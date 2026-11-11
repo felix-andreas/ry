@@ -425,8 +425,24 @@ only for a failure main already has, never for one your own change introduces. A
 listed failure as `known` without its diff and ends with one line per engine:
 
 ```
-ry-jit-gctorture: 3 of 7 passed, 4 known (same as main), 0 new, 0 listed but passing
-ry-gctorture-young: 4 of 7 passed, 3 known (same as main), 0 new, 0 listed but passing
+ry-jit-gctorture: 3 passed, 4 failed (4 known, 0 new), 0 skipped
+ry-gctorture-young: 4 passed, 3 failed (3 known, 0 new), 0 skipped
+```
+
+A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
+a case needs a package that is not installed (a case names its packages in a leading
+`# oracle: requires` comment). It lists each such case and exits 1. Install the packages into the
+corpus library with `just corpus`, which the oracle searches by itself ([Corpus and
+oracle](/development/corpus-and-oracle)). For a deliberately partial local run, `--allow-skips`
+skips those cases and marks every summary line `PARTIAL`:
+
+```
+skip    cases/datatable__fread.R: needs bit64
+skip    cases/packages__xts_keeps_source_rownames.R: needs xts
+ok      cases/arith__complex_math.R
+ok      cases/base__match_arg_native.R
+PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package)
+PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
 The oracle refuses a file whose entry names an unknown engine, a missing case, or the same case and
