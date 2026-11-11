@@ -598,7 +598,8 @@ fn find_program(name: &str) -> Option<PathBuf> {
 
 /// The program a Unix `which` finds for `name`: `name` itself when it holds a slash, otherwise
 /// the first executable file of that name in a `PATH` directory, where an empty entry is the
-/// working directory. `None` for an empty name or where nothing executable matches.
+/// working directory, reported as `./name`. `None` for an empty name or where nothing executable
+/// matches.
 #[cfg(unix)]
 pub(crate) fn which(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -616,7 +617,7 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|directory| {
         let candidate = if directory.as_os_str().is_empty() {
-            PathBuf::from(name)
+            Path::new(".").join(name)
         } else {
             directory.join(name)
         };
