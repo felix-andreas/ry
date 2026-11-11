@@ -2,11 +2,12 @@ use {
     clap::{Parser, Subcommand},
     oracle::{
         BUILD_FILE, Build, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
+        Verdict,
         bench::{self, Summary},
         build_file, check_build, diff, engine_from_environment, engine_packages, expected_path,
-        find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
+        fails_run, find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
         known_failure, known_failures, packages, parse, read_build, render, runnable_cases,
-        write_build,
+        verdict, write_build,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -601,6 +602,7 @@ fn compare(
                 println!("ERROR   {}: {error}", case.display());
                 for tally in &mut tallies {
                     tally.new += 1;
+                    tally.fails = true;
                 }
                 continue;
             }
@@ -620,33 +622,44 @@ fn compare(
                 }
                 Err(error) => Some(format!("ERROR   {shown}: {error}")),
             };
-            match (failure, known_failure(&known, case, &name)) {
-                (None, None) => {
+            let entry = known_failure(&known, case, &name);
+            let verdict = verdict(failure.is_some(), entry);
+            tally.fails |= fails_run(verdict);
+            match verdict {
+                Verdict::Passed => {
                     println!("ok      {shown}");
                     tally.passed += 1;
                 }
-                (None, Some(_)) => {
+                Verdict::IntermittentPassed => {
+                    println!("ok      {shown} (listed as intermittent)");
+                    tally.passed += 1;
+                    tally.intermittent_passed += 1;
+                }
+                Verdict::ListedButPassing => {
                     println!(
                         "PASSES  {shown}: listed in {KNOWN_FAILURES_FILE}, so delete its entry"
                     );
+                    tally.passed += 1;
                     tally.listed_but_passing += 1;
                 }
-                (Some(failure), None) => {
-                    println!("{failure}");
-                    tally.new += 1;
-                }
-                (Some(_), Some(entry)) => {
-                    println!(
-                        "known   {shown}: {} (area {}{})",
-                        entry.reason,
-                        entry.area,
+                Verdict::Known => {
+                    if let Some(entry) = entry {
+                        let mut notes = vec![format!("area {}", entry.area)];
                         if entry.provisional {
-                            ", provisional"
-                        } else {
-                            ""
+                            notes.push("provisional".to_string());
                         }
-                    );
+                        if entry.intermittent {
+                            notes.push("intermittent".to_string());
+                        }
+                        println!("known   {shown}: {} ({})", entry.reason, notes.join(", "));
+                    }
                     tally.known += 1;
+                }
+                Verdict::New => {
+                    if let Some(failure) = &failure {
+                        println!("{failure}");
+                    }
+                    tally.new += 1;
                 }
             }
         }
@@ -670,7 +683,7 @@ fn compare(
         let mut line = format!(
             "{partial}{}: {} passed, {} failed ({} known, {} new), {skipped} skipped",
             engine.name(),
-            tally.passed + tally.listed_but_passing,
+            tally.passed,
             tally.known + tally.new,
             tally.known,
             tally.new,
@@ -695,7 +708,14 @@ fn compare(
             ));
         }
         println!("{line}");
-        failed |= tally.new + tally.listed_but_passing > 0;
+        if tally.intermittent_passed > 0 {
+            println!(
+                "{partial}{}: intermittent, passed here: {}",
+                engine.name(),
+                tally.intermittent_passed
+            );
+        }
+        failed |= tally.fails;
     }
     if selection.missing > 0 {
         println!(
@@ -719,7 +739,10 @@ struct Tally {
     known: usize,
     new: usize,
     listed_but_passing: usize,
+    intermittent_passed: usize,
     unavailable: usize,
+    /// Whether any case's [`Verdict`] fails the run.
+    fails: bool,
 }
 
 fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
