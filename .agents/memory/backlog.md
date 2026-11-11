@@ -75,7 +75,14 @@ left, in order of expected gain:
 - The JIT's first compile costs about 4 MB of peak RSS (code generator start-up). On
   `testthat_full` one compile of `isTRUE`'s body (3 KB of code) makes JIT on 4 MB above JIT off;
   a compile that saves microseconds should not cost megabytes (`decisions.md`, "withr's
-  environment and option helpers run natively", peak RSS).
+  environment and option helpers run natively", peak RSS). The cost is clean, file-backed
+  libR text, not heap: on the `conditions` application one tier-1 compile of `fetch()` pages in
+  about 3.3 MB, which resident-page symbolization puts entirely in `cranelift_*`, `regalloc2`
+  and `jit::codegen`. Anonymous memory and the GC peak do not rise, and with `RY_JIT=off` the
+  two builds' peaks are equal (47.85 against 47.80 MB). So a speed-up elsewhere that pushes a
+  hot body over the compile threshold shows up as a few MB of peak RSS. Levers: a lighter first
+  tier that does not start Cranelift, or code layout that keeps the code generator's pages
+  together (function ordering).
 - Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
@@ -95,13 +102,14 @@ left, in order of expected gain:
 
 ## Open: the typed core
 
-- **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Box conversion at the boundary.** A record or tag argument from R converts deeply into boxes on every call, and a box result converts back (`typed::to_box`, `typed::from_box`): typed `expr_tree` spends about 46 of its 48 ms converting the tree, against 1.7 ms to evaluate `evaluate(build(14, 8))` built natively. The end shape keeps a box beside the R record it came from (or makes the R record a view of the box), so a value that crosses twice converts once. Boxes are also never scalar-replaced: a record built and read in one function is still allocated. `Str.to_i64` and `Str.to_f64` parse twice (`Op::Parses`, then `Op::Parse`). The design's pools (`typed-runtime.md`, "Representations") are not built.
 - **List functions that box every item.** `List.reverse`, the take, drop and sublist family and `List.split_at` move packed items through `arrays::gather`, but most of the others (`List.sort_asc`, `List.map`, `List.keep_if`, `List.concat`, ...) still go through `list_elements`, which allocates one scalar per item of an `F64` or `I64` list. A million-item list pays about 60 MiB of transient scalars that way. The end shape is a packed path per item kind, as `gather` has.
 - **Non-constant defaults and R's random numbers.** A missing argument passes only a constant scalar default (`jit::native::call`), so `vasicek`'s `dt = 1f64 / 12f64` refuses; its kernel also calls R's `set.seed` and `stats::rnorm`, which the typed core refuses as base functions it does not know, and `sales` runs its `DataFrame` parameter on the table engine. Both are listed in `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`.
 - **JIT-compiled callers skip native entries.** With the JIT on, a caller compiled to machine code calls `isTRUE` and the other `NATIVE_ENTRIES` closures as full closures (a loop of 17,000 `isTRUE(x)` calls takes no native entry); tier 0 takes the entry. Route compiled calls of base closures through `base_fast_paths` as tier 0 does.
 - **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
-- **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. Making `orders` native (records and tags above) removes the cost where it is measured.
-- **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
+- **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. `log_rank`, `sales` and `vasicek` pay it.
+- **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises, and base arithmetic and `c()` over them), so `f(c(1, 2))` from untyped code takes the native path but `evaluate(build(14, 8))` runs `evaluate` in the interpreter. A typed call is never read ahead: it may not finish, and R never runs an argument the callee does not force. Hooking the call after the interpreter forces the arguments would cover it; `expr_tree.typed.R` binds the tree to a variable first.
+- **Typed calls between compiled typed closures are eager.** `Op::CallTyped` computes every argument before the call, while tier 0 leaves an argument a promise until the callee forces it. Values and errors agree (a native failure reruns the call in tier 0), but a never-forced argument that does not finish hangs natively (`f(x, spin(x))` inside a typed body). Lowering an argument the callee may not force as a thunk, or proving the callee strict in it, would close the gap.
 - **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
 - **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
@@ -1004,6 +1012,11 @@ overhead, not allocation.
 - Bench environment: a multi-package `install.packages()` call under ry installs nothing without
   an error, `ry R CMD INSTALL` fails with "cannot read CMD", and the testthat workload fails on
   both engines with testthat 3.3.2 ("attempt to use zero-length variable name").
+- Uncompiled calls of `vector("nope", 1L)` and `choose("a", 1)` report their error against the
+  internal's call (`vector(mode, length)`, `choose(n, k)`), where GNU R names the closure's call,
+  because those internals use `call.error` and GNU R's use `error()`. Compiled sites inline the
+  wrapper with the original call and agree; promise code and a closure's first, uncompiled call
+  do not. Fix in the internals (`crate::unwind::current_call()`, as `normalizePath` does).
 - The unary builtin path and native entries skip `call_builtin_checked`, so `--profile-summary`
   counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
   which only an `f` that reads `parent.frame()` can observe.

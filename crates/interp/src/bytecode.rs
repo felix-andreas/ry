@@ -417,6 +417,44 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     }
 }
 
+/// A closure over `env` for the `function` expression with `formals`, `body` and `srcref` in
+/// the code `outer`, made as [`Op::Closure`] makes it: every closure made from the expression
+/// shares one compiled body, kept in `outer`'s constants. A native prologue that runs part of
+/// a compiled body by hand makes its closures with this, since a closure made from the source
+/// alone would be compiled again for each call of the outer function.
+pub(crate) unsafe fn inner_closure(
+    outer: Sexp,
+    formals: Sexp,
+    body: Sexp,
+    srcref: Sexp,
+    env: Sexp,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let site = if outer.kind() == SexpType::Bytecode {
+        let constants = outer.cdr();
+        (0..length(constants)).find_map(|position| {
+            let constant = constants.element(position);
+            let matches = constant == body
+                || (constant.kind() == SexpType::Bytecode && source_of(constant) == body);
+            matches.then_some((constants, position, constant))
+        })
+    } else {
+        None
+    };
+    let Some((constants, position, shared)) = site else {
+        return eval::make_closure(formals, body, srcref, env);
+    };
+    let closure = eval::make_closure(formals, shared, srcref, env)?;
+    if shared.kind() != SexpType::Bytecode && worth_compiling(shared) {
+        heap.root(closure);
+        if let Ok(Some(code)) = compile(shared, closure) {
+            heap.set_element(constants, position, code);
+            heap.set_cdr(closure, code);
+        }
+    }
+    Ok(closure)
+}
+
 /// A closure's body as source: the expression of compiled code.
 pub unsafe fn closure_body(function: Sexp) -> Sexp {
     let body = function.cdr();
@@ -992,6 +1030,11 @@ pub enum Op {
     /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
     /// `symbol`, or in the global environment.
     SuperAssign,
+    /// `dst call internal first count`: a call of a base closure whose body is only
+    /// `.Internal(f(...))`, inlined as GNU R's compiler inlines its "safe base internals": the
+    /// internal's arguments, evaluated in the caller, are in registers `first..first + count`,
+    /// and the builtin `internal` runs on them with `call` as the call its errors name.
+    Internal,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -1006,7 +1049,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 50] = [
+pub const OPS: [Op; 51] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -1057,6 +1100,7 @@ pub const OPS: [Op; 50] = [
     Op::Fused,
     Op::Unfused,
     Op::SuperAssign,
+    Op::Internal,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2966,6 +3010,10 @@ impl Compiler {
             if inlined {
                 return self.guarded(call, head, primitive, dst, &name, &args);
             }
+        } else if SAFE_BASE_INTERNALS.contains(&name.as_str())
+            && let Some(inline) = self.inlined_internal(head, call)?
+        {
+            return self.internal(call, head, inline, dst);
         } else if let Some(function) = self.library_function(head)? {
             let args = values::pairlist_items(call.cdr());
             // Registers do not count as references, so the later arguments must not update an
@@ -3436,6 +3484,157 @@ impl Compiler {
             env = env.enclosure();
         }
         None
+    }
+
+    /// For a call of base's closure `head` whose body is only `.Internal(f(...))`, the closure,
+    /// the internal and the expressions for the internal's arguments, as GNU R's compiler
+    /// inlines such a "safe base internal": each argument is the caller's expression for the
+    /// formal it names, or the formal's default, or a literal. Every default must be a constant,
+    /// every tag must name a formal exactly and each formal may appear once, so evaluating the
+    /// arguments in the internal's order forces them as the call would. `None` otherwise, for
+    /// the ordinary call.
+    unsafe fn inlined_internal(&self, head: Sexp, call: Sexp) -> R<Option<InlinedInternal>> {
+        let heap = crate::heap();
+        let Some(binding) = heap
+            .frame_cell(heap.known().base_env, head)
+            .map(|cell| cell.cdr())
+        else {
+            return Ok(None);
+        };
+        // Base's closures start as lazy-load promises, and a loop body that calls one is
+        // compiled before the first call forces it. Fetching a closure record runs no R code,
+        // so it is forced here as GNU R's compiler forces it to read the definition.
+        const CLOSURE_RECORD: u32 = 3;
+        if let Some((CLOSURE_RECORD, false, _)) = crate::serialize::lazy_record_header(binding)? {
+            eval::force_promise(binding)?;
+        }
+        let function = forced_value(binding);
+        if function.kind() != SexpType::Closure || self.enclosing_function(head) != Some(function) {
+            return Ok(None);
+        }
+        let mut body = closure_body(function);
+        if body.kind() == SexpType::Language
+            && body.car() == symbols().brace
+            && values::pairlist_length(body.cdr()) == 1
+        {
+            body = body.cdr().car();
+        }
+        if body.kind() != SexpType::Language || body.car() != symbols().dot_internal {
+            return Ok(None);
+        }
+        let inner = body.cdr().car();
+        if inner.kind() != SexpType::Language || inner.car().kind() != SexpType::Symbol {
+            return Ok(None);
+        }
+        let Some(internal) = crate::builtins::internal_function(inner.car()) else {
+            return Ok(None);
+        };
+        // A special internal takes its arguments unevaluated, which inlining would change.
+        if eval::builtin_def(internal)?.kind != crate::builtins::Kind::Internal {
+            return Ok(None);
+        }
+        let formals = values::pairlist_items(function.car());
+        let constant = |value: Sexp| {
+            !matches!(
+                value.kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            )
+        };
+        if formals.iter().any(|&(tag, default)| {
+            tag == symbols().dots || !(default == missing_arg() || constant(default))
+        }) {
+            return Ok(None);
+        }
+        let mut supplied: SmallVec<[Option<Sexp>; 8]> = SmallVec::from_elem(None, formals.len());
+        let args = values::pairlist_items(call.cdr());
+        for (tag, value) in &args {
+            if *value == symbols().dots || *value == missing_arg() {
+                return Ok(None);
+            }
+            if *tag != nil() {
+                let Some(index) = formals.iter().position(|(formal, _)| formal == tag) else {
+                    return Ok(None);
+                };
+                if supplied[index].replace(*value).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        for (tag, value) in &args {
+            if *tag == nil() {
+                let Some(slot) = supplied.iter_mut().find(|slot| slot.is_none()) else {
+                    return Ok(None);
+                };
+                *slot = Some(*value);
+            }
+        }
+        let mut used = 0u64;
+        let mut expressions = SmallVec::new();
+        for (_, argument) in values::pairlist_items(inner.cdr()) {
+            let expression = if argument.kind() == SexpType::Symbol {
+                let Some(index) = formals.iter().position(|(formal, _)| *formal == argument) else {
+                    return Ok(None);
+                };
+                if index >= 64 || used & 1 << index != 0 {
+                    return Ok(None);
+                }
+                used |= 1 << index;
+                match supplied[index] {
+                    Some(value) => value,
+                    None if formals[index].1 != missing_arg() => formals[index].1,
+                    None => return Ok(None),
+                }
+            } else if constant(argument) && argument != missing_arg() {
+                argument
+            } else {
+                return Ok(None);
+            };
+            expressions.push(expression);
+        }
+        Ok(Some(InlinedInternal {
+            function,
+            internal,
+            expressions,
+        }))
+    }
+
+    /// A call as [`Compiler::inlined_internal`] found it: a guard that `head` still names base's
+    /// closure, the internal's arguments evaluated into a run of registers, and
+    /// [`Op::Internal`].
+    unsafe fn internal(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        inline: InlinedInternal,
+        dst: u32,
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(inline.function);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let mark = self.next_register;
+        let first = self.next_register;
+        for _ in &inline.expressions {
+            self.allocate();
+        }
+        for (offset, &expression) in inline.expressions.iter().enumerate() {
+            self.expression(expression, first + offset as u32)?;
+        }
+        let call_constant = self.constant(call);
+        let internal = self.constant(inline.internal);
+        self.emit(
+            Op::Internal,
+            &[
+                dst,
+                call_constant,
+                internal,
+                first,
+                inline.expressions.len() as u32,
+            ],
+        );
+        self.release_to(mark);
+        self.cold_fallback(&[guard], call, dst)
     }
 
     /// The standard library builtin `symbol` names from the closure's enclosure, such as
@@ -4421,6 +4620,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
+        Op::Internal => 5,
     }
 }
 
@@ -4452,6 +4652,37 @@ const OP_MASK: u32 = (1 << OP_BITS) - 1;
 const RESPECIALIZE_SHIFT: u32 = 24;
 const RESPECIALIZE_MASK: u32 = 0xFF << RESPECIALIZE_SHIFT;
 const RESPECIALIZE_LIMIT: u32 = 4;
+
+/// The base closures whose `.Internal` GNU R's compiler inlines, because the internal evaluates
+/// its arguments and neither looks at the caller's frame nor at how it was called.
+const SAFE_BASE_INTERNALS: [&str; 20] = [
+    "atan2",
+    "besselY",
+    "beta",
+    "choose",
+    "drop",
+    "inherits",
+    "is.vector",
+    "lbeta",
+    "lchoose",
+    "nchar",
+    "polyroot",
+    "typeof",
+    "vector",
+    "which.max",
+    "which.min",
+    "is.loaded",
+    "identical",
+    "match",
+    "rep.int",
+    "rep_len",
+];
+
+struct InlinedInternal {
+    function: Sexp,
+    internal: Sexp,
+    expressions: SmallVec<[Sexp; 6]>,
+}
 
 /// Tier 0's specialized forms of [`Op::Arithmetic`], by opcode minus `OPS.len()`: the operator
 /// and whether the form takes doubles (one operand a double, the other a double or an integer)
@@ -4587,6 +4818,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
+        Op::Internal => &[Register, Call, Constant, Base, Count],
         Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
     })
 }
@@ -5868,6 +6100,7 @@ handlers! {
     run_fused, step_fused: Fused, true, op_fused;
     run_unfused, step_unfused: Unfused, false, op_unfused;
     run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
+    run_internal, step_internal: Internal, true, op_internal;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -8869,6 +9102,28 @@ unsafe fn op_super_assign(state: &mut Activation<'_, '_>, instruction: Instructi
     let value = instruction.input(1);
     eval::set_var(symbol, value, state.machine.enclosure())?;
     (*state.interp).visible = false;
+    Ok(Flow::Next)
+}
+
+/// A base closure's `.Internal` inlined ([`Op::Internal`]): the internal runs on the evaluated
+/// arguments, as in GNU R's compiled code.
+#[inline(always)]
+unsafe fn op_internal(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let first = instruction.operand(3);
+    let call = state.constant(instruction, 1);
+    let function = state.constant(instruction, 2);
+    let definition = eval::builtin_def(function)?;
+    let mut args = eval::Args::new();
+    for index in 0..instruction.operand(4) {
+        args.push(Arg {
+            tag: nil(),
+            value: instruction.register(first + index),
+        });
+    }
+    let value = eval::call_inlined_internal(definition, call, function, &args, *state.header)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    (*state.interp).visible = true;
     Ok(Flow::Next)
 }
 

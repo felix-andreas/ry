@@ -576,31 +576,39 @@ pub unsafe extern "C" fn SHALLOW_DUPLICATE_ATTRIB(to: Sexp, from: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_allocResizableVector(kind: SEXPTYPE, capacity: R_xlen_t) -> Sexp {
-    enter(|| {
-        let kind = sexp_type(kind)?;
-        if !kind.is_vector() || kind == SexpType::Char {
-            return Err(HeapError::InvalidVectorType {
-                kind,
-                length: capacity,
+    direct(
+        // Unlike `Rf_allocVector`'s direct path this zeroes an atomic vector, as the slow path
+        // does, so a caller that reads elements it never wrote sees the same zeros on both.
+        |runtime| {
+            let kind = SexpType::from_code(kind)?;
+            if !kind.is_vector() || kind == SexpType::Char {
+                return None;
             }
-            .into());
-        }
-        Ok(runtime().heap.alloc_resizable_vector(kind, capacity)?)
-    })
+            let object = runtime.heap.alloc_vector(kind, capacity).ok()?;
+            runtime.heap.mark_resizable(object);
+            Some(object)
+        },
+        || {
+            let kind = sexp_type(kind)?;
+            if !kind.is_vector() || kind == SexpType::Char {
+                return Err(HeapError::InvalidVectorType {
+                    kind,
+                    length: capacity,
+                }
+                .into());
+            }
+            Ok(runtime().heap.alloc_resizable_vector(kind, capacity)?)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_resizeVector(vector: Sexp, length: R_xlen_t) {
-    enter(|| {
-        // GNU R removes the attributes that describe the old length, so one set afterwards goes
-        // to the end of the attribute list: data.table relies on that order. A resize that is
-        // about to fail leaves them alone.
-        let runtime = runtime();
-        if runtime.heap.is_resizable(vector)
-            && length >= 0
-            && length != vector.length()
-            && length <= vector.capacity()
-        {
+    // GNU R removes the attributes that describe the old length, so one set afterwards goes to
+    // the end of the attribute list: data.table relies on that order. A resize that is about to
+    // fail leaves them alone, so every failure takes the slow path before anything changes.
+    let resize = |runtime: &mut Runtime| {
+        if length != vector.length() && vector.attrib() != runtime.nil() {
             for name in [
                 R_DimSymbol.get(),
                 R_DimNamesSymbol.get(),
@@ -609,8 +617,31 @@ pub unsafe extern "C" fn R_resizeVector(vector: Sexp, length: R_xlen_t) {
                 remove_attribute(vector, name);
             }
         }
-        Ok(runtime.heap.resize_vector(vector, length)?)
-    })
+        runtime.heap.resize_within_capacity(vector, length);
+    };
+    direct(
+        |runtime| {
+            (runtime.heap.is_resizable(vector) && (0..=vector.capacity()).contains(&length))
+                .then(|| resize(runtime))
+        },
+        || {
+            let runtime = runtime();
+            if runtime.heap.is_resizable(vector)
+                && length >= 0
+                && length != vector.length()
+                && length <= vector.capacity()
+            {
+                for name in [
+                    R_DimSymbol.get(),
+                    R_DimNamesSymbol.get(),
+                    R_NamesSymbol.get(),
+                ] {
+                    remove_attribute(vector, name);
+                }
+            }
+            Ok(runtime.heap.resize_vector(vector, length)?)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
