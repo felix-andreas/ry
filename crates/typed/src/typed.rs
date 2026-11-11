@@ -591,4 +591,3 @@ fn depth_budget() -> i64 {
     let state = interp::interp();
     i64::from(state.max_depth) - state.frames.len() as i64
 }
-
