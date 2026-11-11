@@ -218,6 +218,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Next GC candidate, once escape analysis lands: promoted survivors in the `records` workload.** Collecting survivors that the young generation promoted is about a fifth of a warm run's wall time. Each warm run makes about 4.5 minor, 0.5 intermediate and 1 major collection, with about 37 ms of pauses (16.8 minor, 5.5 intermediate, 14.9 major; `RY_GC_LOG`, REPEAT 3 minus REPEAT 1, halved). `collect_keeping` is 10.4% of the warm run's instructions inclusive. Escape analysis should keep most of these record temporaries out of the heap. Once it does, measure again before tuning promotion.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
+- **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
 
 ## Open: base R kernels against GNU R
 
