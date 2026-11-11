@@ -4432,7 +4432,16 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     if values::inherits(sequence, "factor") {
         sequence = crate::coerce::factor_as_character(sequence)?;
     }
-    let sequence = values::materialize(sequence)?;
+    // Numbers are read one element at a time through `vector_element`, as GNU R's loop reads them
+    // through `INTEGER_ELT` and `REAL_ELT`, so `for (i in 1:1e9)` never expands the sequence.
+    let sequence = if matches!(
+        sequence.kind(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) {
+        sequence
+    } else {
+        values::materialize(sequence)?
+    };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
@@ -4443,7 +4452,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
                 call.call,
             ));
         }
-        kind if kind.is_vector() => sequence.length() as usize,
+        kind if kind.is_vector() => length(sequence),
         SexpType::Record => {
             return Err(crate::records::boundary_error(
                 sequence,

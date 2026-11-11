@@ -21,3 +21,12 @@ s[3]
 s[[4]]
 s[c(2, 12)]
 state(s)
+# So does a for loop, at top level as inside a function.
+total <- 0L
+for (i in s) total <- total + i
+total
+state(s)
+d <- as.double(1:5)
+for (v in d) total <- total + v
+total
+state(d)

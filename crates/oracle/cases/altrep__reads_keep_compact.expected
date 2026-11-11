@@ -28,9 +28,13 @@
 | [1] 4
 | [1]  2 NA
 | [1] "13 INTSXP g0c0 [REF(65535)]  1 : 10 (compact)"
+| [1] 55
+| [1] "13 INTSXP g0c0 [REF(65535)]  1 : 10 (compact)"
+| [1] 70
+| [1] "14 REALSXP g0c0 [REF(65535)]  1 : 5 (compact)"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| "13 INTSXP g0c0 [REF(65535)]  1 : 10 (compact)"
+| "14 REALSXP g0c0 [REF(65535)]  1 : 5 (compact)"
