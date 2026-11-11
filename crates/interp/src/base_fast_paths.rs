@@ -94,10 +94,25 @@ const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
         "ryAssignNativeRoutines",
         0x26c985af62edd0db,
     ),
-    ("tryCatch", "tryCatchList", "ryTryCatchList", 0x2e065bb04214d605),
+    (
+        "tryCatch",
+        "tryCatchList",
+        "ryTryCatchList",
+        0x2e065bb04214d605,
+    ),
     ("tryCatch", "doTryCatch", "ryDoTryCatch", 0xacf47eb5e4bfc044),
-    ("withRestarts", "withOneRestart", "ryWithOneRestart", 0x66b61e2fa205a4b4),
-    ("withRestarts", "doWithOneRestart", "ryDoWithOneRestart", 0x3d98111142c9efce),
+    (
+        "withRestarts",
+        "withOneRestart",
+        "ryWithOneRestart",
+        0x66b61e2fa205a4b4,
+    ),
+    (
+        "withRestarts",
+        "doWithOneRestart",
+        "ryDoWithOneRestart",
+        0x3d98111142c9efce,
+    ),
 ];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
@@ -3268,7 +3283,11 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     let classes = values::get_attr(handlers, names.names);
     eval::define(names.handlers, handlers, frame)?;
     eval::define(names.classes, classes, frame)?;
-    eval::define(names.parentenv, eval::frame_sys_parent_pending(index)?, frame)?;
+    eval::define(
+        names.parentenv,
+        eval::frame_sys_parent_pending(index)?,
+        frame,
+    )?;
     if length(classes) != forced.len() {
         eval::eval(nth(statements, 6), frame)?;
     }
