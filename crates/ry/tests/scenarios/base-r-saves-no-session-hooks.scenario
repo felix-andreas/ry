@@ -1,0 +1,18 @@
+# ry's base R tree saves base's `.userHooksEnv` empty, as GNU R does. The runtime registers its
+# package hooks at every start, so a hook saved in base.rdb would run a second time per event, and
+# one a later runtime removed would keep running from a tree built before.
+
+requires ry-runtime
+hide gnu-r
+
+file hooks.R
+| saved <- new.env()
+| invisible(lazyLoad(file.path(R.home("library"), "base", "R", "base"), envir = saved,
+|          filter = function(name) name == ".userHooksEnv"))
+| cat("saved hooks:", length(ls(get(".userHooksEnv", saved), all.names = TRUE)), "\n")
+| cat("live hooks:", length(ls(.userHooksEnv, all.names = TRUE)) > 0, "\n")
+
+run ry run --runtime ry hooks.R
+expect exit 0
+expect stdout "saved hooks: 0"
+expect stdout "live hooks: TRUE"
