@@ -7,38 +7,79 @@ use {
     crate::{
         attribute_access::same_text,
         builtins::is_native_value,
-        bytecode::ElementKind,
         eval::reuse_permitted,
         moves,
         subset::{int_to_real, vector_element},
         unwind::R,
-        values::{self, length, na_string, nil},
+        values::{self, length, na_string, nil, symbols},
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+    heap::{
+        Heap,
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+    },
 };
 
-/// `x[i]`, `x[[i]]` or `x$name` read without a call: the element when the subject does not
-/// dispatch and the subscript selects one element by the direct paths of [`scalar_subset`] and
-/// [`direct_subset2`], and `None` for everything else, which the general call handles.
-#[expect(dead_code, reason = "the compiled element read op is its caller")]
-pub(crate) unsafe fn read_element(
+/// The zero-based position of the element `x[i]` or `x[[i]]` (`double`) reads, for tier 0's
+/// handler of a call to the base primitive: `x` is a double, integer or logical vector (or for
+/// `[[` a list) that is not an object, an array or ALTREP, and has no attributes for `[`, and
+/// `i` is a plain numeric scalar within bounds or, for `[[`, an existing ASCII name. `None` for
+/// anything else, so the builtin runs. The subscript is checked before the subject's flags
+/// because a subscript the handler does not take (a negative or vector one) is the common
+/// reason to decline.
+#[inline(always)]
+pub(crate) unsafe fn element_position(
+    heap: &Heap,
     subject: Sexp,
     index: Sexp,
-    kind: ElementKind,
-) -> R<Option<Sexp>> {
-    if is_native_value(subject) || is_native_value(index) {
-        return Ok(None);
+    double: bool,
+) -> Option<usize> {
+    let kind = subject.kind();
+    if !matches!(
+        kind,
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
+    ) || (kind == SexpType::List && !double)
+    {
+        return None;
     }
-    match kind {
-        ElementKind::Single if !subject.is_object() => scalar_subset(subject, index),
-        ElementKind::Single => Ok(None),
-        ElementKind::Double => direct_subset2(nil(), &[subject, index]),
-        // `$` matches a name exactly first, which is `[[`'s exact match; a partial match and
-        // `$` on an atomic vector take the general path.
-        ElementKind::Dollar if index.kind() == SexpType::String => {
-            direct_subset2(nil(), &[subject, index])
+    let position = if index.kind() == SexpType::String {
+        if !double {
+            return None;
         }
-        ElementKind::Dollar => Ok(None),
+        name_position(heap, subject, index)?
+    } else {
+        scalar_position(index, subject.length() as usize)?
+    };
+    if subject.is_object()
+        || subject.is_array()
+        || subject.is_altrep()
+        || (!double && subject.attrib() != heap.known().nil)
+    {
+        return None;
+    }
+    Some(position)
+}
+
+/// The element at `position` of a subject [`element_position`] took: a list's element itself,
+/// or a number as a fresh scalar from the young generation, `None` when that allocation needs
+/// a collection.
+#[inline(always)]
+pub(crate) unsafe fn element_value(
+    heap: &mut Heap,
+    subject: Sexp,
+    position: usize,
+) -> Option<Sexp> {
+    let kind = subject.kind();
+    let data = subject.data();
+    match kind {
+        SexpType::List => Some(*data.cast::<Sexp>().add(position)),
+        SexpType::Real => {
+            let bits = (*data.cast::<f64>().add(position)).to_bits();
+            heap.try_alloc_scalar(kind, [bits, 0])
+        }
+        _ => {
+            let bits = *data.cast::<i32>().add(position) as u32 as u64;
+            heap.try_alloc_scalar(kind, [bits, 0])
+        }
     }
 }
 
@@ -142,10 +183,37 @@ pub(crate) unsafe fn direct_subset2(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp
     vector_element(object, position).map(Some)
 }
 
+/// The position of the first of `subject`'s names that is the one-string `index`, when that
+/// string is ASCII and not `NA`, which matches no name. Every ASCII `CHARSXP` is one interned
+/// object whatever its encoding mark, so the names that match it exactly are the ones that are
+/// the same pointer; any other string, or a name no element has, is left to the full subscript.
+#[inline(always)]
+pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> Option<usize> {
+    let nil = heap.known().nil;
+    if index.is_altrep() || index.attrib() != nil || index.length() != 1 {
+        return None;
+    }
+    let name = *index.data().cast::<Sexp>();
+    if name == na_string() || !name.has_gp(gp::ASCII) || name.length() == 0 {
+        return None;
+    }
+    let names = values::get_attr(subject, symbols().names);
+    if names.kind() != SexpType::String || names.is_altrep() {
+        return None;
+    }
+    let names = std::slice::from_raw_parts(names.data().cast::<Sexp>(), names.length() as usize);
+    names.iter().position(|candidate| *candidate == name)
+}
+
 /// The zero-based position a plain scalar integer or real subscript selects among `count`
 /// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
-unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
-    if index.is_altrep() || index.attrib() != nil() || length(index) != 1 {
+#[inline(always)]
+pub(crate) unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
+    if !matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        || index.is_altrep()
+        || index.attrib() != nil()
+        || index.length() != 1
+    {
         return None;
     }
     match index.kind() {
