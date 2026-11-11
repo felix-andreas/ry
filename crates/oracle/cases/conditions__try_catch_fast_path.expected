@@ -393,7 +393,7 @@
 | NULL
 | doTryCatch(return(expr), name, parentenv, handler)
 | eval(expression, globalenv())
-| .Primitive("eval")
+| [1] TRUE
 | value[[3L]](cond)
 | tryCatchOne(expr, names, parentenv, handlers[[1L]])
 | [1] FALSE
