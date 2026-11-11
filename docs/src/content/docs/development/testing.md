@@ -425,7 +425,11 @@ runs in its own process, and the table adds both engines' peak RSS. zoo and xts 
 Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
 build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
-Evict both builds' files with `posix_fadvise(POSIX_FADV_DONTNEED)` before every RSS comparison.
+`python3 tools/bench/evict.py RY...` evicts every file each build reads at run time, recursively:
+the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory and
+the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
+Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
+leaves the `.ryc` images cached.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
