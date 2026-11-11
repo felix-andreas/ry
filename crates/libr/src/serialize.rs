@@ -307,8 +307,6 @@ const HAS_ATTR: u32 = 1 << 9;
 const HAS_TAG: u32 = 1 << 10;
 /// A `CHARSXP`'s cache and hash bits describe this session's string table, not the string.
 const CHARSXP_SESSION_BITS: u16 = gp::CACHED | 1;
-/// Whether this session's compilers refused a closure says nothing about the closure.
-const CLOSURE_SESSION_BITS: u16 = gp::NATIVE_REFUSED;
 /// Back-reference indices up to this fit in the flags word; larger ones follow it.
 const MAX_PACKED_INDEX: usize = (i32::MAX >> 8) as usize;
 
@@ -609,9 +607,6 @@ impl Writer<'_, '_> {
             let has_attr = !matches!(kind, SexpType::Char | SexpType::Promise)
                 && object.attrib() != self.known.nil;
             let mut levels = object.gp();
-            if kind == SexpType::Closure {
-                levels &= !CLOSURE_SESSION_BITS;
-            }
             if kind == SexpType::Char {
                 levels &= !CHARSXP_SESSION_BITS;
                 // `NA_STRING` is not an ASCII string in GNU R, whatever its bytes.

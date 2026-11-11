@@ -367,18 +367,11 @@ pub mod gp {
     pub const CLOSURE_STEP: u16 = 1 << 14;
     /// A closure `trace()` flagged, GNU R's `RTRACE`.
     pub const CLOSURE_TRACE: u16 = 1 << 13;
-    /// A strict typed closure that neither the typed core nor the scalar natives compile for
-    /// the types of a call's arguments (`jit::native::call`). A strict closure's argument types
-    /// follow its annotations, so its later calls go to the interpreter without reading their
-    /// arguments first. The bit records what this session's compilers did, so serialization
-    /// leaves it out.
-    pub const NATIVE_REFUSED: u16 = 1 << 12;
     /// Every bit a closure can carry. Each means something different, so no two may share a
     /// position.
-    pub const CLOSURE_BITS: [u16; 6] = [
+    pub const CLOSURE_BITS: [u16; 5] = [
         S4_OBJECT,
         NATIVE_ENTRY,
-        NATIVE_REFUSED,
         CLOSURE_TRACE,
         CLOSURE_STEP,
         CLOSURE_DEBUG,
