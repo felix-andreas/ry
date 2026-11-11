@@ -67,6 +67,11 @@ The [language tour](https://ry-lang.org/ry) shows every feature.
 
 ry's runtime against GNU R, as the geometric mean of each benchmark suite's speed-ups:
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/public/bench-summary-dark.svg">
+  <img alt="Grouped bars of the geometric mean speed-up over GNU R for each benchmark suite, for ry and, where the suite has typed programs, ry typed" src="docs/public/bench-summary-light.svg">
+</picture>
+
 <!-- bench-summary -->
 | Suite | What it is | ry vs GNU R | ry typed |
 | --- | --- | ---: | ---: |
@@ -77,23 +82,25 @@ ry's runtime against GNU R, as the geometric mean of each benchmark suite's spee
 
 Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
 
-- Public R JIT benchmarks: measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Package test suites: measured on 2026-11-11 at ry 46191c4 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Numeric kernels (ours): measured on 2026-11-11 at ry b868dc5-dirty with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Application workloads (ours): measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v338; 10 paired rounds.
+Measured on 2026-11-11 against GNU R 4.6.2 on Linux, 10 paired rounds per suite.
 
-[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program.
+[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program, with the machine and ry commit of each suite.
 <!-- /bench-summary -->
 
 ## Features
 
-- **Checker:** unresolved names, syntax errors, lints, and type errors inferred from plain R.
-- **Types:** `#:` comments or inline syntax, generics, unions, records, tagged unions, strict mode.
-- **Formatter:** `ry fmt`, one style for every file.
-- **Editor:** a language server for any LSP editor, and a VS Code extension with a debugger.
-- **Loader:** reloads a package of about 300,000 lines after an edit in under 100 ms, where
-  `load_all()` takes about 9 s.
-- **Runtime:** a JIT, R's C API for compiled packages, and `DataFrame`, a typed table on Polars.
+- **Checker:** `ry check` reports unresolved names, syntax errors, lint warnings and type errors,
+  inferring types from plain R code without any annotations.
+- **Types:** optional annotations in `#:` comments or inline syntax, with generics, unions, records
+  and tagged unions. Strict mode rejects code that has no types.
+- **Formatter:** `ry fmt` rewrites R files into one consistent layout, like Black for Python or
+  rustfmt for Rust, so diffs show changes in logic rather than whitespace.
+- **Editor:** a language server for any LSP editor (hover, completion, go to definition, rename),
+  and a VS Code extension with a debugger.
+- **Loader:** `ry load` reloads a package of about 300,000 lines after an edit in under 100 ms,
+  where devtools `load_all()` takes about 9 s.
+- **Runtime:** runs R code with a JIT compiler, loads packages with compiled code through R's C
+  API, and adds `DataFrame`, a typed table built on Polars.
 
 ry is in beta. The checker, formatter, language server and loader are ready for daily use. The
 runtime is incomplete: a script that needs something it lacks stops with an error that names it, and
