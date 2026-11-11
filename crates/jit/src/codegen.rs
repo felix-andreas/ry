@@ -3155,6 +3155,11 @@ impl<'p> Translator<'p> {
                 self.store_register(dst, value);
             }
         }
+        let value = if matches!(ty, Ty::IntVec | Ty::DblVec) {
+            self.sequence_contents(value, ty, slot, dst, mismatch)?
+        } else {
+            value
+        };
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
             if probed {
@@ -4058,6 +4063,53 @@ impl<'p> Translator<'p> {
         let converted = self.builder.ins().fcvt_from_sint(F64, value);
         let na = self.builder.ins().f64const(Ieee64::with_bits(NA_REAL_BITS));
         self.builder.ins().select(missing, na, converted)
+    }
+
+    /// `value`, or when it is a compact sequence where `ty` expects a plain vector, a plain copy
+    /// of it that the slot and `dst` hold from then on: a formal declared `integer[]` called with
+    /// `1:n` would otherwise fail the guard on every first call. Anything else that does not fit
+    /// jumps to `mismatch`.
+    fn sequence_contents(
+        &mut self,
+        value: Value,
+        ty: Ty,
+        slot: usize,
+        dst: Option<usize>,
+        mismatch: Label,
+    ) -> Result<Value, Refusal> {
+        let fits = self.check(value, ty);
+        let join = self.builder.create_block();
+        self.builder.append_block_param(join, I64);
+        let convert = self.builder.create_block();
+        self.builder.set_cold_block(convert);
+        self.builder.ins().brif(fits, join, &[value], convert, &[]);
+        self.builder.switch_to_block(convert);
+        let kind = if ty == Ty::IntVec {
+            SexpType::Integer
+        } else {
+            SexpType::Real
+        };
+        let kind = self.builder.ins().iconst(I64, kind as i64);
+        let contents = self
+            .call(
+                runtime::jit_sequence_contents as *const () as usize,
+                &[I64, I64, I64],
+                Some(I64),
+                &[self.activation, value, kind],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let converted = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(contents, converted, &[], mismatch, &[]);
+        self.builder.switch_to_block(converted);
+        self.store_slot_cell(slot, contents);
+        if let Some(dst) = dst {
+            self.store_register(dst, contents);
+        }
+        self.builder.ins().jump(join, &[contents]);
+        self.builder.switch_to_block(join);
+        Ok(self.builder.block_params(join)[0])
     }
 
     /// Whether the object `value` points to has type `ty`.

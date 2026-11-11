@@ -1073,6 +1073,37 @@ pub unsafe extern "C" fn jit_loop_sequence(
     }
 }
 
+/// A plain copy of `value` when it is an attribute-free compact sequence of `kind`, for a load
+/// that expects a plain vector, such as a formal declared `integer[]` called with `1:n`; null
+/// for anything else, which fails the load's guard. The sequence itself stays compact, as GNU
+/// R's element reads leave it.
+pub unsafe extern "C" fn jit_sequence_contents(
+    activation: *mut Activation,
+    value: *mut Header,
+    kind: i64,
+) -> *mut Header {
+    unsafe {
+        guarded(activation, std::ptr::null_mut(), |activation| {
+            let Some(value) = Sexp::from_raw(value) else {
+                return std::ptr::null_mut();
+            };
+            if values::compact_sequence(value).is_none()
+                || value.kind() as i64 != kind
+                || value.attrib() != values::nil()
+            {
+                return std::ptr::null_mut();
+            }
+            match scoped(|| values::read_contents(value)) {
+                Ok(contents) => contents.as_ptr(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
+        })
+    }
+}
+
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {
         guarded(
