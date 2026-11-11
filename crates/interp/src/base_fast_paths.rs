@@ -2340,7 +2340,9 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         })? || !argument_is(frame, symbols.decimal_mark, |value| {
             string_scalar(value).as_deref() == Some(".")
         })? || !argument_is(frame, symbols.zero_print, |value| value == nil())?
-            || !argument_is(frame, symbols.drop0trailing, is_false)?
+            || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
+                is_false(value)
+            })?
         {
             return decline();
         }
@@ -2354,7 +2356,9 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             string_scalar(value).as_deref() == Some(".")
         })?
         || !argument_is(frame, symbols.zero_print, |value| value == nil())?
-        || !argument_is(frame, symbols.drop0trailing, is_false)?
+        || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
+            is_false(value)
+        })?
     {
         return decline();
     }
