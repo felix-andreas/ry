@@ -334,8 +334,14 @@ pub fn build(sources: &BuildSources<'_>, output: &Path) -> Result<()> {
 /// base R's loader and the default packages: [`build`] writes it as its last step, and this
 /// writes it again over the tree at `root` with the runtime `libr` and the front end `rcmd`,
 /// which a runtime of another build needs, because an image loads only into the build that wrote
-/// it.
-pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
+/// it. With `layout`, the image is laid out by the touch profile in that directory
+/// (`tools/layout/image_order.py`), and the stable ids of its objects are written there.
+pub fn write_start_image(
+    root: &Path,
+    rcmd: &Path,
+    libr: &Path,
+    layout: Option<&Path>,
+) -> Result<()> {
     let libr_link = libr_path(root);
     let front_end = if Platform::HOST == Platform::Windows {
         root.join("bin").join("R.exe")
@@ -353,7 +359,7 @@ pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     remove_if_present(&front_end)?;
     crate::link(libr, &libr_link)?;
     crate::link(rcmd, &front_end)?;
-    let written = run_image_writer(&front_end, root, &work);
+    let written = run_image_writer(&front_end, root, &work, layout);
     fs::remove_dir_all(&work).map_err(io_error(&work))?;
     remove_if_present(&libr_link)?;
     remove_if_present(&front_end)?;
@@ -370,14 +376,21 @@ pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
 /// base packages from a session that starts from that image. The environment is emptied down to
 /// what finds programs and temporary files, because the image holds start-up as this one
 /// environment ran it; the steps that read the environment run again on every start.
-fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
+fn run_image_writer(
+    front_end: &Path,
+    root: &Path,
+    work: &Path,
+    layout: Option<&Path>,
+) -> Result<()> {
     let image = root.join("library/base/R/ry-start.image");
+    let mut arguments = vec![OsStr::new("write-start-image"), image.as_os_str()];
+    arguments.extend(layout.map(Path::as_os_str));
     run_in_home(
         front_end,
         root,
         work,
         "ry-rcmd write-start-image",
-        &[OsStr::new("write-start-image"), image.as_os_str()],
+        &arguments,
     )?;
     let driver = work.join("base-code-images.R");
     write(&driver, BASE_CODE_IMAGES)?;
@@ -591,7 +604,7 @@ impl<'a> Builder<'a> {
         )?;
         self.build_help()?;
         self.compile_native()?;
-        run_image_writer(&self.front_end(), &self.root, &self.work)?;
+        run_image_writer(&self.front_end(), &self.root, &self.work, None)?;
         self.finish()
     }
 

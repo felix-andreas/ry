@@ -120,3 +120,10 @@ engine = "ry-jit-gctorture"
 area = "jit"
 reason = "aborts: the collector finds a freed object among its roots (allocating under jit_step)"
 
+[[failure]]
+case = "s4__native_definitions"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV when the engine loads base R from ry's own home (main e3bb8627, 4 of 4 runs); passes with GNU R's home"
+provisional = true
+intermittent = true
