@@ -7,7 +7,7 @@
 # fails when the installed withr is another release, so an update that drops the fast paths shows
 # up here.
 
-requires ry-runtime r-package:withr
+requires ry-runtime r-package:withr>=3.0.3
 
 file check.R
 | library(withr)
