@@ -29,7 +29,7 @@ use {
         Heap, HeapError,
         env::{Frame, FrameImage, TableImage},
         object::{ExternalPtrObject, Header, Sexp, SexpType, Shape, flag_bits, gp, holds_handles},
-        space::{IMAGE_LARGE_BASE, PAGE_SIZE, virtual_memory},
+        space::{IMAGE_LARGE_BASE, PAGE_SIZE, SlotIndex, virtual_memory},
         strings,
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -320,7 +320,10 @@ impl Heap {
         let mut out = Writer::default();
         out.bytes.extend_from_slice(MAGIC);
         out.u64(precondition);
-        let mut ids = self.number_for_image(&fixed_objects, &roots);
+        // Numbered before anything moves, so that it names each object by its old address
+        // throughout the numbering and the moves.
+        let index = self.space.slot_index(self.large.iter().copied());
+        let mut ids = self.number_for_image(&index, &fixed_objects, &roots);
         let mut numbering = Digest::new();
         numbering.word(ids.len() as u64);
         for &object in &ids {
@@ -347,8 +350,8 @@ impl Heap {
                 ranked.push(ids[id as usize]);
             }
         }
-        self.compact_small_objects(&ranked, &fixed_objects, &mut roots, &mut ids);
-        let large = self.move_large_objects(&ranked, &mut roots, &mut ids)?;
+        self.compact_small_objects(&index, &ranked, &fixed_objects, &mut roots, &mut ids);
+        let large = self.move_large_objects(&index, &ranked, &mut roots, &mut ids)?;
         out.u64(IMAGE_LARGE_BASE as u64);
         out.u64(large.len() as u64 * 8);
         let mut large_objects: Vec<u64> = self
@@ -500,7 +503,12 @@ impl Heap {
     /// content, and then takes what only the heap's other roots keep, small objects by address
     /// before large ones. A heap built by the same start-up numbers its objects the same way,
     /// wherever they lie, except for that last group of large objects.
-    unsafe fn number_for_image(&self, fixed_objects: &[Sexp], roots: &[Sexp]) -> Vec<Sexp> {
+    unsafe fn number_for_image(
+        &self,
+        index: &SlotIndex,
+        fixed_objects: &[Sexp],
+        roots: &[Sexp],
+    ) -> Vec<Sexp> {
         let mut symbols: Vec<(Sexp, Sexp)> = self
             .symbols
             .iter()
@@ -523,7 +531,7 @@ impl Heap {
             .copied()
             .chain(symbols.iter().map(|&(_, symbol)| symbol))
             .chain(strings);
-        let mut seen: FxHashSet<Sexp> = FxHashSet::default();
+        let mut seen = index.set();
         let mut numbered: Vec<Sexp> = Vec::new();
         let mut stack: Vec<Sexp> = Vec::new();
         let mut children: Vec<Sexp> = Vec::new();
@@ -563,26 +571,35 @@ impl Heap {
     /// classes may keep their address.
     unsafe fn compact_small_objects(
         &mut self,
+        index: &SlotIndex,
         ranked: &[Sexp],
         fixed_objects: &[Sexp],
         roots: &mut [Sexp],
         ids: &mut [Sexp],
     ) {
-        let fixed: FxHashSet<Sexp> = fixed_objects.iter().copied().collect();
+        let mut fixed = index.set();
+        for &object in fixed_objects {
+            fixed.insert(object);
+        }
         let movable: Vec<Sexp> = ranked
             .iter()
             .copied()
             .filter(|&object| {
                 self.space.holds(object)
-                    && !fixed.contains(&object)
+                    && !fixed.contains(object)
                     && !object.is_altrep()
                     && object.kind() != SexpType::Symbol
                     && object.kind().shape() != Shape::Environment
             })
             .collect();
-        let moves: FxHashMap<Sexp, Sexp> =
-            self.space.compact_for_image(&movable).into_iter().collect();
-        self.forward_for_image(&|object| moves.get(&object).copied(), roots, ids);
+        let mut moves: Vec<Option<Sexp>> = vec![None; index.len()];
+        for (from, to) in self.space.compact_for_image(&movable) {
+            if let Some(number) = index.of(from) {
+                moves[number] = Some(to);
+            }
+        }
+        let forward = |object| index.of(object).and_then(|number| moves[number]);
+        self.forward_for_image(&forward, roots, ids);
     }
 
     /// Points every reference the image carries at what `forward` returns for its target.
@@ -664,6 +681,7 @@ impl Heap {
     /// too, in the order of `ranked`, and returns the section's bytes.
     unsafe fn move_large_objects(
         &mut self,
+        index: &SlotIndex,
         ranked: &[Sexp],
         roots: &mut [Sexp],
         ids: &mut [Sexp],
@@ -697,7 +715,8 @@ impl Heap {
             ));
         }
         self.image_large = IMAGE_LARGE_BASE..IMAGE_LARGE_BASE + section_length;
-        let mut moves: FxHashMap<Sexp, Sexp> = FxHashMap::default();
+        let mut moves: Vec<Option<Sexp>> = vec![None; index.len()];
+        let mut moved_objects = FxHashSet::default();
         for (&object, &offset) in old.iter().zip(&offsets) {
             let target = start.add(offset);
             std::ptr::copy_nonoverlapping(
@@ -707,13 +726,18 @@ impl Heap {
             );
             let moved = Sexp::from_raw(target.cast())
                 .ok_or_else(|| ImageError::Unsupported("a large object is null".to_owned()))?;
-            moves.insert(object, moved);
+            let number = index.of(object).ok_or_else(|| {
+                ImageError::Unsupported("a large object is missing from the slot index".to_owned())
+            })?;
+            moves[number] = Some(moved);
+            moved_objects.insert(moved);
         }
         for &object in &old {
             self.free_large(object);
         }
-        self.large = moves.values().copied().collect();
-        self.forward_for_image(&|object| moves.get(&object).copied(), roots, ids);
+        self.large = moved_objects;
+        let forward = |object| index.of(object).and_then(|number| moves[number]);
+        self.forward_for_image(&forward, roots, ids);
         let mut section = vec![0u64; section_length / 8];
         std::ptr::copy_nonoverlapping(start, section.as_mut_ptr().cast::<u8>(), section_length);
         Ok(section)
@@ -726,28 +750,38 @@ impl Heap {
         live: &[Sexp],
         prefixes: &[Vec<u8>],
     ) -> Vec<(Sexp, Vec<(Sexp, *mut Sexp)>)> {
-        let mut strings: FxHashMap<Sexp, Vec<(Sexp, *mut Sexp)>> = FxHashMap::default();
-        for &object in live {
-            if object.kind() == SexpType::Char
-                && !object.is_altrep()
-                && !self.symbols.contains_key(&object)
-                && prefixes.iter().any(|prefix| under(prefix, object.bytes()))
-            {
-                strings.insert(object, Vec::new());
-            }
-        }
+        let mut strings: Vec<(Sexp, Vec<(Sexp, *mut Sexp)>)> = live
+            .iter()
+            .copied()
+            .filter(|&object| {
+                object.kind() == SexpType::Char
+                    && !object.is_altrep()
+                    && !self.symbols.contains_key(&object)
+                    && prefixes.iter().any(|prefix| under(prefix, object.bytes()))
+            })
+            .map(|object| (object, Vec::new()))
+            .collect();
         if strings.is_empty() {
             return Vec::new();
         }
+        strings.sort_unstable_by_key(|(string, _)| string.as_ptr() as usize);
+        let index = self.space.slot_index(self.large.iter().copied());
+        // Each number's position in `strings`, plus one, so that zero means no string.
+        let mut positions = vec![0u32; index.len()];
+        for (position, (string, _)) in strings.iter().enumerate() {
+            if let Some(number) = index.of(*string) {
+                positions[number] = position as u32 + 1;
+            }
+        }
         for &object in live {
             object.for_each_handle_field(&mut |field| {
-                if let Some(referrers) = strings.get_mut(&*field) {
-                    referrers.push((object, field));
+                if let Some(number) = index.of(*field)
+                    && let Some(position) = positions[number].checked_sub(1)
+                {
+                    strings[position as usize].1.push((object, field));
                 }
             });
         }
-        let mut strings: Vec<_> = strings.into_iter().collect();
-        strings.sort_unstable_by_key(|(string, _)| string.as_ptr() as usize);
         strings
     }
 

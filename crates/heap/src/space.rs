@@ -1315,6 +1315,97 @@ impl Space {
     pub fn page_count(&self) -> usize {
         self.page_count
     }
+
+    /// A dense number for every slot of the space as it is laid out now and for each of
+    /// `large`, which are the heap's large objects.
+    pub fn slot_index(&self, large: impl Iterator<Item = Sexp>) -> SlotIndex {
+        let mut first_slot = Vec::with_capacity(self.page_count);
+        let mut slots = 0;
+        for &class in &self.page_class[..self.page_count] {
+            first_slot.push(slots as u32);
+            if let Some(size) = SLOT_SIZES.get(class as usize) {
+                slots += PAGE_SIZE / size;
+            }
+        }
+        let mut large: Vec<usize> = large.map(|object| object.as_ptr() as usize).collect();
+        large.sort_unstable();
+        SlotIndex {
+            base: self.base.as_ptr() as usize,
+            page_class: self.page_class[..self.page_count].to_vec(),
+            first_slot,
+            slots,
+            large,
+        }
+    }
+}
+
+/// Numbers every slot of the space and every large object densely, as they lay when the index
+/// was taken, so that a number keeps naming the object that was there after objects move. The
+/// image writer keys its sets and its forwarding table on these numbers instead of hashing
+/// addresses: a slot's number is its page's first number plus its index in the page, and a
+/// large object's comes after every slot's, in address order.
+pub(crate) struct SlotIndex {
+    base: usize,
+    page_class: Vec<u8>,
+    first_slot: Vec<u32>,
+    slots: usize,
+    large: Vec<usize>,
+}
+
+impl SlotIndex {
+    pub fn len(&self) -> usize {
+        self.slots + self.large.len()
+    }
+
+    /// The number of the slot or large object at `object`'s address, or `None` when neither
+    /// was there.
+    #[inline]
+    pub fn of(&self, object: Sexp) -> Option<usize> {
+        let address = object.as_ptr() as usize;
+        let offset = address.wrapping_sub(self.base);
+        let page = offset >> PAGE_SHIFT;
+        if let Some(&class) = self.page_class.get(page) {
+            let multiplier = *SLOT_INDEX_MULTIPLIERS.get(class as usize)?;
+            let slot = ((offset & (PAGE_SIZE - 1)) as u64 * multiplier) >> 32;
+            return Some(self.first_slot[page] as usize + slot as usize);
+        }
+        let position = self.large.binary_search(&address).ok()?;
+        Some(self.slots + position)
+    }
+
+    /// An empty set of the objects this index numbers.
+    pub fn set(&self) -> SlotSet<'_> {
+        SlotSet {
+            index: self,
+            words: vec![0; self.len().div_ceil(64)],
+        }
+    }
+}
+
+/// A set of the objects a [`SlotIndex`] numbers, one bit each.
+pub(crate) struct SlotSet<'a> {
+    index: &'a SlotIndex,
+    words: Vec<u64>,
+}
+
+impl SlotSet<'_> {
+    /// Adds `object` and says whether it was absent. An object the index does not number is
+    /// never added.
+    pub fn insert(&mut self, object: Sexp) -> bool {
+        let Some(number) = self.index.of(object) else {
+            return false;
+        };
+        let (word, bit) = (number / 64, 1u64 << (number % 64));
+        let absent = self.words[word] & bit == 0;
+        self.words[word] |= bit;
+        absent
+    }
+
+    pub fn contains(&self, object: Sexp) -> bool {
+        self.index
+            .of(object)
+            .is_some_and(|number| self.words[number / 64] & (1 << (number % 64)) != 0)
+    }
 }
 
 impl Drop for Space {
