@@ -8,6 +8,7 @@
 | simpleWarning | n is 2.25, NA and TRUE | f(2.25) 
 | simpleWarning | ab123 | doTryCatch(return(expr), name, parentenv, handler) 
 | simpleWarning |  | doTryCatch(return(expr), name, parentenv, handler) 
+| simpleWarning | 0.333333333333333 1e+05 1e+15 1e-20 0.3 0 NaN -Inf NA 123456789012 | doTryCatch(return(expr), name, parentenv, handler) 
 | $value
 | [1] "n is 1, NA and TRUE"
 | 
