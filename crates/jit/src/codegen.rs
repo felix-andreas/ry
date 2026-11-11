@@ -466,7 +466,7 @@ impl<'p> Translator<'p> {
                     self.store_register(dst, value);
                 }
             }
-            Action::SetVar { slot, src } => {
+            Action::SetVar { slot, src, expand } => {
                 let ty = match before.registers[src] {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
@@ -475,6 +475,30 @@ impl<'p> Translator<'p> {
                     self.use_register(src, ty)
                 } else {
                     self.load_register(src)
+                };
+                let (ty, value) = if expand {
+                    let (ty, kind) = if ty == Ty::IntSeq {
+                        (Ty::IntVec, SexpType::Integer)
+                    } else {
+                        (Ty::DblVec, SexpType::Real)
+                    };
+                    let pc = self.plan.insts[position].pc;
+                    let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+                    let kind = self.builder.ins().iconst(I64, kind as i64);
+                    let contents = self
+                        .call(
+                            runtime::jit_sequence_contents as *const () as usize,
+                            &[I64, I64, I64],
+                            Some(I64),
+                            &[self.activation, value, kind],
+                        )
+                        .ok_or(Refusal("a helper without a result"))?;
+                    // The sequence passed its guard, so only an error makes the copy fail.
+                    let copied = self.builder.ins().icmp_imm_s(IntCC::NotEqual, contents, 0);
+                    self.guard(copied, failed);
+                    (ty, contents)
+                } else {
+                    (ty, value)
                 };
                 if ty == Ty::Num {
                     let flag = self.builder.use_var(self.integers[src]);
@@ -3155,10 +3179,11 @@ impl<'p> Translator<'p> {
                 self.store_register(dst, value);
             }
         }
-        let value = if matches!(ty, Ty::IntVec | Ty::DblVec) {
-            self.sequence_contents(value, ty, slot, dst, mismatch)?
+        let (value, copied) = if matches!(ty, Ty::IntVec | Ty::DblVec) {
+            let (value, copied) = self.sequence_contents(value, ty, slot, dst, mismatch)?;
+            (value, Some(copied))
         } else {
-            value
+            (value, None)
         };
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
@@ -3183,7 +3208,17 @@ impl<'p> Translator<'p> {
                 self.guard(fits, mismatch);
             }
         }
-        self.builder.def_var(self.statuses[slot], merged_status);
+        // The slot holds a copy the frame does not bind, so it reads as an outer variable: an
+        // element assignment copies it again and writes the result back, rather than changing
+        // the copy in place where the frame never sees it.
+        let status = match copied {
+            Some(copied) => {
+                let outer = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
+                self.builder.ins().select(copied, outer, merged_status)
+            }
+            None => merged_status,
+        };
+        self.builder.def_var(self.statuses[slot], status);
         match ty {
             Ty::Int | Ty::Lgl => {
                 let unboxed = self.unbox(value, ty);
@@ -4068,7 +4103,7 @@ impl<'p> Translator<'p> {
     /// `value`, or when it is a compact sequence where `ty` expects a plain vector, a plain copy
     /// of it that the slot and `dst` hold from then on: a formal declared `integer[]` called with
     /// `1:n` would otherwise fail the guard on every first call. Anything else that does not fit
-    /// jumps to `mismatch`.
+    /// jumps to `mismatch`. The second value says whether the slot now holds a copy.
     fn sequence_contents(
         &mut self,
         value: Value,
@@ -4076,13 +4111,17 @@ impl<'p> Translator<'p> {
         slot: usize,
         dst: Option<usize>,
         mismatch: Label,
-    ) -> Result<Value, Refusal> {
+    ) -> Result<(Value, Value), Refusal> {
         let fits = self.check(value, ty);
         let join = self.builder.create_block();
         self.builder.append_block_param(join, I64);
+        self.builder.append_block_param(join, I8);
         let convert = self.builder.create_block();
         self.builder.set_cold_block(convert);
-        self.builder.ins().brif(fits, join, &[value], convert, &[]);
+        let kept = self.builder.ins().iconst(I8, 0);
+        self.builder
+            .ins()
+            .brif(fits, join, &[value, kept], convert, &[]);
         self.builder.switch_to_block(convert);
         let kind = if ty == Ty::IntVec {
             SexpType::Integer
@@ -4107,9 +4146,11 @@ impl<'p> Translator<'p> {
         if let Some(dst) = dst {
             self.store_register(dst, contents);
         }
-        self.builder.ins().jump(join, &[contents]);
+        let copied = self.builder.ins().iconst(I8, 1);
+        self.builder.ins().jump(join, &[contents, copied]);
         self.builder.switch_to_block(join);
-        Ok(self.builder.block_params(join)[0])
+        let params = self.builder.block_params(join);
+        Ok((params[0], params[1]))
     }
 
     /// Whether the object `value` points to has type `ty`.

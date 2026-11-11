@@ -1074,9 +1074,10 @@ pub unsafe extern "C" fn jit_loop_sequence(
 }
 
 /// A plain copy of `value` when it is an attribute-free compact sequence of `kind`, for a load
-/// that expects a plain vector, such as a formal declared `integer[]` called with `1:n`; null
-/// for anything else, which fails the load's guard. The sequence itself stays compact, as GNU
-/// R's element reads leave it.
+/// that expects a plain vector, such as a formal declared `integer[]` called with `1:n`, or for
+/// an assignment into a variable the body changes. An attribute-free plain vector of `kind`,
+/// such as the one `a:a` gives, comes back as it is, and anything else gives null, which fails
+/// the caller's guard. The sequence itself stays compact, as GNU R's element reads leave it.
 pub unsafe extern "C" fn jit_sequence_contents(
     activation: *mut Activation,
     value: *mut Header,
@@ -1087,10 +1088,13 @@ pub unsafe extern "C" fn jit_sequence_contents(
             let Some(value) = Sexp::from_raw(value) else {
                 return std::ptr::null_mut();
             };
-            if values::compact_sequence(value).is_none()
-                || value.kind() as i64 != kind
-                || value.attrib() != values::nil()
-            {
+            if value.kind() as i64 != kind || value.attrib() != values::nil() {
+                return std::ptr::null_mut();
+            }
+            if !value.is_altrep() {
+                return value.as_ptr();
+            }
+            if values::compact_sequence(value).is_none() {
                 return std::ptr::null_mut();
             }
             match scoped(|| values::read_contents(value)) {

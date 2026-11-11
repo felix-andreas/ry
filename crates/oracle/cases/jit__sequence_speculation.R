@@ -51,3 +51,35 @@ sweep <- function(n) {
 for (k in 1:40) r <- sweep(k + 3L)
 r
 sweep(4L)
+# A compact sequence bound in an enclosing frame, read and then assigned into by a hot loop:
+# the assignment makes a local copy and leaves the outer binding as it was.
+outer <- function() {
+    v <- 1:10
+    inner <- function() {
+        s <- 0L
+        for (i in 1:3000) {
+            s <- s + v[[3L]]
+            if (i == 2000L) v[[3L]] <- 100L
+        }
+        c(s, v[[3L]])
+    }
+    c(inner(), v[[3L]])
+}
+outer()
+# A sequence the loop swaps and increments element by element.
+shuffle <- function(n) {
+    p <- 1:n
+    q <- seq_len(n) + 0
+    for (j in 1:5000) {
+        t <- p[[1L]]; p[[1L]] <- p[[2L]]; p[[2L]] <- t
+        p[[3L]] <- p[[3L]] + 1L
+        q[[n]] <- q[[n]] / 2 + j
+    }
+    list(p, q)
+}
+shuffle(5L)
+# `lapply` and `vapply` read a compact sequence one element at a time.
+squares <- lapply(seq_len(2000L), function(x) x * (x + 0.5))
+sum(unlist(squares))
+sum(vapply(3:2002, function(x) x / 2, numeric(1)))
+lapply(seq(2, 8, by = 3), function(x) x)

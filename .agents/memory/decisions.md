@@ -6159,9 +6159,16 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     same kind, and feedback that saw only that scalar at a `:`, `seq_len` or `seq_along` site
     still types the result as a sequence. A sequence joined with a plain vector is `Boxed`, never
     `IntVec`: the slot join keeps a sequence a path forgot (`inds <- 1:n` on one path, `inds <-
-    which(...)` on the other), a partly loaded sequence variable joins with its load feedback,
-    and a variable the body assigns into (`x[i] <- v`, `x[[i]] <- v`, a replacement call) never
-    loads as a sequence, because the first assignment materializes it. `for` normalizes its
+    which(...)` on the other), and a partly loaded sequence variable joins with its load
+    feedback. Load feedback that saw only one kind (sequence, scalar or vector of integers, or of
+    doubles) types the variable as the plain vector, so `perm1 <- 0:(n-1)` followed by element
+    stores stays `IntVec`. A variable the body assigns into (`x[i] <- v`, `x[[i]] <- v`, a
+    replacement call) is never a sequence: `SetVar` of a sequence into it stores an expanded copy
+    (`jit_sequence_contents`, a side exit when the value is some other ALTREP), and a load that
+    still finds a compact value copies it and marks the slot as an outer variable, so the first
+    element store copies again and writes the result back instead of losing the store in a
+    temporary. Converting on a join edge was rejected: an edge has no side exit and the copy
+    would need its own reference ownership. `for` normalizes its
     sequence register to the plain vector type, so a loop header that joins a compact pass with a
     materialized one stays typed and the loop step branches on the info vector. Without these,
     fannkuchredux and fasta_3 deoptimized and recompiled their main body up to four times

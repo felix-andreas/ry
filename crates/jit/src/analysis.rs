@@ -809,6 +809,10 @@ pub enum Action<'a> {
     SetVar {
         slot: usize,
         src: usize,
+        /// Whether a compact sequence is copied on the way in: the body assigns into the
+        /// variable, which expands the sequence anyway, and a plain vector keeps its loads and
+        /// element assignments native.
+        expand: bool,
     },
     /// A function lookup resolved at compile time; the speculations check it still holds.
     GetFun {
@@ -1787,11 +1791,20 @@ impl<'a> Builder<'a> {
 
     /// The type a load of the variable in `slot` speculates on from its feedback `bits`. A
     /// variable the body assigns into, such as `count <- 0:(n - 1L)` updated by `count[[r]] <-
-    /// r`, holds a compact sequence only until the first assignment, so a guess of a sequence
-    /// would fail on the next pass, deoptimize and recompile the body; it loads boxed instead.
+    /// r`, holds a compact sequence only until the first assignment, so it loads as the plain
+    /// vector, which also covers feedback that has seen both: the load copies a sequence it
+    /// still finds compact (see `sequence_contents` in codegen), where a guess of a sequence
+    /// would fail on the next pass, deoptimize and recompile the body.
     fn variable_ty(&self, slot: usize, bits: u32) -> Ty {
+        let within = |mask: u32| bits & !mask == 0;
+        let integers =
+            feedback::INTEGER_SCALAR | feedback::INTEGER_VECTOR | feedback::INTEGER_SEQUENCE;
+        let doubles = feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR | feedback::DOUBLE_SEQUENCE;
         match from_feedback(bits) {
-            Ty::IntSeq | Ty::DblSeq if self.modified[slot] => Ty::Boxed,
+            Ty::IntSeq if self.modified[slot] => Ty::IntVec,
+            Ty::DblSeq if self.modified[slot] => Ty::DblVec,
+            Ty::Boxed if bits != 0 && within(integers) => Ty::IntVec,
+            Ty::Boxed if bits != 0 && within(doubles) => Ty::DblVec,
             ty => ty,
         }
     }
@@ -2084,6 +2097,12 @@ impl<'a> Builder<'a> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
+                let expand = self.modified[slot] && matches!(ty, Ty::IntSeq | Ty::DblSeq);
+                let ty = match ty {
+                    Ty::IntSeq if expand => Ty::IntVec,
+                    Ty::DblSeq if expand => Ty::DblVec,
+                    ty => ty,
+                };
                 state.slots[slot] = Slot {
                     status: status::DIRTY,
                     ty,
@@ -2092,6 +2111,7 @@ impl<'a> Builder<'a> {
                 Action::SetVar {
                     slot,
                     src: operand(1),
+                    expand,
                 }
             }
             Op::GetFun => {
@@ -4135,7 +4155,7 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
     // These make compact sequences from two elements on, the common case to guess, wherever
     // the runtime has registered the classes; an interpreter without them makes plain vectors.
     // SAFETY: the interpreter is initialized before anything compiles.
-    let sequence = if unsafe { interp::interp().compact_sequence_classes[0] != values::nil() } {
+    let sequence = if interp::interp().compact_sequence_classes[0] != values::nil() {
         Ty::IntSeq
     } else {
         Ty::IntVec
