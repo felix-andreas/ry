@@ -1178,6 +1178,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "features"
+version = "0.4.3-beta"
+dependencies = [
+ "anyhow",
+ "futures-io",
+ "libc",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "filedescriptor"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4921,6 +4932,7 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "ssa",
+ "stacker",
 ]
 
 [[package]]

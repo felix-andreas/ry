@@ -130,7 +130,9 @@ const REST_SLOT: usize = 1;
 const FIRST_FORMAL_SLOT: usize = 2;
 
 /// Records the checks a function literal's inline annotations ask for, keyed by the formals or
-/// body the lowering just built for it. Does nothing when no annotation is checkable.
+/// body the lowering just built for it. Does nothing for a literal without annotations. One
+/// whose annotations the runtime cannot check (an alias, a tag union) is still registered, so it
+/// is a typed closure that the typed core compiles.
 pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) -> R<()> {
     let state = &mut interp().annotations;
     if !state.enabled {
@@ -168,7 +170,10 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
             _ => {}
         }
     }
-    if slots.iter().all(|(mask, _)| *mask == 0) {
+    if slots
+        .iter()
+        .all(|(mask, text)| *mask == 0 && text.is_empty())
+    {
         return Ok(());
     }
     let key = if formals.kind() == SexpType::Pairlist {
@@ -455,6 +460,14 @@ pub unsafe fn declared_formals(formals: Sexp, body: Sexp) -> (Vec<Option<Declare
         .map(|&mask| declared(mask as Mask))
         .collect();
     (types, formal_masks.iter().all(|&mask| mask != 0))
+}
+
+/// The annotation text of the formal at `position` of the definition `formals`/`body`, such as
+/// `Dict<Str, F64>`, for a compiler that needs a type the value alone does not give.
+pub unsafe fn formal_annotation(formals: Sexp, body: Sexp, position: usize) -> Option<String> {
+    let signature = signature_for(formals, body)?;
+    let text = text_at(signature, FIRST_FORMAL_SLOT + position);
+    (!text.is_empty()).then_some(text)
 }
 
 fn declared(mask: Mask) -> Option<Declared> {

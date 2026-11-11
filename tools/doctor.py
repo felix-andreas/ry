@@ -35,7 +35,8 @@ def main():
     r = check_gnu_r()
     if r:
         check_oracle_packages(r)
-    check_corpus()
+    corpus_complete = check_corpus()
+    check_cache(corpus_complete)
     check_binaries()
     check_disk()
     sys.exit(1 if failures else 0)
@@ -172,13 +173,37 @@ def check_corpus():
         report("warn", "corpus", f"{len(missing)} of {len(pinned)} pinned packages missing from {library}: {', '.join(missing[:6])}{' ...' if len(missing) > 6 else ''}", "just bench-packages install")
     else:
         report("ok", "corpus", f"{len(pinned)} pinned packages in {library}")
+    return bool(installed) and not missing
+
+
+def check_cache(corpus_complete):
+    """Whoever changes what a tree is built from builds it once and pushes it, so the next fresh container restores it."""
+    lock = root / "tools/cache.lock"
+    recorded = {tuple(line.split()[:2]) for line in lock.read_text().splitlines() if line.strip()} if lock.exists() else set()
+    for tree in ["r", "corpus"]:
+        code, output = run(["bash", str(root / "tools/cache.sh"), "hash", tree])
+        if code != 0:
+            report("warn", f"cache {tree}", f"cannot hash its inputs: {output[-200:]}")
+            continue
+        if (tree, output) in recorded:
+            report("ok", f"cache {tree}", f"tools/cache.lock has a build of these inputs ({output})")
+            continue
+        # Suggest a push only for a tree that `tools/cache.sh push` would accept.
+        if tree == "r":
+            pushable = run(["bash", str(root / "tools/reference-r.sh"), "check"])[0] == 0
+        else:
+            pushable = corpus_complete
+        if pushable:
+            report("warn", f"cache {tree}", f"tools/cache.lock has no build of these inputs ({output}), so a fresh container builds it from source", f"just cache-push {tree}, then commit tools/cache.lock")
+        else:
+            report("warn", f"cache {tree}", f"tools/cache.lock has no build of these inputs ({output}), and this machine has no finished tree to push")
 
 
 def check_binaries():
     identity = runtime_identity(root / "crates").encode()
     target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
     found = False
-    for profile in ["debug", "release", "profiling"]:
+    for profile in ["debug", "release", "iterate", "profiling"]:
         directory = target / profile
         binaries = {name: directory / name for name in ["ry", "libR.so", "ry-rcmd"]}
         if not binaries["ry"].exists() and not binaries["libR.so"].exists():

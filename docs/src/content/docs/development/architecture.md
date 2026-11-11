@@ -75,9 +75,12 @@ illegal dependency unrepresentable.
   engine use.
 - **`typed`** is the typed core. A strict typed closure called with values whose types it accepts
   is lowered from its body to a typed IR at its first call, given reference counts, and compiled
-  with Cranelift to run on native values: scalars in registers, 16-byte strings, and lists that
-  view an R vector's data or own their items. `jit`'s `native::call` is the only caller, and a
-  call that does not compile, or fails while it runs, goes back to the interpreter unchanged. It
+  with Cranelift to run on native values: scalars in registers, 16-byte strings, lists that
+  view an R vector's data or own their items, dictionaries, and records, tuples and tags in
+  counted boxes whose *shape* (layout plus field types) the code knows. A tag type is a union of
+  shapes, and a `match` over one branches on the box's shape. `jit`'s `native::call` is the only
+  caller, and a call that does not compile, or fails while it runs, goes back to the interpreter
+  unchanged. It
   depends on `heap` and `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and
   `RY_TYPED_DUMP=1` prints the Cranelift IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
