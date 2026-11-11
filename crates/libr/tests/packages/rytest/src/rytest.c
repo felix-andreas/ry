@@ -916,6 +916,361 @@ SEXP rytest_run_callback(void)
     return value;
 }
 
+/* The hot API entry points, one per operation code, for the fuzz that runs each of them on its
+   direct path and on its slow path and compares what they leave behind. */
+
+static SEXP attribute_tags(SEXP x)
+{
+    int count = 0;
+    for (SEXP cell = ATTRIB(x); cell != R_NilValue; cell = CDR(cell))
+        count++;
+    SEXP tags = PROTECT(allocVector(STRSXP, count));
+    int index = 0;
+    for (SEXP cell = ATTRIB(x); cell != R_NilValue; cell = CDR(cell))
+        SET_STRING_ELT(tags, index++, PRINTNAME(TAG(cell)));
+    UNPROTECT(1);
+    return tags;
+}
+
+SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
+{
+    SEXP result;
+    switch (INTEGER(op)[0]) {
+    case 0: result = Rf_setAttrib(a, b, c); break;
+    case 1: result = Rf_getAttrib(a, b); break;
+    case 2: result = ScalarInteger(Rf_nrows(a)); break;
+    case 3: result = ScalarInteger(Rf_ncols(a)); break;
+    case 4: result = ScalarInteger(Rf_asLogical(a)); break;
+    case 5: result = ScalarInteger(Rf_asInteger(a)); break;
+    case 6: result = ScalarReal(Rf_asReal(a)); break;
+    case 7: result = ScalarLogical(Rf_inherits(a, CHAR(STRING_ELT(b, 0)))); break;
+    case 8: result = Rf_lang3(a, b, c); break;
+    case 9: result = Rf_list3(a, b, c); break;
+    case 10: result = Rf_cons(a, b); break;
+    case 11: result = Rf_lcons(a, b); break;
+    case 12: result = ScalarString(STRING_ELT(a, 0)); break;
+    case 13: result = mkString(CHAR(STRING_ELT(a, 0))); break;
+    case 14: result = Rf_install(CHAR(STRING_ELT(a, 0))); break;
+    case 15: result = ScalarLogical(LENGTH(Rf_allocVector(INTEGER(a)[0], INTEGER(b)[0]))); break;
+    case 16: result = ScalarLogical(Rf_asLogical(Rf_GetOption1(Rf_install("rytest.option")))); break;
+    case 17: result = SETCAR(a, b); break;
+    case 18: result = SETCADR(a, b); break;
+    case 19: result = SETCDR(a, b); break;
+    case 20: SET_TAG(a, b); result = R_NilValue; break;
+    case 21: result = ScalarLogical(R_existsVarInFrame(a, b)); break;
+    case 22: result = R_DelayedBindingExpression(b, a); break;
+    case 23: result = R_DelayedBindingEnvironment(b, a); break;
+    case 24: result = ScalarInteger(R_GetBindingType(b, a)); break;
+    case 25:
+        switch (INTEGER(b)[0]) {
+        case 0: result = classgets(a, c); break;
+        case 1: result = namesgets(a, c); break;
+        case 2: result = dimgets(a, c); break;
+        default: result = dimnamesgets(a, c);
+        }
+        break;
+    default: result = R_NilValue;
+    }
+    PROTECT(result);
+    SEXP outcome = PROTECT(allocVector(VECSXP, 4));
+    SET_VECTOR_ELT(outcome, 0, result);
+    SET_VECTOR_ELT(outcome, 1, a);
+    SET_VECTOR_ELT(outcome, 2, attribute_tags(a));
+    SET_VECTOR_ELT(outcome, 3, ScalarLogical(OBJECT(a) != 0));
+    UNPROTECT(2);
+    return outcome;
+}
+
+/* Loops over one hot API entry point each, so a profiler can count the instructions a call
+   costs: `bench_` functions are what the instruction-count test measures. Each loop repeats the
+   same call, so the setup before it is a small, fixed share. */
+
+#define BENCH __attribute__((noinline)) static void
+
+BENCH bench_set_attrib_symbol(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 4));
+    SEXP name = install("rytest.tag");
+    SEXP value = PROTECT(ScalarInteger(1));
+    for (int i = 0; i < count; i++)
+        setAttrib(x, name, value);
+    UNPROTECT(2);
+}
+
+BENCH bench_set_attrib_class(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 4));
+    SEXP value = PROTECT(mkString("rytest_class"));
+    for (int i = 0; i < count; i++)
+        setAttrib(x, R_ClassSymbol, value);
+    UNPROTECT(2);
+}
+
+BENCH bench_set_attrib_dim(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 6));
+    SEXP value = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(value)[0] = 2;
+    INTEGER(value)[1] = 3;
+    for (int i = 0; i < count; i++)
+        setAttrib(x, R_DimSymbol, value);
+    UNPROTECT(2);
+}
+
+BENCH bench_set_attrib_dimnames(int count)
+{
+    SEXP x = PROTECT(allocMatrix(REALSXP, 2, 1));
+    SEXP value = PROTECT(allocVector(VECSXP, 2));
+    SEXP rows = allocVector(STRSXP, 2);
+    SET_VECTOR_ELT(value, 0, rows);
+    SET_STRING_ELT(rows, 0, mkChar("a"));
+    SET_STRING_ELT(rows, 1, mkChar("b"));
+    for (int i = 0; i < count; i++)
+        setAttrib(x, R_DimNamesSymbol, value);
+    UNPROTECT(2);
+}
+
+BENCH bench_set_attrib_names(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 1));
+    SEXP value = PROTECT(mkString("a"));
+    for (int i = 0; i < count; i++)
+        setAttrib(x, R_NamesSymbol, value);
+    UNPROTECT(2);
+}
+
+BENCH bench_get_attrib(int count)
+{
+    SEXP x = PROTECT(allocMatrix(REALSXP, 2, 2));
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += LENGTH(getAttrib(x, R_DimSymbol));
+    UNPROTECT(1);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+BENCH bench_alloc_vector(int count)
+{
+    for (int i = 0; i < count; i++)
+        allocVector(REALSXP, 4);
+}
+
+BENCH bench_scalar_integer(int count)
+{
+    for (int i = 0; i < count; i++)
+        ScalarInteger(i);
+}
+
+BENCH bench_scalar_logical(int count)
+{
+    for (int i = 0; i < count; i++)
+        ScalarLogical(i & 1);
+}
+
+BENCH bench_mk_string(int count)
+{
+    for (int i = 0; i < count; i++)
+        mkString("rytest");
+}
+
+BENCH bench_install(int count)
+{
+    for (int i = 0; i < count; i++)
+        install("rytest.symbol");
+}
+
+BENCH bench_nrows_ncols(int count)
+{
+    SEXP x = PROTECT(allocMatrix(REALSXP, 2, 3));
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += nrows(x) + ncols(x);
+    UNPROTECT(1);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+BENCH bench_lang2(int count)
+{
+    SEXP f = install("rytest.f");
+    SEXP x = PROTECT(ScalarInteger(1));
+    for (int i = 0; i < count; i++)
+        lang2(f, x);
+    UNPROTECT(1);
+}
+
+BENCH bench_cons(int count)
+{
+    SEXP x = PROTECT(ScalarInteger(1));
+    for (int i = 0; i < count; i++)
+        CONS(x, R_NilValue);
+    UNPROTECT(1);
+}
+
+BENCH bench_as_scalars(int count)
+{
+    SEXP x = PROTECT(ScalarReal(2.0));
+    double sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += asLogical(x) + asInteger(x) + asReal(x);
+    UNPROTECT(1);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+BENCH bench_inherits(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 1));
+    SEXP classes = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(classes, 0, mkChar("first"));
+    SET_STRING_ELT(classes, 1, mkChar("second"));
+    setAttrib(x, R_ClassSymbol, classes);
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += inherits(x, "second");
+    UNPROTECT(2);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+BENCH bench_protect_with_index(int count)
+{
+    PROTECT_INDEX index;
+    SEXP x = R_NilValue;
+    PROTECT_WITH_INDEX(x, &index);
+    for (int i = 0; i < count; i++)
+        REPROTECT(x, index);
+    UNPROTECT(1);
+}
+
+BENCH bench_char_is_ascii(int count)
+{
+    SEXP text = mkChar("rytest");
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += Rf_charIsASCII(text) + Rf_charIsUTF8(text);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+BENCH bench_external_ptr_addr(int count)
+{
+    SEXP pointer = PROTECT(R_MakeExternalPtr(&count, R_NilValue, R_NilValue));
+    intptr_t sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += (intptr_t) R_ExternalPtrAddr(pointer);
+    UNPROTECT(1);
+    if (sum == 1) Rprintf("unreachable\n");
+}
+
+BENCH bench_get_option(int count)
+{
+    SEXP tag = install("digits");
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += GetOption1(tag) == R_NilValue;
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+BENCH bench_class_names_gets(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 2));
+    SEXP class = PROTECT(mkString("rytest_class"));
+    SEXP names = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(names, 0, mkChar("a"));
+    SET_STRING_ELT(names, 1, mkChar("b"));
+    for (int i = 0; i < count; i++) {
+        classgets(x, class);
+        namesgets(x, names);
+    }
+    UNPROTECT(3);
+}
+
+BENCH bench_set_car_cdr(int count)
+{
+    SEXP x = PROTECT(ScalarInteger(1));
+    SEXP cell = PROTECT(CONS(x, R_NilValue));
+    for (int i = 0; i < count; i++) {
+        SETCAR(cell, x);
+        SETCDR(cell, R_NilValue);
+    }
+    UNPROTECT(2);
+}
+
+BENCH bench_binding_probes(int count)
+{
+    SEXP env = PROTECT(R_NewEnv(R_EmptyEnv, TRUE, 0));
+    SEXP symbol = install("rytest.variable");
+    defineVar(symbol, R_NilValue, env);
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += R_existsVarInFrame(env, symbol) + R_GetBindingType(symbol, env);
+    UNPROTECT(1);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+/* `env` binds `lazy` with delayedAssign(), since the C API has no way to make a promise. */
+BENCH bench_delayed_binding(int count, SEXP env)
+{
+    SEXP symbol = install("lazy");
+    intptr_t sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += (intptr_t) R_DelayedBindingExpression(symbol, env)
+            + (intptr_t) R_DelayedBindingEnvironment(symbol, env);
+    if (sum == 1) Rprintf("unreachable\n");
+}
+
+SEXP rytest_api_bench(SEXP count, SEXP env)
+{
+    int n = INTEGER(count)[0];
+    /* A collection before each loop keeps one from landing inside a measured loop. */
+    R_gc();
+    bench_set_attrib_symbol(n);
+    R_gc();
+    bench_set_attrib_class(n);
+    R_gc();
+    bench_set_attrib_dim(n);
+    R_gc();
+    bench_set_attrib_dimnames(n);
+    R_gc();
+    bench_set_attrib_names(n);
+    R_gc();
+    bench_get_attrib(n);
+    R_gc();
+    bench_alloc_vector(n);
+    R_gc();
+    bench_scalar_integer(n);
+    R_gc();
+    bench_scalar_logical(n);
+    R_gc();
+    bench_mk_string(n);
+    R_gc();
+    bench_install(n);
+    R_gc();
+    bench_nrows_ncols(n);
+    R_gc();
+    bench_lang2(n);
+    R_gc();
+    bench_cons(n);
+    R_gc();
+    bench_as_scalars(n);
+    R_gc();
+    bench_inherits(n);
+    R_gc();
+    bench_protect_with_index(n);
+    R_gc();
+    bench_char_is_ascii(n);
+    R_gc();
+    bench_external_ptr_addr(n);
+    R_gc();
+    bench_get_option(n);
+    R_gc();
+    bench_class_names_gets(n);
+    R_gc();
+    bench_set_car_cdr(n);
+    R_gc();
+    bench_binding_probes(n);
+    R_gc();
+    bench_delayed_binding(n, env);
+    return R_NilValue;
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -977,6 +1332,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_closure_lookup", (DL_FUNC) &rytest_closure_lookup, 2},
     {"rytest_keep_callback", (DL_FUNC) &rytest_keep_callback, 1},
     {"rytest_run_callback", (DL_FUNC) &rytest_run_callback, 0},
+    {"rytest_api_op", (DL_FUNC) &rytest_api_op, 4},
+    {"rytest_api_bench", (DL_FUNC) &rytest_api_bench, 2},
     {NULL, NULL, 0}
 };
 

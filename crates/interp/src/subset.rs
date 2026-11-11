@@ -1117,8 +1117,9 @@ unsafe fn array_subset(
         }
         selections.push(positions);
     }
-    let flat = flat_offsets(&selections, dims);
-    let result = select_elements(object, &flat)?;
+    let offsets = ArrayOffsets::new(&selections, dims);
+    let count = offsets.remaining;
+    let result = select_positions(object, offsets, count)?;
     let new_dims: SmallVec<[usize; 4]> =
         selections.iter().map(|selection| selection.len()).collect();
     let new_dimnames: SmallVec<[Sexp; 4]> = if dimnames.kind() == SexpType::List {
@@ -1344,36 +1345,135 @@ fn scatter_slab<T: Copy>(array: &mut [T], value: &[T], dims: &[usize], fixed: &[
 }
 
 /// The column-major offsets of every combination of `selections`, the first dimension varying
-/// fastest, with `NA_POSITION` wherever a selected position is `NA`.
-fn flat_offsets(selections: &[Positions], dims: &[usize]) -> Positions {
-    let mut flat: Positions = smallvec![0usize];
-    let mut stride = 1usize;
-    for (selection, &extent) in selections.iter().zip(dims) {
-        let offset = |base: usize, position: usize| {
-            if base == NA_POSITION || position == NA_POSITION {
-                NA_POSITION
-            } else {
-                base + position * stride
-            }
+/// fastest, with `NA_POSITION` wherever a selected position is `NA`. They are produced one at a
+/// time, so `x[, , k]` on a large array gathers without first writing a list of offsets as long
+/// as the result.
+///
+/// The innermost run walks the first selection longer than one position, and the single
+/// positions before it fold into the base, so `x[5, , k]` strides through a row without taking
+/// an odometer step per element.
+struct ArrayOffsets<'a> {
+    selections: &'a [Positions],
+    strides: SmallVec<[usize; 4]>,
+    /// The position within each selection; only the dimensions after `lead` move.
+    counters: SmallVec<[usize; 4]>,
+    /// The offset the non-`NA` positions outside the innermost run contribute.
+    base: usize,
+    /// How many dimensions outside the innermost run sit on an `NA` position.
+    missing: usize,
+    /// The dimension of the innermost run.
+    lead: usize,
+    /// The selection of the innermost run and its stride.
+    run: &'a [Position],
+    run_stride: usize,
+    /// The position within the innermost run.
+    inner: usize,
+    remaining: usize,
+}
+
+impl<'a> ArrayOffsets<'a> {
+    fn new(selections: &'a [Positions], dims: &[usize]) -> ArrayOffsets<'a> {
+        let mut strides = SmallVec::with_capacity(dims.len());
+        let mut stride = 1usize;
+        for &extent in dims {
+            strides.push(stride);
+            stride = stride.saturating_mul(extent);
+        }
+        let lead = selections
+            .iter()
+            .position(|selection| selection.len() != 1)
+            .unwrap_or(selections.len().saturating_sub(1));
+        let mut offsets = ArrayOffsets {
+            selections,
+            run_stride: strides.get(lead).copied().unwrap_or(0),
+            strides,
+            counters: smallvec![0; selections.len()],
+            base: 0,
+            missing: 0,
+            lead,
+            run: selections
+                .get(lead)
+                .map_or(&[], |selection| selection.as_slice()),
+            inner: 0,
+            remaining: selections.iter().map(|selection| selection.len()).product(),
         };
-        // A single offset so far (the first dimension, or a scalar index before this one) maps
-        // straight over the selection, which is the shape of a row or column subscript.
-        if let [base] = flat[..] {
-            flat = selection
-                .iter()
-                .map(|&position| offset(base, position))
-                .collect();
-            stride *= extent;
-            continue;
+        if offsets.remaining > 0 {
+            for dimension in (0..selections.len()).filter(|&dimension| dimension != lead) {
+                offsets.enter(dimension, 0);
+            }
         }
-        let mut next = Positions::with_capacity(flat.len() * selection.len());
-        for &position in selection {
-            next.extend(flat.iter().map(|&base| offset(base, position)));
-        }
-        flat = next;
-        stride *= extent;
+        offsets
     }
-    flat
+
+    /// Adds the contribution of position `counter` in the selection of `dimension` to the base.
+    fn enter(&mut self, dimension: usize, counter: usize) {
+        match self.contribution(dimension, counter) {
+            Some(part) => self.base += part,
+            None => self.missing += 1,
+        }
+    }
+
+    fn leave(&mut self, dimension: usize, counter: usize) {
+        match self.contribution(dimension, counter) {
+            Some(part) => self.base -= part,
+            None => self.missing -= 1,
+        }
+    }
+
+    fn contribution(&self, dimension: usize, counter: usize) -> Option<usize> {
+        let position = *self.selections.get(dimension)?.get(counter)?;
+        let stride = *self.strides.get(dimension)?;
+        (position != NA_POSITION).then(|| position * stride)
+    }
+
+    /// Starts the next run: an odometer step over the dimensions after the innermost run, where
+    /// only the dimensions whose counter changes update the base, so advancing is amortized
+    /// constant time.
+    #[inline(never)]
+    fn advance(&mut self) -> Option<()> {
+        self.inner = 0;
+        for dimension in self.lead + 1..self.selections.len() {
+            let counter = *self.counters.get(dimension)?;
+            self.leave(dimension, counter);
+            let next = match counter + 1 < self.selections.get(dimension)?.len() {
+                true => counter + 1,
+                false => 0,
+            };
+            *self.counters.get_mut(dimension)? = next;
+            self.enter(dimension, next);
+            if next != 0 {
+                break;
+            }
+        }
+        Some(())
+    }
+}
+
+impl Iterator for ArrayOffsets<'_> {
+    type Item = usize;
+
+    // Inlined so the gather loop keeps the iterator's state in registers; the odometer step
+    // stays out of line because it runs once per run, not once per element.
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.remaining == 0 {
+            return None;
+        }
+        if self.inner == self.run.len() {
+            self.advance()?;
+        }
+        let position = *self.run.get(self.inner)?;
+        self.inner += 1;
+        self.remaining -= 1;
+        Some(match self.missing > 0 || position == NA_POSITION {
+            true => NA_POSITION,
+            false => self.base + position * self.run_stride,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
 
 // `[[`.
@@ -2490,7 +2590,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         if total == 0 {
             return Ok(result);
         }
-        scatter(result, &flat_offsets(&selections, &dims), value)?;
+        scatter(result, ArrayOffsets::new(&selections, &dims), value)?;
         return Ok(result);
     }
     let index = indices.first().copied().unwrap_or(missing_arg());
@@ -2626,10 +2726,16 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         return Ok(false);
     }
     match kind {
-        SexpType::Real => recycle_into(values::reals_mut(target), &offsets, values::reals(value)),
-        SexpType::Logical | SexpType::Integer => {
-            recycle_into(values::ints_mut(target), &offsets, values::ints(value))
-        }
+        SexpType::Real => recycle_into(
+            values::reals_mut(target),
+            offsets.iter().copied(),
+            values::reals(value),
+        ),
+        SexpType::Logical | SexpType::Integer => recycle_into(
+            values::ints_mut(target),
+            offsets.iter().copied(),
+            values::ints(value),
+        ),
         _ => {
             let source = value.slice::<Sexp>();
             let heap = crate::heap();
@@ -2759,6 +2865,27 @@ unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
         && values::get_attr(vector, symbols().dimnames) == nil()
 }
 
+/// A copy of `vector`, which has no attributes, one element longer with the new element unset
+/// and room to grow, which the caller binds. The caller grows a vector in place where it has
+/// room. Nothing after this may fail, because an unshared list's elements move into the copy
+/// (see [`grow`]).
+#[cold]
+pub(crate) unsafe fn append_copy(vector: Sexp, reuse: bool) -> R<Sexp> {
+    let count = length(vector);
+    let heap = crate::heap();
+    let result = alloc_with_room(vector.kind(), count + 1)?;
+    if reuse
+        && matches!(vector.kind(), SexpType::List | SexpType::Expression)
+        && !vector.is_altrep()
+        && !values::maybe_shared(vector)
+    {
+        heap.move_elements(result, vector);
+    } else {
+        copy_prefix(values::materialize(vector)?, result, count)?;
+    }
+    Ok(result)
+}
+
 /// A resizable vector of `length` elements with room to grow by GNU R's factor of 1.05.
 unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
     let capacity = length + length / 20;
@@ -2770,7 +2897,7 @@ unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
 }
 
 /// `target[offsets] <- value`, recycling `value`, which is not empty, and skipping NA offsets.
-unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
+unsafe fn scatter(target: Sexp, offsets: impl Iterator<Item = usize>, value: Sexp) -> R<()> {
     let value = values::materialize(value)?;
     let count = length(value);
     if value != target && value.kind() == target.kind() {
@@ -2786,7 +2913,7 @@ unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
             _ => {}
         }
     }
-    for (position, &offset) in offsets.iter().enumerate() {
+    for (position, offset) in offsets.enumerate() {
         if offset != NA_POSITION {
             assign_element(target, offset, value, position % count)?;
         }
@@ -2795,8 +2922,8 @@ unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
 }
 
 /// Writes `source`, recycled, to `offsets` of `target`, skipping the NA offsets.
-fn recycle_into<T: Copy>(target: &mut [T], offsets: &[usize], source: &[T]) {
-    for (&offset, &item) in offsets.iter().zip(source.iter().cycle()) {
+fn recycle_into<T: Copy>(target: &mut [T], offsets: impl Iterator<Item = usize>, source: &[T]) {
+    for (offset, &item) in offsets.zip(source.iter().cycle()) {
         if let Some(slot) = target.get_mut(offset) {
             *slot = item;
         }

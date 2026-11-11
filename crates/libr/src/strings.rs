@@ -3,7 +3,7 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Reachable, direct, enter, error},
         runtime,
     },
     heap::{
@@ -155,6 +155,9 @@ pub unsafe extern "C" fn IS_BYTES(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_charIsASCII(object: Sexp) -> Rboolean {
+    if object.kind() == SexpType::Char {
+        return object.has_gp(gp::ASCII) as Rboolean;
+    }
     enter(|| {
         check_charsxp(object, "charIsASCII")?;
         Ok(object.has_gp(gp::ASCII) as Rboolean)
@@ -165,6 +168,9 @@ pub unsafe extern "C" fn Rf_charIsASCII(object: Sexp) -> Rboolean {
 /// ry's native encoding is UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_charIsUTF8(object: Sexp) -> Rboolean {
+    if object.kind() == SexpType::Char {
+        return !object.has_gp(gp::LATIN1 | gp::BYTES) as Rboolean;
+    }
     enter(|| {
         check_charsxp(object, "charIsUTF8")?;
         Ok(!object.has_gp(gp::LATIN1 | gp::BYTES) as Rboolean)
@@ -291,7 +297,10 @@ pub unsafe extern "C" fn Rf_reEnc(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_install(name: *const c_char) -> Sexp {
-    enter(|| Ok(runtime().heap.install(c_bytes(name))?))
+    direct(
+        |runtime| runtime.heap.install(c_bytes(name)).ok().map(Reachable),
+        || Ok(runtime().heap.install(c_bytes(name))?),
+    )
 }
 
 #[unsafe(no_mangle)]
