@@ -3198,20 +3198,7 @@ unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()
         _ => nil(),
     };
     let outer = interp().frames[index].function.cdr();
-    let mut shared = body;
-    if outer.kind() == SexpType::Bytecode {
-        let constants = outer.cdr();
-        if let Some(compiled) = (0..length(constants))
-            .map(|position| constants.element(position))
-            .find(|&constant| {
-                constant.kind() == SexpType::Bytecode
-                    && crate::bytecode::source_of(constant) == body
-            })
-        {
-            shared = compiled;
-        }
-    }
-    let closure = eval::make_closure(formals, shared, srcref, env)?;
+    let closure = crate::bytecode::inner_closure(outer, formals, body, srcref, env)?;
     crate::heap().root(closure);
     eval::define(nth(statement, 1), closure, env)
 }
