@@ -887,8 +887,9 @@ mod tests {
                 if library.nominals.contains(name) || manifest.contains(name.as_str()) {
                     continue;
                 }
-                // R registers operator methods like `Compare.Date` without exporting them.
-                if is_operator_method_name(name) {
+                // R registers operator methods like `Compare.Date` without exporting them, and a
+                // `class$member` declaration types a member of an object, not a binding.
+                if is_operator_method_name(name) || name.contains('$') {
                     continue;
                 }
                 if CONDITIONAL_NAMESPACES.contains(&namespace.as_str())
