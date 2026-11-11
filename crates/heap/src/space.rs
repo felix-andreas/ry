@@ -24,7 +24,7 @@ use {
     crate::{
         env::Frame,
         image::{ImageError, Reader, Writer},
-        object::{Sexp, SexpType, Shape, flag_bits, gc_bits},
+        object::{Sexp, SexpType, VectorObject, flag_bits, gc_bits},
     },
     std::{collections::VecDeque, ptr::NonNull},
 };
@@ -74,9 +74,11 @@ const NO_PAGE: u32 = u32::MAX;
 /// The class of a page that holds no objects and can be given to any class.
 const EMPTY_PAGE: u8 = u8::MAX;
 /// `offset * SLOT_INDEX_MULTIPLIERS[class] >> 32` is the index of the slot at byte `offset` of a
-/// page, exact for every slot start because offsets stay below 2^16.
-const SLOT_INDEX_MULTIPLIERS: [u64; CLASS_COUNT] = {
-    let mut multipliers = [0u64; CLASS_COUNT];
+/// page, exact for every slot start because offsets stay below 2^16. The table covers every
+/// `u8`, so indexing it with a page's class needs no bounds check; a byte that names no class,
+/// such as [`EMPTY_PAGE`], maps to zero.
+const SLOT_INDEX_MULTIPLIERS: [u64; 256] = {
+    let mut multipliers = [0u64; 256];
     let mut class = 0;
     while class < CLASS_COUNT {
         multipliers[class] = (1u64 << 32).div_ceil(SLOT_SIZES[class] as u64);
@@ -384,9 +386,9 @@ impl Space {
     fn locate(&self, object: Sexp) -> Option<(usize, usize, u64)> {
         let offset = (object.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize);
         let page = offset >> PAGE_SHIFT;
-        let class = *self.page_class.get(page)? as usize;
+        let class = *self.page_class.get(page)?;
         let in_page = (offset & (PAGE_SIZE - 1)) as u64;
-        let slot = (in_page * SLOT_INDEX_MULTIPLIERS.get(class)?) >> 32;
+        let slot = (in_page * SLOT_INDEX_MULTIPLIERS[class as usize]) >> 32;
         Some((page, (slot >> 6) as usize, 1 << (slot & 63)))
     }
 
@@ -415,7 +417,10 @@ impl Space {
             return false;
         }
         *marks |= bit;
-        unsafe { self.age(object, Some((page, word, bit))) };
+        if unsafe { self.age(object) } {
+            // The bound holds for the reason above: every bitmap matches `page_class`.
+            unsafe { *self.tenured.get_unchecked_mut(page).get_unchecked_mut(word) |= bit };
+        }
         true
     }
 
@@ -426,13 +431,14 @@ impl Space {
         }
         unsafe {
             object.set_gc_bit(gc_bits::MARK, true);
-            self.age(object, None);
+            self.age(object);
         }
         true
     }
 
-    #[inline(never)]
-    unsafe fn age(&mut self, object: Sexp, location: Option<(usize, usize, u64)>) {
+    /// Ages a newly marked object by one generation and says whether it is tenured now.
+    #[inline(always)]
+    unsafe fn age(&mut self, object: Sexp) -> bool {
         let bits = unsafe { object.gc_bits() };
         let promote = if bits & gc_bits::OLD == 0 {
             gc_bits::OLD
@@ -446,12 +452,11 @@ impl Space {
         }
         let cells = unsafe { vector_cells(object) };
         self.marked_vector_cells += cells;
-        if promote & gc_bits::TENURED != 0 {
+        let tenured = promote & gc_bits::TENURED != 0;
+        if tenured {
             self.tenured_vector_cells += cells;
-            if let Some((page, word, bit)) = location {
-                self.tenured[page][word] |= bit;
-            }
         }
+        tenured
     }
 
     /// [`Space::mark`] for a child of a tenured object in a deeper collection, which must also
@@ -468,7 +473,9 @@ impl Space {
         let newly = *marks & bit == 0;
         if newly {
             *marks |= bit;
-            unsafe { self.age(object, Some((page, word, bit))) };
+            if unsafe { self.age(object) } {
+                unsafe { *self.tenured.get_unchecked_mut(page).get_unchecked_mut(word) |= bit };
+            }
         }
         let tenured = unsafe { *self.tenured.get_unchecked(page).get_unchecked(word) } & bit != 0;
         (newly, tenured)
@@ -1264,18 +1271,37 @@ fn run_mask(bit: usize, run: usize) -> u64 {
 }
 
 /// The 8-byte cells `object`'s vector data takes, as GNU R's `Vcells` count it, or zero for an
-/// object that is not a vector. An ALTREP vector's data lives in the objects it points at.
+/// object that is not a vector. A small vector counts the whole of its slot past the vector
+/// header, as GNU R counts a small vector by its size class, so the count needs no length and
+/// no arithmetic on the hot path of marking. A large vector counts its elements. An ALTREP
+/// vector's data lives in the objects it points at.
+#[inline]
 pub(crate) unsafe fn vector_cells(object: Sexp) -> u64 {
     let kind = unsafe { object.kind() };
-    if kind.shape() != Shape::Vector || unsafe { object.is_altrep() } {
-        return 0;
-    }
     let Some(element) = kind.element_size() else {
         return 0;
     };
+    if unsafe { object.is_altrep() } {
+        return 0;
+    }
+    let class = unsafe { object.size_class() };
+    if let Some(&cells) = SLOT_VECTOR_CELLS.get(class as usize) {
+        return cells;
+    }
     let elements = unsafe { object.length() } as usize + usize::from(kind == SexpType::Char);
     (elements * element).div_ceil(8) as u64
 }
+
+/// The vector cells of a small vector in each class: its slot past the vector header.
+const SLOT_VECTOR_CELLS: [u64; CLASS_COUNT] = {
+    let mut cells = [0u64; CLASS_COUNT];
+    let mut class = 0;
+    while class < CLASS_COUNT {
+        cells[class] = ((SLOT_SIZES[class] - size_of::<VectorObject>()) / 8) as u64;
+        class += 1;
+    }
+    cells
+};
 
 /// The slots of word `word` that exist in a page of `slots` slots.
 fn valid_slots(slots: usize, word: usize) -> u64 {
