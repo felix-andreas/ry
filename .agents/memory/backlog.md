@@ -2712,9 +2712,11 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
-- **The base packages have no code image.** GNU R's build makes `stats`, `utils` and the other
-  base packages' lazy-load databases without `R CMD INSTALL`, so their closures compile at first
-  call; the recommended packages, which `tools/base-r/build.sh` installs, do get images.
+- **Unforced base bindings still compile at run time.** The start image holds compiled code for
+  every closure bound in a loaded namespace, but lazy-load bindings that start-up never forces
+  (most of stats and utils) are fetched and compiled when a session first calls them. Forcing them
+  all at image write would move that cost to the build, at the price of a larger image; measure
+  the image size and a full collection's page touches before doing it.
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
   because the pending check is dropped at exit. A function without parameters whose body is a

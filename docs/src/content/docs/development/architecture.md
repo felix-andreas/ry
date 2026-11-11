@@ -646,6 +646,14 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   cache by every process that loads the image, and a page is copied when it is first written.
   The objects carry their tenured bits, so no minor or intermediate collection traces them and a
   major collection's marking leaves their headers alone.
+- **Base R's closures arrive compiled.** Just before writing, the writer compiles afresh every
+  closure bound in base's namespace and the six default namespaces
+  (`bytecode::compile_namespaces_for_image`), and the image keeps that code. A lazy-load binding
+  start-up never forced stays a promise. Every other code object ran during start-up and carries
+  the writer's inline caches, type feedback and profile, so the image stores its source instead.
+  A session therefore runs base R's functions as bytecode from their first call without
+  compiling them, and the pages of code it never calls stay in the shared page cache. The cost
+  is 1.9 MB of image and about 1 MB more file-backed memory in an empty run.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment
