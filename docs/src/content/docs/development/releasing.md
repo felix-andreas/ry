@@ -144,7 +144,8 @@ On x86_64 Linux, `just package` builds through `tools/layout/optimize.sh`, which
 crate with profile-guided optimization and lays out `libR.so` with BOLT when `llvm-bolt` 20 or
 newer is installed (`RY_LAYOUT=off` skips the whole pipeline, `RY_LAYOUT_BOLT=off` only BOLT). The script
 builds an instrumented `ry`, runs `tools/layout/train.py` on it (the oracle cases, the
-`tools/bench/kernels` and `tools/bench/applications` programs and half the public suites, with the JIT on and off), and rebuilds
+plain R programs of the numeric kernels and application workloads, and half the public suite, with
+the JIT on and off), and rebuilds
 with the profile. Any profile-mismatch warning, or more than 1% of functions without a profile
 record, fails the build, because a stale profile optimizes hot code as cold
 (`decisions.md`, "The Linux release build is profile-guided"). The training needs testthat, purrr,

@@ -420,6 +420,11 @@ kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory`
 runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
 `RY_BENCH_RLIB` (default `~/R/library`).
 
+Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
+or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
+build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
+Evict both builds' files with `posix_fadvise(POSIX_FADV_DONTNEED)` before every RSS comparison.
+
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
 the ratio ry / GNU R. The cases live in `tools/bench/internal/stdlib`: `ry.R` holds ry's side and `gnu.R`

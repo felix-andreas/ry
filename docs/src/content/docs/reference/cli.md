@@ -228,7 +228,7 @@ your code and no data. It lists:
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
-of three runs of the `timeseries` workload in `just bench applications`, 7% on the median). Without the
+of three runs of the `timeseries` application workload, 7% on the median). Without the
 option, the hooks cost one predictable branch each.
 
 `ry repl` still works. It is the earlier name of `ry R`'s console (`ry run`'s with `--runtime ry`),

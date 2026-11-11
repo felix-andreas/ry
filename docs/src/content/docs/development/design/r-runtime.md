@@ -574,11 +574,10 @@ builtins in a systems language instead of in JavaScript. ry's equivalents are:
   sequence of calls to these, and no JIT can make a slow primitive fast.
 - **An optimizing JIT for the R code in between,** which is what the rest of this section is about.
 
-Where ry stands against that bar on untyped code: `just bench applications` times ten production-shaped
-workloads (S3 objects, conditions, validation, strings, `lapply` pipelines, records, tables, xts
-and zoo, a scalar simulation, and a testthat suite of small `test_that()` blocks), and ry runs the
-first nine at 1.23 times GNU R's speed with the JIT and 1.27 times without it (geometric means of
-one wall-time run, which varies by about 10%). The rest is decided by tier 0, the call path and
+Where ry stands against that bar on untyped code: the application workloads (`just bench
+applications`: S3 objects, conditions, validation, strings, `lapply` pipelines, records, tables,
+xts and zoo, and a testthat suite of small `test_that()` blocks) run faster than on GNU R, but far
+from the bar (`benchmarks.mdx` has the current geometric means). The rest is decided by tier 0, the call path and
 builtins, because their hot closures run a few hundred to a few thousand times, under tier 1's
 threshold. A user's profile of a package test suite agrees: builtins 33% of the time, tier 0 26%,
 call setup 22%, GC 8%, and compiled code under 1%, with every closure running inside testthat's
@@ -879,7 +878,7 @@ a few thousand times, under tier 1's entry threshold. This table lists every ide
 plans or rejected for that code, in the order it is built. A status changes with the pull request
 that changes it. `prior-art.md` gives the reasoning behind each source engine's verdict.
 
-The gaps come from `ry run --profile-summary` on the nine `just bench applications` workloads (JIT on: tier-0
+The gaps come from `ry run --profile-summary` on the application workloads (JIT on: tier-0
 instructions 23 to 44% of the time, closure call setup 12 to 24%, builtins about 25%, S3 method
 lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 121.4k instructions per
 call on ry (JIT off, down from 141.6k when this table started) and about 106k on GNU R 4.3.3. A
@@ -894,9 +893,9 @@ and jumping) costs about 11k instructions per call, about 13 per op over about 8
 a gap that size, so shrinking the op count and the cost per op (step 3) comes forward.
 
 **Target.** Untyped R with the JIT on runs at 10 times GNU R's speed on one thread, measured as the
-geometric mean over the `just bench applications` workloads and over the package corpus
-(`just bench-packages`). The milestones are 1.5x and then 3x. Today the workloads run at 0.9x
-(`results.json`) and the corpus at 1.06x (22 packages whose tests pass on both engines). Parallelism
+geometric mean over the application workloads (`just bench applications`) and over the package
+test suites (`just bench packages`). The milestones are 1.5x and then 3x; `benchmarks.mdx` has
+where both suites stand. Parallelism
 is deferred: the architecture keeps it possible (`decisions.md`, "Single-thread first"), but the
 target does not count on it.
 
@@ -974,7 +973,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads and corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), compiled call sites that force the strict arguments of `typeof`, `identical`, `inherits`, `is.vector` and `match` as GNU R's compiler does, so an argument that is still an unforced promise over R code (a caller's `g(k + 1L)`) takes the native entry too (per call, JIT off: `typeof` through two wrapper layers 9,232 to 6,317 instructions, GNU R 5,834; `typeof(k + 1L)` 6,729 to 4,162, GNU R 3,244), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, a native `Reduce(accumulate = TRUE)`, element assignments that stay in slot frames, and negative subscripts and builtin argument matching without allocation. Under the JIT, `x[[i]]`, `x[[i]] <- v` and `x[i] <- v` run at a tenth of GNU R's instructions or less; at tier 0 they cost 1.6 to 1.9 times GNU R, all of it dispatch around the builtin (the third table under "Builtin fast paths"). Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads and corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), compiled call sites that force the strict arguments of `typeof`, `identical`, `inherits`, `is.vector` and `match` as GNU R's compiler does, so an argument that is still an unforced promise over R code (a caller's `g(k + 1L)`) takes the native entry too (per call, JIT off: `typeof` through two wrapper layers 9,232 to 6,317 instructions, GNU R 5,834; `typeof(k + 1L)` 6,729 to 4,162, GNU R 3,244), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, a native `Reduce(accumulate = TRUE)`, element assignments that stay in slot frames, and negative subscripts and builtin argument matching without allocation. Under the JIT, `x[[i]]`, `x[[i]] <- v` and `x[i] <- v` run at a tenth of GNU R's instructions or less; at tier 0 the scalar reads and stores, list stores included, cost less than GNU R's net of the loop (`x[2L]` 4% more), through fast handlers for the ops around the builtin (the fourth table under "Builtin fast paths"). Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
 | (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through faster ry ports or parallelism; third-party C is not replaced | in progress | ry's own ports are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus. Built: vector kernels for the d/p/q functions, batched samplers, and AVX2 twister, tempering and inversion lanes, bit-identical to GNU R ("Distribution functions and the RNG run as vector kernels and batched samplers" in `decisions.md`). `rnorm` costs 67 instructions per normal (164 before); per element at length 1e6 `rnorm` is 3.2x GNU R, `runif` 5.7x, `qnorm` 3.0x, `pnorm` 1.7x and `rpois` 1.1x. The native bucket of `simulation` fell from 0.53 s (53%) to 0.30 s (40%), and the workload runs 1.26x faster (1.15 to 1.43 over 9 rounds). `sample` draws its indices in integers: per element at length 1e6, `sample(1e6)` is 2.7x GNU R and `sample(1e6, replace = TRUE)` 3.7x. Stats closures of the form `.Call(C_routine, ...)` enter their routine directly, without a frame, and decline to the R body on any warning or error ("Stats distribution closures enter their routine directly" in `decisions.md`): per call, `dnorm(x)` and `pnorm(x)` take about 0.46 µs (GNU R 1.0 and 1.1 µs) and `rnorm(1)` 0.68 µs (GNU R 2.8 µs). `pnorm`'s exponentials and the `qnorm` tail logarithms run on the exact vector ports of glibc's FMA `exp` and `log` that the fused element-wise kernels use: per element at length 1e6, `pnorm` is 1.80x GNU R (1.19x over the scalar loop) and `qnorm` on tail probabilities 2.09x (1.19x). `sample.int(N, n)` with `N / 128 <= n` tracks drawn values in a bitset, 2.64x GNU R at `sample.int(1e8, 1e6)` (1.21x over the hash set) |
@@ -1000,12 +999,12 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Cheaper promises: created lazily, held inline in the frame slot, or allocated from a per-call arena | Ř, GNU R | rejected, measured | a closure call on the testthat workload costs about 8,100 instructions with 1.2 promises; allocating a promise is a nursery bump, and promises are 1.4 of the 7.4 objects freed per call. None of the three designs saves more than that allocation, and each changes what `PRCODE`, `PRENV`, `substitute` and `delayedAssign` see | |
 | Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
-| Argument-match caches, one entry per closure body | V8, JSC | done (`eval::match_args_cached`) | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | matching in `seq()` 3.6k to 1.0k instructions; 1.0 to 1.2 million named calls per `bench-real` workload |
+| Argument-match caches, one entry per closure body | V8, JSC | done (`eval::match_args_cached`) | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | matching in `seq()` 3.6k to 1.0k instructions; 1.0 to 1.2 million named calls per application workload |
 | Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | built | S3 method lookup up to 17% (`timeseries`); instructions per dispatch: `UseMethod` 8.75k to 7.69k (GNU R 9.82k), with `NextMethod` 23.14k to 19.04k (GNU R 19.03k), `standardGeneric` 14.26k to 8.69k (GNU R 11.68k) | `resolve_s3`, `site_hit` in `crates/interp/src/dispatch.rs`; `S4Cache`, `dispatch_generic` in `crates/interp/src/methods.rs` |
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
 | Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |
-| Native prologues for hot base closures (`match.arg`, `stopifnot`, `setdiff`, `structure`, `format.default`, `Reduce`), installed by hash on the R version they were written from | ry, after the methods core | built | bench-real `validation` 0.6x to 1.87x GNU R; 2.71G to 1.32G instructions (JIT off) | `crates/interp/src/base_fast_paths.rs` |
+| Native prologues for hot base closures (`match.arg`, `stopifnot`, `setdiff`, `structure`, `format.default`, `Reduce`), installed by hash on the R version they were written from | ry, after the methods core | built | `validation` workload 0.6x to 1.87x GNU R; 2.71G to 1.32G instructions (JIT off) | `crates/interp/src/base_fast_paths.rs` |
 | Native prologues for hot package closures, installed by hash from `registerS3methods()` on each namespace load: rlang 1.3.0's `trace_back`, which every `expect_error()` and `expect_warning()` runs | ry | built | testthat workload 6.79G to 4.69G instructions (JIT on and off) | `crates/interp/src/package_fast_paths.rs` |
 | Builtin fast paths without string round trips or repeated evaluation: `attributes` and `c` take names as CHARSXPs instead of interning them again; the compiled `[[` read serves classless lists and the in-place element assignment takes a constant name; `forceAndCall` reuses its call's argument cells; `lapply` and `vapply` hand a builtin `FUN` (or `[[`) the element they read; `Reduce` gets a native prologue | ry | built | instructions per call, JIT off, before and after (GNU R): `attributes` on an xts object 4,183 to 1,786 (2,692); `c(1:3, 4.5)` 4,262 to 2,131 (2,731); `c(a, z = 3)` 5,964 to 4,616 (4,299); `x[[2L]]` 1,150 to 698 (709); `x[["fee"]]` 1,674 to 693 (1,805); `x[["net"]] <- 3` 4,910 to 987 (2,011); `forceAndCall(2, f, x, y)` 5,520 to 4,232 (5,198); `` vapply(rows, `[[`, 0, "fee") `` over 100 rows 421.8k to 260.0k (363.4k); `Reduce(f, x)` over 100 elements 748.7k to 423.1k (688.8k) | `do_attributes`, `do_c` in `crates/interp/src/subset.rs`; `cached_item` in `records.rs`; `do_force_and_call`, `force_and_call_with`, `call_with_values` in `eval.rs`; `do_reduce` in `base_fast_paths.rs` |
 | One-argument builtins without dispatch, and native entries for small base closures: compiled code calls a builtin's `unary` function with the operand register before any dispatch, and a call to a hash-guarded base closure whose arguments are already values runs natively without a frame | ry | built | instructions per call, JIT off, before and after (GNU R): `!x` 944 to 563 (750); `length(x)` 1,002 to 772 (1,232); `is.null(x)` 754 to 575 (697); `is.na(x)` 1,128 to 641 (1,490); `is.character(x)` 754 to 574 (699); `identical(x, y)` 8,545 to 1,818 (3,149); `isTRUE(x)` 6,087 to 1,114 (5,594); `nrow(m)` 4,575 to 1,324 (4,075); `match(x, t)` 6,869 to 1,905 (2,963); `x %in% t` 11,327 to 1,745 (8,226); `x %\|\|% y` 3,293 to 1,027 (absent in GNU R 4.3.3) | `BuiltinDef::unary` in `builtins.rs`, its call in `op_call_builtin` (`bytecode.rs`); `native_entry` and `NATIVE_ENTRIES` in `base_fast_paths.rs` |
@@ -1021,7 +1020,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | One kernel layer for vector builtins: vectorized slice kernels, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator. `y <- exp(-x^2/2) * k` runs at 1.4 to 1.6 ns per element against GNU R's 6.3 (4x), `x * k + 1` at 0.3 against 1.8 | `crates/interp/src/kernels.rs`, `vector_math.rs` |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
-| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on `bench-real` to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
+| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on the application workloads to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
 | Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
 | A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (its share of the session's closure calls) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `repays` in `crates/jit/src/jit.rs` |
 | Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |
@@ -1141,7 +1140,7 @@ written, and install-time code decides which of these facts are known before the
 | Whole-package compilation at install, with entry guards and deoptimization to tier 0 | scalar native functions built; general bodies planned | JIT |
 
 The targets are at least 80% of closures in rlang, cli and testthat running as machine code (5 to
-11% today), 30% fewer instructions on the testthat workload, and `bench-real` at twice GNU R's
+11% today), 30% fewer instructions on the testthat workload, and the application workloads at twice GNU R's
 speed. Vector kernels are a separate module behind a narrow interface that compiled code calls.
 
 **Frame layout.** A call's frame is a window of the register file: a header register, one slot per
@@ -1327,10 +1326,34 @@ the JIT):
 Under the JIT the scalar element ops run at a fifth of GNU R or less. At tier 0 what is left is
 dispatch around the builtin rather than the builtin: for `x[[i]]`, the function lookup, the
 primitive and object branches, the call and the jump cost about 300 instructions around a
-130-instruction read, and an assignment's two guards cost about 100. A fused tier-0 element op
-that calls `element_access::read_element` closes that gap. The computed-subscript read
+130-instruction read, and an assignment's two guards cost about 100. The computed-subscript read
 `x[[(k %% 8L) + 1L]]` still leaves the JIT for tier 0, and `x[i] <- list(5)` costs more under the
 JIT than at tier 0.
+
+A fourth round gave tier 0 fast handlers for those ops (beside `GetFun`'s, which reads a
+binding cell from the lookup cache): the primitive and object branches, `CallBuiltin` on `[[`
+and `[` through `element_access::element_position`, and `SubAssign` in place, by position or by
+an existing ASCII name. Each declines to the general handler with no side effect, so the op
+stream the JIT reads does not change. Instructions per loop iteration at tier 0, measured with
+callgrind against GNU R 4.6.2 (an empty loop costs 180 at tier 0 and 99 in GNU R):
+
+| Loop body | Before | After | JIT | GNU R 4.6 |
+| --- | ---: | ---: | ---: | ---: |
+| `s <- x[[i]]` | 846 | 599 | 70 | 553 |
+| `s <- x[2L]` | 886 | 587 | 56 | 492 |
+| `x[[i]] <- 5` | 726 | 467 | 76 | 519 |
+| `x[i] <- 5` | 727 | 470 | 72 | 519 |
+| `x[[i]] <- 5`, a list | 708 | 486 | 268 | 687 |
+| `x[i] <- list(5)` | 1917 | 1050 | 2428 | 1941 |
+| `x$b <- k` | 1006 | 678 | 1080 | 878 |
+| `s <- x[["b"]]`, a list | 556 | 546 | 657 | 1293 |
+| `s <- x[-1L]`, declined | 1761 | 1853 | 1982 | 2113 |
+| `x[["b"]] <- 2`, a name append, declined | 3565 | 3672 | 4031 | 5243 |
+
+Net of the loop, every read and store the handlers take is below GNU R except `x[2L]`, 4%
+above. A shape they decline pays for the attempt, about 5% on a negative subscript. The JIT
+column shows where compiled code is slower than tier 0: its fallback for a list's `[<-`, `$<-`,
+`$` and a name read calls the general path.
 
 ### How the static types feed the JIT
 

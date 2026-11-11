@@ -55,7 +55,7 @@ def load_suites():
         if not results_path.exists():
             continue
         manifest = tomllib.loads(manifest_path.read_text())
-        results = normalize(json.loads(results_path.read_text()))
+        results = check_schema(json.loads(results_path.read_text()))
         twin = next((suite for suite in suites if suite["id"] == manifest["id"]), None)
         if twin:
             sys.exit(f"error: benchmark suite `{manifest['id']}` is defined by both {twin['directory']} and {manifest_path.parent}")
@@ -94,10 +94,10 @@ def ratio(value):
     places = Decimal(1) if value >= 10 else Decimal("0.01")
     return f"{Decimal(value).quantize(places, rounding=ROUND_HALF_UP)}x"
 
-def normalize(results):
-    if results.get("schema") == 1:
-        return results
-    sys.exit(f"error: results.json has schema {results['schema']}, which this script does not read")
+def check_schema(results):
+    if results.get("schema") != 1:
+        sys.exit(f"error: results.json has schema {results.get('schema')}, which this script does not read")
+    return results
 
 if __name__ == "__main__":
     main()
