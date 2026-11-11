@@ -1073,7 +1073,6 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 ### Tier-0 call entry and dispatch
 
 - On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. That is after the raw pool reads and the out-of-line tier schedule (`decisions.md`, "Tier-0 call entry"). `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine` for the handler. The register clear is about 16 of `grow_registers`' 57 and must stay. What remains needs superinstructions (a fused guard plus `GetFun`, a fused `GetVar` plus `Element`), together with a per-site epoch stamp that re-proves `effects::resolve` and a test that rebinds a base function between two calls at one site, or a thinner call path (the AOT track's call plans).
-- Per-safepoint liveness maps for tier 0 (one format shared with the JIT's deopt metadata) would let a register window grow without the clear and still free what GNU R frees. They save only the clear, about 16M instructions or 0.3% on testthat_full, so their value is semantic, not speed, and the clear already matches GNU R's finalizer timing. Low priority.
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
