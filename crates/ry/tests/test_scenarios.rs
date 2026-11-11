@@ -202,7 +202,7 @@ fn native_entries_hold_in_slot_frames() {
          measure <- function(run) for (i in seq_len({CALLS})) run()\n\
          measure(function() Sys.unsetenv(name))\n"
     );
-    let Some(summary) = profile_summary(&[("entries.R", &script)]) else {
+    let Some((summary, _)) = profile_summary(&[("entries.R", &script)]) else {
         return;
     };
     let native = summary_count(&summary, "closure calls run natively, without a frame");
@@ -237,9 +237,11 @@ fn declined_typed_calls_keep_slot_frames() {
          print(total)\n"
     );
     let manifest = "[check]\ntyping = true\nstrict = true\n";
-    let Some(summary) = profile_summary(&[("ry.toml", manifest), ("taxed.R", &script)]) else {
+    let Some((summary, stdout)) = profile_summary(&[("ry.toml", manifest), ("taxed.R", &script)])
+    else {
         return;
     };
+    assert_eq!(stdout, "[1] 4000\n");
     let reified = summary_count(&summary, "slot frames turned into environments");
     assert!(
         reified < CALLS / 10,
@@ -269,9 +271,13 @@ fn native_typed_calls_keep_slot_frames() {
          print(total)\n"
     );
     let manifest = "[check]\ntyping = true\nstrict = true\n";
-    let Some(summary) = profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)]) else {
+    let Some((summary, stdout)) =
+        profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)])
+    else {
         return;
     };
+    // Each iteration adds 4 * (k + 0.5).
+    assert_eq!(stdout, "[1] 800080000\n");
     let reified = summary_count(&summary, "slot frames turned into environments");
     assert!(
         reified < CALLS / 10,
@@ -292,13 +298,37 @@ fn promises_over_slot_frames_are_counted() {
                   later <- function() do.call(function(y) function() y, list(quote(x)), envir = parent.frame())\n\
                   g <- function(x) later()\n\
                   k <- g(3)\n\
-                  stopifnot(identical(k(), 3))\n";
-    profile_summary(&[("counted.R", script)]);
+                  print(k())\n";
+    if let Some((_, stdout)) = profile_summary(&[("counted.R", script)]) {
+        assert_eq!(stdout, "[1] 1\n[1] 2\n[1] 3\n[1] 3\n");
+    }
+}
+
+/// Native code reads a promise over a slot frame only when forcing it could give nothing but
+/// that value. A slot holding a missing argument is not such a promise: the call goes to the
+/// interpreter, which raises R's error for it.
+#[test]
+fn native_reads_leave_missing_arguments_to_the_interpreter() {
+    let script = "twice <- function(v: F64) -> F64 v * 2.0\n\
+                  f <- function(a) twice(a)\n\
+                  x: F64 <- 0\n\
+                  for (k in List.range(1, 3)) {\n\
+                  \x20 x <- x + 1.0\n\
+                  \x20 print(f(x + 0.5))\n\
+                  }\n\
+                  tryCatch(do.call(f, list()), error = function(e) cat(conditionMessage(e), \"\\n\"))\n";
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    if let Some((_, stdout)) = profile_summary(&[("ry.toml", manifest), ("missing.R", script)]) {
+        assert_eq!(
+            stdout,
+            "[1] 3\n[1] 5\n[1] 7\nargument \"a\" is missing, with no default \n"
+        );
+    }
 }
 
 /// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
-/// gives the summary; `None` when ry's runtime is missing.
-fn profile_summary(files: &[(&str, &str)]) -> Option<String> {
+/// gives the summary and what the script printed; `None` when ry's runtime is missing.
+fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
     if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()]) {
         eprintln!("profile summary: skipped, {reason}");
         return None;
@@ -322,7 +352,10 @@ fn profile_summary(files: &[(&str, &str)]) -> Option<String> {
         "{script} failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    Some(fs::read_to_string(&summary).expect("read the profile summary"))
+    Some((
+        fs::read_to_string(&summary).expect("read the profile summary"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
 }
 
 /// The count in the row of the summary's events table that `event` names.

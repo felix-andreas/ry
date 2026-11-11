@@ -32,7 +32,7 @@ use {
     heap::{
         object::{
             INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
-            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS,
+            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS, gp,
         },
         records::{Fields, slot_kind},
     },
@@ -3083,10 +3083,7 @@ unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
     if let Some(value) = typed::call(function, &arguments) {
-        if value.is_ok() {
-            force_read(&read);
-        }
-        return Some(value);
+        return Some(value.and_then(|value| force_read(&read).map(|()| value)));
     }
     let (types, words) = argument_words(&arguments)?;
     let native = native_for(function, &types)?;
@@ -3108,7 +3105,6 @@ pub(crate) unsafe fn gather(
     function: Sexp,
     args: &[interp::builtins::Arg],
 ) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>)> {
-    use heap::object::gp;
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
         || interp::moves::tracking()
     {
@@ -3197,20 +3193,22 @@ pub(crate) unsafe fn run(
             .ok_or_else(|| interp::unwind::error("a native function returned no record")),
     };
     heap.release_handles(mark);
-    force_read(read);
+    if let Err(unwind) = force_read(read) {
+        return Some(Err(unwind));
+    }
     interp::interp().visible = true;
     Some(value)
 }
 
 /// Forces each argument promise a compiled call read without forcing: a promise shared through
-/// `...` must keep the value this call saw, as if tier 0 had forced it.
-unsafe fn force_read(read: &[(Sexp, Sexp)]) {
+/// `...` must keep the value this call saw, as if tier 0 had forced it. Settling runs code only
+/// for a checked promise, which the reads decline, but the native call may have run R code that
+/// checks one since, and that check's error is the call's.
+unsafe fn force_read(read: &[(Sexp, Sexp)]) -> R<()> {
     for &(promise, value) in read {
-        // Settling runs code only for a checked promise, which the reads above decline.
-        if let Err(unwind) = settle_unforced(promise, value) {
-            panic!("a promise read for native code failed to settle: {unwind:?}");
-        }
+        settle_unforced(promise, value)?;
     }
+    Ok(())
 }
 
 type R<T> = Result<T, interp::unwind::Unwind>;
@@ -3230,7 +3228,7 @@ unsafe fn promise_value(
     // A checked promise runs its annotation check when forced, which only tier 0 does, and
     // forcing a promise whose code is running raises the recursion error, which a read must not
     // replace with a value.
-    if promise.has_gp(heap::object::gp::CHECKED_PROMISE)
+    if promise.has_gp(gp::CHECKED_PROMISE)
         || promise.has_gp(PROMISE_SEEN)
         || depth > MAX_PURE_DEPTH
     {
@@ -3311,7 +3309,7 @@ unsafe fn pure_value(
     // A slot frame's own binding of the function's name lives in its slots, and any other name
     // resolves from the frame's enclosure. Looking it up in the pending environment itself would
     // reify the frame, through the heap's resolver, on every call.
-    let start = if env.has_gp(heap::object::gp::PENDING_FRAME) {
+    let start = if env.has_gp(gp::PENDING_FRAME) {
         match pending_name(env, head) {
             // R's function lookup passes over a binding that holds no function, as `c` does after
             // `c <- 3`. A promise would have to be forced to tell, and a local function is not a

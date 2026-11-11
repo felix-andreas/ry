@@ -497,10 +497,12 @@ pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
         return Ok(promise.car());
     }
     let env = promise.tag();
-    if !promise.has_gp(gp::ARGUMENT_REFERENCE)
+    let counted = !promise.has_gp(gp::ARGUMENT_REFERENCE)
         && env.kind() == SexpType::Environment
-        && env.has_gp(gp::PENDING_FRAME)
-    {
+        && env.has_gp(gp::PENDING_FRAME);
+    // A checked promise's annotation check can fail, which leaves the promise unforced.
+    let settled = settle_promise(promise, value)?;
+    if counted {
         let frame = &mut interp().frames[pending_owner(env)];
         debug_assert!(
             frame.unforced > 0,
@@ -508,7 +510,7 @@ pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
         );
         frame.unforced = frame.unforced.saturating_sub(1);
     }
-    settle_promise(promise, value)
+    Ok(settled)
 }
 
 /// The position of the live slot frame whose pending environment is `pending`.
