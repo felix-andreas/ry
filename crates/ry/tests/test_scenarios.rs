@@ -183,49 +183,92 @@ fn typed_benchmarks_run_natively() {
 #[test]
 fn native_entries_hold_in_slot_frames() {
     const CALLS: u64 = 20_000;
-    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()]) {
-        eprintln!("native entries: skipped, {reason}");
+    let script = format!(
+        "name <- \"RY_SCENARIO_UNSET\"\n\
+         measure <- function(run) for (i in seq_len({CALLS})) run()\n\
+         measure(function() Sys.unsetenv(name))\n"
+    );
+    let Some(summary) = profile_summary(&[("entries.R", &script)]) else {
         return;
+    };
+    let native = summary_count(&summary, "closure calls run natively, without a frame");
+    assert!(
+        native >= CALLS,
+        "{native} closure calls ran natively, fewer than the script's {CALLS} calls of `Sys.unsetenv`"
+    );
+}
+
+/// A typed call the typed core declines still reads its arguments first, and reading
+/// `order$region` from the slot frame of `taxed` must not give that frame an environment: a
+/// lookup in its pending environment would, on every call.
+#[test]
+fn declined_typed_calls_keep_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "alias Region = :North | :South\n\
+         alias Order = Record{{net: F64, region: Region}}\n\
+         tax_rate <- function(region: Region) -> F64 {{\n\
+         \x20 match (region) {{\n\
+         \x20   :North => 0.2\n\
+         \x20   :South => 0.1\n\
+         \x20 }}\n\
+         }}\n\
+         taxed <- function(order: Order) -> F64 order$net * tax_rate(order$region)\n\
+         total: F64 <- 0\n\
+         for (i in List.range(1, {CALLS})) total <- total + taxed((net = 1.0, region = :North))\n\
+         print(total)\n"
+    );
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    let Some(summary) = profile_summary(&[("ry.toml", manifest), ("taxed.R", &script)]) else {
+        return;
+    };
+    let reified = summary_count(&summary, "slot frames turned into environments");
+    assert!(
+        reified < CALLS / 10,
+        "{reified} slot frames got an environment in {CALLS} calls of `taxed`"
+    );
+}
+
+/// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
+/// gives the summary; `None` when ry's runtime is missing.
+fn profile_summary(files: &[(&str, &str)]) -> Option<String> {
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()]) {
+        eprintln!("profile summary: skipped, {reason}");
+        return None;
     }
     let directory = tempfile::tempdir().expect("temporary directory");
-    let script = directory.path().join("entries.R");
-    fs::write(
-        &script,
-        format!(
-            "name <- \"RY_SCENARIO_UNSET\"\n\
-             measure <- function(run) for (i in seq_len({CALLS})) run()\n\
-             measure(function() Sys.unsetenv(name))\n"
-        ),
-    )
-    .expect("write the script");
+    for (name, text) in files {
+        fs::write(directory.path().join(name), text).expect("write a file");
+    }
+    let (script, _) = files.last().expect("a script to run");
     let summary = directory.path().join("summary.md");
     let output = Command::new(env!("CARGO_BIN_EXE_ry"))
         .args(["run", "--runtime", "ry", "--profile-summary"])
         .arg(&summary)
-        .arg(&script)
+        .arg(script)
         .current_dir(directory.path())
         .env("XDG_CACHE_HOME", directory.path().join(".cache"))
         .output()
         .expect("run ry");
     assert!(
         output.status.success(),
-        "the script failed:\n{}",
+        "{script} failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let text = fs::read_to_string(&summary).expect("read the profile summary");
-    let native: u64 = text
+    Some(fs::read_to_string(&summary).expect("read the profile summary"))
+}
+
+/// The count in the row of the summary's events table that `event` names.
+fn summary_count(summary: &str, event: &str) -> u64 {
+    summary
         .lines()
         .find_map(|line| {
-            line.strip_prefix("| closure calls run natively, without a frame | ")?
+            line.strip_prefix(&format!("| {event} | "))?
                 .strip_suffix(" |")?
                 .parse()
                 .ok()
         })
-        .unwrap_or_else(|| panic!("the summary counts no native entries:\n{text}"));
-    assert!(
-        native >= CALLS,
-        "{native} closure calls ran natively, fewer than the script's {CALLS} calls of `Sys.unsetenv`"
-    );
+        .unwrap_or_else(|| panic!("the summary has no row `{event}`:\n{summary}"))
 }
 
 enum Outcome {
