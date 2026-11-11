@@ -119,7 +119,9 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
 /// body's code holds, so a harness can check that its seeds reach every one.
 pub fn check_superinstruction_agreement(entropy: &mut impl Entropy) -> u64 {
     syntax::testing::enable_invariants();
-    let body = program(entropy);
+    // Arithmetic programs call no builtin, so a builtin call of a free variable and of an
+    // argument comes first, to reach the pairs that end in one.
+    let body = format!("w <- abs(pi) + abs(b)\n{}", program(entropy));
     let arguments = [
         "3L",
         "-2.5",

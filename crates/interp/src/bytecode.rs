@@ -4432,12 +4432,16 @@ pub unsafe fn superinstructions_in(code: Sexp) -> u64 {
     if code.kind() != SexpType::Bytecode {
         return 0;
     }
+    let words = values::ints(code.car());
     let mut found = 0;
-    for &word in values::ints(code.car()) {
+    let mut pc = 0;
+    while let Some(&word) = words.get(pc) {
+        let Some(op) = op_of(word as u32) else { break };
         let index = (word as u32 & OP_MASK) as usize;
         if let Some(position) = index.checked_sub(SUPERINSTRUCTION_BASE) {
             found |= 1 << position;
         }
+        pc += 1 + operand_count(op);
     }
     found
 }
