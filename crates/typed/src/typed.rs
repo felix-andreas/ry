@@ -5,9 +5,9 @@
 //! compiles the closure for them once (lowering its body to the IR, inserting the reference
 //! counts and generating code), converts the arguments to native values, runs the code and
 //! converts its value back. Whatever the compiler cannot handle, and every call whose code gives
-//! up partway, runs in the interpreter instead, which the caller does when [`call`] returns
-//! `None`. Code gives up before anything it did is visible, so running the call again from the
-//! start is always correct.
+//! up partway, runs in the interpreter instead, which the caller does when [`call`] does not
+//! return [`Outcome::Ran`]. Code gives up before anything it did is visible, so running the call
+//! again from the start is always correct.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -77,14 +77,33 @@ const GUESSES: [Type; 4] = [Type::Dbl, Type::Int, Type::Lgl, Type::Str];
 /// How often a recursive closure's lowering may revise its result type.
 const MAX_REVISIONS: usize = 3;
 
+/// What became of a call through [`call`]. Unless the code ran, the caller makes the call in
+/// the interpreter.
+pub enum Outcome {
+    /// The compiled code ran, to a value or an error.
+    Ran(Result<Sexp, Unwind>),
+    /// The closure does not compile for the argument values' types, and no later call with
+    /// values of the same types will compile it either.
+    Refused,
+    /// This call does not run natively, but another call with the same types may: an argument
+    /// does not convert, the code gave up partway, or the closure is being compiled.
+    Declined,
+}
+
 /// Calls the typed closure `function` with argument values `values`, one per formal in order,
-/// through its compiled code. `None` when the closure does not compile for these values or the
-/// code gives up, and the caller then makes the call in the interpreter.
-pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwind>> {
+/// through its compiled code.
+pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Outcome {
+    match run(function, values) {
+        Ok(value) => Outcome::Ran(value),
+        Err(outcome) => outcome,
+    }
+}
+
+unsafe fn run(function: Sexp, values: &[Sexp]) -> Result<Result<Sexp, Unwind>, Outcome> {
     if !interp::annotations::is_typed(function)
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
     {
-        return None;
+        return Err(Outcome::Declined);
     }
     let mut params: SmallVec<[Type; 4]> = SmallVec::new();
     for (position, &value) in values.iter().enumerate() {
@@ -96,7 +115,7 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
             params.push(Type::I64);
             continue;
         }
-        let ty = type_of(value)?;
+        let ty = type_of(value).ok_or(Outcome::Declined)?;
         // A length-one vector passed where the closure declares a vector is that vector, not a
         // scalar.
         let ty = match ty.item() {
@@ -108,14 +127,15 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
         params.push(ty);
     }
     let compiled = compiled_for(function, &params)?;
+    // A dictionary has no R value to convert back to, whatever the call's values are.
     if matches!(compiled.result, Type::Dict { .. }) {
-        return None;
+        return Err(Outcome::Refused);
     }
     let mut arguments = Arguments::default();
     for (&value, &ty) in values.iter().zip(&params) {
         if !arguments.push(value, ty) {
             arguments.release();
-            return None;
+            return Err(Outcome::Declined);
         }
     }
     let heap = interp::heap();
@@ -126,31 +146,34 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
     if status != 0 {
         arguments.release();
         heap.release_handles(mark);
-        return None;
+        return Err(Outcome::Declined);
     }
     let value = to_r(compiled.result, out);
     drop_words(compiled.result, out);
     arguments.release();
     heap.release_handles(mark);
     interp::interp().visible = true;
-    Some(value)
+    Ok(value)
 }
 
 /// The compiled code for calling `function` with arguments of types `params`, compiling it on
-/// first use. `None` when the closure does not compile for them.
-pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static Compiled> {
+/// first use. [`Outcome::Refused`] when the closure does not compile for them or the session
+/// compiled as many closures as it may, and [`Outcome::Declined`] while it is being compiled.
+pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Result<&'static Compiled, Outcome> {
     let key: Key = (function, SmallVec::from_slice(params));
     match COMPILED.with_borrow(|compiled| compiled.get(&key).copied()) {
         // A function the code calls was rebound since it compiled: compile it again.
         Some(Some(compiled)) if !still_resolves(compiled) => {}
-        Some(found) => return found,
+        Some(found) => return found.ok_or(Outcome::Refused),
         None => {}
     }
     if COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_some()).count())
         >= MAX_COMPILED
-        || !COMPILING.with_borrow_mut(|compiling| compiling.insert(key.clone()))
     {
-        return None;
+        return Err(Outcome::Refused);
+    }
+    if !COMPILING.with_borrow_mut(|compiling| compiling.insert(key.clone())) {
+        return Err(Outcome::Declined);
     }
     let result = compile(function, params);
     COMPILING.with_borrow_mut(|compiling| compiling.remove(&key));
@@ -175,7 +198,7 @@ pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static C
         }
         table.insert(key, compiled);
     });
-    compiled
+    compiled.ok_or(Outcome::Refused)
 }
 
 /// Whether `function` has compiled code for some argument types.
@@ -267,7 +290,7 @@ struct Linker {
 impl Callees for Linker {
     unsafe fn callee(&mut self, function: Sexp, params: &[Type]) -> Result<(usize, Type), Refusal> {
         let compiled = compiled_for(function, params)
-            .ok_or(Refusal("a typed function it calls does not compile"))?;
+            .map_err(|_| Refusal("a typed function it calls does not compile"))?;
         // Code that calls another function directly is only right while that function's own
         // lookups hold.
         self.speculations.extend_from_slice(&compiled.speculations);

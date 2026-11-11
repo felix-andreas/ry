@@ -32,7 +32,7 @@ use {
     heap::{
         object::{
             INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
-            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS,
+            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS, gp,
         },
         records::{Fields, slot_kind},
     },
@@ -3079,17 +3079,32 @@ pub(crate) unsafe fn with_released_roots(
 }
 
 unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
+    // Reading the arguments evaluates their pure code, which the interpreter repeats when the
+    // call does not run natively, so a closure no compiler takes skips it.
+    if function.has_gp(gp::NATIVE_REFUSED) {
+        return None;
+    }
     let (arguments, read) = gather(function, args)?;
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
-    if let Some(value) = typed::call(function, &arguments) {
-        if value.is_ok() {
-            force_read(&read);
+    let refused = match typed::call(function, &arguments) {
+        typed::Outcome::Ran(value) => {
+            if value.is_ok() {
+                force_read(&read);
+            }
+            return Some(value);
         }
-        return Some(value);
-    }
-    let (types, words) = argument_words(&arguments)?;
-    let native = native_for(function, &types)?;
+        typed::Outcome::Refused => true,
+        typed::Outcome::Declined => false,
+    };
+    let scalar = argument_words(&arguments)
+        .and_then(|(types, words)| Some((native_for(function, &types)?, words)));
+    let Some((native, words)) = scalar else {
+        if refused {
+            function.set_gp_bits(gp::NATIVE_REFUSED, true);
+        }
+        return None;
+    };
     let trampoline = trampoline(&native.params, native.result)?;
     run(native.result, &read, |out| {
         trampoline(
@@ -3108,7 +3123,6 @@ pub(crate) unsafe fn gather(
     function: Sexp,
     args: &[interp::builtins::Arg],
 ) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>)> {
-    use heap::object::gp;
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
         || interp::moves::tracking()
     {
@@ -3230,7 +3244,7 @@ unsafe fn promise_value(
     // A checked promise runs its annotation check when forced, which only tier 0 does, and
     // forcing a promise whose code is running raises the recursion error, which a read must not
     // replace with a value.
-    if promise.has_gp(heap::object::gp::CHECKED_PROMISE)
+    if promise.has_gp(gp::CHECKED_PROMISE)
         || promise.has_gp(PROMISE_SEEN)
         || depth > MAX_PURE_DEPTH
     {
@@ -3311,7 +3325,7 @@ unsafe fn pure_value(
     // A slot frame's own binding of the function's name lives in its slots, and any other name
     // resolves from the frame's enclosure. Looking it up in the pending environment itself would
     // reify the frame, through the heap's resolver, on every call.
-    let start = if env.has_gp(heap::object::gp::PENDING_FRAME) {
+    let start = if env.has_gp(gp::PENDING_FRAME) {
         match pending_name(env, head) {
             // R's function lookup passes over a binding that holds no function, as `c` does after
             // `c <- 3`. A promise would have to be forced to tell, and a local function is not a
