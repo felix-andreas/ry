@@ -25,6 +25,11 @@ fn case_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
 
+/// Cases that once read freed memory only under collection stress, run on every stress pass
+/// whatever the seed picks: `apply__lapply_closure_results_stay_rooted` read a freed argument
+/// promise that had left the pool while the call allocated.
+const REGRESSION_CASES: &[&str] = &["apply__lapply_closure_results_stay_rooted"];
+
 fn cases() -> Vec<PathBuf> {
     runnable_cases(find_cases(&case_directory()), installed_packages).0
 }
@@ -139,9 +144,12 @@ fn cases_survive(torture: ProcessEngine) {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let mut all = cases();
+    let (mut chosen, mut all): (Vec<PathBuf>, Vec<PathBuf>) =
+        cases().into_iter().partition(|case| {
+            case.file_stem()
+                .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
+        });
     let mut rng = SplitMix64(seed);
-    let mut chosen = Vec::new();
     for _ in 0..fuzz_iterations(1).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }

@@ -28,8 +28,10 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// Collecting on every allocation makes a fuzz program take up to a few minutes on a busy machine.
 const TORTURE_TIMEOUT: Duration = Duration::from_secs(900);
 /// Seeds outside the default range whose programs once diverged, run on every pass:
-/// 24 reported an unbound variable against the wrong call once a closure ran compiled.
-const REGRESSION_SEEDS: &[u64] = &[24];
+/// 24 reported an unbound variable against the wrong call once a closure ran compiled, and 9571
+/// read a freed argument reference after a collection landed between detaching it from the pool
+/// and binding it into `str`'s frame.
+const REGRESSION_SEEDS: &[u64] = &[24, 9571];
 
 #[test]
 fn programs_are_deterministic() {
@@ -90,7 +92,15 @@ fn fuzz_programs_survive_gc_torture() {
     let ry = ProcessEngine::ry().with_timeout(TIMEOUT);
     let torture = ProcessEngine::ry_gc_torture().with_timeout(TORTURE_TIMEOUT);
     let young = ProcessEngine::ry_gc_torture_young().with_timeout(TORTURE_TIMEOUT);
-    let reports = run_seeds(&ry, &[&torture, &young], fuzz_iterations(3).div_ceil(3));
+    let mut reports = run_seeds(&ry, &[&torture, &young], fuzz_iterations(3).div_ceil(3));
+    let directory = scratch_directory();
+    for &seed in REGRESSION_SEEDS {
+        reports.push(
+            check_seed(seed, &ry, &[&torture, &young], &directory)
+                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
+        );
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     assert_agree(&reports);
 }
 
