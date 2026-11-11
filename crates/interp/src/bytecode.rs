@@ -5258,15 +5258,11 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// its variable's vector in place.
 pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
     let mut state = activation(machine, true);
-    let index = op_index(state.code, pc);
-    let applied = if index == Op::CallBuiltin as usize {
-        call_builtin_fast(&mut state, pc)
-    } else if index == Op::SubAssign as usize {
-        sub_assign_fast(&mut state, pc)
-    } else if index == Op::Field as usize {
-        field_fast(&mut state, pc)
-    } else {
-        None
+    let applied = match op_of(*state.code.add(pc) as u32) {
+        Some(Op::CallBuiltin) => call_builtin_fast(&mut state, pc),
+        Some(Op::SubAssign) => sub_assign_fast(&mut state, pc),
+        Some(Op::Field) => field_fast(&mut state, pc),
+        _ => None,
     };
     applied.is_some()
 }
@@ -5279,19 +5275,21 @@ pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
 /// forcing could.
 pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> {
     let mut state = activation(machine, true);
-    let index = op_index(state.code, pc);
-    if !runs_no_r_code(&state, index, pc) {
+    // A specialized or fused opcode steps as the instruction it starts from, so the step
+    // table is indexed by that base op, never by the specialized handler index.
+    let op = op_of(*state.code.add(pc) as u32)?;
+    if !runs_no_r_code(&state, op, pc) {
         return None;
     }
     let heap = state.heap;
     let mark = (*heap).handle_mark();
-    (*STEP_HANDLERS.as_ptr().add(index))(&mut state, pc);
+    (*STEP_HANDLERS.as_ptr().add(op as usize))(&mut state, pc);
     (*heap).release_handles(mark);
     Some(state.exit.map(|_| ()))
 }
 
 #[inline(always)]
-unsafe fn runs_no_r_code(state: &Activation<'_, '_>, index: usize, pc: usize) -> bool {
+unsafe fn runs_no_r_code(state: &Activation<'_, '_>, op: Op, pc: usize) -> bool {
     if (*state.interp).handlers.is_some() {
         return false;
     }
@@ -5305,14 +5303,14 @@ unsafe fn runs_no_r_code(state: &Activation<'_, '_>, index: usize, pc: usize) ->
         ) && !value.is_object()
             && !value.is_altrep()
     };
-    if index == Op::CallBuiltin as usize {
+    if op == Op::CallBuiltin {
         let first = *code.add(pc + 4) as usize;
         let count = *code.add(pc + 5) as usize;
         element_builtin(state, pc).is_some()
             && (first..first + count).all(|register| plain(*registers.add(register)))
-    } else if index == Op::Field as usize {
+    } else if op == Op::Field {
         plain(operand(1))
-    } else if index == Op::SubAssign as usize {
+    } else if op == Op::SubAssign {
         assigned_slot(state, pc).is_some_and(|cell| {
             matches!(
                 (*cell).kind(),
