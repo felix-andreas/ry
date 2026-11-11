@@ -374,8 +374,7 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
         return None;
     }
     if value.kind() == SexpType::Record {
-        return (!value.is_object()
-            && interp::records::native_kind(value) == NativeKind::Tag)
+        return (!value.is_object() && interp::records::native_kind(value) == NativeKind::Tag)
             .then_some(Type::Tag(shapes::ANY));
     }
     let array = value.is_array();
@@ -567,8 +566,7 @@ const STACK_RED_ZONE: usize = 64 * 1024;
 const STACK_GROWTH: usize = 1024 * 1024;
 
 unsafe fn to_box_inner(value: Sexp) -> Option<(u64, Item)> {
-    if value.kind() != SexpType::Record || value.is_object() || value.attrib() != rvalues::nil()
-    {
+    if value.kind() != SexpType::Record || value.is_object() || value.attrib() != rvalues::nil() {
         return None;
     }
     let layout = value.record_layout();
@@ -626,7 +624,12 @@ unsafe fn to_box_inner(value: Sexp) -> Option<(u64, Item)> {
         description.strings,
         description.words,
     );
-    for ((&field, word), &offset) in description.fields.iter().zip(&words).zip(&description.offsets) {
+    for ((&field, word), &offset) in description
+        .fields
+        .iter()
+        .zip(&words)
+        .zip(&description.offsets)
+    {
         let at = boxed.add(values::BOX_FIELDS + 8 * offset as usize) as *mut u64;
         *at = word[0];
         if field == Item::Str {
@@ -796,4 +799,3 @@ fn depth_budget() -> i64 {
     let state = interp::interp();
     i64::from(state.max_depth) - state.frames.len() as i64
 }
-

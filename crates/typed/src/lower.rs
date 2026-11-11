@@ -779,8 +779,7 @@ impl Lowering<'_> {
                     else {
                         continue;
                     };
-                    let Some(ty) =
-                        joined(self.builder.ty(then_local), self.builder.ty(else_local))
+                    let Some(ty) = joined(self.builder.ty(then_local), self.builder.ty(else_local))
                     else {
                         continue;
                     };
@@ -1972,7 +1971,8 @@ impl Lowering<'_> {
                 let symbol = match field.kind() {
                     SexpType::Symbol => field,
                     SexpType::String => {
-                        let text = rvalues::string_at(field, 0).ok_or(Refusal("an NA field name"))?;
+                        let text =
+                            rvalues::string_at(field, 0).ok_or(Refusal("an NA field name"))?;
                         rvalues::install(&text).map_err(|_| Refusal("a field name"))?
                     }
                     _ => return Err(Refusal("a `$` of a computed field")),
@@ -2001,7 +2001,9 @@ impl Lowering<'_> {
                     (".ry_text", Type::Dbl) | (_, Type::I64 | Type::Int) => {
                         Ok(self.builder.emit(Type::Str, Op::Format(a)))
                     }
-                    _ => Err(Refusal("a `Num.to_str` of something other than a whole number")),
+                    _ => Err(Refusal(
+                        "a `Num.to_str` of something other than a whole number",
+                    )),
                 }
             }
             "Str.concat" => {
@@ -2060,10 +2062,9 @@ impl Lowering<'_> {
                     array: true,
                 };
                 match (name, self.builder.ty(a)) {
-                    ("Str.starts_with" | "Str.ends_with", Type::Str) => Ok(self.builder.emit(
-                        Type::Lgl,
-                        Op::Affix(name == "Str.starts_with", a, b),
-                    )),
+                    ("Str.starts_with" | "Str.ends_with", Type::Str) => Ok(self
+                        .builder
+                        .emit(Type::Lgl, Op::Affix(name == "Str.starts_with", a, b))),
                     ("Str.split_on", Type::Str) => Ok(self.builder.emit(strings, Op::Split(a, b))),
                     ("Str.join_with", ty) if ty == strings => {
                         Ok(self.builder.emit(Type::Str, Op::Join(a, b)))
@@ -2226,7 +2227,9 @@ impl Lowering<'_> {
                 let ty = interp::annotations::formal_annotation(formals, body, 0)
                     .as_deref()
                     .and_then(dict_type)
-                    .ok_or(Refusal("a walk from `Dict.empty()` whose state type is unknown"))?;
+                    .ok_or(Refusal(
+                        "a walk from `Dict.empty()` whose state type is unknown",
+                    ))?;
                 self.builder.emit(ty, Op::DictNew)
             }
             Some(state) => self.value(state)?,
@@ -2369,9 +2372,8 @@ impl Lowering<'_> {
     unsafe fn construct(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let items = &arguments.items[..];
         let (tag, items) = if name == ".ry_tag" {
-            let ((None, tag), payload) = items
-                .split_first()
-                .ok_or(Refusal("a tag without a name"))?
+            let ((None, tag), payload) =
+                items.split_first().ok_or(Refusal("a tag without a name"))?
             else {
                 return Err(Refusal("a tag whose name is an argument"));
             };
@@ -2498,7 +2500,8 @@ impl Lowering<'_> {
         exhaustive: bool,
         arm: &mut dyn FnMut(&mut Self, Option<u32>) -> Result<Option<Local>, Refusal>,
     ) -> Result<Option<Local>, Refusal> {
-        let mut cases: SmallVec<[Option<u32>; 4]> = shapes.iter().map(|&shape| Some(shape)).collect();
+        let mut cases: SmallVec<[Option<u32>; 4]> =
+            shapes.iter().map(|&shape| Some(shape)).collect();
         if !exhaustive {
             cases.push(None);
         }
@@ -2511,9 +2514,7 @@ impl Lowering<'_> {
             match case {
                 Some(shape) if position + 1 < cases.len() => {
                     let expected = self.int(shape as i32);
-                    let same = self
-                        .builder
-                        .emit(Type::Bool, Op::Same(shape_of, expected));
+                    let same = self.builder.emit(Type::Bool, Op::Same(shape_of, expected));
                     let next = self.builder.block();
                     self.builder.terminate(Terminator::Branch {
                         condition: same,
@@ -2692,19 +2693,22 @@ impl Lowering<'_> {
         let default = self.value(default)?;
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
-        let value = self.switch_shapes(result, &candidates, exhaustive, &mut |lowering, shape| {
-            let layout = shape.map(|shape| shapes::shape(shape).layout);
-            match (shape, layout) {
-                (Some(shape), Some(layout)) if layout == ok => lowering.field(result, shape, 0).map(Some),
-                (_, Some(layout)) if layout == err => Ok(Some(default)),
-                _ => {
-                    lowering.builder.terminate(Terminator::Fail);
-                    let unreachable = lowering.builder.block();
-                    lowering.builder.switch_to(unreachable);
-                    Ok(None)
+        let value =
+            self.switch_shapes(result, &candidates, exhaustive, &mut |lowering, shape| {
+                let layout = shape.map(|shape| shapes::shape(shape).layout);
+                match (shape, layout) {
+                    (Some(shape), Some(layout)) if layout == ok => {
+                        lowering.field(result, shape, 0).map(Some)
+                    }
+                    (_, Some(layout)) if layout == err => Ok(Some(default)),
+                    _ => {
+                        lowering.builder.terminate(Terminator::Fail);
+                        let unreachable = lowering.builder.block();
+                        lowering.builder.switch_to(unreachable);
+                        Ok(None)
+                    }
                 }
-            }
-        })?;
+            })?;
         let value = value.ok_or(Refusal("a `Result.with_default` of no result"))?;
         self.usable(value)?;
         Ok(value)
@@ -2721,7 +2725,11 @@ impl Lowering<'_> {
         let ty = self.builder.ty(list);
         let item = match ty {
             Type::Vector { item, array: true } | Type::List(item) => item,
-            _ => return Err(Refusal("a `List.keep_oks` over something that is not a list")),
+            _ => {
+                return Err(Refusal(
+                    "a `List.keep_oks` over something that is not a list",
+                ));
+            }
         };
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let kept = if oks { ok } else { err };
@@ -2787,7 +2795,9 @@ impl Lowering<'_> {
                     return Ok(None);
                 }
             }
-            Ok(Some(lowering.builder.emit(Type::Null, Op::Const(Constant::Null))))
+            Ok(Some(
+                lowering.builder.emit(Type::Null, Op::Const(Constant::Null)),
+            ))
         })?;
         let next = self
             .builder
@@ -2858,8 +2868,8 @@ impl Lowering<'_> {
         self.builder.switch_to(absent);
         let reason = self.tag(missing, &[])?;
         let err = self.tag("Err", &[reason])?;
-        let Type::Tag(union) = joined(self.builder.ty(ok), self.builder.ty(err))
-            .ok_or(Refusal("a lookup result"))?
+        let Type::Tag(union) =
+            joined(self.builder.ty(ok), self.builder.ty(err)).ok_or(Refusal("a lookup result"))?
         else {
             return Err(Refusal("a lookup result"));
         };
@@ -2885,7 +2895,9 @@ impl Lowering<'_> {
         let key = self.dict_key(dict, key)?;
         let dict_ty = self.builder.ty(dict);
         let Type::Dict { value: item, .. } = dict_ty else {
-            return Err(Refusal("a `Dict.update` of something other than a dictionary"));
+            return Err(Refusal(
+                "a `Dict.update` of something other than a dictionary",
+            ));
         };
         let current = self.lookup_result(dict, key, "Missing")?;
         let answer = self
@@ -2893,29 +2905,30 @@ impl Lowering<'_> {
             .ok_or(Refusal("an update that never completes"))?;
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(answer), &[ok, err], &[])?;
-        let updated = self.switch_shapes(answer, &candidates, exhaustive, &mut |lowering, shape| {
-            let layout = shape.map(|shape| shapes::shape(shape).layout);
-            match (shape, layout) {
-                (Some(shape), Some(layout)) if layout == ok => {
-                    let value = lowering.field(answer, shape, 0)?;
-                    let value = lowering.convert_scalar(value, item)?;
-                    Ok(Some(
-                        lowering
-                            .builder
-                            .emit(dict_ty, Op::DictInsert(dict, key, value)),
-                    ))
+        let updated =
+            self.switch_shapes(answer, &candidates, exhaustive, &mut |lowering, shape| {
+                let layout = shape.map(|shape| shapes::shape(shape).layout);
+                match (shape, layout) {
+                    (Some(shape), Some(layout)) if layout == ok => {
+                        let value = lowering.field(answer, shape, 0)?;
+                        let value = lowering.convert_scalar(value, item)?;
+                        Ok(Some(
+                            lowering
+                                .builder
+                                .emit(dict_ty, Op::DictInsert(dict, key, value)),
+                        ))
+                    }
+                    (_, Some(layout)) if layout == err => Ok(Some(
+                        lowering.builder.emit(dict_ty, Op::DictRemove(dict, key)),
+                    )),
+                    _ => {
+                        lowering.builder.terminate(Terminator::Fail);
+                        let unreachable = lowering.builder.block();
+                        lowering.builder.switch_to(unreachable);
+                        Ok(None)
+                    }
                 }
-                (_, Some(layout)) if layout == err => {
-                    Ok(Some(lowering.builder.emit(dict_ty, Op::DictRemove(dict, key))))
-                }
-                _ => {
-                    lowering.builder.terminate(Terminator::Fail);
-                    let unreachable = lowering.builder.block();
-                    lowering.builder.switch_to(unreachable);
-                    Ok(None)
-                }
-            }
-        })?;
+            })?;
         let updated = updated.ok_or(Refusal("an update that never completes"))?;
         self.usable(updated)?;
         Ok(updated)
@@ -3689,7 +3702,9 @@ unsafe fn pattern_matches(
     match pattern.kind() {
         SexpType::Symbol => match &*rvalues::symbol_name(pattern) {
             "_" => Ok(true),
-            "T" | "F" | ".." | "..." | "" => Err(Refusal("a `match` pattern the typed core does not know")),
+            "T" | "F" | ".." | "..." | "" => {
+                Err(Refusal("a `match` pattern the typed core does not know"))
+            }
             _ => {
                 bindings.push((pattern, None));
                 Ok(true)
@@ -3747,7 +3762,9 @@ unsafe fn field_pattern(
     match pattern.kind() {
         SexpType::Symbol => match &*rvalues::symbol_name(pattern) {
             "_" => Ok(()),
-            "T" | "F" | ".." | "..." | "" => Err(Refusal("a field pattern the typed core does not know")),
+            "T" | "F" | ".." | "..." | "" => {
+                Err(Refusal("a field pattern the typed core does not know"))
+            }
             _ => {
                 bindings.push((pattern, Some(slot)));
                 Ok(())

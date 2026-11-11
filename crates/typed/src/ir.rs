@@ -86,7 +86,11 @@ impl Type {
     pub fn is_object(self) -> bool {
         matches!(
             self,
-            Type::Vector { .. } | Type::List(_) | Type::Dict { .. } | Type::Record(_) | Type::Tag(_)
+            Type::Vector { .. }
+                | Type::List(_)
+                | Type::Dict { .. }
+                | Type::Record(_)
+                | Type::Tag(_)
         )
     }
 

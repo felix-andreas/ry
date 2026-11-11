@@ -1301,7 +1301,9 @@ impl Emitter<'_> {
                 SmallVec::from_slice(&[self.logical(parsed)])
             }
             Op::DictNew => {
-                let dest = inst.dest.ok_or(Refusal("a dictionary without a destination"))?;
+                let dest = inst
+                    .dest
+                    .ok_or(Refusal("a dictionary without a destination"))?;
                 let Type::Dict { key, value } = ty(dest) else {
                     return Err(Refusal("a new dictionary of another type"));
                 };
@@ -1791,9 +1793,11 @@ impl Emitter<'_> {
     /// Parses the string `a` as an `I64` or a double into a stack slot, and the runtime's status.
     fn parse(&mut self, a: Local, i64: bool) -> Result<(Value, StackSlot), Refusal> {
         let x = self.get(a)?;
-        let slot =
-            self.builder
-                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
         let out = self.builder.ins().stack_addr(I64, slot, 0);
         let function = if i64 {
             address!(values::ry_str_to_i64)

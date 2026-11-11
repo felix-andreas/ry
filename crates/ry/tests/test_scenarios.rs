@@ -95,7 +95,9 @@ const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 /// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
 #[test]
 fn typed_benchmarks_run_natively() {
-    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
         eprintln!("typed benchmarks: skipped, {reason}");
         return;
     }
@@ -109,7 +111,11 @@ fn typed_benchmarks_run_natively() {
                 .map(|entry| entry.expect("a benchmark directory entry").path())
         })
         .filter_map(|path| {
-            let name = path.file_name()?.to_str()?.strip_suffix(".typed.R")?.to_owned();
+            let name = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".typed.R")?
+                .to_owned();
             Some((name, path))
         })
         .collect();
@@ -262,8 +268,7 @@ fn native_typed_calls_keep_slot_frames() {
          print(total)\n"
     );
     let manifest = "[check]\ntyping = true\nstrict = true\n";
-    let Some((summary, stdout)) =
-        profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)])
+    let Some((summary, stdout)) = profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)])
     else {
         return;
     };
@@ -320,7 +325,9 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
 /// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
 /// gives the summary and what the script printed; `None` when ry's runtime is missing.
 fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
-    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
         eprintln!("profile summary: skipped, {reason}");
         return None;
     }
@@ -594,20 +601,26 @@ fn missing_package(
     // A package older than `minimum` prints a marker line with its version and exits cleanly, so
     // the probe cannot mistake a failing `ry run` or `Rscript`, whatever its exit status, for an
     // old package.
-    let mut probe = format!("if (!requireNamespace('{package}', quietly = TRUE)) quit(status = 1)\n");
+    let mut probe =
+        format!("if (!requireNamespace('{package}', quietly = TRUE)) quit(status = 1)\n");
     if let Some(minimum) = minimum {
         probe.push_str(&format!(
             "if (packageVersion('{package}') < '{minimum}') cat('{OLD_PACKAGE}', format(packageVersion('{package}')), '\\n')\n"
         ));
     }
     let mut runtimes = Vec::new();
-    if requirements.iter().any(|requirement| requirement == "ry-runtime") {
+    if requirements
+        .iter()
+        .any(|requirement| requirement == "ry-runtime")
+    {
         let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("package-probe");
         let script = directory.join("probe.R");
-        if let Err(error) =
-            fs::create_dir_all(&directory).and_then(|()| fs::write(&script, &probe))
+        if let Err(error) = fs::create_dir_all(&directory).and_then(|()| fs::write(&script, &probe))
         {
-            return Err(format!("writing the package probe {}: {error}", script.display()));
+            return Err(format!(
+                "writing the package probe {}: {error}",
+                script.display()
+            ));
         }
         let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
         command
@@ -620,12 +633,17 @@ fn missing_package(
             .envs(library_variables(library));
         runtimes.push(("ry's runtime".to_owned(), command));
     }
-    if requirements.iter().any(|requirement| requirement == "gnu-r") {
+    if requirements
+        .iter()
+        .any(|requirement| requirement == "gnu-r")
+    {
         let Some(rscript) = gnu_rscript() else {
             return Ok(Some("GNU R is not installed".to_owned()));
         };
         let mut command = Command::new(&rscript);
-        command.args(["-e", &probe]).envs(library_variables(library));
+        command
+            .args(["-e", &probe])
+            .envs(library_variables(library));
         runtimes.push((format!("GNU R at {}", rscript.display()), command));
     }
     for (runtime, mut command) in runtimes {
@@ -638,7 +656,10 @@ fn missing_package(
             let detail = stderr.lines().rev().find(|line| !line.trim().is_empty());
             return Ok(Some(match detail {
                 Some(detail) => {
-                    format!("the R package {package} does not load in {runtime}: {}", detail.trim())
+                    format!(
+                        "the R package {package} does not load in {runtime}: {}",
+                        detail.trim()
+                    )
                 }
                 None => format!("the R package {package} is not installed for {runtime}"),
             }));
@@ -665,11 +686,16 @@ const OLD_PACKAGE: &str = "scenario-probe-old-package";
 /// release that built the library. Other scenarios see the caller's variables untouched, so the
 /// ones about library defaults test the defaults.
 fn scenario_library(requirements: &[String]) -> Option<&'static Path> {
-    if !requirements.iter().any(|requirement| requirement.starts_with("r-package:")) {
+    if !requirements
+        .iter()
+        .any(|requirement| requirement.starts_with("r-package:"))
+    {
         return None;
     }
     let (library, release) = corpus_library()?;
-    if requirements.iter().any(|requirement| requirement == "gnu-r")
+    if requirements
+        .iter()
+        .any(|requirement| requirement == "gnu-r")
         && gnu_r().ok().map(|gnu_r| gnu_r.release.as_str()) != Some(release.as_str())
     {
         return None;
@@ -788,7 +814,11 @@ fn gnu_r() -> Result<&'static GnuR, &'static String> {
         .get_or_init(|| {
             let rscript = gnu_rscript().ok_or("GNU R is not installed")?;
             let output = Command::new(&rscript)
-                .args(["--vanilla", "-e", "cat(R.home(), format(getRversion()), sep = '\\n')"])
+                .args([
+                    "--vanilla",
+                    "-e",
+                    "cat(R.home(), format(getRversion()), sep = '\\n')",
+                ])
                 .output()
                 .map_err(|error| format!("running {}: {error}", rscript.display()))?;
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -859,9 +889,10 @@ fn path_without_gnu_r() -> Result<&'static std::ffi::OsString, String> {
 }
 
 fn mirror_without_gnu_r(directory: &Path, mirror: &Path) -> Result<(), String> {
-    fs::create_dir_all(mirror).map_err(|error| format!("creating {}: {error}", mirror.display()))?;
-    let entries =
-        fs::read_dir(directory).map_err(|error| format!("reading {}: {error}", directory.display()))?;
+    fs::create_dir_all(mirror)
+        .map_err(|error| format!("creating {}: {error}", mirror.display()))?;
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("reading {}: {error}", directory.display()))?;
     for entry in entries {
         let entry = entry.map_err(|error| format!("reading {}: {error}", directory.display()))?;
         let name = entry.file_name();

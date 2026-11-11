@@ -170,7 +170,10 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
             _ => {}
         }
     }
-    if slots.iter().all(|(mask, text)| *mask == 0 && text.is_empty()) {
+    if slots
+        .iter()
+        .all(|(mask, text)| *mask == 0 && text.is_empty())
+    {
         return Ok(());
     }
     let key = if formals.kind() == SexpType::Pairlist {
