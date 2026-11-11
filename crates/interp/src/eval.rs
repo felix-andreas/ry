@@ -1310,7 +1310,16 @@ pub(crate) unsafe fn call_inlined_internal(
     args: &[Arg],
     env: Sexp,
 ) -> R<Sexp> {
-    call_builtin_checked(definition, call, op, args, env, None, call)
+    // The wrapper's frame is gone, so its call is what the internal's errors and warnings
+    // report, as they would from inside the closure.
+    let state = interp();
+    let outer =
+        state
+            .assignment_call
+            .replace((crate::heap().known().unbound, call, state.frames.len()));
+    let result = call_builtin_checked(definition, call, op, args, env, None, call);
+    interp().assignment_call = outer;
+    result
 }
 
 /// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the

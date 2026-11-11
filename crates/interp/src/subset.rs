@@ -615,7 +615,7 @@ pub unsafe fn length_argument(value: Sexp) -> R<usize> {
     }
     let count = values::as_real_scalar(value);
     if count.is_nan() || count < 0.0 {
-        return Err(error("vector: cannot make a vector of negative length"));
+        return Err(error("invalid 'length' argument"));
     }
     Ok(count as usize)
 }
