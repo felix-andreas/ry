@@ -28,8 +28,10 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// Collecting on every allocation makes a fuzz program take up to a few minutes on a busy machine.
 const TORTURE_TIMEOUT: Duration = Duration::from_secs(900);
 /// Seeds outside the default range whose programs once diverged, run on every pass:
-/// 24 reported an unbound variable against the wrong call once a closure ran compiled.
-const REGRESSION_SEEDS: &[u64] = &[24];
+/// 24 reported an unbound variable against the wrong call once a closure ran compiled, and 9571
+/// read a freed argument reference after a collection landed between detaching it from the pool
+/// and binding it into `str`'s frame.
+const REGRESSION_SEEDS: &[u64] = &[24, 9571];
 
 #[test]
 fn programs_are_deterministic() {

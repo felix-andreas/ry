@@ -43,7 +43,11 @@ the simulator pins that property with a test. A seeded battery loops through
 `FUZZ_SEED=14 cargo test -p loader --test test_reload_fuzz a_reload_matches_a_fresh_load -- --exact`.
 Three variables move the window. `FUZZ_SEED` alone replays that one seed. `FUZZ_ITERS` sets the
 count, starting at `FUZZ_SEED` or 0. `FUZZ_DEPTH` multiplies each loop's own default count instead,
-so a test with several loops keeps their proportions when a campaign deepens it.
+so a test with several loops keeps their proportions when a campaign deepens it. Each case builds
+its generator from its seed alone, as `SplitMix64(CONSTANT ^ seed)`, because a generator shared
+across cases makes a replayed seed draw different inputs and a deeper round rerun the same ones.
+`for_each_seed` takes the plain default count: wrapping it in `fuzz_iterations` applies
+`FUZZ_DEPTH` twice.
 
 **Invariants are always on in simulation.** Cross-checks that are too expensive for production run
 whenever a harness asks for them, and panic at the step that broke them with the inputs that
@@ -144,7 +148,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 
 | Command | Meaning |
 | --- | --- |
-| `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME` | Skip the scenario unless GNU R is installed, `libR.so` is built beside `ry` and ry's base R is built (`just base-r`), or the package loads in every runtime the scenario requires: ry's runtime for `ry-runtime`, and for `gnu-r` the GNU R that `--runtime gnu-r` picks. The skip names the runtime that lacks the package. |
+| `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME[>=VERSION]` | Skip the scenario unless GNU R is installed with its shared library (`--enable-R-shlib`), `libR.so` is built beside `ry` and ry's base R is built (`just base-r`), or the package loads, at `VERSION` or later (`packageVersion`), in every runtime the scenario requires: ry's runtime for `ry-runtime`, and for `gnu-r` the GNU R that `--runtime gnu-r` picks. The skip names the runtime and, for an old package, the installed version. A misspelled requirement fails the scenario. |
 | `hide gnu-r` | Run every later `ry` with no GNU R: `R` and `Rscript` vanish from `PATH` while everything beside them (such as `sh` in `/usr/bin`) stays, and `R_HOME` is unset. |
 | `client pull` / `client utf8` / `client cold` | Start the editor as a pull-diagnostics or UTF-8 client, or one whose first steps arrive before the startup warm-up has run. Must come before the first editor step. |
 | `file PATH` + body | Write a file; a running editor sees a watcher event. `$ROOT` in the body is the scenario's workspace. |
@@ -184,6 +188,15 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect exit N` / `expect stdout\|stderr [lacks] "needle"` | Check the last `run`, `install` or `stop`. |
 
 `cargo test -p ry-lang --test test_scenarios` runs them all, and `just scenarios <name>` runs one.
+
+A scenario that requires an R package loads it from the corpus library (`just corpus`, in
+`$RY_CORPUS_DIR/library`, else `.corpus/library`) when every package in it was built by the R
+release ry's runtime presents and, for a `gnu-r` scenario, by the release of the GNU R it runs. The
+runner then sets `R_LIBS` and `R_LIBS_USER` to that library for every `ry` and R the scenario
+starts. Other scenarios see the caller's variables, so the ones about library defaults test the
+defaults. A library built by another release is not used, because `library()` would warn. The
+runner prints the library it uses, or why it uses none, before the first scenario. To use another
+library, set `R_LIBS` yourself; `R_LIBS=` (empty) turns the default off.
 
 ## Each layer
 

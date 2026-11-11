@@ -49,6 +49,7 @@ fn scenarios_hold() {
         "no scenarios found in {}",
         directory.display()
     );
+    corpus_library();
     let only = std::env::var("SCENARIO").ok();
     let mut failures = Vec::new();
     for path in paths {
@@ -70,6 +71,307 @@ fn scenarios_hold() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// The typed benchmark programs whose kernels do not run on native code yet, with what the
+/// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
+/// `tools/bench/applications` must run natively.
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
+    ("expr_tree", "tagged unions built in the kernel (`.ry_tag`)"),
+    ("log_rank", "a record parameter"),
+    (
+        "orders",
+        "records and tags built in the kernel (`.ry_record`, `.ry_tag`)",
+    ),
+    ("report", "text building (`.ry_text`)"),
+    (
+        "sales",
+        "a `DataFrame` parameter, which the table engine runs",
+    ),
+    (
+        "team_scores",
+        "`Result.with_default` and a mapped non-local function",
+    ),
+    (
+        "vasicek",
+        "R's random number generator (`set.seed`, `stats::rnorm`)",
+    ),
+];
+
+/// The harness's own typed functions, which read R's clock and so run in the interpreter.
+const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
+
+/// A typed benchmark program that compiles natively has to stay native: a refusal that sends
+/// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
+/// time (500 times as much for `array_dot`). Each program runs once with
+/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
+#[test]
+fn typed_benchmarks_run_natively() {
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+        eprintln!("typed benchmarks: skipped, {reason}");
+        return;
+    }
+    let bench = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench");
+    let harness = fs::read_to_string(bench.join("harness.typed.R")).expect("read the harness");
+    let mut programs: Vec<(String, PathBuf)> = ["kernels", "applications"]
+        .iter()
+        .flat_map(|suite| {
+            fs::read_dir(bench.join(suite))
+                .expect("the benchmark suite directory exists")
+                .map(|entry| entry.expect("a benchmark directory entry").path())
+        })
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.strip_suffix(".typed.R")?.to_owned();
+            Some((name, path))
+        })
+        .collect();
+    programs.sort();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    // Strict mode, as the benchmark runner runs typed programs.
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\ntyping = true\nstrict = true\n",
+    )
+    .expect("write ry.toml");
+    let mut failures = Vec::new();
+    for (name, path) in &programs {
+        if TYPED_BENCHMARKS_NOT_NATIVE
+            .iter()
+            .any(|(listed, _)| listed == name)
+        {
+            continue;
+        }
+        let program = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let script = directory.path().join(format!("{name}.R"));
+        fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry"])
+            .arg(&script)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            // One timed run after the first is enough to reach the warm calls.
+            .env("RY_BENCH_REPEAT", "1")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            failures.push(format!("{name} failed:\n{stderr}"));
+            continue;
+        }
+        let interpreted: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("typed: `")?
+                    .strip_suffix("` runs in the interpreter")
+            })
+            .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
+            .collect();
+        if !interpreted.is_empty() {
+            let mut refusals: Vec<&str> = stderr
+                .lines()
+                .filter(|line| {
+                    line.starts_with("typed: no code") || line.starts_with("typed: refusing")
+                })
+                .collect();
+            refusals.sort_unstable();
+            refusals.dedup();
+            failures.push(format!(
+                "{name}: {} ran in the interpreter\n{}",
+                interpreted.join(", "),
+                refusals.join("\n")
+            ));
+        }
+    }
+    for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
+        if !programs.iter().any(|(name, _)| name == listed) {
+            failures.push(format!(
+                "{listed} is listed as not native but is not a benchmark"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A base closure with a native entry runs without a frame when the caller runs in a slot frame
+/// too: every call of `Sys.unsetenv` here passes a promise of a global variable from a function
+/// that runs in a slot frame, which the entry reads without forcing.
+#[test]
+fn native_entries_hold_in_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "name <- \"RY_SCENARIO_UNSET\"\n\
+         measure <- function(run) for (i in seq_len({CALLS})) run()\n\
+         measure(function() Sys.unsetenv(name))\n"
+    );
+    let Some((summary, _)) = profile_summary(&[("entries.R", &script)]) else {
+        return;
+    };
+    let native = summary_count(&summary, "closure calls run natively, without a frame");
+    assert!(
+        native >= CALLS,
+        "{native} closure calls ran natively, fewer than the script's {CALLS} calls of `Sys.unsetenv`"
+    );
+}
+
+/// A typed call the typed core declines still reads its arguments first. When an argument is a
+/// call made in a slot frame, finding that call's function must not give the frame an
+/// environment, which a lookup in its pending environment would, on every call.
+#[test]
+fn declined_typed_calls_keep_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "alias Region = :North | :South\n\
+         alias Order = Record{{net: F64, region: Region}}\n\
+         tax_rate <- function(region: Region) -> F64 {{\n\
+         \x20 match (region) {{\n\
+         \x20   :North => 0.2\n\
+         \x20   :South => 0.1\n\
+         \x20 }}\n\
+         }}\n\
+         alias Taxed = Record{{net: F64, tax: F64}}\n\
+         taxed <- function(order: Order) -> Taxed {{\n\
+         \x20 tax <- order$net * tax_rate(order$region)\n\
+         \x20 (net = order$net, tax = tax)\n\
+         }}\n\
+         total: F64 <- 0\n\
+         for (i in List.range(1, {CALLS})) total <- total + taxed((net = 1.0, region = :North))$tax\n\
+         print(total)\n"
+    );
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    let Some((summary, stdout)) = profile_summary(&[("ry.toml", manifest), ("taxed.R", &script)])
+    else {
+        return;
+    };
+    assert_eq!(stdout, "[1] 4000\n");
+    let reified = summary_count(&summary, "slot frames turned into environments");
+    assert!(
+        reified < CALLS / 10,
+        "{reified} slot frames got an environment in {CALLS} calls of `taxed`"
+    );
+}
+
+/// A strict typed function that runs natively reads its arguments from the caller's slots
+/// without forcing them, and settles each promise it reads as forcing would. A wrapper that runs
+/// in a slot frame then returns with no promise left unforced, so it keeps its slots: one that
+/// still counted a settled promise would get an environment on every call. `both` reads the
+/// same promise twice, which settles it once.
+#[test]
+fn native_typed_calls_keep_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "twice <- function(v: F64) -> F64 v * 2.0\n\
+         add <- function(a: F64, b: F64) -> F64 a + b\n\
+         doubled <- function(v) twice(v)\n\
+         both <- function(v) add(v, v)\n\
+         x: F64 <- 0\n\
+         total: F64 <- 0\n\
+         for (k in List.range(1, {CALLS})) {{\n\
+         \x20 x <- x + 1.0\n\
+         \x20 total <- total + doubled(x + 0.5) + both(x + 0.5)\n\
+         }}\n\
+         print(total)\n"
+    );
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    let Some((summary, stdout)) =
+        profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)])
+    else {
+        return;
+    };
+    // Each iteration adds 4 * (k + 0.5).
+    assert_eq!(stdout, "[1] 800080000\n");
+    let reified = summary_count(&summary, "slot frames turned into environments");
+    assert!(
+        reified < CALLS / 10,
+        "{reified} slot frames got an environment in {CALLS} calls of each wrapper"
+    );
+}
+
+/// A promise made over a slot frame's pending environment counts as unforced however it is
+/// made. Here `do.call` evaluates a call in the frame `parent.frame()` names, which makes the
+/// promise of `x` over the pending environment outside the slot frame's own call setup; a frame
+/// that missed it would count one promise too few when it is forced, and could return without
+/// the environment a promise still needs.
+#[test]
+fn promises_over_slot_frames_are_counted() {
+    let script = "show <- function() do.call(print, list(quote(x)), envir = parent.frame())\n\
+                  f <- function(x) { show(); NULL }\n\
+                  for (i in 1:3) f(i)\n\
+                  later <- function() do.call(function(y) function() y, list(quote(x)), envir = parent.frame())\n\
+                  g <- function(x) later()\n\
+                  k <- g(3)\n\
+                  print(k())\n";
+    if let Some((_, stdout)) = profile_summary(&[("counted.R", script)]) {
+        assert_eq!(stdout, "[1] 1\n[1] 2\n[1] 3\n[1] 3\n");
+    }
+}
+
+/// Native code reads a promise over a slot frame only when forcing it could give nothing but
+/// that value. A slot holding a missing argument is not such a promise: the call goes to the
+/// interpreter, which raises R's error for it.
+#[test]
+fn native_reads_leave_missing_arguments_to_the_interpreter() {
+    let script = "twice <- function(v: F64) -> F64 v * 2.0\n\
+                  f <- function(a) twice(a)\n\
+                  x: F64 <- 0\n\
+                  for (k in List.range(1, 3)) {\n\
+                  \x20 x <- x + 1.0\n\
+                  \x20 print(f(x + 0.5))\n\
+                  }\n\
+                  tryCatch(do.call(f, list()), error = function(e) cat(conditionMessage(e), \"\\n\"))\n";
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    if let Some((_, stdout)) = profile_summary(&[("ry.toml", manifest), ("missing.R", script)]) {
+        assert_eq!(
+            stdout,
+            "[1] 3\n[1] 5\n[1] 7\nargument \"a\" is missing, with no default \n"
+        );
+    }
+}
+
+/// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
+/// gives the summary and what the script printed; `None` when ry's runtime is missing.
+fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+        eprintln!("profile summary: skipped, {reason}");
+        return None;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    for (name, text) in files {
+        fs::write(directory.path().join(name), text).expect("write a file");
+    }
+    let (script, _) = files.last().expect("a script to run");
+    let summary = directory.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .args(["run", "--runtime", "ry", "--profile-summary"])
+        .arg(&summary)
+        .arg(script)
+        .current_dir(directory.path())
+        .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+        .output()
+        .expect("run ry");
+    assert!(
+        output.status.success(),
+        "{script} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some((
+        fs::read_to_string(&summary).expect("read the profile summary"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
+/// The count in the row of the summary's events table that `event` names.
+fn summary_count(summary: &str, event: &str) -> u64 {
+    summary
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(&format!("| {event} | "))?
+                .strip_suffix(" |")?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("the summary has no row `{event}`:\n{summary}"))
+}
+
 enum Outcome {
     Passed(usize),
     Skipped(String),
@@ -88,7 +390,8 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         .filter(|step| step.words[0] == "requires")
         .flat_map(|step| step.words[1..].iter().cloned())
         .collect();
-    if let Some(reason) = missing_requirement(&requirements) {
+    let library = scenario_library(&requirements);
+    if let Some(reason) = missing_requirement(&requirements, library)? {
         return Ok(Outcome::Skipped(reason));
     }
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -113,6 +416,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         spawned: None,
         hide_gnu_r: false,
         environment: BTreeMap::new(),
+        library,
     };
     for step in &steps {
         journey.run(step).map_err(|problem| {
@@ -197,43 +501,115 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-fn missing_requirement(requirements: &[String]) -> Option<String> {
+/// Why the scenario cannot run here, or an error for a requirement the scenario misspells: a typo
+/// must fail rather than skip the scenario forever. Every requirement is parsed before any is
+/// probed, so a typo fails even on a machine that would skip the scenario for another reason, and
+/// the runtimes are checked before a package probe runs in them.
+fn missing_requirement(
+    requirements: &[String],
+    library: Option<&Path>,
+) -> Result<Option<String>, String> {
+    let mut packages = Vec::new();
     for requirement in requirements {
         match requirement.as_str() {
-            "gnu-r" => {
-                if which("Rscript").is_none() {
-                    return Some("GNU R is not installed".to_owned());
-                }
-            }
-            "ry-runtime" => {
-                if ry_base().is_none() {
-                    return Some(
-                        "ry's base R is not built; build it with `just base-r`".to_owned(),
-                    );
-                }
-                if let Err(error) = libr_path() {
-                    return Some(format!("ry's runtime is missing: {error}"));
-                }
-            }
+            "gnu-r" | "ry-runtime" => {}
             other => {
                 let Some(package) = other.strip_prefix("r-package:") else {
-                    return Some(format!("unknown requirement `{other}`"));
+                    return Err(format!("unknown requirement `{other}`"));
                 };
-                if let Some(reason) = missing_package(package, requirements) {
-                    return Some(reason);
+                let (name, minimum) = match package.split_once(">=") {
+                    Some((name, minimum)) => (name, Some(minimum)),
+                    None => (package, None),
+                };
+                if !is_package_name(name) || minimum.is_some_and(|minimum| !is_version(minimum)) {
+                    return Err(format!(
+                        "`{other}` is not an R package name with an optional `>=VERSION`"
+                    ));
                 }
+                packages.push((name, minimum));
             }
         }
     }
-    None
+    let requires = |name: &str| requirements.iter().any(|requirement| requirement == name);
+    if let Some((name, _)) = packages.first()
+        && !requires("ry-runtime")
+        && !requires("gnu-r")
+    {
+        return Err(format!(
+            "`r-package:{name}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
+        ));
+    }
+    if requires("gnu-r") {
+        let gnu_r = match gnu_r() {
+            Ok(gnu_r) => gnu_r,
+            Err(reason) => return Ok(Some(reason.clone())),
+        };
+        // `--runtime gnu-r` embeds GNU R through its shared library.
+        if !gnu_r.home.join("lib").join("libR.so").is_file()
+            && !gnu_r.home.join("lib").join("libR.dylib").is_file()
+        {
+            return Ok(Some(format!(
+                "GNU R at {} has no shared library; it was built without `--enable-R-shlib`",
+                gnu_r.home.display()
+            )));
+        }
+    }
+    if requires("ry-runtime") {
+        if ry_base().is_none() {
+            return Ok(Some(
+                "ry's base R is not built; build it with `just base-r`".to_owned(),
+            ));
+        }
+        if let Err(error) = libr_path() {
+            return Ok(Some(format!("ry's runtime is missing: {error}")));
+        }
+    }
+    for (name, minimum) in packages {
+        if let Some(reason) = missing_package(name, minimum, requirements, library)? {
+            return Ok(Some(reason));
+        }
+    }
+    Ok(None)
 }
 
-/// Why `package` cannot load in a runtime the scenario runs on, checked with that runtime itself:
-/// ry's for `ry-runtime`, and for `gnu-r` the GNU R that `--runtime gnu-r` picks. A library
-/// built by one R version may not load in another, so asking any other R could pass a package
-/// the scenario then fails to load, or skip one it can.
-fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
-    let probe = format!("quit(status = !requireNamespace('{package}', quietly = TRUE))");
+/// R's rule for a package name: ASCII letters, digits and dots, at least two characters, starting
+/// with a letter and not ending with a dot.
+fn is_package_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[bytes.len() - 1] != b'.'
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'.')
+}
+
+/// A version R's `numeric_version` reads: runs of digits separated by single dots or dashes.
+fn is_version(version: &str) -> bool {
+    version
+        .split(['.', '-'])
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Why `package` cannot load in a runtime the scenario runs on, or loads older than `minimum`,
+/// checked with that runtime itself: ry's for `ry-runtime`, and for `gnu-r` the GNU R that
+/// `--runtime gnu-r` picks. A library built by one R version may not load in another, so asking
+/// any other R could pass a package the scenario then fails to load, or skip one it can.
+fn missing_package(
+    package: &str,
+    minimum: Option<&str>,
+    requirements: &[String],
+    library: Option<&Path>,
+) -> Result<Option<String>, String> {
+    // A package older than `minimum` prints a marker line with its version and exits cleanly, so
+    // the probe cannot mistake a failing `ry run` or `Rscript`, whatever its exit status, for an
+    // old package.
+    let mut probe = format!("if (!requireNamespace('{package}', quietly = TRUE)) quit(status = 1)\n");
+    if let Some(minimum) = minimum {
+        probe.push_str(&format!(
+            "if (packageVersion('{package}') < '{minimum}') cat('{OLD_PACKAGE}', format(packageVersion('{package}')), '\\n')\n"
+        ));
+    }
     let mut runtimes = Vec::new();
     if requirements.iter().any(|requirement| requirement == "ry-runtime") {
         let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("package-probe");
@@ -241,7 +617,7 @@ fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
         if let Err(error) =
             fs::create_dir_all(&directory).and_then(|()| fs::write(&script, &probe))
         {
-            return Some(format!("writing the package probe {}: {error}", script.display()));
+            return Err(format!("writing the package probe {}: {error}", script.display()));
         }
         let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
         command
@@ -250,43 +626,196 @@ fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
             .current_dir(&directory)
             .env("XDG_CACHE_HOME", directory.join(".cache"))
             .env_remove("RY_LIBR")
-            .env_remove("RY_IMAGE");
+            .env_remove("RY_IMAGE")
+            .envs(library_variables(library));
         runtimes.push(("ry's runtime".to_owned(), command));
     }
     if requirements.iter().any(|requirement| requirement == "gnu-r") {
-        let rscript = std::env::var_os("R_HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join("bin").join("Rscript"))
-            .or_else(|| which("Rscript"));
-        let Some(rscript) = rscript else {
-            return Some("GNU R is not installed".to_owned());
+        let Some(rscript) = gnu_rscript() else {
+            return Ok(Some("GNU R is not installed".to_owned()));
         };
         let mut command = Command::new(&rscript);
-        command.args(["-e", &probe]);
+        command.args(["-e", &probe]).envs(library_variables(library));
         runtimes.push((format!("GNU R at {}", rscript.display()), command));
-    }
-    if runtimes.is_empty() {
-        return Some(format!(
-            "`r-package:{package}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
-        ));
     }
     for (runtime, mut command) in runtimes {
         let output = match command.output() {
             Ok(output) => output,
-            Err(error) => return Some(format!("checking for {package} with {runtime}: {error}")),
+            Err(error) => return Err(format!("checking for {package} with {runtime}: {error}")),
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.lines().rev().find(|line| !line.trim().is_empty());
-            return Some(match detail {
+            return Ok(Some(match detail {
                 Some(detail) => {
                     format!("the R package {package} does not load in {runtime}: {}", detail.trim())
                 }
                 None => format!("the R package {package} is not installed for {runtime}"),
-            });
+            }));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let installed = stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(OLD_PACKAGE));
+        if let (Some(installed), Some(minimum)) = (installed, minimum) {
+            return Ok(Some(format!(
+                "{package} {} in {runtime}, scenario needs >= {minimum}",
+                installed.trim()
+            )));
         }
     }
-    None
+    Ok(None)
+}
+
+/// The marker the package probe prints before the version of a package that is too old.
+const OLD_PACKAGE: &str = "scenario-probe-old-package";
+
+/// The package library a scenario's R processes search: the corpus library ([`corpus_library`])
+/// for a scenario that requires an R package, when every runtime it requires matches the R
+/// release that built the library. Other scenarios see the caller's variables untouched, so the
+/// ones about library defaults test the defaults.
+fn scenario_library(requirements: &[String]) -> Option<&'static Path> {
+    if !requirements.iter().any(|requirement| requirement.starts_with("r-package:")) {
+        return None;
+    }
+    let (library, release) = corpus_library()?;
+    if requirements.iter().any(|requirement| requirement == "gnu-r")
+        && gnu_r().ok().map(|gnu_r| gnu_r.release.as_str()) != Some(release.as_str())
+    {
+        return None;
+    }
+    Some(library.as_path())
+}
+
+fn library_variables(library: Option<&Path>) -> impl Iterator<Item = (&'static str, &Path)> {
+    library
+        .into_iter()
+        .flat_map(|library| [("R_LIBS", library), ("R_LIBS_USER", library)])
+}
+
+/// The corpus library (`just corpus`, in `$RY_CORPUS_DIR/library`, else `.corpus/library`) and
+/// the R release that built it, when the caller set no `R_LIBS` and every package in it was built
+/// by the R release ry's runtime presents. A library built by another release would make
+/// `library()` warn, so it is not used. Setting `R_LIBS`, even to an empty value, turns it off.
+fn corpus_library() -> Option<&'static (PathBuf, String)> {
+    static LIBRARY: OnceLock<Option<(PathBuf, String)>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| {
+            if let Some(libraries) = std::env::var_os("R_LIBS") {
+                if libraries.is_empty() {
+                    eprintln!("scenarios: R_LIBS is empty, so no default package library");
+                } else {
+                    eprintln!("scenarios: R packages load from R_LIBS={}", libraries.to_string_lossy());
+                }
+                return None;
+            }
+            let corpus = std::env::var_os("RY_CORPUS_DIR")
+                .filter(|directory| !directory.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+            // Absolute, because the scenario's processes run in other directories.
+            let Ok(library) = fs::canonicalize(corpus.join("library")) else {
+                return None;
+            };
+            if !library.is_dir() {
+                return None;
+            }
+            let field = |path: &Path, name: &str| -> Option<String> {
+                let text = fs::read_to_string(path).ok()?;
+                let line = text.lines().find(|line| line.starts_with(name))?;
+                Some(line[name.len()..].trim().to_owned())
+            };
+            let presented = base_r()
+                .and_then(|base| field(&base.join("library/base/DESCRIPTION"), "Version:"));
+            let Some(presented) = presented else {
+                eprintln!(
+                    "scenarios: not using {}: ry's base R is not built, so its R release is unknown",
+                    library.display()
+                );
+                return None;
+            };
+            let built_by = |description: &Path| -> Option<String> {
+                let built = field(description, "Built:")?;
+                let release = built.strip_prefix("R ")?.split(';').next()?;
+                Some(release.trim().to_owned())
+            };
+            let entries = match fs::read_dir(&library)
+                .and_then(|entries| entries.collect::<Result<Vec<_>, _>>())
+            {
+                Ok(entries) => entries,
+                Err(error) => {
+                    eprintln!("scenarios: not using {}: {error}", library.display());
+                    return None;
+                }
+            };
+            let mismatch = entries.iter().find_map(|entry| {
+                let description = entry.path().join("DESCRIPTION");
+                if !description.is_file() {
+                    return None;
+                }
+                match built_by(&description) {
+                    Some(release) if release == presented => None,
+                    release => Some((entry.file_name(), release)),
+                }
+            });
+            if let Some((package, release)) = mismatch {
+                eprintln!(
+                    "scenarios: not using {}: {} was built by R {}, not by R {presented}",
+                    library.display(),
+                    package.to_string_lossy(),
+                    release.as_deref().unwrap_or("of an unknown release")
+                );
+                return None;
+            }
+            eprintln!(
+                "scenarios: R packages load from {} (built by R {presented})",
+                library.display()
+            );
+            Some((library, presented))
+        })
+        .as_ref()
+}
+
+/// The `Rscript` of the GNU R that `gnu-r` scenarios run: `R_HOME`'s, else the one on `PATH`.
+fn gnu_rscript() -> Option<PathBuf> {
+    std::env::var_os("R_HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join("bin").join("Rscript"))
+        .or_else(|| which("Rscript"))
+}
+
+/// The GNU R that `gnu-r` scenarios run ([`gnu_rscript`]): its R home and release.
+struct GnuR {
+    home: PathBuf,
+    release: String,
+}
+
+/// The GNU R `gnu-r` scenarios run, or why there is none usable. `--vanilla` keeps a site profile
+/// that prints from shifting the lines this reads.
+fn gnu_r() -> Result<&'static GnuR, &'static String> {
+    static GNU_R: OnceLock<Result<GnuR, String>> = OnceLock::new();
+    GNU_R
+        .get_or_init(|| {
+            let rscript = gnu_rscript().ok_or("GNU R is not installed")?;
+            let output = Command::new(&rscript)
+                .args(["--vanilla", "-e", "cat(R.home(), format(getRversion()), sep = '\\n')"])
+                .output()
+                .map_err(|error| format!("running {}: {error}", rscript.display()))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines().map(str::trim);
+            match (output.status.success(), lines.next(), lines.next()) {
+                (true, Some(home), Some(release)) => Ok(GnuR {
+                    home: PathBuf::from(home),
+                    release: release.to_owned(),
+                }),
+                _ => Err(format!(
+                    "{} does not report its R home and release: {}",
+                    rscript.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+            }
+        })
+        .as_ref()
 }
 
 /// The base R tree ry's runtime loads in scenarios: the one `R_HOME` names, which emulates that
@@ -516,6 +1045,8 @@ struct Journey {
     hide_gnu_r: bool,
     /// Variables `env` set for later `run` steps.
     environment: BTreeMap<String, String>,
+    /// The package library this scenario's R processes search ([`scenario_library`]).
+    library: Option<&'static Path>,
 }
 
 /// A `ry` process the journey started with `spawn` and has not stopped yet, such as a watcher.
@@ -1059,6 +1590,7 @@ impl Journey {
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
                     .env_remove("RY_LIBR")
                     .env_remove("RY_IMAGE")
+                    .envs(library_variables(self.library))
                     .envs(&self.environment);
                 if *program == "single-ry" {
                     // A release finds nothing beside it, so neither may the copy that stands in.
@@ -1088,6 +1620,7 @@ impl Journey {
                     .args(arguments)
                     .current_dir(&self.root)
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
+                    .envs(library_variables(self.library))
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
@@ -1203,6 +1736,7 @@ impl Journey {
                 let output = Command::new(&front_end)
                     .args(["CMD", "INSTALL", "-l", "library", package])
                     .current_dir(&self.root)
+                    .envs(library_variables(self.library))
                     .output()
                     .map_err(|error| format!("running {}: {error}", front_end.display()))?;
                 self.last_run = Some(Run {
@@ -1253,7 +1787,7 @@ impl Journey {
                 }
             }
             ["debug", "start", path, options @ ..] => {
-                let mut session = DebugSession::start(&self.root)?;
+                let mut session = DebugSession::start(&self.root, self.library)?;
                 let program = self.root.join(path);
                 let mut launch = json!({ "program": program });
                 let mut breakpoints: BTreeMap<PathBuf, Vec<Value>> = BTreeMap::new();
@@ -1739,10 +2273,11 @@ struct DebugSession {
 const DEBUG_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl DebugSession {
-    fn start(root: &Path) -> Result<DebugSession, String> {
+    fn start(root: &Path, library: Option<&Path>) -> Result<DebugSession, String> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_ry"))
             .arg("debug-adapter")
             .current_dir(root)
+            .envs(library_variables(library))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()

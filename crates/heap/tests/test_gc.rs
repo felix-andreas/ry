@@ -11,7 +11,7 @@ use {
         strings::Encoding,
     },
     std::collections::HashSet,
-    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations},
+    syntax::testing::{SplitMix64, for_each_seed},
 };
 
 #[derive(Clone)]
@@ -414,6 +414,35 @@ fn fuzz_reconciles_free_only_unreachable_vectors_under_stress() {
     for_each_seed(10, |seed| run_checked(seed, 200, true, false));
 }
 
+/// A weak pair's value that is still young when a deeper collection traces the tenured list
+/// holding it ages only to the younger old generation, so the list must stay remembered. If it
+/// did not, the next intermediate collection would free the value without tracing the list,
+/// leaving the pair pointing at a freed object (a bytecode inline cache's effect proof).
+#[test]
+fn deeper_collection_keeps_a_tenured_weak_pair_list_remembered() {
+    for first in [Collection::Intermediate, Collection::Major] {
+        let mut heap = Heap::new();
+        unsafe {
+            let key = heap.alloc_vector(SexpType::List, 0).expect("alloc");
+            heap.add_global_root(key);
+            let cache = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+            heap.add_global_root(cache);
+            heap.mark_weak_pairs(cache);
+            heap.collect(Collection::Major);
+            heap.collect(Collection::Major);
+            let mark = heap.handle_mark();
+            let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            heap.root(value);
+            heap.set_element(cache, 0, key);
+            heap.set_element(cache, 1, value);
+            heap.collect(first);
+            heap.release_handles(mark);
+            heap.collect(Collection::Intermediate);
+            assert_eq!(cache.element(1), heap.nil(), "after {first:?}");
+        }
+    }
+}
+
 /// Past the bytes a reconcile waits for, so one dead vector runs it.
 const BIG: isize = 600_000;
 
@@ -451,7 +480,7 @@ enum Held {
 /// reconciles must have freed some, without any collection having to.
 #[test]
 fn fuzz_temporaries_are_freed_and_live_vectors_kept() {
-    for_each_seed(fuzz_iterations(20), |seed| {
+    for_each_seed(20, |seed| {
         let mut rng = SplitMix64(seed);
         let mut heap = Heap::new();
         unsafe {
@@ -1473,51 +1502,53 @@ fn a_reserved_batch_survives_the_collections_that_follow_it() {
 /// after a major collection the table holds exactly the strings still rooted.
 #[test]
 fn fuzz_the_intern_table_keeps_exactly_the_surviving_strings() {
-    let mut random = SplitMix64(0x5EED_7AB1E);
-    let mut heap = Heap::new();
-    unsafe {
-        let base = heap.string_count();
-        let base_mark = heap.handle_mark();
-        let mut rooted: Vec<(Vec<u8>, Sexp)> = Vec::new();
-        for round in 0..fuzz_iterations(24) {
-            for _ in 0..random.below(20_000) {
-                // One string in a hundred is longer than the largest small-object slot, so the
-                // large strings' own young list is exercised too.
-                let padding = if random.chance(1, 100) { 3000 } else { 0 };
-                let bytes = format!("s{round}_{}{}", random.below(50_000), "x".repeat(padding))
-                    .into_bytes();
-                let string = heap.mk_char(&bytes, Encoding::Native).unwrap();
-                if random.chance(1, 4) {
-                    heap.root(string);
-                    rooted.push((bytes, string));
+    for_each_seed(3, |seed| {
+        let mut random = SplitMix64(0x5EED_7AB1E ^ seed);
+        let mut heap = Heap::new();
+        unsafe {
+            let base = heap.string_count();
+            let base_mark = heap.handle_mark();
+            let mut rooted: Vec<(Vec<u8>, Sexp)> = Vec::new();
+            for round in 0..8 {
+                for _ in 0..random.below(20_000) {
+                    // One string in a hundred is longer than the largest small-object slot, so the
+                    // large strings' own young list is exercised too.
+                    let padding = if random.chance(1, 100) { 3000 } else { 0 };
+                    let bytes = format!("s{round}_{}{}", random.below(50_000), "x".repeat(padding))
+                        .into_bytes();
+                    let string = heap.mk_char(&bytes, Encoding::Native).unwrap();
+                    if random.chance(1, 4) {
+                        heap.root(string);
+                        rooted.push((bytes, string));
+                    }
+                }
+                rooted.retain(|_| !random.chance(1, 3));
+                // The kept strings move into one list while every string is still rooted.
+                let holder = heap
+                    .alloc_vector(SexpType::List, rooted.len() as isize)
+                    .unwrap();
+                for (index, (_, string)) in rooted.iter().enumerate() {
+                    heap.set_element(holder, index, *string);
+                }
+                heap.release_handles(base_mark);
+                heap.root(holder);
+                let kind = if random.chance(1, 3) {
+                    Collection::Major
+                } else {
+                    Collection::Minor
+                };
+                heap.collect(kind);
+                for (bytes, string) in &rooted {
+                    assert_eq!(heap.mk_char(bytes, Encoding::Native).unwrap(), *string);
+                }
+                if kind == Collection::Major {
+                    let distinct: HashSet<&[u8]> =
+                        rooted.iter().map(|(bytes, _)| bytes.as_slice()).collect();
+                    assert_eq!(heap.string_count(), base + distinct.len(), "round {round}");
                 }
             }
-            rooted.retain(|_| !random.chance(1, 3));
-            // The kept strings move into one list while every string is still rooted.
-            let holder = heap
-                .alloc_vector(SexpType::List, rooted.len() as isize)
-                .unwrap();
-            for (index, (_, string)) in rooted.iter().enumerate() {
-                heap.set_element(holder, index, *string);
-            }
-            heap.release_handles(base_mark);
-            heap.root(holder);
-            let kind = if random.chance(1, 3) {
-                Collection::Major
-            } else {
-                Collection::Minor
-            };
-            heap.collect(kind);
-            for (bytes, string) in &rooted {
-                assert_eq!(heap.mk_char(bytes, Encoding::Native).unwrap(), *string);
-            }
-            if kind == Collection::Major {
-                let distinct: HashSet<&[u8]> =
-                    rooted.iter().map(|(bytes, _)| bytes.as_slice()).collect();
-                assert_eq!(heap.string_count(), base + distinct.len(), "round {round}");
-            }
         }
-    }
+    });
 }
 
 /// Large vectors that live across a minor collection are promoted, and in a loop like
@@ -1580,7 +1611,7 @@ fn dead_large_vectors_stay_within_the_limit(stress: bool) {
 /// must keep its elements however the mappings are resized and recycled.
 #[test]
 fn fuzz_mapped_vectors_keep_their_elements() {
-    for_each_seed(fuzz_iterations(8), |seed| {
+    for_each_seed(8, |seed| {
         let mut rng = SplitMix64(seed);
         let mut heap = Heap::new();
         let mut live: Vec<(Sexp, i32)> = Vec::new();
@@ -1629,7 +1660,7 @@ fn fuzz_mapped_vectors_keep_their_elements() {
 fn fuzz_mapped_allocator_keeps_contents() {
     use std::alloc::{GlobalAlloc, Layout, System};
     let allocator = heap::large::Mapped(System);
-    for_each_seed(fuzz_iterations(8), |seed| {
+    for_each_seed(8, |seed| {
         let mut rng = SplitMix64(seed);
         let mut blocks: Vec<(*mut u8, Layout, u8)> = Vec::new();
         let size = |rng: &mut SplitMix64| match rng.below(3) {
@@ -1933,12 +1964,12 @@ fn run_interning(seed: u64, steps: usize, stress: bool) {
 
 #[test]
 fn fuzz_interning_agrees_with_a_reference_map() {
-    for_each_seed(fuzz_iterations(24), |seed| run_interning(seed, 1500, false));
+    for_each_seed(24, |seed| run_interning(seed, 1500, false));
 }
 
 #[test]
 fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
-    for_each_seed(fuzz_iterations(4), |seed| {
+    for_each_seed(4, |seed| {
         run_interning(500 + seed, 300, true)
     });
 }

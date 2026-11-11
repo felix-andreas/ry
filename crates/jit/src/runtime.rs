@@ -709,10 +709,11 @@ pub unsafe extern "C" fn jit_call(
                         value,
                     });
                 }
-                if annotations::is_typed(function)
-                    && let Some(value) = crate::native::call(function, &args)
-                {
-                    return value;
+                if annotations::is_typed(function) {
+                    if let Some(value) = crate::native::call(function, &args) {
+                        return value;
+                    }
+                    annotations::log_interpreted(call);
                 }
                 // `signature` is what the compiler decided about the callee's annotation checks:
                 // null when they depend on the values, `NULL` for an untyped callee, otherwise

@@ -497,6 +497,29 @@ allocated it returns, and `vmaxget`/`vmaxset` let code reset it earlier, so it i
 watermarks. ry implements it as a bump allocator that keeps R's alignment and restores the watermark
 on return and on a `longjmp`.
 
+**Interpreter hot paths make no Rust allocations.** Every R object comes from the heap's own
+allocator, so a Rust `Vec` or `String` that lives only for one call is pure overhead: a `malloc`,
+a `free`, and a cache line the next call does not reuse. Three rules keep them off the hot paths:
+
+- A list that is usually short lives on the stack (`SmallVec`), such as the dims of an array, a
+  match's capture groups, a parsed `gsub` replacement and the pieces of a `strsplit` element.
+- Data that already exists is borrowed: a pattern is looked up by `&str`, a replacement refers to
+  slices of its template, and `return()` or `break` unwinds with the jump inline in `Unwind`.
+- Text of unbounded length is assembled in one scratch buffer the interpreter owns
+  (`Interp::text_buffer`, through `strings::with_text_buffer`). It is an explicit allocator, not a
+  thread-local cache: each use takes it, clears it and puts it back, so a nested use gets a fresh
+  buffer and the outer one is never clobbered.
+
+A pairlist result is linked cell by cell as it is built (`PairlistBuilder`), with the head rooted,
+instead of collected into a vector first. A handler that `withCallingHandlers` or `tryCatch`
+establishes comes from a pool of at most 64 entries on the interpreter, and returns to it when its
+frame exits unless something still shares it. `crates/interp/tests/test_rust_allocations.rs` pins
+the property: it runs pinned shapes (`return()`, `break`, `c()`, group dispatch, `sprintf`,
+`paste`, `gsub`, handler setup and others) warm under a counting allocator, and each must stay
+within its budget. The budget is zero for all but two shapes: `gsub` with capture groups, whose
+regex engine allocates one capture set per match, and `mapply`, whose closure calls build their
+call and frame through the general call protocol.
+
 ### Errors across the boundary
 
 R signals an error with `longjmp`, and a `longjmp` across Rust frames is undefined behavior. So the
@@ -705,6 +728,13 @@ checked and refilled:
   matches falls back to a search and is updated. A wrong hint costs a search, never a wrong answer.
 - **Lookups skip function frames.** A function lookup past the local frame walks only the frames
   that can bind the symbol, using the same hints.
+- **The call entry reads its fixed facts raw.** The compiler builds the constant pool and the
+  vectors in its fixed entries (register count, profile, feedback, slots), so none is ALTREP and
+  the entry indexes them directly. The tiers' schedule is checked against one counter, and only a
+  call that reaches it leaves the inlined fast path.
+- **A new register window is cleared.** Each call's window is filled with `NULL` when it grows, so
+  a register the frame has not written yet never holds what an earlier call left there, and a
+  collection inside the window frees exactly what GNU R would.
 - **Builtin checks are derived at registration.** Arity, names, replacement form and which
   arguments a builtin accepts as native values are computed once per builtin (`Checks` in
   `crates/interp/src/builtins.rs`), so a call does not re-derive them from the builtin's name.

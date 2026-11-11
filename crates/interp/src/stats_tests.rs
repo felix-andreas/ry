@@ -715,7 +715,8 @@ pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
 /// one whose every completion is above it is dropped.
 pub unsafe fn fexact(call: &NativeCall<'_>) -> R<Sexp> {
     let x = call.arg(0);
-    let Some([rows, columns]) = values::dims(x).and_then(|dims| <[usize; 2]>::try_from(dims).ok())
+    let Some([rows, columns]) =
+        values::dims(x).and_then(|dims| <[usize; 2]>::try_from(&dims[..]).ok())
     else {
         return Err(call.error("'x' must be a matrix"));
     };

@@ -194,12 +194,12 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
     };
     let control = ["PACKAGE", "NAOK", "DUP", "ENCODING"];
     let mut package = None;
-    let mut routine_args = Vec::with_capacity(rest.len());
+    let mut routine_args = crate::eval::Args::new();
     for arg in rest {
         let tag = arg.tag;
         if tag.kind() == SexpType::Symbol && control.contains(&&*values::symbol_name(tag)) {
             if &*values::symbol_name(tag) == "PACKAGE" {
-                package = values::first_string(arg.value).map(|text| text.into_owned());
+                package = values::first_string(arg.value);
             }
             continue;
         }

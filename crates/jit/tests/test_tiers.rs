@@ -1101,7 +1101,8 @@ fn fully_typed_closure_compiles_at_its_first_call() {
     // scalar function runs as a native function from its first call, whose values fix the
     // argument types. An argument that computes is evaluated first when that is pure
     // (`c(1, 2.5)`), and otherwise stays a promise only the frame may force (`abs(...)`); a
-    // straight-line body then waits until it is hot. A call whose
+    // straight-line body then waits until it is hot. An assignment the tier-0 compiler fuses
+    // (`acc <- acc + ...`) compiles too, though its fused pass has not run yet. A call whose
     // values the declared types do not predict still gets tier 0's answer.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::On);
@@ -1148,12 +1149,24 @@ fn fully_typed_closure_compiles_at_its_first_call() {
                 "3.5",
                 Some(true),
             ),
+            (
+                "fa <- function(x: integer[]) -> integer { acc <- 0L; for (i in 1:4) acc <- acc + (x[[2L]] + 1L); acc }",
+                "fa(1:3)",
+                "12L",
+                Some(true),
+            ),
+            (
+                "fc <- function(x: double[]) -> double if ((x[[2]] * 2) > 0) x[[1L]] - x[[1L]] else x[[1L]]",
+                "fc(c(1, 2.5))",
+                "0",
+                Some(true),
+            ),
         ];
         let mut outcomes = Vec::new();
         for (index, (definition, call, _, _)) in cases.iter().enumerate() {
             run(definition);
             let outcome = run(call);
-            let name = format!("f{}", ["t", "i", "v", "w", "e", "u", "l"][index]);
+            let name = format!("f{}", ["t", "i", "v", "w", "e", "u", "l", "a", "c"][index]);
             let compiled = has_compiled_code(&name);
             outcomes.push((outcome, compiled));
         }
@@ -1628,7 +1641,7 @@ unsafe fn run(text: &str) -> String {
             Err(Unwind::Error(error)) => format!("error: {}", error.message),
             // An error no handler caught ran the default handler, which recorded the message
             // after a head that names the call.
-            Err(Unwind::Jump(jump)) if matches!(*jump, Jump::TopLevel) => {
+            Err(Unwind::Jump(jump)) if matches!(jump, Jump::TopLevel) => {
                 let text = &interp::interp().error_message;
                 // The head breaks the line when the call is long, so the break moves with the
                 // closure's name and is normalized away.

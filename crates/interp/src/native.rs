@@ -47,7 +47,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("dyn.load", 4, |call| unsafe {
-        let path = values::require_string(call.arg(0), "x")?;
+        let path = values::require_str(call.arg(0), "x")?;
         match builtin_libraries::builtin_library(&path) {
             Some(package) => builtin_libraries::load(package, &path),
             None => no_host(call),
@@ -69,7 +69,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }
     }),
     internal("getSymbolInfo", 3, |call| unsafe {
-        let name = values::require_string(call.arg(0), "name")?;
+        let name = values::require_str(call.arg(0), "name")?;
         let package = values::first_string(call.arg(1)).map(|text| text.into_owned());
         Ok(builtin_libraries::symbol_info(&name, package.as_deref())?.unwrap_or_else(nil))
     }),

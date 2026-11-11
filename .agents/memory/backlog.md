@@ -39,6 +39,12 @@ The quality bar is four things.
 
 - `RY_FAST_PATHS=0` is checked inside three prologues only (`fast_paths_enabled` in `crates/interp/src/base_fast_paths.rs`), so every other base and package prologue still runs and a fast-path bug cannot be bisected with it. Install time is the wrong place for the check, because a start-up image already holds installed prologues; check it once where a prologue internal is dispatched. Found while tracing withr's `get_options` prologue, which passed every name in one character vector to `options()` (only the first is read) and so broke `local_options` with an unset first option.
 
+## Open: tier-0 liveness maps (low priority, correctness only)
+
+- A tier-0 register a frame has stopped using keeps its object alive until the frame returns, so a finalizer can run later than in GNU R for a variable that is dead before its scope ends. `Op::EndStatement` already clears each statement's temporaries, and clearing the register window on every grow keeps finalizer timing equal to GNU R's on the pinned cases (`decisions.md`, "Tier-0 call entry").
+- Per-safepoint liveness maps would close the rest. As a speed lever they are worth little: they remove only the register fill, about 16 of `grow_registers`' 57 instructions per call, roughly 0.3 points of `testthat_full` Ir.
+- Tier-1 deopt does not need them. Each deopt block is generated from the plan's liveness bitset at compile time, and compiled code keeps every boxed value in tier 0's register window or the frame, both of which are roots.
+
 ## Open: the baseline tier and JIT on against JIT off
 
 The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
@@ -91,8 +97,10 @@ left, in order of expected gain:
 
 - **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.
 - **List functions that box every item.** `List.reverse`, the take, drop and sublist family and `List.split_at` move packed items through `arrays::gather`, but most of the others (`List.sort_asc`, `List.map`, `List.keep_if`, `List.concat`, ...) still go through `list_elements`, which allocates one scalar per item of an `F64` or `I64` list. A million-item list pays about 60 MiB of transient scalars that way. The end shape is a packed path per item kind, as `gather` has.
-- **Non-constant defaults.** A missing argument passes only a constant scalar default (`jit::native::call`), so `vasicek`'s `dt = 1f64 / 12f64` refuses; it also calls R's `set.seed` and `rnorm`.
+- **Non-constant defaults and R's random numbers.** A missing argument passes only a constant scalar default (`jit::native::call`), so `vasicek`'s `dt = 1f64 / 12f64` refuses; its kernel also calls R's `set.seed` and `stats::rnorm`, which the typed core refuses as base functions it does not know, and `sales` runs its `DataFrame` parameter on the table engine. Both are listed in `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`.
+- **JIT-compiled callers skip native entries.** With the JIT on, a caller compiled to machine code calls `isTRUE` and the other `NATIVE_ENTRIES` closures as full closures (a loop of 17,000 `isTRUE(x)` calls takes no native entry); tier 0 takes the entry. Route compiled calls of base closures through `base_fast_paths` as tier 0 does.
 - **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
+- **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. Making `orders` native (records and tags above) removes the cost where it is measured.
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
 - **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
@@ -120,13 +128,11 @@ left, in order of expected gain:
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
-## Open: the package test suite benchmark
-
-- **zoo's tests fail on GNU R too.** In `tools/bench/packages/results.json`, zoo's test scripts halt on both engines (`vignette-zoo.R: Execution halted`), so it has no time on either. A failure on GNU R points at the corpus (a missing Suggests package or an offline step), not at ry; fix the lock or the runner so zoo measures.
-
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
+
+- **xts peaks 34% above GNU R.** In the packages suite (`tools/bench/packages/results.json`), xts's tests peak at 451.7 MiB on ry against 338.0 MiB on GNU R, the only package far above GNU R's peak. Owner: B4 (xts and zoo), after ALTREP. Start with what xts allocates that GNU R shares or frees earlier: index copies through `[.xts`, attribute duplication, and survivors the collector promotes.
 
 - **Package install speed.** `R CMD INSTALL` of Matrix takes 39 s on ry against GNU R's 177 s (74 s with `MAKEFLAGS=-j4`), and almost all of it is the compiler (`decisions.md`, "Package builds run `make` in parallel"). The R half is about 10% slower than GNU R's on the same `tools` calls: MASS's Rd objects take 0.55 s and help indices 0.27 s; Matrix's S4 sourcing takes 2.7 s. Levers: Rd parsing (`tools:::.install_package_Rd_objects`), and the separate test-load process (about 0.2 s per package).
 
@@ -202,6 +208,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still allocates a position list for a general subscript of more than eight positions.
 - **Collector throughput toward a tenth of today's collection time** (testthat workload: 9 minor collections, about 17 ms of pauses, `collect_keeping` 66.9M instructions). Lazy-load fetches are pretenured (`decisions.md`, "Pretenuring lazy-load fetches"), so `library(testthat)` runs no collection. Where the pauses go: a minor collection's `trace` visits tens of thousands of objects at about 260 instructions each, most of them old objects rescanned from the remembered set or the roots rather than young survivors (39k traced against 4.5k newly aged in a load's collection), so find which old objects are rescanned and why; dead returned frames are cleared one cell at a time, with a cache miss on each value's mark bit and refcount (about 7 ms over 20k frames and 110k cells); the sweep and the young string table about 3 ms (`decisions.md`, "Minor collections touch only what changed").
+- **Next GC candidate, once escape analysis lands: promoted survivors in the `records` workload.** Collecting survivors that the young generation promoted is about a fifth of a warm run's wall time. Each warm run makes about 4.5 minor, 0.5 intermediate and 1 major collection, with about 37 ms of pauses (16.8 minor, 5.5 intermediate, 14.9 major; `RY_GC_LOG`, REPEAT 3 minus REPEAT 1, halved). `collect_keeping` is 10.4% of the warm run's instructions inclusive. Escape analysis should keep most of these record temporaries out of the heap. Once it does, measure again before tuning promotion.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 
@@ -1074,6 +1081,10 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ## Open: performance and memory
 
+### Tier-0 call entry and dispatch
+
+- On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. That is after the raw pool reads and the out-of-line tier schedule (`decisions.md`, "Tier-0 call entry"). `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine` for the handler. The register clear is about 16 of `grow_registers`' 57 and must stay. What remains needs superinstructions (a fused guard plus `GetFun`, a fused `GetVar` plus `Element`), together with a per-site epoch stamp that re-proves `effects::resolve` and a test that rebinds a base function between two calls at one site, or a thinner call path (the AOT track's call plans).
+
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
@@ -1540,8 +1551,6 @@ A human is required for three things: moving the staged workflows in `.github/pe
 which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.
 
 ## Open: robustness harnesses
-
-- **Three `fuzz_iterations` harnesses ignore `FUZZ_SEED`.** `refactor_seed_mutations_keep_code_valid` (`crates/ide/tests/test_fuzz.rs`), `fuzz_the_intern_table_keeps_exactly_the_surviving_strings` (`crates/heap/tests/test_gc.rs`) and the reload fuzz (`crates/loader/tests/test_reload_fuzz.rs`) draw from one fixed generator, so `just fuzz-deep` reruns their same inputs each round. Convert each to `for_each_seed` with `SplitMix64(CONST ^ seed)`.
 
 Gaps in the simulation, fuzzing and scenario design that `development/robustness.md` specifies.
 
