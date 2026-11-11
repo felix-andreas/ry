@@ -18,6 +18,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 SCRIPT = os.path.join(HERE, "kernels.R")
+sys.path.insert(0, os.path.join(ROOT, "tools", "bench"))
+from evict import evict  # noqa: E402
 
 
 def main():
@@ -31,6 +33,8 @@ def main():
         "gnu": ["Rscript", SCRIPT],
         "ry": [arguments.ry, "run", "--runtime", "ry", SCRIPT],
     }
+    if arguments.memory:
+        evict([arguments.ry])
     for rows in arguments.rows.split(","):
         if arguments.memory:
             results = {engine: {} for engine in engines}
