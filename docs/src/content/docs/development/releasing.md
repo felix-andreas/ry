@@ -199,7 +199,8 @@ version that differs from any of the three.
 1. On a clean main, run `just release-dry-run`. It packages this machine's archive, installs it into
    a scratch directory, smoke-tests it (`tools/smoke-test.sh`), packages the VS Code extension and
    builds the nix package.
-2. Run `just try` and read every step's output.
+2. Run `just try` and read every step's output. `crates/oracle/known_failures.toml` must be
+   empty, intermittent entries included ([Testing](/development/testing#known-oracle-failures)).
 3. Write the release's entry on the [news page](/news).
 4. Run `just bump-version X.Y.Z-beta` (it commits), and push.
 5. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the
