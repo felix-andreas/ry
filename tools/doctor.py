@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
 # The oldest release that parses the justfile; tools/dev-setup.sh installs a pinned newer one.
@@ -35,7 +36,9 @@ def main():
     r = check_gnu_r()
     if r:
         check_oracle_packages(r)
-    check_corpus()
+        check_libraries(r)
+    corpus_complete = check_corpus()
+    check_cache(corpus_complete)
     check_binaries()
     check_disk()
     sys.exit(1 if failures else 0)
@@ -106,22 +109,26 @@ def check_gnu_r():
         report("FAIL", "GNU R", f"no R on PATH and ORACLE_R is unset; the oracle needs {wanted}", "sudo tools/dev-setup.sh")
         return None
     script = (
-        'cat(format(getRversion()), capabilities("profmem"), capabilities("cairo"), '
-        'basename(La_library()), basename(extSoftVersion()[["BLAS"]]), '
+        'cat(format(getRversion()), capabilities("profmem"), capabilities("ICU"), '
+        'getOption("bitmapType"), basename(La_library()), basename(extSoftVersion()[["BLAS"]]), '
         'file.exists(file.path(R.home("lib"), "libR.so")), sep = "\\n")'
     )
     code, output = run([r, "--vanilla", "--slave", "-e", script])
     if code != 0:
         report("FAIL", "GNU R", f"{r} does not run: {output[-200:]}")
         return None
-    version, profmem, cairo, lapack, blas, shlib = (output.splitlines() + [""] * 6)[:6]
+    version, profmem, icu, bitmap, lapack, blas, shlib = (output.splitlines() + [""] * 7)[:7]
     problems = []
     if version != wanted:
         problems.append(f"release {version}, not {wanted}")
     if profmem != "TRUE":
         problems.append("no memory profiling (utils__rprofmem and sys_call_shares_arguments differ)")
-    if cairo != "TRUE":
-        problems.append("no cairo (the graphics cases differ)")
+    if icu != "TRUE":
+        problems.append("no ICU (collation and the string cases differ)")
+    # A build without pango-cairo still reports capabilities("cairo"), but png() falls back to
+    # bitmapType "Xlib", which fails headless with "X11 is not available".
+    if bitmap != "cairo":
+        problems.append(f'bitmapType "{bitmap}", not "cairo" (the graphics cases differ; build with pango-cairo)')
     if shlib != "TRUE":
         problems.append("no libR.so (ry's GNU R console and binary packages need --enable-R-shlib)")
     if problems:
@@ -131,7 +138,7 @@ def check_gnu_r():
     if expected_lapack and lapack != expected_lapack:
         report("warn", "GNU R", f"{r} {version} uses LAPACK {lapack}, the recordings {expected_lapack}; the last digits of linear algebra may differ")
     else:
-        report("ok", "GNU R", f"{r} {version}, memory profiling, cairo, {blas} and {lapack}")
+        report("ok", "GNU R", f"{r} {version}, memory profiling, ICU, cairo bitmaps, {blas} and {lapack}")
     return r
 
 
@@ -155,6 +162,66 @@ def check_oracle_packages(r):
         report("ok", "oracle packages", ", ".join(f"{p} {versions[p]}" for p in ORACLE_PACKAGES))
 
 
+def check_libraries(r):
+    """Whether `ry run` by hand loads the packages the reference R loads.
+
+    The oracle gives every engine the reference R's `.libPaths()` (crates/oracle/src/oracle.rs,
+    `library_environment`), so this matters only outside it: ry's default libraries are its bundled
+    base R's plus any GNU R user and site libraries it finds, such as Debian's
+    /usr/lib/R/site-library, and a case rerun by hand then loads other versions than the oracle did.
+    """
+    target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+    ry = os.environ.get("ORACLE_RY") or next((str(path) for path in [target / "debug/ry", target / "release/ry"] if path.exists()), None)
+    if not ry:
+        return
+    probe = 'cat(.libPaths(), sep = "\\n")'
+    code, output = run([r, "--vanilla", "--slave", "-e", probe])
+    if code != 0:
+        report("warn", "libraries", f"{r} cannot list its libraries: {output[-200:]}")
+        return
+    r_paths = output.splitlines()
+    with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
+        script.write(probe)
+        script.flush()
+        code, output = run([ry, "run", "--runtime", "ry", script.name])
+    if code != 0:
+        report("warn", "libraries", f"{ry} cannot list its libraries: {output[-200:]}")
+        return
+    ry_paths = output.splitlines()
+    ours, theirs = visible_packages(ry_paths), visible_packages(r_paths)
+    other = [f"{name} {ours[name][0]} from {ours[name][1]}" for name in sorted(ours.keys() & theirs.keys()) if ours[name][0] != theirs[name][0]]
+    absent = sorted(theirs.keys() - ours.keys())
+    if not other and not absent:
+        report("ok", "libraries", f"ry run loads the {len(theirs)} packages the reference R loads, at the same versions")
+        return
+    problems = []
+    if other:
+        problems.append(f"loads {', '.join(other[:4])}{' ...' if len(other) > 4 else ''} in place of the reference R's versions")
+    if absent:
+        problems.append(f"lacks {len(absent)} of the reference R's packages ({', '.join(absent[:4])}{' ...' if len(absent) > 4 else ''})")
+    report(
+        "warn",
+        "libraries",
+        f"ry run by hand searches {', '.join(ry_paths)}, not the reference R's {', '.join(r_paths)}, so it " + " and ".join(problems)
+        + "; the oracle passes the reference R's paths itself, so this affects only a case rerun by hand",
+        f"R_LIBS={':'.join(r_paths)} R_LIBS_SITE= R_LIBS_USER= ry run ...",
+    )
+
+
+def visible_packages(paths):
+    """Each package `library()` would load from `paths`, as name -> (version, library): the first library that has it wins."""
+    packages = {}
+    for library in paths:
+        for description in sorted(pathlib.Path(library).glob("*/DESCRIPTION")):
+            name = description.parent.name
+            if name in packages:
+                continue
+            fields = (line.split(":", 1) for line in description.read_text(errors="replace").splitlines() if ":" in line)
+            version = next((value.strip() for key, value in fields if key == "Version"), "?")
+            packages[name] = (version, library)
+    return packages
+
+
 def check_corpus():
     corpus = pathlib.Path(os.environ.get("RY_CORPUS_DIR", root / ".corpus")) / "packages"
     lock = root / "tools/bench/packages/lock.tsv"
@@ -168,13 +235,40 @@ def check_corpus():
         report("warn", "corpus", f"{len(missing)} of {len(pinned)} pinned packages missing from {library}: {', '.join(missing[:6])}{' ...' if len(missing) > 6 else ''}", "just bench-packages install")
     else:
         report("ok", "corpus", f"{len(pinned)} pinned packages in {library}")
+    return bool(installed) and not missing
+
+
+def check_cache(corpus_complete):
+    """Whoever changes what a tree is built from builds it once and pushes it, so the next fresh container restores it."""
+    # tools/cache.sh takes zstd from nixpkgs when it is not installed, so nix is all a restore needs.
+    if not shutil.which("nix-store") and not pathlib.Path("/nix/var/nix/profiles/default/bin/nix-store").exists():
+        report("warn", "cache", "nix is not installed, so a fresh container cannot restore from ry.cachix.org and builds the reference R and the corpus from source", "install nix (https://nixos.org/download)")
+    lock = root / "tools/cache.lock"
+    recorded = {tuple(line.split()[:2]) for line in lock.read_text().splitlines() if line.strip()} if lock.exists() else set()
+    for tree in ["r", "corpus"]:
+        code, output = run(["bash", str(root / "tools/cache.sh"), "hash", tree])
+        if code != 0:
+            report("warn", f"cache {tree}", f"cannot hash its inputs: {output[-200:]}")
+            continue
+        if (tree, output) in recorded:
+            report("ok", f"cache {tree}", f"tools/cache.lock has a build of these inputs ({output})")
+            continue
+        # Suggest a push only for a tree that `tools/cache.sh push` would accept.
+        if tree == "r":
+            pushable = run(["bash", str(root / "tools/reference-r.sh"), "check"])[0] == 0
+        else:
+            pushable = corpus_complete
+        if pushable:
+            report("warn", f"cache {tree}", f"tools/cache.lock has no build of these inputs ({output}), so a fresh container builds it from source", f"just cache-push {tree}, then commit tools/cache.lock")
+        else:
+            report("warn", f"cache {tree}", f"tools/cache.lock has no build of these inputs ({output}), and this machine has no finished tree to push")
 
 
 def check_binaries():
     identity = runtime_identity(root / "crates").encode()
     target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
     found = False
-    for profile in ["debug", "release", "profiling"]:
+    for profile in ["debug", "release", "iterate", "profiling"]:
         directory = target / profile
         binaries = {name: directory / name for name in ["ry", "libR.so", "ry-rcmd"]}
         if not binaries["ry"].exists() and not binaries["libR.so"].exists():

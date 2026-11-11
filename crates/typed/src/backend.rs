@@ -141,7 +141,7 @@ fn trampoline(
     builder.append_block_params_for_function_params(entry);
     builder.switch_to_block(entry);
     let &[budget, input, output] = builder.block_params(entry) else {
-        return Err(Refusal("a trampoline without its parameters"));
+        return Err(Refusal::new("a trampoline without its parameters"));
     };
     let mut arguments: SmallVec<[Value; 8]> = SmallVec::new();
     arguments.push(budget);
@@ -159,7 +159,7 @@ fn trampoline(
     let call = builder.ins().call(callee, &arguments);
     let results: SmallVec<[Value; 4]> = builder.inst_results(call).iter().copied().collect();
     let Some((&status, value)) = results.split_first() else {
-        return Err(Refusal("a typed call without a status"));
+        return Err(Refusal::new("a typed call without a status"));
     };
     for (index, &word) in value.iter().enumerate() {
         builder
@@ -201,7 +201,7 @@ impl Emitter<'_> {
         let parameters: SmallVec<[Value; 8]> =
             self.builder.block_params(entry).iter().copied().collect();
         let Some((&budget, mut arguments)) = parameters.split_first() else {
-            return Err(Refusal("a function without its budget"));
+            return Err(Refusal::new("a function without its budget"));
         };
         let budget_variable = self.builder.declare_var(I64);
         self.builder.def_var(budget_variable, budget);
@@ -213,7 +213,7 @@ impl Emitter<'_> {
                 let initial = if index < self.function.params {
                     let (&first, rest) = arguments
                         .split_first()
-                        .ok_or(Refusal("a function without an argument"))?;
+                        .ok_or(Refusal::new("a function without an argument"))?;
                     arguments = rest;
                     first
                 } else {
@@ -237,7 +237,7 @@ impl Emitter<'_> {
         let first = *self
             .blocks
             .first()
-            .ok_or(Refusal("a function without blocks"))?;
+            .ok_or(Refusal::new("a function without blocks"))?;
         self.builder.ins().jump(first, &[]);
         let function = self.function;
         for (index, block) in function.blocks.iter().enumerate() {
@@ -275,7 +275,7 @@ impl Emitter<'_> {
                     (a, b) => a == b,
                 };
                 if words(ty) != words(self.function.result) || !compatible {
-                    return Err(Refusal("a `return` of another type than the result"));
+                    return Err(Refusal::new("a `return` of another type than the result"));
                 }
                 let values = self.get(local)?;
                 if self.function.is_param(local) && ty.is_counted() {
@@ -295,7 +295,7 @@ impl Emitter<'_> {
         self.blocks
             .get(block.0 as usize)
             .copied()
-            .ok_or(Refusal("a jump to a missing block"))
+            .ok_or(Refusal::new("a jump to a missing block"))
     }
 
     /// Returns the failure status from the current block.
@@ -347,7 +347,7 @@ impl Emitter<'_> {
         let variables = self
             .variables
             .get(local.0 as usize)
-            .ok_or(Refusal("a missing local"))?
+            .ok_or(Refusal::new("a missing local"))?
             .clone();
         Ok(variables
             .iter()
@@ -361,17 +361,17 @@ impl Emitter<'_> {
         values
             .first()
             .copied()
-            .ok_or(Refusal("a local without a value"))
+            .ok_or(Refusal::new("a local without a value"))
     }
 
     fn set(&mut self, local: Local, values: &[Value]) -> Result<(), Refusal> {
         let variables = self
             .variables
             .get(local.0 as usize)
-            .ok_or(Refusal("a missing local"))?
+            .ok_or(Refusal::new("a missing local"))?
             .clone();
         if variables.len() != values.len() {
-            return Err(Refusal("a value with the wrong number of words"));
+            return Err(Refusal::new("a value with the wrong number of words"));
         }
         for (&variable, &value) in variables.iter().zip(values) {
             self.builder.def_var(variable, value);
@@ -452,7 +452,7 @@ impl Emitter<'_> {
                 let wide = self.wide(values[0]);
                 (wide, self.iconst(0))
             }
-            _ => return Err(Refusal("an item that is not a scalar")),
+            _ => return Err(Refusal::new("an item that is not a scalar")),
         })
     }
 
@@ -617,7 +617,7 @@ impl Emitter<'_> {
                         match op {
                             Compare::Eq => equal,
                             Compare::Ne => self.builder.ins().bxor_imm_s(equal, 1),
-                            _ => return Err(Refusal("an ordering comparison of strings")),
+                            _ => return Err(Refusal::new("an ordering comparison of strings")),
                         }
                     }
                     Item::Dbl => {
@@ -640,7 +640,7 @@ impl Emitter<'_> {
                         self.na_or(na, compared)
                     }
                     Item::Record(_) | Item::Tag(_) => {
-                        return Err(Refusal("a comparison of records or tags"));
+                        return Err(Refusal::new("a comparison of records or tags"));
                     }
                 };
                 SmallVec::from_slice(&[value])
@@ -675,7 +675,7 @@ impl Emitter<'_> {
                         match op {
                             Math::Neg => self.builder.ins().ineg(x),
                             Math::Abs => self.builder.ins().iabs(x),
-                            _ => return Err(Refusal("an I64 math function")),
+                            _ => return Err(Refusal::new("an I64 math function")),
                         }
                     }
                     _ => {
@@ -683,7 +683,7 @@ impl Emitter<'_> {
                         let value = match op {
                             Math::Neg => self.builder.ins().ineg(x),
                             Math::Abs => self.builder.ins().iabs(x),
-                            _ => return Err(Refusal("an integer math function")),
+                            _ => return Err(Refusal::new("an integer math function")),
                         };
                         self.na_or(na, value)
                     }
@@ -731,7 +731,7 @@ impl Emitter<'_> {
                         self.fail_if(na, &inst.fail_drops)?;
                         self.wide(x)
                     }
-                    _ => return Err(Refusal("an I64 from a value that is not a number")),
+                    _ => return Err(Refusal::new("an I64 from a value that is not a number")),
                 };
                 SmallVec::from_slice(&[value])
             }
@@ -766,7 +766,7 @@ impl Emitter<'_> {
             Op::Get(a, index) => {
                 let item = ty(*a)
                     .items()
-                    .ok_or(Refusal("an index into a non-vector"))?;
+                    .ok_or(Refusal::new("an index into a non-vector"))?;
                 let pointer = self.one(*a)?;
                 let index = self.one(*index)?;
                 let address = self.item_address(pointer, index, item, inst)?;
@@ -777,7 +777,7 @@ impl Emitter<'_> {
             Op::Set(a, index, value) => {
                 let item = ty(*a)
                     .items()
-                    .ok_or(Refusal("an assignment into a non-vector"))?;
+                    .ok_or(Refusal::new("an assignment into a non-vector"))?;
                 let pointer = self.one(*a)?;
                 let index = self.one(*index)?;
                 // The bounds are checked before the list is made unique, so a failure still
@@ -844,7 +844,7 @@ impl Emitter<'_> {
             Op::Repeat(value, times) => {
                 let item = ty(*value)
                     .item()
-                    .ok_or(Refusal("a `rep` of a non-scalar"))?;
+                    .ok_or(Refusal::new("a `rep` of a non-scalar"))?;
                 let times = self.one(*times)?;
                 let negative = self
                     .builder
@@ -1152,7 +1152,7 @@ impl Emitter<'_> {
                         self.call_words(function, I64, &[x, owned])
                     }
                     Text::AsciiUpper | Text::AsciiLower => {
-                        return Err(Refusal("an ASCII case change of a vector"));
+                        return Err(Refusal::new("an ASCII case change of a vector"));
                     }
                 };
                 SmallVec::from_slice(&[list])
@@ -1232,7 +1232,7 @@ impl Emitter<'_> {
                     shape.fields.get(*index as usize),
                     shape.offsets.get(*index as usize),
                 ) else {
-                    return Err(Refusal("a field the shape does not have"));
+                    return Err(Refusal::new("a field the shape does not have"));
                 };
                 let address = self
                     .builder
@@ -1293,7 +1293,9 @@ impl Emitter<'_> {
                 SmallVec::from_slice(&[list])
             }
             Op::Parse(a) => {
-                let dest = inst.dest.ok_or(Refusal("a parse without a destination"))?;
+                let dest = inst
+                    .dest
+                    .ok_or(Refusal::new("a parse without a destination"))?;
                 let i64 = ty(dest) == Type::I64;
                 let (status, slot) = self.parse(*a, i64)?;
                 let failed = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
@@ -1309,9 +1311,9 @@ impl Emitter<'_> {
             Op::DictNew => {
                 let dest = inst
                     .dest
-                    .ok_or(Refusal("a dictionary without a destination"))?;
+                    .ok_or(Refusal::new("a dictionary without a destination"))?;
                 let Type::Dict { key, value } = ty(dest) else {
-                    return Err(Refusal("a new dictionary of another type"));
+                    return Err(Refusal::new("a new dictionary of another type"));
                 };
                 let (key, value) = (self.iconst(kind(key)), self.iconst(kind(value)));
                 let dict = self.call_words(address!(values::ry_dict_new), I64, &[key, value]);
@@ -1330,7 +1332,9 @@ impl Emitter<'_> {
             }
             Op::DictGet(dict, key) => {
                 let Type::Dict { value, .. } = ty(*dict) else {
-                    return Err(Refusal("a lookup in something other than a dictionary"));
+                    return Err(Refusal::new(
+                        "a lookup in something other than a dictionary",
+                    ));
                 };
                 let pointer = self.one(*dict)?;
                 let (k0, k1) = self.item_words(*key)?;
@@ -1505,7 +1509,7 @@ impl Emitter<'_> {
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
             Arith::Div | Arith::Pow | Arith::NumPow => {
-                return Err(Refusal("an integer division or power"));
+                return Err(Refusal::new("an integer division or power"));
             }
         };
         Ok(self.na_or(na, value))
@@ -1572,8 +1576,8 @@ impl Emitter<'_> {
             }
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
-            Arith::Div => return Err(Refusal("a `/` of I64s")),
-            Arith::NumPow => return Err(Refusal("a `Num.pow` of I64s")),
+            Arith::Div => return Err(Refusal::new("a `/` of I64s")),
+            Arith::NumPow => return Err(Refusal::new("a `Num.pow` of I64s")),
         })
     }
 
@@ -1626,7 +1630,7 @@ impl Emitter<'_> {
             (Reduce::Sum, Item::I64) => {
                 self.reduce_status(address!(values::ry_sum_i64), I64, x, inst)?
             }
-            (_, Item::I64) => return Err(Refusal("an I64 reduction other than a sum")),
+            (_, Item::I64) => return Err(Refusal::new("an I64 reduction other than a sum")),
             (Reduce::Prod, _) => self.call(address!(values::ry_prod_dbl), &[I64], &[F64], &[x])[0],
             (Reduce::Mean, _) => self.call(address!(values::ry_mean_dbl), &[I64], &[F64], &[x])[0],
             (Reduce::Sum, _) => self.reduce_status(address!(values::ry_sum_int), I32, x, inst)?,
@@ -1822,7 +1826,7 @@ impl Emitter<'_> {
     ) -> Result<SmallVec<[Value; 2]>, Refusal> {
         let budget = self
             .budget
-            .ok_or(Refusal("a function without its budget"))?;
+            .ok_or(Refusal::new("a function without its budget"))?;
         let budget = self.builder.use_var(budget);
         let budget = self.builder.ins().iadd_imm_s(budget, -1);
         let mut words: SmallVec<[Value; 8]> = SmallVec::from_slice(&[budget]);
@@ -1835,7 +1839,7 @@ impl Emitter<'_> {
             let callee = self
                 .callees
                 .get(index)
-                .ok_or(Refusal("a call of a missing function"))?;
+                .ok_or(Refusal::new("a call of a missing function"))?;
             let signature = self
                 .builder
                 .import_signature(signature(&callee.params, callee.result));
@@ -1845,7 +1849,7 @@ impl Emitter<'_> {
         let results: SmallVec<[Value; 3]> =
             self.builder.inst_results(call).iter().copied().collect();
         let Some((&status, value)) = results.split_first() else {
-            return Err(Refusal("a typed call without a status"));
+            return Err(Refusal::new("a typed call without a status"));
         };
         let failed = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
         self.fail_if(failed, &inst.fail_drops)?;

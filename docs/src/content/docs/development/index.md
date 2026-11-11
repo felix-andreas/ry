@@ -17,12 +17,36 @@ sudo tools/dev-setup.sh   # apt libraries, just, GNU R 4.6.2 in /opt/R, the orac
 just doctor               # each check prints ok, warn or FAIL with the command that fixes it
 ```
 
-The script is idempotent, so the cloud environment's setup script runs it in every fresh container.
-It installs `just` 1.59.0 from PyPI, because the justfile needs 1.40 or newer and Ubuntu's package
-is older. It builds the oracle's [reference GNU R](/development/corpus-and-oracle#the-reference-gnu-r)
-from source (about three and a half minutes on four cores) and installs the packages the oracle cases name, with
-rlang pinned to 1.3.0. The benchmark corpus library is a separate, longer step:
-`just bench-packages install`.
+The script is idempotent, so a cloud environment can run it as its setup script in every fresh
+container. It installs `just` 1.59.0 from PyPI, because the justfile needs 1.40 or newer and
+Ubuntu's package is older, and it wraps rustc in sccache, so a fresh worktree compiles its
+dependencies from a shared cache (a cold debug build of `ry` takes about 1 minute instead of 4.5).
+The cache lives in `~/.cache/sccache` and grows to sccache's default cap of 10 GB; set
+`SCCACHE_CACHE_SIZE` to change it. The oracle's [reference GNU R](/development/corpus-and-oracle#the-reference-gnu-r)
+and the packages its cases name (rlang pinned to 1.3.0) come from `tools/reference-r.sh`, which
+restores a prebuilt copy from the public binary cache `ry.cachix.org` in about five seconds and
+builds from source (about three and a half minutes on four cores) when the cache holds no build of
+the current scripts. The script also restores the package-test corpus library from the same cache
+(about ten seconds). When the cache has no build of the pinned set, `just bench-packages install`
+installs it from source in about eight minutes.
+
+Restoring needs nix, which the cloud image has, and takes zstd from nixpkgs when it is not installed; without nix, the script builds R from source.
+`tools/cache.lock` names each prebuilt tree by a hash of the files it was built from, so editing
+`tools/reference-r.sh` or a pinned version makes the next container build from source, and
+`just doctor` warns until the lock has a build of the current inputs. After such a change, push the
+new build and commit the lock:
+
+```sh
+sudo tools/dev-setup.sh   # builds R from source, since the cache has no build of the new inputs
+just cache-push r         # packs /opt/R/4.6.2, pushes it to ry.cachix.org, rewrites tools/cache.lock
+```
+
+`just cache-push` refuses a tree that is not what its inputs build (an R that fails
+`tools/reference-r.sh check`, a library that lacks a locked version), and a push that would take the
+trees in the lock past 2.5 GB, half of the cache's 5 GB. Anyone can read the cache, so push only
+these trees, which hold GNU R and CRAN packages, and never ry's own builds or anything private. A
+cloud session's proxy holds the write token for `app.cachix.org`, which is why the push names that
+host; elsewhere, set `CACHIX_AUTH_TOKEN`.
 
 `just doctor` also checks that `ry`, `libR.so` and the start-up image were built from the working
 tree, by recomputing the runtime hash they embed, and it reports free disk and the size of each
@@ -66,6 +90,7 @@ just release-dry-run                # package and smoke-test this machine's rele
 just docs-deploy <branch>           # build the docs site and deploy it (main is production)
 just doctor                         # check the toolchain, GNU R, the corpus and binary freshness
 just prune                          # free disk in target/ without forcing a full rebuild
+just cache-push r                   # push the reference GNU R to ry.cachix.org (or `corpus`)
 ```
 
 The simulators, fuzzers and long oracle runs have their own recipes, which
@@ -94,6 +119,25 @@ environment variables come up every day:
 Some suites and every performance instrument read a corpus of real-world R code. Fetch it with
 `cargo -Zscript scripts/fetch-corpus.rs`, which writes into the gitignored `corpus/`
 directory. The resolved inventory is committed as `scripts/corpus-manifest.txt`.
+
+### Build profiles
+
+| Profile | Command | Use it for |
+| --- | --- | --- |
+| `dev` | `cargo build` | everyday work and tests |
+| `release` | `cargo build --release` | shipped binaries and every number you publish or quote |
+| `iterate` | `cargo build --profile iterate`, `cargo test-release` | optimized tests and quick performance loops |
+| `profiling` | `cargo build --profile profiling` | perf, callgrind and samply |
+
+`iterate` is release without cross-crate link-time optimization (`lto = false`, which keeps
+cargo's thin LTO inside each crate). After an edit to the interpreter it rebuilds
+`ry` and `libR.so` in about 2 minutes on four cores, against about 6 for release, and its link stays
+under 16 GB of memory. No inlining then crosses a crate boundary, so a single program can run
+a quarter faster or slower than under release: `ry --version` names the profile
+(`ry 0.4.3-beta (iterate build)`), and `tools/bench/bench.py` refuses any binary that is not a
+release build. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
+release's inlining: the `.text` of `ry` and `libR.so` is within 0.2% of release's, and its link
+peaks near 11 GB.
 
 ### The R console needs no R to build
 

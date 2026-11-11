@@ -3131,28 +3131,71 @@ pub(crate) unsafe fn gather(
         arguments.push(value);
         formal = formal.cdr();
     }
-    // A missing argument whose default is a constant scalar is that constant, since evaluating
-    // it in the call's frame could give nothing else.
+    // A missing argument's default is evaluated in the call's frame, so a constant scalar is
+    // that constant, and so is code that names no formal and that `pure_value` reads in the
+    // closure's environment, such as `1 / 12`: the frame could give it no other value.
     while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == values::symbols().dots {
+            return None;
+        }
         let default = formal.car();
-        if formal.tag() == values::symbols().dots
-            || !matches!(
-                default.kind(),
-                SexpType::Real
-                    | SexpType::Integer
-                    | SexpType::I64
-                    | SexpType::Logical
-                    | SexpType::String
-            )
-            || default.length() != 1
-            || default.attrib() != values::nil()
+        let value = match default.kind() {
+            SexpType::Language if !names_a_formal(default, formals, 0) => {
+                let mut promises: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+                let value = pure_value(default, function.tag(), &mut promises, 0)?;
+                if !promises.is_empty() {
+                    return None;
+                }
+                value
+            }
+            _ => default,
+        };
+        if !matches!(
+            value.kind(),
+            SexpType::Real
+                | SexpType::Integer
+                | SexpType::I64
+                | SexpType::Logical
+                | SexpType::String
+        ) || value.length() != 1
+            || value.attrib() != values::nil()
         {
             return None;
         }
-        arguments.push(default);
+        arguments.push(value);
         formal = formal.cdr();
     }
     Some((arguments, read))
+}
+
+/// Whether `code` mentions the name of one of `formals`, as a variable or a function. Code that
+/// does would read the call's frame, which a default evaluated ahead of the call has not got.
+/// Too deep a tree counts as mentioning one.
+unsafe fn names_a_formal(code: Sexp, formals: Sexp, depth: usize) -> bool {
+    match code.kind() {
+        SexpType::Symbol => {
+            let mut formal = formals;
+            while formal.kind() == SexpType::Pairlist {
+                if formal.tag() == code {
+                    return true;
+                }
+                formal = formal.cdr();
+            }
+            false
+        }
+        SexpType::Language if depth < MAX_PURE_DEPTH => {
+            let mut item = code;
+            while item.kind() == SexpType::Language || item.kind() == SexpType::Pairlist {
+                if names_a_formal(item.car(), formals, depth + 1) {
+                    return true;
+                }
+                item = item.cdr();
+            }
+            false
+        }
+        SexpType::Language => true,
+        _ => false,
+    }
 }
 
 /// The native type of each argument and the 64-bit word a native function takes it as.
