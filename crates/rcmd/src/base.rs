@@ -49,10 +49,7 @@ pub fn installed() -> Option<PathBuf> {
     }
     let executable = std::env::current_exe().ok()?;
     let directory = executable.parent()?;
-    let beside = [
-        directory.join("base-r"),
-        directory.join("../lib/ry/base-r"),
-    ];
+    let beside = [directory.join("base-r"), directory.join("../lib/ry/base-r")];
     beside
         .into_iter()
         .chain(development_candidates(directory))

@@ -216,11 +216,7 @@ fn typed_array_dot_peak_memory_stays_near_gnu_r() {
         assert_eq!(exit, 0, "the program failed: {command:?}");
         peak
     };
-    let gnu_r = peak(
-        Command::new("Rscript")
-            .arg("--vanilla")
-            .arg(script(false)),
-    );
+    let gnu_r = peak(Command::new("Rscript").arg("--vanilla").arg(script(false)));
     let ry = peak(
         Command::new(binary)
             .args(["run", "--runtime", "ry"])
@@ -359,4 +355,115 @@ fn wait_with_peak(child: Child) -> (i32, i64) {
         -1
     };
     (exit, usage.ru_maxrss)
+}
+
+/// Loop bodies whose tier-0 instruction count per iteration must stay within a ratio of GNU R's,
+/// each as `(name, start, body, ratio)`: `x` starts as `start`, and `body` grows it by one
+/// element. A subscript that calls a function, such as `length(x) + 1L`, must stay in bytecode,
+/// because the tree walker's complex assignment costs more than five times GNU R's.
+const TIER0_INSTRUCTION_CASES: [(&str, &str, &str, f64); 2] = [
+    ("append_length", "numeric(0)", "x[length(x) + 1L] <- k", 1.5),
+    (
+        "append_length_list",
+        "list()",
+        "x[[length(x) + 1L]] <- k",
+        1.5,
+    ),
+];
+
+#[test]
+#[ignore = "needs a release build with libR beside it and valgrind; run in release with --ignored"]
+fn tier0_computed_subscript_stores_stay_near_gnu_r() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_ry"));
+    if !binary.with_file_name("libR.so").exists() {
+        eprintln!("skipped: ry's runtime library is not built beside the binary");
+        return;
+    }
+    let present = |program: &str| {
+        Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    };
+    if !present("Rscript") || !present("valgrind") {
+        eprintln!("skipped: this test needs GNU R and valgrind");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut over = Vec::new();
+    for (name, start, body, ratio) in TIER0_INSTRUCTION_CASES {
+        // The difference between two loop lengths cancels start-up and the loop's warm-up.
+        let per_iteration = |command: &dyn Fn(&Path) -> Command| {
+            let [short, long] = [20_000, 40_000].map(|count| {
+                let script = directory.path().join(format!("{name}_{count}.R"));
+                fs::write(
+                    &script,
+                    format!(
+                        "f <- function(n) {{ x <- {start}; for (k in seq_len(n)) {body}; length(x) }}\n\
+                         invisible(f(10L)); invisible(f(10L)); invisible(f({count}L))\n"
+                    ),
+                )
+                .expect("write the script");
+                callgrind_instructions(&mut command(&script))
+            });
+            long.saturating_sub(short) / 20_000
+        };
+        let gnu_r = per_iteration(&|script| {
+            let mut command = Command::new("Rscript");
+            command.arg("--vanilla").arg(script);
+            command
+        });
+        let ry = per_iteration(&|script| {
+            let mut command = Command::new(binary);
+            command
+                .args(["run", "--runtime", "ry"])
+                .arg(script)
+                .env("RY_JIT", "off");
+            command
+        });
+        let measured = ry as f64 / gnu_r as f64;
+        eprintln!(
+            "{name}: {ry} instructions per iteration on tier 0, {gnu_r} on GNU R ({measured:.2}x)"
+        );
+        if measured > ratio {
+            over.push(format!("{name} at {measured:.2}x, over {ratio}x"));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "tier 0 fell behind GNU R's instruction count: {}",
+        over.join(", ")
+    );
+}
+
+/// The instructions callgrind counts for a command and every process it starts, since `Rscript`
+/// runs R in a child.
+fn callgrind_instructions(command: &mut Command) -> u64 {
+    let program = command.get_program().to_owned();
+    let arguments: Vec<_> = command.get_args().map(ToOwned::to_owned).collect();
+    let mut valgrind = Command::new("valgrind");
+    valgrind
+        .args([
+            "--tool=callgrind",
+            "--trace-children=yes",
+            "--callgrind-out-file=/dev/null",
+        ])
+        .arg(program)
+        .args(arguments)
+        .envs(
+            command
+                .get_envs()
+                .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned()))),
+        )
+        .stdout(Stdio::null());
+    let output = valgrind.output().expect("run valgrind");
+    assert!(
+        output.status.success(),
+        "the script failed under valgrind: {command:?}"
+    );
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter_map(|line| line.split("Collected : ").nth(1))
+        .filter_map(|count| count.trim().parse::<u64>().ok())
+        .sum()
 }
