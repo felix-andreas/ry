@@ -2399,17 +2399,21 @@ impl<'a> Builder<'a> {
             }
             // A site that gave up keeps only its ordinary code.
             Op::Unfused => Action::FallThrough,
-            Op::Fused => {
+            // A pass that has not computed its expression yet (its result instruction has never
+            // run) has no type to speculate on, so the compiled code runs the ordinary code
+            // alone. Falling through keeps the types the ordinary code knows, such as a typed
+            // closure's declared formals at its first call.
+            Op::Fused => 'fused: {
                 let program = self.constant(operand(1));
                 if program == values::nil() {
-                    return Ok(Action::FallThrough);
+                    break 'fused Action::FallThrough;
                 }
                 // The fused pass records its result's type at the instruction whose value it
                 // computes, so the jump to its target speculates on that type.
-                let ty = match bytecode::fused_result_site(program).map(|site| self.feedback_at(site))
-                {
-                    None | Some(Ty::Bottom) => Ty::Boxed,
-                    Some(ty) => ty,
+                let ty = match bytecode::fused_result_site(program) {
+                    None => Ty::Boxed,
+                    Some(site) if self.never_ran(site) => break 'fused Action::FallThrough,
+                    Some(site) => self.feedback_at(site),
                 };
                 let reads = self.slice(bytecode::fused_operand_registers(program));
                 // The pass reads variables from the frame and may force an argument's promise,
