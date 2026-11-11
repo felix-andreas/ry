@@ -276,9 +276,6 @@ pub struct Hooks {
     /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
     /// host has no compact sequences.
     pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
-    /// The first element and the increment of a compact sequence, or `None` for any other
-    /// value, so that a `for` loop steps through `1:n` without expanding it.
-    pub compact_sequence_steps: unsafe fn(Sexp) -> Option<(f64, f64)>,
     /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
@@ -661,7 +658,6 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
-        compact_sequence_steps: |_| None,
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),

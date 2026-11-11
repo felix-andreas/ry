@@ -1057,7 +1057,7 @@ pub unsafe extern "C" fn jit_loop_sequence(
         let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
             Some(value) => {
-                let steps = (interp::interp().hooks.compact_sequence_steps)(value);
+                let steps = values::compact_sequence(value).map(|(_, first, step)| (first, step));
                 let (first, step) = steps.unwrap_or((0.0, 0.0));
                 let sequence = match steps {
                     Some(_) => value,

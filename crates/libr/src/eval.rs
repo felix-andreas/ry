@@ -90,7 +90,6 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
                 crate::altrep::compact_realseq(length, first, increment)?
             }))
         },
-        compact_sequence_steps: |object| unsafe { crate::altrep::compact_sequence_steps(object) },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         altrep_int_elt: |object, index| unsafe {
             Ok(crate::altrep::int_elt(object, index as crate::R_xlen_t)?)

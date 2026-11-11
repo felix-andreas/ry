@@ -1494,12 +1494,6 @@ unsafe fn new_sequence(
     Ok(sequence)
 }
 
-/// The first element and the increment of a compact sequence, expanded or not, or `None` for
-/// any other value.
-pub unsafe fn compact_sequence_steps(object: Sexp) -> Option<(f64, f64)> {
-    let (_, first, increment) = interp::values::compact_sequence(object)?;
-    Some((first, increment))
-}
 
 unsafe fn sequence_info(object: Sexp) -> (R_xlen_t, f64, f64) {
     let info = object.car().slice::<f64>();
