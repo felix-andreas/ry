@@ -2749,6 +2749,20 @@ unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
         && values::get_attr(vector, symbols().dimnames) == nil()
 }
 
+/// `vector`, which has no attributes, one element longer, the new element unset: `vector`
+/// itself when `reuse` says nothing else sees it and it has room, and otherwise a copy with
+/// room to grow, which the caller binds.
+pub(crate) unsafe fn append_room(vector: Sexp, reuse: bool) -> R<Sexp> {
+    let count = length(vector);
+    if reuse && grows_in_place(vector, count + 1) {
+        crate::heap().resize_vector(vector, count as isize + 1)?;
+        return Ok(vector);
+    }
+    let result = alloc_with_room(vector.kind(), count + 1)?;
+    copy_prefix(values::materialize(vector)?, result, count)?;
+    Ok(result)
+}
+
 /// A resizable vector of `length` elements with room to grow by GNU R's factor of 1.05.
 unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
     let capacity = length + length / 20;

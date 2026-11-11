@@ -20,7 +20,7 @@ use {
 };
 
 /// The zero-based position of the element `x[i]` or `x[[i]]` (`double`) reads, for tier 0's
-/// handler of a call to the base primitive: `x` is a double, integer or logical vector (or for
+/// handler of a call to the base primitive: `x` is a double, integer, logical or character vector (or for
 /// `[[` a list) that is not an object, an array or ALTREP, and has no attributes for `[`, and
 /// `i` is a plain numeric scalar within bounds or, for `[[`, an existing ASCII name. `None` for
 /// anything else, so the builtin runs. The subscript is checked before the subject's flags
@@ -36,7 +36,7 @@ pub(crate) unsafe fn element_position(
     let kind = subject.kind();
     if !matches!(
         kind,
-        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String | SexpType::List
     ) || (kind == SexpType::List && !double)
     {
         return None;
@@ -60,8 +60,8 @@ pub(crate) unsafe fn element_position(
 }
 
 /// The element at `position` of a subject [`element_position`] took: a list's element itself,
-/// or a number as a fresh scalar from the young generation, `None` when that allocation needs
-/// a collection.
+/// or a number or string as a fresh scalar from the young generation, `None` when that
+/// allocation needs a collection.
 #[inline(always)]
 pub(crate) unsafe fn element_value(
     heap: &mut Heap,
@@ -75,6 +75,13 @@ pub(crate) unsafe fn element_value(
         SexpType::Real => {
             let bits = (*data.cast::<f64>().add(position)).to_bits();
             heap.try_alloc_scalar(kind, [bits, 0])
+        }
+        SexpType::String => {
+            let element = *data.cast::<Sexp>().add(position);
+            let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
+            // The store `Heap::set_element` would count into a fresh vector.
+            element.increment_refcount();
+            Some(scalar)
         }
         _ => {
             let bits = *data.cast::<i32>().add(position) as u32 as u64;
