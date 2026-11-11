@@ -516,8 +516,13 @@ mod imp {
         }
     }
 
-    /// An `iconv(3)` conversion descriptor, closed on drop.
-    pub struct Iconv(IconvDescriptor);
+    /// An `iconv(3)` conversion descriptor, closed on drop. `identity` marks UTF-8 to UTF-8,
+    /// which copies the input's strictly valid UTF-8 prefix itself instead of letting glibc
+    /// decode and re-encode it at about 30 instructions a byte.
+    pub struct Iconv {
+        descriptor: IconvDescriptor,
+        pub(super) identity: bool,
+    }
 
     type IconvDescriptor = *mut c_void;
 
@@ -543,16 +548,56 @@ mod imp {
             // SAFETY: both names are valid NUL-terminated strings.
             let descriptor = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
             if descriptor as isize == -1 {
-                None
-            } else {
-                Some(Iconv(descriptor))
+                return None;
             }
+            let utf8 = |name: &CString| {
+                let name = name.as_bytes();
+                name.eq_ignore_ascii_case(b"UTF-8") || name.eq_ignore_ascii_case(b"UTF8")
+            };
+            Some(Iconv {
+                descriptor,
+                identity: utf8(&from) && utf8(&to),
+            })
         }
 
         /// Converts from the start of `input` into `output`, advancing `input` past what was
         /// used. Returns how many bytes were written, and either how many characters were
         /// converted irreversibly (as `iconv(3)` counts them) or why it stopped early.
         pub fn convert(
+            &mut self,
+            input: &mut &[u8],
+            output: &mut [u8],
+        ) -> (usize, Result<usize, IconvStop>) {
+            if !self.identity {
+                return self.convert_with_iconv(input, output);
+            }
+            // UTF-8 is stateless, so glibc continuing after the copied prefix answers exactly
+            // as one call over the whole input would. glibc is the one to judge what follows the
+            // prefix, because it accepts more than strict UTF-8 (code points past U+10FFFF and
+            // five-byte forms) and reports an invalid sequence cut off by the end as incomplete.
+            let valid = match std::str::from_utf8(input) {
+                Ok(_) => input.len(),
+                Err(error) => error.valid_up_to(),
+            };
+            let mut end = valid.min(output.len());
+            if end < valid {
+                while end > 0 && input[end] & 0xC0 == 0x80 {
+                    end -= 1;
+                }
+            }
+            output[..end].copy_from_slice(&input[..end]);
+            *input = &input[end..];
+            if input.is_empty() {
+                return (end, Ok(0));
+            }
+            if end < valid {
+                return (end, Err(IconvStop::OutputFull));
+            }
+            let (written, outcome) = self.convert_with_iconv(input, &mut output[end..]);
+            (end + written, outcome)
+        }
+
+        fn convert_with_iconv(
             &mut self,
             input: &mut &[u8],
             output: &mut [u8],
@@ -565,7 +610,7 @@ mod imp {
             // the call; iconv only reads the input.
             let status = unsafe {
                 iconv(
-                    self.0,
+                    self.descriptor,
                     &mut input_pointer,
                     &mut input_left,
                     &mut output_pointer,
@@ -595,7 +640,7 @@ mod imp {
             // length describe `output`.
             let status = unsafe {
                 iconv(
-                    self.0,
+                    self.descriptor,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                     &mut output_pointer,
@@ -615,7 +660,7 @@ mod imp {
             // SAFETY: a null input and output reset the descriptor's shift state.
             unsafe {
                 iconv(
-                    self.0,
+                    self.descriptor,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
@@ -629,7 +674,7 @@ mod imp {
         fn drop(&mut self) {
             // SAFETY: the descriptor came from a successful iconv_open and is closed once.
             unsafe {
-                iconv_close(self.0);
+                iconv_close(self.descriptor);
             }
         }
     }
@@ -1515,5 +1560,70 @@ mod tests {
         );
         assert_eq!(rest, b"b");
         assert!(PortableIconv::open("UTF-8", "no-such-encoding").is_none());
+    }
+
+    /// UTF-8 to UTF-8 copies the strictly valid prefix itself, so it must answer exactly as
+    /// glibc's own conversion: the same stop, input used, bytes written and output, including on
+    /// the forms glibc accepts beyond strict UTF-8 and on a full output buffer.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn utf8_identity_matches_glibc() {
+        use {
+            super::imp::Iconv,
+            syntax::testing::{SplitMix64, for_each_seed},
+        };
+        let pieces: [&[u8]; 28] = [
+            b"a",
+            b"xyz\n",
+            "\u{e9}".as_bytes(),
+            "\u{20ac}".as_bytes(),
+            "\u{1d11e}".as_bytes(),
+            "\u{fffe}".as_bytes(),
+            "\u{feff}".as_bytes(),
+            b"\0",
+            b"\x80",
+            b"\xc0\x80",
+            b"\xc1\xbf",
+            b"\xc2",
+            b"\xe0",
+            b"\xe0\x80",
+            b"\xe0\xa0",
+            b"\xed\xa0\x80",
+            b"\xed\x9f\xbf",
+            b"\xf0",
+            b"\xf0\x80",
+            b"\xf0\x90",
+            b"\xf0\x90\x80",
+            b"\xf4\x90\x80\x80",
+            b"\xf4\x8f\xbf\xbf",
+            b"\xf5\x80\x80\x80",
+            b"\xf8\x88\x80\x80\x80",
+            b"\xfe",
+            b"\xff",
+            b"\xe2\x82",
+        ];
+        let mut fast = Iconv::open("UTF-8", "utf8").expect("glibc converts UTF-8");
+        let mut glibc = Iconv::open("UTF-8", "UTF-8").expect("glibc converts UTF-8");
+        glibc.identity = false;
+        for_each_seed(20_000, |seed| {
+            let mut rng = SplitMix64(seed);
+            let mut input = Vec::new();
+            for _ in 0..rng.below(9) {
+                input.extend_from_slice(pieces[rng.below(pieces.len())]);
+            }
+            let capacity = rng.below(input.len() + 4);
+            let mut run = |converter: &mut Iconv| {
+                let mut rest = &input[..];
+                let mut output = vec![0u8; capacity];
+                let (written, outcome) = converter.convert(&mut rest, &mut output);
+                output.truncate(written);
+                (input.len() - rest.len(), output, outcome)
+            };
+            assert_eq!(
+                run(&mut fast),
+                run(&mut glibc),
+                "input {input:02x?}, capacity {capacity}"
+            );
+        });
     }
 }
