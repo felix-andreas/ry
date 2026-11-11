@@ -866,7 +866,11 @@ pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
         return Err(error("wrong type for argument"));
     }
     if length(new_values) != length(names) {
-        return Err(error("wrong length for argument"));
+        return Err(error(if r_at_least(4, 4) {
+            "'names' and 'val' are of different lengths"
+        } else {
+            "wrong length for argument"
+        }));
     }
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;

@@ -29,9 +29,9 @@ run ry migrate data-table --write analysis.R
 expect exit 0
 expect stdout "applied 5 rewrites in 1 file"
 expect file analysis.R "sales <- DataFrame.read_csv(\"sales.csv\")"
-expect file analysis.R "big <- sales |> DataFrame.filter(col(\"units\") > 2L, col(\"region\") != \"asia\")"
-expect file analysis.R "totals <- sales |> DataFrame.group_by(\"region\") |> GroupBy.agg(units = col(\"units\") |> Expr.sum(), n = Expr.len())"
-expect file analysis.R "sales <- sales |> DataFrame.with_columns(revenue = col(\"units\") * col(\"price\"))"
+expect file analysis.R "big <- sales |> DataFrame.filter(Expr.col(\"units\") > 2L, Expr.col(\"region\") != \"asia\")"
+expect file analysis.R "totals <- sales |> DataFrame.group_by(\"region\") |> GroupBy.agg(units = Expr.col(\"units\") |> Expr.sum(), n = Expr.len())"
+expect file analysis.R "sales <- sales |> DataFrame.with_columns(revenue = Expr.col(\"units\") * Expr.col(\"price\"))"
 expect file analysis.R "sales <- sales |> DataFrame.sort(\"region\", \"units\", descending = c(FALSE, TRUE))"
 expect file analysis.R "high <- scores[scores > 2]"
 

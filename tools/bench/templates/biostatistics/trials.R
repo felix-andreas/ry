@@ -26,8 +26,8 @@ enrol_@ID@ <- function(patients: integer = @PATIENTS@L, start: Date = as.Date("2
 visit_schedule_@ID@ <- function(enrolment: Enrolment@ID@, visits: integer = @VISITS@L, interval_days: integer = 28L) -> Schedule@ID@ {
 #@ typed
   schedule <- DataFrame.join(enrolment, DataFrame(visit = seq_len(visits)), how = "cross")
-  schedule <- DataFrame.with_columns(schedule, due = col("enrolled") + (col("visit") - 1L) * interval_days)
-  schedule <- DataFrame.with_columns(schedule, study_day = col("due") - col("enrolled") + 1L)
+  schedule <- DataFrame.with_columns(schedule, due = Expr.col("enrolled") + (Expr.col("visit") - 1L) * interval_days)
+  schedule <- DataFrame.with_columns(schedule, study_day = Expr.col("due") - Expr.col("enrolled") + 1L)
   schedule
 #@ untyped
   schedule <- enrolment[, .(visit = seq_len(visits)), by = .(patient, arm, enrolled)]
