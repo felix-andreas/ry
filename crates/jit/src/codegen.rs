@@ -322,8 +322,14 @@ impl<'p> Translator<'p> {
             let words = (8 * runtime::LOOP_WORDS * index) as i32;
             let loop_index = self.builder.ins().load(I64, flags(), self.loops, words);
             let count = self.builder.ins().load(I64, flags(), self.loops, words + 8);
-            let first = self.builder.ins().load(F64, flags(), self.loops, words + 16);
-            let step = self.builder.ins().load(F64, flags(), self.loops, words + 24);
+            let first = self
+                .builder
+                .ins()
+                .load(F64, flags(), self.loops, words + 16);
+            let step = self
+                .builder
+                .ins()
+                .load(F64, flags(), self.loops, words + 24);
             self.builder.def_var(self.loop_indexes[index], loop_index);
             self.builder.def_var(self.loop_counts[index], count);
             self.builder.def_var(self.loop_firsts[index], first);
@@ -632,6 +638,10 @@ impl<'p> Translator<'p> {
                 objects,
                 dst,
             } => self.step(position, &before, effect, objects, dst)?,
+            Action::Fused { dst, ty, reads } => {
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                self.fused(position, &before, (dst, ty), reads, target)?;
+            }
             Action::Branch => {
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let label = self.edge(position, target)?;
@@ -884,9 +894,16 @@ impl<'p> Translator<'p> {
                                 )
                                 .ok_or(Refusal("a helper without a result"))?;
                             let words = (8 * runtime::LOOP_WORDS * index) as i32;
-                            let length = self.builder.ins().load(I64, flags(), self.loops, words + 8);
-                            let first = self.builder.ins().load(F64, flags(), self.loops, words + 16);
-                            let step = self.builder.ins().load(F64, flags(), self.loops, words + 24);
+                            let length =
+                                self.builder.ins().load(I64, flags(), self.loops, words + 8);
+                            let first =
+                                self.builder
+                                    .ins()
+                                    .load(F64, flags(), self.loops, words + 16);
+                            let step =
+                                self.builder
+                                    .ins()
+                                    .load(F64, flags(), self.loops, words + 24);
                             let fits = self.check(prepared, expected);
                             let compact = self.compact_sequence_fits(prepared, expected, step);
                             let fits = self.builder.ins().bor(fits, compact);
@@ -894,7 +911,9 @@ impl<'p> Translator<'p> {
                                 self.deopt(pc, before.id, None, position, reason::SPECULATION);
                             self.guard(fits, failed);
                             self.store_register(src, prepared);
-                            self.builder.ins().jump(join, &[prepared, length, first, step]);
+                            self.builder
+                                .ins()
+                                .jump(join, &[prepared, length, first, step]);
                             self.builder.switch_to_block(join);
                             let params = self.builder.block_params(join).to_vec();
                             self.builder.def_var(self.loop_firsts[index], params[2]);
@@ -1166,6 +1185,94 @@ impl<'p> Translator<'p> {
         Ok(())
     }
 
+    /// Runs a fused pass in tier 0. When it computes the expression, its value in `dst` is
+    /// checked to have type `ty` and control jumps to `target`; when it declines, control goes
+    /// on to the ordinary code. Either way the variables are written back before the pass and
+    /// reloaded after it, since it reads them from the frame and may force a promise.
+    unsafe fn fused(
+        &mut self,
+        position: usize,
+        before: &StateRef<'p>,
+        (dst, ty): (usize, Ty),
+        reads: &[usize],
+        target: usize,
+    ) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        self.box_registers(reads.iter().copied(), before);
+        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        self.flush_all(before, failed);
+        let pc_value = iconst(&mut self.builder, pc);
+        let result = self
+            .call(
+                runtime::jit_fused as *const () as usize,
+                &[I64, I64],
+                Some(I32),
+                &[self.activation, pc_value],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        self.forget_slots();
+        let taken_state = self
+            .plan
+            .edges(position)
+            .iter()
+            .find(|(pc, _)| *pc == target)
+            .map(|&(_, state)| state)
+            .ok_or(Refusal("an edge the analysis did not see"))?;
+        let fused = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, outcome::FUSED as i64);
+        let taken = self.builder.create_block();
+        let declined = self.builder.create_block();
+        self.builder.ins().brif(fused, taken, &[], declined, &[]);
+
+        self.builder.switch_to_block(taken);
+        if !matches!(ty, Ty::Boxed | Ty::Bottom) {
+            let value = self.load_register(dst);
+            let fits = self.check(value, ty);
+            let mismatch = self.deopt(
+                target,
+                taken_state,
+                Some(dst),
+                position,
+                reason::SPECULATION,
+            );
+            self.guard(fits, mismatch);
+            if ty.is_unboxed() {
+                let unboxed = self.unbox(value, ty);
+                self.def_register(dst, ty, unboxed);
+            }
+        }
+        let label = self.edge(position, target)?;
+        self.builder.ins().jump(label, &[]);
+
+        self.builder.switch_to_block(declined);
+        // A pass that computed the expression and then found the code invalid resumes tier 0 at
+        // the target, where the expression's value already is.
+        let stale =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, result, outcome::FUSED_INVALIDATED as i64);
+        let resume = self.deopt(
+            target,
+            taken_state,
+            Some(dst),
+            position,
+            reason::SPECULATION,
+        );
+        let ordinary = self.builder.create_block();
+        self.builder.ins().brif(stale, resume, &[], ordinary, &[]);
+        self.builder.switch_to_block(ordinary);
+        let after = self.after_with_boxed(position, None)?;
+        let next = self.next_pc(position)?;
+        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
+        let continued = self.builder.create_block();
+        self.branch_on_outcome(result, continued, failed, invalidated);
+        self.fill_edges()?;
+        self.builder.switch_to_block(continued);
+        Ok(())
+    }
+
     /// Calls a closure with arguments evaluated in compiled code. The callee may reach this
     /// frame, so the variables are written back before the call and forgotten after it.
     #[allow(clippy::too_many_arguments)]
@@ -1335,7 +1442,16 @@ impl<'p> Translator<'p> {
 
     /// Boxes the unboxed registers the instruction at `position` reads, so tier 0 finds them.
     unsafe fn box_reads(&mut self, position: usize, before: &StateRef<'p>) {
-        for register in analysis::reads(&self.plan.insts[position]) {
+        self.box_registers(analysis::reads(&self.plan.insts[position]), before);
+    }
+
+    /// Writes the unboxed values of `registers` to the window, for tier 0 to read.
+    unsafe fn box_registers(
+        &mut self,
+        registers: impl IntoIterator<Item = usize>,
+        before: &StateRef<'p>,
+    ) {
+        for register in registers {
             let ty = before
                 .registers
                 .get(register)
@@ -2700,7 +2816,10 @@ impl<'p> Translator<'p> {
         failed: Label,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        let block = self.builder.current_block().ok_or(Refusal("no current block"))?;
+        let block = self
+            .builder
+            .current_block()
+            .ok_or(Refusal("no current block"))?;
         self.builder.set_cold_block(block);
         self.flush_all(before, failed);
         self.box_reads(position, before);
@@ -2738,10 +2857,10 @@ impl<'p> Translator<'p> {
             self.subscript_position(before.registers[index], index, bound, false);
         // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
         let status = self.builder.use_var(self.statuses[slot]);
-        let local = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
+        let local =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
         let attempt = self.builder.ins().band(in_range, local);
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();

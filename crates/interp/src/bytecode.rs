@@ -642,6 +642,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         // never needs one of its own to return to.
         srcref: nil(),
         rebinding: None,
+        assigning: None,
         tail_updates: (Vec::new(), nil()),
         summary: nil(),
         // Promise code runs on the slots of the frame that made it, so it shares that frame's
@@ -1123,6 +1124,10 @@ struct Compiler {
     /// The call `x <- f(x, ...)` assigns to `x`, while the compiler compiles that call, so a
     /// call of a closure becomes [`Op::CallRebinding`].
     rebinding: Option<(Sexp, Sexp)>,
+    /// The call `x <- call` assigns to `x`, with the symbol's constant and the assignment's
+    /// lookup cache slot, while the compiler compiles that call, so a fused pass may compute
+    /// the result into the value `x` holds.
+    assigning: Option<Sexp>,
     /// The body's calls in tail position that are `f(p, ...)` for a library builtin that
     /// updates its first argument in place, `p` the first parameter, with `p`: each becomes
     /// [`Op::CallTailUpdate`] (see [`tail_updates`]).
@@ -1246,11 +1251,13 @@ mod fusion {
     pub const DECLINES: usize = 0;
     pub const NODES: usize = 1;
     pub const LEAVES: usize = 2;
-    /// -1 for none, else 0 for `sum`, 1 for `any` and 2 for `all`.
+    /// -1 for none, [`ASSIGNED`] for none with the result assigned by the `SetVar` the pass
+    /// jumps to, else 0 for `sum`, 1 for `any` and 2 for `all`.
     pub const REDUCTION: usize = 3;
     pub const REDUCTION_SITE: usize = 4;
     pub const GUARDS: usize = 5;
     pub const HEADER: usize = 6;
+    pub const ASSIGNED: i32 = -2;
     pub const GUARD: usize = 4;
     pub const LEAF: usize = 4;
     pub const NODE: usize = 5;
@@ -1286,6 +1293,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
+        assigning: None,
         bound: None,
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
@@ -1752,7 +1760,7 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         {
             return true;
         }
-        if rebinds_first_argument(expression) {
+        if rebinds_first_argument(expression) || assigns_fusible(expression) {
             return true;
         }
         if matches!(
@@ -1770,6 +1778,27 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         cell = cell.cdr();
     }
     false
+}
+
+/// Whether `expression` is `x <- call` for an element-wise operator or math function, whose
+/// fused pass may compute its result into the value `x` holds (`kernels::fused`), so an
+/// earlier argument of an enclosing call must not keep `x` in an uncounted register.
+unsafe fn assigns_fusible(expression: Sexp) -> bool {
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol || !matches!(&*symbol_name(head), "<-" | "=") {
+        return false;
+    }
+    let value = expression.cdr().cdr().car();
+    if expression.cdr().car().kind() != SexpType::Symbol
+        || value.kind() != SexpType::Language
+        || value.car().kind() != SexpType::Symbol
+    {
+        return false;
+    }
+    let operator = symbol_name(value.car());
+    ARITHS.iter().any(|(_, name)| *name == &*operator)
+        || math_index(&operator).is_some()
+        || matches!(&*operator, "&" | "|" | "!")
 }
 
 /// Whether `expression` is `x <- f(x, ...)`, whose call may update the value of `x` in place
@@ -2370,6 +2399,7 @@ impl Compiler {
     /// name their base functions, since a redefined operator might not evaluate it at all; when
     /// one does not, the whole call goes to the evaluator instead.
     unsafe fn fused_call(&mut self, call: Sexp, dst: u32, plan: &FusionPlan) -> R<()> {
+        let assigned = self.assigning == Some(call);
         let ahead_end = plan
             .steps
             .iter()
@@ -2431,7 +2461,7 @@ impl Compiler {
         if ordinary.next().is_some() {
             sites.clear();
         }
-        let program = match self.fusion_program(plan, &sites, &ahead) {
+        let program = match self.fusion_program(plan, &sites, &ahead, assigned) {
             Some(words) => values::integer_vector(&words)?,
             None => {
                 self.code[program_position - 2] = op_word(Op::Unfused);
@@ -2622,6 +2652,7 @@ impl Compiler {
         plan: &FusionPlan,
         sites: &[u32],
         ahead: &[(usize, u32)],
+        assigned: bool,
     ) -> Option<Vec<i32>> {
         if sites.len() != plan.steps.len() {
             return None;
@@ -2680,6 +2711,7 @@ impl Compiler {
             }
         }
         let reduction = match plan.reduction {
+            None if assigned => fusion::ASSIGNED,
             None => -1,
             Some(Reduction::Sum) => 0,
             Some(Reduction::Any) => 1,
@@ -3661,8 +3693,12 @@ impl Compiler {
                 if rebinds_first_argument(call) {
                     self.rebinding = Some((args[1].1, args[0].1));
                 }
+                if assigns_fusible(call) {
+                    self.assigning = Some(args[1].1);
+                }
                 let compiled = self.expression(args[1].1, dst);
                 self.rebinding = None;
+                self.assigning = None;
                 compiled?;
                 let symbol = self.constant(args[0].1);
                 let slot = self.cache();
@@ -4681,7 +4717,7 @@ unsafe fn valid_fusion_program(
         || leaves > MAX_NODES
         || guards > MAX_NODES
         || words.len() != leaves_end + nodes * fusion::NODE
-        || !(-1..=2).contains(&words[fusion::REDUCTION])
+        || !(fusion::ASSIGNED..=2).contains(&words[fusion::REDUCTION])
         || count(fusion::REDUCTION_SITE).is_none_or(|site| site >= sites)
     {
         return false;
@@ -5330,6 +5366,70 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 /// instruction at `pc`.
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> (R<Sexp>, usize) {
+    let mut state = activation(machine);
+    let handlers = if SINGLE {
+        &STEP_HANDLERS
+    } else {
+        &RUN_HANDLERS
+    };
+    if !SINGLE {
+        release(&state);
+        if let Some(baseline) = baseline_code(state.constants) {
+            run_baseline(&mut state, baseline, pc);
+            return (state.exit, STOP);
+        }
+    }
+    (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+    (state.exit, state.stepped)
+}
+
+/// Runs the [`Op::Fused`] instruction at `pc` for optimized code, which goes on at the
+/// instruction's target when this returns `true` and runs the ordinary code otherwise.
+pub unsafe fn fused_step(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+    let mut state = activation(machine);
+    let instruction = Instruction {
+        code: state.code,
+        at: pc,
+        registers: state.registers,
+    };
+    Ok(matches!(op_fused(&mut state, instruction)?, Flow::Goto(_)))
+}
+
+/// The instruction whose type feedback describes the value of the fused program `program`:
+/// its reduction's call, or else its root operator.
+pub unsafe fn fused_result_site(program: Sexp) -> Option<usize> {
+    if program.kind() != SexpType::Integer {
+        return None;
+    }
+    let words = values::ints(program);
+    if words.get(fusion::REDUCTION).copied()? >= 0 {
+        return usize::try_from(*words.get(fusion::REDUCTION_SITE)?).ok();
+    }
+    let root = words.len().checked_sub(fusion::NODE)?;
+    usize::try_from(*words.get(root + 4)?).ok()
+}
+
+/// The registers the fused program `program` reads: those of the call operands its
+/// expression evaluates ahead of the pass.
+pub unsafe fn fused_operand_registers(program: Sexp) -> SmallVec<[usize; 4]> {
+    if program.kind() != SexpType::Integer {
+        return SmallVec::new();
+    }
+    let words = values::ints(program);
+    let count = |index: usize| words.get(index).map_or(0, |&word| word as usize);
+    let start = fusion::HEADER + count(fusion::GUARDS) * fusion::GUARD;
+    let end = start + count(fusion::LEAVES) * fusion::LEAF;
+    words
+        .get(start..end)
+        .unwrap_or_default()
+        .chunks_exact(fusion::LEAF)
+        .filter(|leaf| leaf[0] == 2)
+        .map(|leaf| leaf[1] as usize)
+        .collect()
+}
+
+#[inline(always)]
+unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>) -> Activation<'m, 'a> {
     let constants = machine.code.cdr();
     let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
         values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
@@ -5344,7 +5444,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     } else {
         values::ints(slots.element(0)).as_ptr()
     };
-    let mut state = Activation {
+    Activation {
         constants,
         cache: LookupCache::of(machine.code),
         feedback,
@@ -5358,21 +5458,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         exit: Ok(nil()),
         stepped: STOP,
         machine,
-    };
-    let handlers = if SINGLE {
-        &STEP_HANDLERS
-    } else {
-        &RUN_HANDLERS
-    };
-    if !SINGLE {
-        release(&state);
-        if let Some(baseline) = baseline_code(constants) {
-            run_baseline(&mut state, baseline, pc);
-            return (state.exit, STOP);
-        }
     }
-    (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
-    (state.exit, state.stepped)
 }
 
 /// The machine code the baseline tier compiled for these constants' code, if any.
@@ -8774,7 +8860,22 @@ unsafe fn fused_pass(
         2 => Some(Reduction::All),
         _ => None,
     };
-    let Some(fused) = kernels::fused(&nodes, &leaves[..leaf_count], reduction)? else {
+    // The assignment's `SetVar` names the symbol and its lookup cache; a code image is only
+    // checked to make the jump target an instruction, so the pass checks that it is this one.
+    let assignment = instruction.code.add(instruction.operand(2));
+    let into = if words[fusion::REDUCTION] == fusion::ASSIGNED
+        && *assignment == op_word(Op::SetVar) as i32
+        && *assignment.add(2) as usize == instruction.operand(0)
+    {
+        reusable_target(
+            state,
+            state.constants.element(*assignment.add(1) as usize),
+            *assignment.add(3) as usize,
+        )
+    } else {
+        None
+    };
+    let Some(fused) = kernels::fused(&nodes, &leaves[..leaf_count], reduction, into)? else {
         return Ok(None);
     };
     if !state.feedback.is_null() {
@@ -8802,6 +8903,26 @@ unsafe fn fused_pass(
         }
     }
     Ok(Some(fused.value))
+}
+
+/// The value `symbol` holds in the activation's own frame, when the assignment the fused
+/// pass computes may overwrite it: the binding is a plain one holding the only reference, and
+/// no register of the frame's expressions holds it uncounted (`slot_owns`,
+/// `eval::reuse_permitted`). The compiler keeps such registers dead in the innermost compiled
+/// frame, as `may_modify_in_place` counts `x <- call` among the in-place updates.
+unsafe fn reusable_target(state: &Activation<'_, '_>, symbol: Sexp, cache: usize) -> Option<Sexp> {
+    if state.in_slots() {
+        let value = *state.slot(cache)?;
+        return slot_owns(state, value).then_some(value);
+    }
+    let env = *state.header;
+    let hint = &mut *state.cache.hints.add(cache);
+    let cell = crate::heap().frame_cell_hinted(env, symbol, hint)?;
+    let value = cell.cdr();
+    (!cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        && value.refcount() == 1
+        && eval::reuse_permitted(env, value))
+    .then_some(value)
 }
 
 #[inline(always)]
