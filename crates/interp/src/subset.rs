@@ -2755,8 +2755,11 @@ unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
 /// list's elements move into the copy (see [`grow`]).
 pub(crate) unsafe fn append_room(vector: Sexp, reuse: bool) -> R<Sexp> {
     let count = length(vector);
-    if reuse && grows_in_place(vector, count + 1) {
-        crate::heap().resize_vector(vector, count as isize + 1)?;
+    let heap = crate::heap();
+    // `reuse` settles sharing and the caller settled attributes, so of `grows_in_place`'s tests
+    // only the room is left: an ALTREP vector is never resizable.
+    if reuse && heap.is_resizable(vector) && vector.capacity() > count as isize {
+        heap.resize_vector(vector, count as isize + 1)?;
         return Ok(vector);
     }
     let result = alloc_with_room(vector.kind(), count + 1)?;
@@ -2765,7 +2768,7 @@ pub(crate) unsafe fn append_room(vector: Sexp, reuse: bool) -> R<Sexp> {
         && !vector.is_altrep()
         && !values::maybe_shared(vector)
     {
-        crate::heap().move_elements(result, vector);
+        heap.move_elements(result, vector);
     } else {
         copy_prefix(values::materialize(vector)?, result, count)?;
     }
