@@ -1,56 +1,72 @@
-# Builds the flake's package and dev shell for x86_64-linux and pushes every store path the build
-# produces to the public binary cache ry.cachix.org, so `nix profile install`, `nix build` and
-# `nix develop` on the flake download ry instead of compiling it. The paths filter mirrors the
-# package's source set in flake.nix, so a docs-only push does not rebuild. The cross-built release
-# packages (`ry-linux-x86_64` and the other two) are left out because nothing installs them through
-# nix.
+# Builds the flake's package and dev shell for x86_64-linux at a released commit and pushes every
+# store path the build produces to the public binary cache ry.cachix.org, so `nix profile install`
+# and `nix develop` on a release download ry instead of compiling it. Only releases are cached,
+# because the cache's 5 GB also holds the oracle's prebuilt trees (tools/cache.sh) and a build of
+# every main push would crowd them out. The cross-built release packages (`ry-linux-x86_64` and the
+# other two) are left out because nothing installs them through nix.
+#
+# Release and Nightly publish with the workflow's GITHUB_TOKEN, and GitHub starts no workflow for
+# an event that token causes, so their releases never fire `release`. This workflow follows those
+# two workflows' runs instead and builds only when the run's publish job succeeded (a Release run
+# started by hand with `publish` unticked publishes nothing). `release` covers a release a person
+# publishes, and a run started by hand builds the chosen ref.
 name: Cachix
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - flake.nix
-      - flake.lock
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - crates/**
-      - types/**
-      - patches/**
-      - tools/base-r/**
-      - editors/code/package.json
-      - .github/workflows/cachix.yml
+  workflow_run:
+    workflows: [Release, Nightly]
+    types: [completed]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
-
-# A newer push supersedes a running build, whose paths would be stale by the time it finished.
-concurrency:
-  group: cachix-${{ github.ref }}
-  cancel-in-progress: true
+  # Reads the triggering run's jobs to see whether it published.
+  actions: read
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: published
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != workflow_run ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" \
+            --jq '[.jobs[] | select(.name == "publish") | .conclusion][0]')
+          echo "publish job: $conclusion"
+          echo "published=$([ "$conclusion" = success ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        if: steps.published.outputs.published == 'true'
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       # The dependency build, the test run and base R need more disk than the runner has free.
       - name: free disk space
+        if: steps.published.outputs.published == 'true'
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: cachix/install-nix-action@v31
+        if: steps.published.outputs.published == 'true'
       # With an auth token the action pushes every path this job builds, through a post-build hook.
-      # The cache's 5 GB also holds the oracle's prebuilt trees (tools/cache.sh), so the filter
-      # keeps out crane's dependency build (`ry-deps-*`): it is the largest output and only a
-      # rebuild from source reads it, never an install.
+      # The filter keeps out crane's dependency build (`ry-deps-*`): it is the largest output and
+      # only a rebuild from source reads it, never an install.
       - uses: cachix/cachix-action@v17
+        if: steps.published.outputs.published == 'true'
         with:
           name: ry
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           pushFilter: "-ry-deps-"
       # `ry` is also `default` and pulls in `ry-unwrapped`, so this covers every native package.
       - name: package
+        if: steps.published.outputs.published == 'true'
         run: nix build --print-build-logs .#packages.x86_64-linux.ry
       - name: dev shell
+        if: steps.published.outputs.published == 'true'
         run: nix build --print-build-logs .#devShells.x86_64-linux.default
