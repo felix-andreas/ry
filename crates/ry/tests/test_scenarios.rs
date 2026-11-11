@@ -213,9 +213,13 @@ fn declined_typed_calls_keep_slot_frames() {
          \x20   :South => 0.1\n\
          \x20 }}\n\
          }}\n\
-         taxed <- function(order: Order) -> F64 order$net * tax_rate(order$region)\n\
+         alias Taxed = Record{{net: F64, tax: F64}}\n\
+         taxed <- function(order: Order) -> Taxed {{\n\
+         \x20 tax <- order$net * tax_rate(order$region)\n\
+         \x20 (net = order$net, tax = tax)\n\
+         }}\n\
          total: F64 <- 0\n\
-         for (i in List.range(1, {CALLS})) total <- total + taxed((net = 1.0, region = :North))\n\
+         for (i in List.range(1, {CALLS})) total <- total + taxed((net = 1.0, region = :North))$tax\n\
          print(total)\n"
     );
     let manifest = "[check]\ntyping = true\nstrict = true\n";
