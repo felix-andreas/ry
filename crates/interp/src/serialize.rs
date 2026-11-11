@@ -1138,35 +1138,64 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
         ),
         _ => (b'1', body),
     };
-    let mut output = Vec::with_capacity(expected);
     let corrupt = |failure: &dyn std::fmt::Display| {
         error(format!("lazy-load database is corrupt: {failure}"))
     };
-    match method {
-        b'1' => {
-            inflate_into(payload, &mut output, usize::MAX).map_err(|failure| corrupt(&failure))?
-        }
-        b'0' => output.extend_from_slice(payload),
+    let output = match method {
+        b'1' => inflate_record(payload, expected).map_err(|failure| corrupt(&failure))?,
+        b'0' => payload.to_vec(),
         // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
         // with `--data-compress=xz` use.
         b'Z' => {
             // The record states its decompressed size, and no LZMA2 dictionary needs to be
             // larger than the output it produces.
             let dictionary = expected.clamp(4096, u32::MAX as usize) as u32;
+            let mut output = Vec::with_capacity(expected);
             lzma_rust2::Lzma2Reader::new(payload, dictionary, None)
                 .read_to_end(&mut output)
                 .map_err(|failure| corrupt(&failure))?;
+            output
         }
         b'2' => {
+            let mut output = Vec::with_capacity(expected);
             bzip2::read::MultiBzDecoder::new(payload)
                 .read_to_end(&mut output)
                 .map_err(|failure| corrupt(&failure))?;
+            output
         }
-        _ => inflate_into(body, &mut output, usize::MAX).map_err(|failure| corrupt(&failure))?,
-    }
+        _ => inflate_record(body, expected).map_err(|failure| corrupt(&failure))?,
+    };
     if output.len() != expected {
         return Err(corrupt(&"its length does not match"));
     }
+    Ok(output)
+}
+
+/// A whole zlib stream that inflates to `expected` bytes, or fewer when it is corrupt. Whole
+/// records go through libdeflate, which inflates a buffer in one call at about twice the speed
+/// of a streaming inflater, and inflating records is half of what a lazy-load fetch costs.
+/// A stream longer than `expected` is an error, as it is for GNU R's `R_decompress1`.
+fn inflate_record(input: &[u8], expected: usize) -> Result<Vec<u8>, String> {
+    // Deflate expands a byte to at most 258 bytes in about a quarter of a byte, so a larger
+    // stated length is corrupt, and checking it first keeps a damaged header from allocating
+    // gigabytes.
+    if expected > input.len().saturating_mul(1032) {
+        return Err("its length does not match".to_owned());
+    }
+    thread_local! {
+        static INFLATER: std::cell::RefCell<libdeflater::Decompressor> =
+            std::cell::RefCell::new(libdeflater::Decompressor::new());
+    }
+    let mut output = vec![0; expected];
+    let written = INFLATER
+        .with_borrow_mut(|inflater| inflater.zlib_decompress(input, &mut output))
+        .map_err(|failure| match failure {
+            libdeflater::DecompressionError::BadData => "the stream is not valid zlib".to_owned(),
+            libdeflater::DecompressionError::InsufficientSpace => {
+                "its length does not match".to_owned()
+            }
+        })?;
+    output.truncate(written);
     Ok(output)
 }
 

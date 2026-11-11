@@ -9,6 +9,8 @@
 //! - tier 0 resumes a call at every pc it reaches with the result it gives alone, the way it
 //!   resumes after the optimizing tier deoptimizes;
 //! - reading a corrupted serialized stream fails with an R error, never a panic;
+//! - a corrupted lazy-load database record, or one whose header states the wrong length,
+//!   decompresses to exactly the stated length or fails with an R error, never a panic;
 //! - a compiled closure's code survives the code image's encoding, and a corrupted image or code
 //!   object fails with an error, never a panic.
 //!
@@ -27,8 +29,9 @@ use {
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
             check_code_image_round_trip, check_element_access_agreement,
             check_environment_agreement, check_fused_agreement, check_image_bodies_round_trip,
-            check_lowering_input, check_quickening_agreement, check_render_drawing,
-            check_resume_at_every_pc, check_unserialize_input, with_interpreter,
+            check_lazy_load_record, check_lowering_input, check_quickening_agreement,
+            check_render_drawing, check_resume_at_every_pc, check_unserialize_input,
+            with_interpreter,
         },
         values,
     },
@@ -82,6 +85,53 @@ fn fuzz_unserialize_never_panics() {
             }
         }
         check_unserialize_input(&bytes);
+    });
+}
+
+/// Records compressed the ways GNU R writes a lazy-load database (a bare zlib stream, and the
+/// method-tagged form of `compress = 2` and `3`), then mutated, header included.
+#[test]
+fn fuzz_lazy_load_records_never_panic() {
+    let records = with_interpreter(|| {
+        serialized_seeds()
+            .iter()
+            .flat_map(|stream| {
+                let zlib = interp::serialize::compress_record(stream, 1).expect("zlib record");
+                let mut tagged = zlib[..4].to_vec();
+                tagged.push(b'1');
+                tagged.extend_from_slice(&zlib[4..]);
+                [(zlib, 1), (tagged, 3)]
+            })
+            .collect::<Vec<_>>()
+    });
+    for (record, kind) in &records {
+        check_lazy_load_record(record, *kind);
+    }
+    for_each_seed(400, |seed| {
+        let mut rng = SplitMix64(seed);
+        let (record, kind) = &records[rng.below(records.len())];
+        let mut record = record.clone();
+        for _ in 0..1 + rng.below(3) {
+            let at = rng.below(record.len());
+            match rng.below(5) {
+                0 => record[at] ^= 1 << rng.below(8),
+                1 => record.truncate(at.max(4)),
+                2 if record.len() > 4 => {
+                    record.remove(at.max(4));
+                }
+                3 => {
+                    let stated = u32::from_be_bytes([record[0], record[1], record[2], record[3]]);
+                    let changed = match rng.below(3) {
+                        0 => stated.wrapping_add(1),
+                        1 => stated.wrapping_sub(1),
+                        _ => (rng.next_u64() % (2 * u64::from(stated) + 2)) as u32,
+                    };
+                    record[..4].copy_from_slice(&changed.to_be_bytes());
+                }
+                _ => record.insert(at.max(4), rng.next_u64() as u8),
+            }
+        }
+        check_lazy_load_record(&record, *kind);
     });
 }
 

@@ -76,6 +76,21 @@ pub fn check_unserialize_input(bytes: &[u8]) {
     });
 }
 
+/// Decompressing any bytes as a lazy-load record of compression `kind` must give exactly the
+/// length its header states or fail with an R error, never panic or read past the record.
+pub fn check_lazy_load_record(record: &[u8], kind: i32) {
+    with_interpreter(|| {
+        if let Ok(stream) = serialize::decompress_record(record, kind) {
+            let stated = u32::from_be_bytes([record[0], record[1], record[2], record[3]]);
+            assert_eq!(
+                stream.len(),
+                stated as usize,
+                "a record decompressed to another length"
+            );
+        }
+    });
+}
+
 /// Generates a program over `a` and `b` and checks that the tier-0 bytecode agrees with the AST
 /// evaluator on it: the program's value evaluated directly must equal its value as a closure body
 /// on each of the first three calls, the second and later of which run compiled bytecode. The
