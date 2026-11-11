@@ -138,7 +138,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use {
-    crate::format::format_g,
+    crate::{format::format_g, vector_math},
     rustc_hash::FxHashMap,
     std::{cell::RefCell, ffi::c_int, rc::Rc},
 };
@@ -2755,49 +2755,6 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         10260.932208618978205,
         45507.789335026729956,
     ];
-    const C: [f64; 9] = [
-        0.39894151208813466764,
-        8.8831497943883759412,
-        93.506656132177855979,
-        597.27027639480026226,
-        2494.5375852903726711,
-        6848.1904505362823326,
-        11602.651437647350124,
-        9842.7148383839780218,
-        1.0765576773720192317e-8,
-    ];
-    const D: [f64; 8] = [
-        22.266688044328115691,
-        235.38790178262499861,
-        1519.377599407554805,
-        6485.558298266760755,
-        18615.571640885098091,
-        34900.952721145977266,
-        38912.003286093271411,
-        19685.429676859990727,
-    ];
-    const P: [f64; 6] = [
-        0.21589853405795699,
-        0.1274011611602473639,
-        0.022235277870649807,
-        0.001421619193227893466,
-        2.9112874951168792e-5,
-        0.02307344176494017303,
-    ];
-    const Q: [f64; 5] = [
-        1.28426009614491121,
-        0.468238212480865118,
-        0.0659881378689285515,
-        0.00378239633202758244,
-        7.29751555083966205e-5,
-    ];
-    // From R 4.5 on, the tail formula runs on into the subnormal range, out to
-    // `qnorm(log(2^-1074), log.p = TRUE)`, before a probability is rounded to 0 or 1.
-    let denormal_edge = if crate::system::r_at_least(4, 5) {
-        38.4674
-    } else {
-        37.5193
-    };
     if x.is_nan() {
         return (x, x);
     }
@@ -2860,29 +2817,10 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
             }
         }
     } else if y <= M_SQRT_32 {
-        let mut xnum = C[8] * y;
-        let mut xden = y;
-        for i in 0..7 {
-            xnum = (xnum + C[i]) * y;
-            xden = (xden + D[i]) * y;
-        }
-        let temp = (xnum + C[7]) / (xden + D[7]);
-        tails_from(temp, y, &mut cumulative, &mut complementary);
+        tails_from(pnorm_middle_temp(y), y, &mut cumulative, &mut complementary);
         swap_tail(&mut cumulative, &mut complementary);
-    } else if (log && y < 1e170)
-        || (lower && -denormal_edge < x && x < 8.2924)
-        || (upper && -8.2924 < x && x < denormal_edge)
-    {
-        let xsq = 1.0 / (x * x);
-        let mut xnum = P[5] * xsq;
-        let mut xden = xsq;
-        for i in 0..4 {
-            xnum = (xnum + P[i]) * xsq;
-            xden = (xden + Q[i]) * xsq;
-        }
-        let mut temp = xsq * (xnum + P[4]) / (xden + Q[4]);
-        temp = (M_1_SQRT_2PI - temp) / y;
-        tails_from(temp, x, &mut cumulative, &mut complementary);
+    } else if pnorm_uses_tail_formula(x, tail, log) {
+        tails_from(pnorm_tail_temp(x, y), x, &mut cumulative, &mut complementary);
         swap_tail(&mut cumulative, &mut complementary);
     } else if x > 0.0 {
         cumulative = d1(log);
@@ -2892,6 +2830,153 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         complementary = d1(log);
     }
     (cumulative, complementary)
+}
+
+const PNORM_C: [f64; 9] = [
+    0.39894151208813466764,
+    8.8831497943883759412,
+    93.506656132177855979,
+    597.27027639480026226,
+    2494.5375852903726711,
+    6848.1904505362823326,
+    11602.651437647350124,
+    9842.7148383839780218,
+    1.0765576773720192317e-8,
+];
+const PNORM_D: [f64; 8] = [
+    22.266688044328115691,
+    235.38790178262499861,
+    1519.377599407554805,
+    6485.558298266760755,
+    18615.571640885098091,
+    34900.952721145977266,
+    38912.003286093271411,
+    19685.429676859990727,
+];
+const PNORM_P: [f64; 6] = [
+    0.21589853405795699,
+    0.1274011611602473639,
+    0.022235277870649807,
+    0.001421619193227893466,
+    2.9112874951168792e-5,
+    0.02307344176494017303,
+];
+const PNORM_Q: [f64; 5] = [
+    1.28426009614491121,
+    0.468238212480865118,
+    0.0659881378689285515,
+    0.00378239633202758244,
+    7.29751555083966205e-5,
+];
+
+/// The factor of `exp(-x^2/2)` in Cody's approximation for `0.674 < |x| <= sqrt(32)`.
+fn pnorm_middle_temp(y: f64) -> f64 {
+    let mut xnum = PNORM_C[8] * y;
+    let mut xden = y;
+    for i in 0..7 {
+        xnum = (xnum + PNORM_C[i]) * y;
+        xden = (xden + PNORM_D[i]) * y;
+    }
+    (xnum + PNORM_C[7]) / (xden + PNORM_D[7])
+}
+
+/// The factor of `exp(-x^2/2)` in Cody's asymptotic approximation for `|x| > sqrt(32)`.
+fn pnorm_tail_temp(x: f64, y: f64) -> f64 {
+    let xsq = 1.0 / (x * x);
+    let mut xnum = PNORM_P[5] * xsq;
+    let mut xden = xsq;
+    for i in 0..4 {
+        xnum = (xnum + PNORM_P[i]) * xsq;
+        xden = (xden + PNORM_Q[i]) * xsq;
+    }
+    let temp = xsq * (xnum + PNORM_P[4]) / (xden + PNORM_Q[4]);
+    (M_1_SQRT_2PI - temp) / y
+}
+
+/// Whether `pnorm_both` evaluates the asymptotic formula at `|x| > sqrt(32)` rather than
+/// rounding the probabilities to 0 and 1.
+fn pnorm_uses_tail_formula(x: f64, tail: c_int, log: bool) -> bool {
+    // From R 4.5 on, the tail formula runs on into the subnormal range, out to
+    // `qnorm(log(2^-1074), log.p = TRUE)`, before a probability is rounded to 0 or 1.
+    let denormal_edge = if crate::system::r_at_least(4, 5) {
+        38.4674
+    } else {
+        37.5193
+    };
+    let (lower, upper) = (tail != 1, tail != 0);
+    (log && x.abs() < 1e170)
+        || (lower && -denormal_edge < x && x < 8.2924)
+        || (upper && -8.2924 < x && x < denormal_edge)
+}
+
+/// `pnorm_both(p, tail, false)` for every finite standardized `p` in `values`, in place, bit for
+/// bit, with `lower` choosing the tail. The two exponentials of each tail value are gathered
+/// into one batch per chunk ([`exp_batch`]), and everything around them performs the scalar
+/// function's operations in the same order.
+pub fn pnorm_standard_fill(values: &mut [f64], lower: bool) {
+    let tail = if lower { 0 } else { 1 };
+    let mut squares = [0.0f64; PNORM_CHUNK];
+    let mut deltas = [0.0f64; PNORM_CHUNK];
+    let mut temps = [0.0f64; PNORM_CHUNK];
+    let mut positions = [0u16; PNORM_CHUNK];
+    for chunk in values.chunks_mut(PNORM_CHUNK) {
+        let mut count = 0;
+        for (index, slot) in chunk.iter_mut().enumerate() {
+            let x = *slot;
+            let y = x.abs();
+            // Cody's two tail approximations; the central region and the far tails need no
+            // exponential and go to the scalar function.
+            let (temp, at) = if y > 0.67448975 && y <= M_SQRT_32 {
+                (pnorm_middle_temp(y), y)
+            } else if y > M_SQRT_32 && pnorm_uses_tail_formula(x, tail, false) {
+                (pnorm_tail_temp(x, y), x)
+            } else {
+                *slot = if lower {
+                    pnorm_both(x, tail, false).0
+                } else {
+                    pnorm_both(x, tail, false).1
+                };
+                continue;
+            };
+            let xsq = (at * 16.0).trunc() / 16.0;
+            let del = (at - xsq) * (at + xsq);
+            squares[count] = -xsq * xsq * 0.5;
+            deltas[count] = -del * 0.5;
+            temps[count] = temp;
+            positions[count] = index as u16;
+            count += 1;
+        }
+        exp_batch(&mut squares[..count]);
+        exp_batch(&mut deltas[..count]);
+        for position in 0..count {
+            let index = usize::from(positions[position]);
+            let Some(slot) = chunk.get_mut(index) else {
+                continue;
+            };
+            let cumulative = squares[position] * deltas[position] * temps[position];
+            let complementary = 1.0 - cumulative;
+            // `swap_tail` in `pnorm_both`: for positive x the tail values trade places.
+            *slot = match (*slot > 0.0, lower) {
+                (false, true) => cumulative,
+                (false, false) => complementary,
+                (true, true) => complementary,
+                (true, false) => cumulative,
+            };
+        }
+    }
+}
+
+/// The chunk length of [`pnorm_standard_fill`], which keeps a chunk's operands in L1.
+pub const PNORM_CHUNK: usize = 256;
+
+/// `exp` of every value in place, bit for bit as the scalar `f64::exp` computes it: the
+/// shared vector kernel when the machine has it, the scalar loop otherwise.
+fn exp_batch(values: &mut [f64]) {
+    if !vector_math::exp(None, values, &mut f64::exp) {
+        for value in values {
+            *value = value.exp();
+        }
+    }
 }
 
 /// The normal quantile by Wichura's AS 241 (PPND16), with asymptotic expansions of the
@@ -3085,13 +3170,18 @@ pub fn qnorm_tails_fill(
         } else {
             lower_tail
         };
-        // Positions outside (0, 1) and NaN go to the scalar function; any finite logarithm
-        // keeps their lanes harmless.
+        // The argument of the logarithm, taken below in one batch. Positions outside (0, 1)
+        // and NaN go to the scalar function; any finite logarithm keeps their lanes harmless.
         *log = if probability > 0.0 && probability < 1.0 {
-            argument.ln()
+            argument
         } else {
-            0.0
+            1.0
         };
+    }
+    if !vector_math::log(None, &mut logs[..count], &mut f64::ln) {
+        for log in &mut logs[..count] {
+            *log = log.ln();
+        }
     }
     qnorm_tail_lanes_dispatch(&logs[..count], &mut values[..count]);
     let mut remaining = 0;
