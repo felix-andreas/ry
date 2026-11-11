@@ -253,6 +253,14 @@ the plain mode's spacing. A small script runs about five times slower than under
 | `young` | when the script starts | a collection that keeps survivors untenured |
 | `startup-young` | at the first allocation | a collection that keeps survivors untenured |
 
+The default suite runs a seeded sample of the oracle cases (`cases_survive_gc_torture`,
+`cases_survive_young_gc_torture`) and of the generated programs (`fuzz_programs_survive_gc_torture`)
+under both modes, compared with ry unstressed. The sample always includes the cases in
+`REGRESSION_CASES` and the seeds in `REGRESSION_SEEDS`, which once read freed memory. Stress does not
+replace the unstressed oracle: before the argument-reference rooting fix,
+`datetime__year_overflow` crashed unstressed under the oracle harness and passed under both
+modes, likely because a freed object reads correctly until something reuses its memory.
+
 ## Running the long harnesses
 
 | Recipe | What it runs |
