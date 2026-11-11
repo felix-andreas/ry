@@ -106,22 +106,26 @@ def check_gnu_r():
         report("FAIL", "GNU R", f"no R on PATH and ORACLE_R is unset; the oracle needs {wanted}", "sudo tools/dev-setup.sh")
         return None
     script = (
-        'cat(format(getRversion()), capabilities("profmem"), capabilities("cairo"), '
-        'basename(La_library()), basename(extSoftVersion()[["BLAS"]]), '
+        'cat(format(getRversion()), capabilities("profmem"), capabilities("ICU"), '
+        'getOption("bitmapType"), basename(La_library()), basename(extSoftVersion()[["BLAS"]]), '
         'file.exists(file.path(R.home("lib"), "libR.so")), sep = "\\n")'
     )
     code, output = run([r, "--vanilla", "--slave", "-e", script])
     if code != 0:
         report("FAIL", "GNU R", f"{r} does not run: {output[-200:]}")
         return None
-    version, profmem, cairo, lapack, blas, shlib = (output.splitlines() + [""] * 6)[:6]
+    version, profmem, icu, bitmap, lapack, blas, shlib = (output.splitlines() + [""] * 7)[:7]
     problems = []
     if version != wanted:
         problems.append(f"release {version}, not {wanted}")
     if profmem != "TRUE":
         problems.append("no memory profiling (utils__rprofmem and sys_call_shares_arguments differ)")
-    if cairo != "TRUE":
-        problems.append("no cairo (the graphics cases differ)")
+    if icu != "TRUE":
+        problems.append("no ICU (collation and the string cases differ)")
+    # A build without pango-cairo still reports capabilities("cairo"), but png() falls back to
+    # bitmapType "Xlib", which fails headless with "X11 is not available".
+    if bitmap != "cairo":
+        problems.append(f'bitmapType "{bitmap}", not "cairo" (the graphics cases differ; build with pango-cairo)')
     if shlib != "TRUE":
         problems.append("no libR.so (ry's GNU R console and binary packages need --enable-R-shlib)")
     if problems:
@@ -131,7 +135,7 @@ def check_gnu_r():
     if expected_lapack and lapack != expected_lapack:
         report("warn", "GNU R", f"{r} {version} uses LAPACK {lapack}, the recordings {expected_lapack}; the last digits of linear algebra may differ")
     else:
-        report("ok", "GNU R", f"{r} {version}, memory profiling, cairo, {blas} and {lapack}")
+        report("ok", "GNU R", f"{r} {version}, memory profiling, ICU, cairo bitmaps, {blas} and {lapack}")
     return r
 
 

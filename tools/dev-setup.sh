@@ -44,12 +44,12 @@ fi
 
 # The reference build of crates/oracle/cases/gnu-r.txt, configured as
 # docs/src/content/docs/development/corpus-and-oracle.md ("The reference GNU R") says. Memory
-# profiling and cairo are what other builds most often lack: without them the Rprofmem and
-# graphics cases differ from their recordings. The shared libR.so is what ry's console loads for
-# GNU R, and what Posit's binary packages link.
-# A build without pango-cairo still reports capabilities("cairo"), but its png() falls back to
-# bitmapType "Xlib", which fails headless with "X11 is not available".
-if ! "$r_prefix/bin/Rscript" -e 'stopifnot(capabilities("profmem"), capabilities("cairo"), capabilities("ICU"), getOption("bitmapType") == "cairo")' >/dev/null 2>&1 ||
+# profiling, ICU and cairo bitmaps are what other builds most often lack: without them the
+# Rprofmem, collation and graphics cases differ from their recordings. The shared libR.so is what
+# ry's console loads for GNU R, and what Posit's binary packages link.
+# capabilities("cairo") is not enough: a build without pango-cairo reports it, but its png() falls
+# back to bitmapType "Xlib", which fails headless with "X11 is not available".
+if ! "$r_prefix/bin/Rscript" -e 'stopifnot(capabilities("profmem"), capabilities("ICU"), getOption("bitmapType") == "cairo")' >/dev/null 2>&1 ||
 	[ ! -f "$r_prefix/lib/R/lib/libR.so" ]; then
 	log "GNU R $r_version: building into $r_prefix"
 	source_dir=$(mktemp -d)
