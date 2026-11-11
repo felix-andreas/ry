@@ -1154,7 +1154,7 @@ pub unsafe fn call_direct(definition: &BuiltinDef, call: Sexp, args: &[Sexp]) ->
     }
     let value = scope(|| direct(call, args))
         .and_then(|value| crate::unwind::raise_parked().map(|()| value))
-        .map_err(|unwind| builtin_failure(definition, unbound(), unwind))?;
+        .map_err(|unwind| builtin_failure(unbound(), unwind))?;
     if value.is_some() {
         match definition.visibility {
             Visibility::On => interp().visible = true,
@@ -1315,7 +1315,7 @@ unsafe fn run_builtin(
     match scope(|| (definition.function)(&context)) {
         Ok(value) => {
             if let Err(unwind) = crate::unwind::raise_parked() {
-                return Err(builtin_failure(definition, blame, unwind));
+                return Err(builtin_failure(blame, unwind));
             }
             match definition.visibility {
                 Visibility::On => interp().visible = true,
@@ -1324,7 +1324,7 @@ unsafe fn run_builtin(
             }
             Ok(value)
         }
-        Err(unwind) => Err(builtin_failure(definition, blame, unwind)),
+        Err(unwind) => Err(builtin_failure(blame, unwind)),
     }
 }
 
@@ -1332,7 +1332,7 @@ unsafe fn run_builtin(
 /// primitive's call as `errorcall` does.
 #[cold]
 #[inline(never)]
-unsafe fn builtin_failure(definition: &BuiltinDef, blame: Sexp, unwind: Unwind) -> Unwind {
+unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
     match unwind {
         Unwind::Error(mut failure) => {
             if failure.call == unbound() {
