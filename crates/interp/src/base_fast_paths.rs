@@ -60,7 +60,7 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
-    ("warning", "ryWarning", 0x0000000000000000),
+    ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
 ];
 

@@ -21,6 +21,7 @@ withCallingHandlers(h("passed ", 1.5, " through dots"), warning = function(w) {
 show(tryCatch(f(2.25), warning = identity))
 show(tryCatch(warning(c("a", "b"), 1:3, NULL), warning = identity))
 show(tryCatch(warning(), warning = identity))
+show(tryCatch(warning(1/3, " ", 1e5, " ", 1e15, " ", 1e-20, " ", 0.1 + 0.2, " ", -0, " ", NaN, " ", -Inf, " ", NA_real_, " ", 123456789012), warning = identity))
 
 # The value is the message, and it is invisible.
 value <- withVisible(suppressWarnings(f(1L)))
