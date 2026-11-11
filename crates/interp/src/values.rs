@@ -806,6 +806,30 @@ pub unsafe fn materialize(object: Sexp) -> R<Sexp> {
     }
 }
 
+/// An ordinary vector with the contents of `object` to read, leaving `object` as it is: a compact
+/// sequence that is not yet expanded is computed into a fresh vector instead of expanding in place.
+/// GNU R prints and formats through element reads, so `x <- 1:10; print(x)` leaves `x` compact
+/// there, and `.Internal(inspect(x))` must report the same afterwards.
+pub unsafe fn read_contents(object: Sexp) -> R<Sexp> {
+    match compact_sequence(object) {
+        Some((count, first, increment)) if object.cdr() == nil() => {
+            let kind = object.kind();
+            let copy = alloc_uninit(kind, count)?;
+            if kind == SexpType::Integer {
+                for (index, slot) in copy.slice_mut::<i32>().iter_mut().enumerate() {
+                    *slot = (first + increment * index as f64) as i32;
+                }
+            } else {
+                for (index, slot) in copy.slice_mut::<f64>().iter_mut().enumerate() {
+                    *slot = first + increment * index as f64;
+                }
+            }
+            Ok(copy)
+        }
+        _ => materialize(object),
+    }
+}
+
 macro_rules! typed_slice {
     ($name:ident, $name_mut:ident, $altrep:ident, $type:ty) => {
         /// The elements, which must be of the matching type. An ALTREP vector is materialized.

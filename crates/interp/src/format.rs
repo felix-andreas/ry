@@ -783,7 +783,7 @@ pub unsafe fn format_vector(
     quote: bool,
     na_string: &str,
 ) -> R<Vec<String>> {
-    let vector = values::materialize(vector)?;
+    let vector = values::read_contents(vector)?;
     let count = length(vector);
     Ok(match vector.kind() {
         SexpType::Logical => {
