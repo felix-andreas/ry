@@ -298,7 +298,8 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 }
 
 /// Whether [`select_positions`] reads `count` elements of `vector` one at a time instead of
-/// expanding it: for a long ALTREP number vector, such as a compact sequence, of which the
+/// expanding it: always for a compact sequence, whose elements are arithmetic and which GNU R
+/// leaves compact when it is subset, and for another long ALTREP number vector of which the
 /// selection is a small part. A short one expands cheaply, and its class keeps the expansion.
 unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
     vector.is_altrep()
@@ -306,8 +307,8 @@ unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
             vector.kind(),
             SexpType::Logical | SexpType::Integer | SexpType::Real
         )
-        && length(vector) >= 1 << 16
-        && count <= length(vector) / 8
+        && (values::compact_sequence(vector).is_some()
+            || (length(vector) >= 1 << 16 && count <= length(vector) / 8))
 }
 
 /// A vector of the elements at `indices` (`usize::MAX` gives NA).
@@ -345,6 +346,21 @@ pub unsafe fn select_positions(
     if reads_sparsely(vector, count) {
         let extent = length(vector);
         let result = alloc(vector.kind(), count)?;
+        if let Some((_, first, increment)) = values::compact_sequence(vector) {
+            for (slot, index) in positions.enumerate() {
+                let number = first + increment * index as f64;
+                if vector.kind() == SexpType::Real {
+                    values::reals_mut(result)[slot] = if index < extent { number } else { NA_REAL };
+                } else {
+                    values::ints_mut(result)[slot] = if index < extent {
+                        number as i32
+                    } else {
+                        NA_INTEGER
+                    };
+                }
+            }
+            return Ok(result);
+        }
         for (slot, index) in positions.enumerate() {
             if vector.kind() == SexpType::Real {
                 values::reals_mut(result)[slot] = if index < extent {
@@ -1608,9 +1624,13 @@ unsafe fn subset2_level(
     if object.kind() == SexpType::I64 {
         return Err(error_in(call, "an I64 is a number and cannot be indexed"));
     }
-    // String and list elements read through the class's `Elt` method, so `x[[i]]` asks for
-    // element `i` alone, as GNU R does; other vectors are read as slices.
-    let object = if matches!(object.kind(), SexpType::String | SexpType::List) {
+    // String, list and number elements read through the class's `Elt` method, so `x[[i]]` asks
+    // for element `i` alone and leaves a compact sequence compact, as GNU R does; other vectors
+    // are read as slices.
+    let object = if matches!(
+        object.kind(),
+        SexpType::String | SexpType::List | SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) {
         object
     } else {
         values::materialize(object)?
