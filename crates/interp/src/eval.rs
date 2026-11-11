@@ -2781,12 +2781,6 @@ pub unsafe fn enter(
     match sampled.and_then(|()| default_promises(depth - 1, function, header as usize, missing)) {
         Ok(()) => {
             let state = interp();
-            // `leave` releases only what the body roots. The handles the default promises
-            // took stay in the caller's scope, as they did before calls split into enter and
-            // leave: releasing them with the frame breaks a gctorture run of
-            // `assignment__dollar_in_place`, so some object outlives the frame through them
-            // alone, and until it is found they keep it alive.
-            state.frames[depth - 1].handle_mark = crate::heap().handle_mark() as u32;
             state.slot_owner = (depth - 1) as u32;
             Ok(Entered {
                 value: function.cdr(),
