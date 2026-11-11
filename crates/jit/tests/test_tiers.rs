@@ -3134,6 +3134,30 @@ const ELEMENT_OPS: &[&str] = &[
 /// iteration is the difference between two loop lengths, which cancels startup. Without
 /// valgrind the test has nothing to measure with and passes with a note.
 #[test]
+fn a_body_at_a_dead_bodys_address_runs_its_own_code() {
+    // Compiled code is found through the body it was compiled from, by the body's address. Once
+    // a body dies, the allocator places new bodies at its address, and each must run its own
+    // code rather than the dead one's.
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            for i in 1..=300 {
+                run(&format!(
+                    "g <- function() {{ s <- 0; for (k in 1:3) s <- s + {i}; s }}"
+                ));
+                let outcome = run("g()");
+                run("rm(g)");
+                if i % 10 == 0 {
+                    interp::heap().collect(heap::Collection::Major);
+                }
+                assert_eq!(outcome, (3 * i).to_string(), "{mode:?}, body {i}");
+            }
+            jit::install_mode(Mode::Off);
+        }
+    });
+}
+
+#[test]
 fn element_ops_cost_no_more_than_tier_zero() {
     const NAME: &str = "element_ops_cost_no_more_than_tier_zero";
     if let (Ok(shape), Ok(mode), Ok(iterations)) = (

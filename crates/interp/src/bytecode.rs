@@ -407,7 +407,13 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     let state = &mut interp().bytecode;
-    let calls = match state.bodies.entry(body).or_insert(Body::Calls(0)) {
+    let entry = state.bodies.entry(body).or_insert(Body::Calls(0));
+    if let Body::Code { pair, .. } = *entry
+        && pair.weak_key() != body
+    {
+        *entry = Body::Calls(0);
+    }
+    let calls = match entry {
         Body::Calls(calls) => {
             *calls += 1;
             *calls
@@ -421,7 +427,9 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         && !crate::annotations::is_typed(function)
     {
         if state.bodies.len() > MAX_TRACKED_BODIES {
-            state.bodies.retain(|_, body| matches!(body, Body::Code { .. }));
+            state
+                .bodies
+                .retain(|key, body| matches!(body, Body::Code { pair, .. } if pair.weak_key() == *key));
         }
         return eval::eval(body, env);
     }
@@ -435,8 +443,7 @@ unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let formals = function.car();
     let srcref = values::get_attr(function, symbols().srcref);
-    if let Some(&Body::Code { pair, formals: compiled_formals, srcref: compiled_srcref }) =
-        interp().bytecode.bodies.get(&body)
+    if let Some((pair, compiled_formals, compiled_srcref)) = live_code(body)
         && compiled_formals == formals
         && compiled_srcref == srcref
     {
@@ -458,6 +465,19 @@ unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
         .alloc_weak_ref(body, code, values::nil(), 0, false)?;
     interp().bytecode.bodies.insert(body, Body::Code { pair, formals, srcref });
     Ok(code)
+}
+
+/// The weak pair, formals and srcref of the code compiled for `body`, while the body it was
+/// compiled for lives. The table is keyed by address and nothing removes a dead body's entry, so
+/// a new body the allocator places at that address finds it: only the pair's key, which the
+/// collector clears when that body dies, says whether the entry is this body's.
+unsafe fn live_code(body: Sexp) -> Option<(Sexp, Sexp, Sexp)> {
+    match interp().bytecode.bodies.get(&body) {
+        Some(&Body::Code { pair, formals, srcref }) if pair.weak_key() == body => {
+            Some((pair, formals, srcref))
+        }
+        _ => None,
+    }
 }
 
 /// Why a closure body runs on the AST evaluator rather than as compiled code. It is a property
@@ -482,8 +502,8 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     }
     let calls = match interp().bytecode.bodies.get(&body) {
         Some(Body::Calls(calls)) => *calls,
-        Some(Body::Code { .. }) => COMPILE_AFTER_CALLS,
-        None => 0,
+        Some(Body::Code { .. }) if live_code(body).is_some() => COMPILE_AFTER_CALLS,
+        Some(Body::Code { .. }) | None => 0,
     };
     if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
         return Ok(body);
