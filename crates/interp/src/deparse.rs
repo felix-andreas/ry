@@ -1831,7 +1831,7 @@ unsafe fn needs_parens(main: OperatorInfo, argument: Sexp, left: bool) -> bool {
 
 // The internals.
 
-unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let cutoff = values::as_integer_scalar(call.arg(1));
     let cutoff = if cutoff == NA_INTEGER || !(20..=500).contains(&cutoff) {

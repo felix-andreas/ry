@@ -2865,6 +2865,27 @@ unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
         && values::get_attr(vector, symbols().dimnames) == nil()
 }
 
+/// A copy of `vector`, which has no attributes, one element longer with the new element unset
+/// and room to grow, which the caller binds. The caller grows a vector in place where it has
+/// room. Nothing after this may fail, because an unshared list's elements move into the copy
+/// (see [`grow`]).
+#[cold]
+pub(crate) unsafe fn append_copy(vector: Sexp, reuse: bool) -> R<Sexp> {
+    let count = length(vector);
+    let heap = crate::heap();
+    let result = alloc_with_room(vector.kind(), count + 1)?;
+    if reuse
+        && matches!(vector.kind(), SexpType::List | SexpType::Expression)
+        && !vector.is_altrep()
+        && !values::maybe_shared(vector)
+    {
+        heap.move_elements(result, vector);
+    } else {
+        copy_prefix(values::materialize(vector)?, result, count)?;
+    }
+    Ok(result)
+}
+
 /// A resizable vector of `length` elements with room to grow by GNU R's factor of 1.05.
 unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
     let capacity = length + length / 20;

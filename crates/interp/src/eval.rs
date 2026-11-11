@@ -967,11 +967,15 @@ pub unsafe fn materialize_references(index: usize) -> R<()> {
 }
 
 /// [`detach_reference`] for each argument reference in `args`, before they go to a call that
-/// may keep them past its return.
+/// may keep them past its return. Each promise is rooted in the current handle scope, which the
+/// caller opens around the call: the pool rooted the reference, and `args` is not scanned by the
+/// collector, so without the root a collection while the call binds its frame frees the promise.
+/// The call's scope ends only once the call returns, by which time the frame holds the promise.
 pub unsafe fn detach_references(args: &[Arg]) -> R<()> {
     for arg in args {
         if is_reference(arg.value) {
             detach_reference(arg.value)?;
+            crate::heap().root(arg.value);
         }
     }
     Ok(())
@@ -2234,10 +2238,10 @@ unsafe fn slot_default_fits(
 pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
     match matched_sources(function, args, call)? {
         Some(sources) => call_with_plan(call, function, &sources, args, sys_parent),
-        None => {
+        None => crate::scope(|| {
             detach_references(args)?;
             apply_closure_owning(call, function, args, sys_parent, None)
-        }
+        }),
     }
 }
 
@@ -2259,8 +2263,10 @@ pub unsafe fn call_with_plan(
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        detach_references(args)?;
-        return apply_closure(call, function, args, sys_parent, None);
+        return crate::scope(|| {
+            detach_references(args)?;
+            apply_closure(call, function, args, sys_parent, None)
+        });
     }
     let count = values::length(constants.element(bytecode::SLOTS).element(1));
     let header = state.bytecode.registers.len();
@@ -5234,11 +5240,19 @@ unsafe fn call_seeded(
     {
         return run_frame(call, function, frame, env, args, entry, &[]);
     }
-    if seeded {
-        detach_reference(args[0].value)?;
+    if !seeded {
+        let frame = bind_arguments(call, function, args, None)?;
+        return run_closure(call, function, frame, env, args, entry);
     }
-    let frame = bind_arguments(call, function, args, None)?;
-    run_closure(call, function, frame, env, args, entry)
+    // Detached, the reference leaves the pool that rooted it, and `args` is not scanned by the
+    // collector, while binding the frame allocates. The root lives in a handle scope of this call
+    // alone, which ends once the closure has returned and its frame no longer needs the promise,
+    // so a caller that makes many calls (`lapply`) keeps no root per call.
+    crate::scope(|| {
+        detach_references(&args[..1])?;
+        let frame = bind_arguments(call, function, args, None)?;
+        run_closure(call, function, frame, env, args, entry)
+    })
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
@@ -5547,7 +5561,7 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
                 false => rebind(target, call.arg(1), call.env()?)?,
                 true => eval(call.arg(1), call.env()?)?,
             };
-            complex_assign(call.call, target, value, call.env()?, superassign)?;
+            complex_assign(call.call, target, value, call.env()?, superassign, &[])?;
             Ok(value)
         }
         _ => Err(call.error("invalid (do_set) left-hand side to assignment")),
@@ -5833,12 +5847,18 @@ pub unsafe fn assign_local(symbol: Sexp, value: Sexp, env: Sexp, cell: Option<Se
 
 /// `f(x, ...) <- value`: evaluates the getter chain down to the variable, then applies the
 /// replacement functions from the outside in and assigns the result to the variable.
+///
+/// `evaluated` is empty, or holds the arguments after `x` of a one-level target that compiled
+/// code has already evaluated, each a forced promise whose code is the argument's (or that code
+/// itself, for one the replacement must evaluate), so the replacement evaluates none of them a
+/// second time.
 pub unsafe fn complex_assign(
     whole: Sexp,
     target: Sexp,
     value: Sexp,
     env: Sexp,
     superassign: bool,
+    evaluated: &[Sexp],
 ) -> R<()> {
     let symbols = symbols();
     let mut getters: SmallVec<[Sexp; 4]> = SmallVec::new();
@@ -5957,7 +5977,8 @@ pub unsafe fn complex_assign(
             let value_promise = forced_promise(value_code, replacement)?;
             crate::heap().untrack_references(value_promise);
             // The call `` `f<-`(`*tmp*`, ..., value = v) `` and the argument list it is applied
-            // with differ only in their first argument, so they share the cells after it.
+            // with differ only in their first argument, so they share the cells after it, unless
+            // the arguments are already evaluated: then the call keeps their code.
             let mut tail_items: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
             let mut rest = getter.cdr().cdr();
             while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
@@ -5967,7 +5988,16 @@ pub unsafe fn complex_assign(
             tail_items.push((symbols.value, value_promise));
             let tail = values::pairlist(&tail_items, SexpType::Pairlist)?;
             let setter_call = values::lcons(setter, values::cons(tmp_symbol, tail)?)?;
-            let arguments = values::cons(object_promise, tail)?;
+            let argument_tail = if depth == 0 && evaluated.len() + 1 == tail_items.len() {
+                for (item, &argument) in tail_items.iter_mut().zip(evaluated) {
+                    item.1 = argument;
+                }
+                crate::heap().root(setter_call);
+                values::pairlist(&tail_items, SexpType::Pairlist)?
+            } else {
+                tail
+            };
+            let arguments = values::cons(object_promise, argument_tail)?;
             let function = call_head_function(setter, env)?;
             // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
             // as GNU R's does, so only a builtin replacement names the assignment.
@@ -5999,7 +6029,11 @@ pub unsafe fn complex_assign(
 
 /// Whether `expression` contains an assignment whose target is `variable` or a part of it. An
 /// assignment to another variable cannot rebind `variable`, so it needs no defensive copy.
-unsafe fn assigns_to(expression: Sexp, variable: Sexp, symbols: &values::Symbols) -> bool {
+pub(crate) unsafe fn assigns_to(
+    expression: Sexp,
+    variable: Sexp,
+    symbols: &values::Symbols,
+) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
     }
