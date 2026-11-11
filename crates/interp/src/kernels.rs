@@ -21,7 +21,7 @@ use {
         long_double::{self, LongDouble},
         system::r_at_least,
         unwind::R,
-        values,
+        values, vector_math,
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
     std::cmp::Ordering,
@@ -446,10 +446,17 @@ pub struct Fused {
 /// than by a scalar, fewer than [`SHORTEST_FUSED`] elements, an operand type the fused operators do not
 /// cover, and any result that would warn (integer overflow, NaN from a math function) or
 /// whose rounding the unfused builtin handles specially (a non-finite double total).
+///
+/// `into` is a vector the caller is free to overwrite, the value of the variable the result is
+/// assigned to when that binding holds it alone. A plain vector of the result's type and length
+/// takes the result, so a loop that recomputes `y <- exp(-x^2 / 2) * k` allocates nothing. It
+/// does so only when no node can decline after the first chunk is written, since a decline
+/// leaves the ordinary code to run, and the variable must keep its value if that code fails.
 pub unsafe fn fused(
     nodes: &[Node],
     leaves: &[Sexp],
     reduction: Option<Reduction>,
+    into: Option<Sexp>,
 ) -> R<Option<Fused>> {
     let Some(root) = nodes.len().checked_sub(1) else {
         return Ok(None);
@@ -561,16 +568,37 @@ pub unsafe fn fused(
         }
     }
 
-    let result = match reduction {
-        None => Some(values::alloc_uninit(
-            match elements[root] {
-                Element::Logical => SexpType::Logical,
-                Element::Integer => SexpType::Integer,
-                Element::Double => SexpType::Real,
-            },
-            count,
-        )?),
-        Some(_) => None,
+    let kind = match elements[root] {
+        Element::Logical => SexpType::Logical,
+        Element::Integer => SexpType::Integer,
+        Element::Double => SexpType::Real,
+    };
+    // A math function that may turn a number into NaN declines to let its builtin warn, and an
+    // integer operator does on overflow; either may happen in any chunk.
+    let declines_midway = nodes.iter().enumerate().any(|(index, node)| match *node {
+        Node::Math(function, _) => !matches!(
+            function,
+            Math::Abs | Math::Sign | Math::Floor | Math::Ceiling | Math::Trunc | Math::Exp
+        ),
+        Node::Binary(operator, ..) => {
+            comparison_of(operator).is_none() && elements[index] == Element::Integer
+        }
+        _ => false,
+    });
+    let reused = into.filter(|&target| {
+        reduction.is_none()
+            && !declines_midway
+            && target.kind() == kind
+            && plain(target)
+            && target.length() as usize == count
+    });
+    // The result overwrites an operand only after a chunk is complete, so the chunk's nodes
+    // read the operand's old elements.
+    let aliased = reused.is_some_and(|target| leaves.contains(&target));
+    let result = match (reduction, reused) {
+        (Some(_), _) => None,
+        (None, Some(target)) => Some(target),
+        (None, None) => Some(values::alloc_uninit(kind, count)?),
     };
     // Each node computed per chunk gets its own buffer; leaves and scalars need none.
     let mut slots = [0; MAX_NODES];
@@ -596,6 +624,7 @@ pub unsafe fn fused(
         &scalar_integers,
         leaf_view,
         result,
+        aliased,
         reduction,
         count,
         &mut scratch,
@@ -660,6 +689,7 @@ unsafe fn chunks<'a>(
     scalar_integers: &[[i32; 1]; MAX_NODES],
     leaf_view: impl Fn(usize, usize, usize) -> View<'a>,
     result: Option<Sexp>,
+    aliased: bool,
     reduction: Option<Reduction>,
     count: usize,
     scratch: &mut Scratch,
@@ -700,7 +730,7 @@ unsafe fn chunks<'a>(
                 }
                 _ => View::Integers(&integer_done[slots[input] * CHUNK..][..length]),
             };
-            let output = match (index == root, result) {
+            let output = match (index == root && !aliased, result) {
                 (true, Some(result)) if elements[index] == Element::Double => {
                     Output::Doubles(&mut values::reals_mut(result)[start..start + length])
                 }
@@ -727,6 +757,16 @@ unsafe fn chunks<'a>(
             };
             if !apply(node, view, output) {
                 return None;
+            }
+        }
+        if aliased && let Some(result) = result {
+            let at = slots[root] * CHUNK;
+            if elements[root] == Element::Double {
+                values::reals_mut(result)[start..start + length]
+                    .copy_from_slice(&scratch.reals[at..at + length]);
+            } else {
+                values::ints_mut(result)[start..start + length]
+                    .copy_from_slice(&scratch.integers[at..at + length]);
             }
         }
         if let Some(reduction) = reduction {
@@ -1194,7 +1234,12 @@ pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bo
         Math::Trunc => math_lanes(source, output, f64::trunc),
         Math::Abs => math_lanes(source, output, f64::abs),
         Math::Sqrt => math_lanes(source, output, f64::sqrt),
-        Math::Exp => math_lanes(source, output, f64::exp),
+        Math::Exp => {
+            if let Some(produced_nan) = vector_lanes(vector_math::exp, source, output, f64::exp) {
+                return produced_nan;
+            }
+            math_lanes(source, output, f64::exp)
+        }
         _ => math_lanes(source, output, |x| arith::math_value(function, x)),
     }
 }
@@ -1595,6 +1640,15 @@ fn zip<O: Copy, L: Reader<O>, R: Reader<O>>(
 
 #[inline(always)]
 fn real_operation(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, output: &mut [f64]) {
+    // Dividing by a power of two and multiplying by its reciprocal round the same exact value,
+    // so they give the same bits, NaN payloads included, and a multiply costs a fraction of a
+    // divide.
+    let (op, right) = match (op, right.map(real_input)) {
+        (Op::Divide, Some(Reals::Scalar(divisor))) if exact_reciprocal(divisor) => {
+            (Op::Multiply, Some(Reals::Scalar(1.0 / divisor)))
+        }
+        _ => (op, right),
+    };
     let square = matches!(right.map(real_input), Some(Reals::Scalar(exponent)) if exponent == 2.0);
     // Beside a scalar that is not NaN, only the other operand can be NaN, and the hardware's
     // `+` and `*` return that operand's payload whichever order the compiler picks, so the loop
@@ -1608,13 +1662,19 @@ fn real_operation(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, out
         Op::Multiply if plain => map2(x, y, output, |a, b| a * b),
         Op::Multiply => map2(x, y, output, arith::multiply),
         Op::Divide => map2(x, y, output, |a, b| a / b),
-        // `power` of a non-NaN base and 2 is the plain square, and gives a NaN base back
-        // untouched, payload and all.
-        Op::Power if square => map2(x, y, output, |a, _| if a.is_nan() { a } else { a * a }),
+        // GNU R squares with `x * x` whatever `x` is (`R_POW`), so `NA^2` comes out quieted.
+        Op::Power if square => map2(x, y, output, |a, _| a * a),
         Op::Power => map2(x, y, output, arith::power),
         Op::Modulo => map2(x, y, output, arith::real_modulo),
         Op::IntegerDivide => map2(x, y, output, arith::real_integer_divide),
     }))
+}
+
+/// Whether `divisor` is a power of two whose reciprocal is a double too: a normal number with
+/// no fraction bits.
+#[inline(always)]
+fn exact_reciprocal(divisor: f64) -> bool {
+    divisor.is_normal() && divisor.to_bits() & ((1 << 52) - 1) == 0
 }
 
 #[inline(always)]
@@ -1745,6 +1805,34 @@ fn math_lanes(
         }
     ));
     produced_nan
+}
+
+/// [`math_lanes`] through a SIMD kernel of [`vector_math`], for a double or in-place operand.
+/// `None` when the kernel does not run here or the operand is not doubles, and the caller runs
+/// [`math_lanes`] instead. The kernel computes the lanes in its main range; the others, `NA`
+/// among them, take `function` with `math_lanes`'s rules.
+pub fn vector_lanes(
+    kernel: fn(Option<&[f64]>, &mut [f64], &mut dyn FnMut(f64) -> f64) -> bool,
+    source: Option<Reals<'_>>,
+    output: &mut [f64],
+    function: fn(f64) -> f64,
+) -> Option<bool> {
+    let source = match source.map(real_input) {
+        Some(Reals::Doubles(values)) => Some(values),
+        None => None,
+        Some(_) => return None,
+    };
+    let mut produced_nan = false;
+    let mut scalar = |value: f64| {
+        let result = if is_na_real(value) {
+            NA_REAL
+        } else {
+            function(value)
+        };
+        produced_nan |= result.is_nan() & !value.is_nan();
+        result
+    };
+    kernel(source, output, &mut scalar).then_some(produced_nan)
 }
 
 /// An integer or logical element as a double.

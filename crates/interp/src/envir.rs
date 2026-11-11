@@ -368,8 +368,9 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
                 many => {
                     let mut items = vec![(nil(), symbols().brace)];
                     items.extend(
-                        many.iter()
-                            .map(|&expression| (nil(), crate::bytecode::source_of_body(expression))),
+                        many.iter().map(|&expression| {
+                            (nil(), crate::bytecode::source_of_body(expression))
+                        }),
                     );
                     values::pairlist(&items, SexpType::Language)
                 }
@@ -405,7 +406,9 @@ unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     match function.kind() {
         SexpType::Nil => match call.frame_index() {
-            Some(index) => crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()")),
+            Some(index) => {
+                crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()"))
+            }
             None => Ok(global_env()),
         },
         SexpType::Closure => Ok(function.tag()),
@@ -1008,7 +1011,10 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                 // The calling environment.
                 return match interp().frames.len() {
                     0 => Ok(global_env()),
-                    count => crate::eval::frame_sys_parent(count - 1, crate::eval::Reify::Site("pos = -1")),
+                    count => crate::eval::frame_sys_parent(
+                        count - 1,
+                        crate::eval::Reify::Site("pos = -1"),
+                    ),
                 };
             }
             if position < 1 || position as usize > path.len() {
@@ -2353,6 +2359,74 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     let package = colon_symbol(call.arg(0))?;
     let symbol = colon_symbol(call.arg(1))?;
     namespace_lookup(package, symbol, exported)
+}
+
+/// `package::symbol` (or `:::` when not `exported`) for a package named by a symbol, with the
+/// binding cell the value came from when reading that cell again gives the same answer as long
+/// as the lookup stamps of `package`, `symbol`, `.__NAMESPACE__.` and `exports` stand still.
+/// Every binding the lookup read on the way (the registry's, the namespace information's, the
+/// export table's entry) is marked watched, so assigning one moves its symbol's stamp; adding or
+/// removing a binding moves it anyway. Lazy data, renamed exports and lookups that pass a
+/// function frame give no cell.
+pub unsafe fn namespace_binding(
+    package: Sexp,
+    symbol: Sexp,
+    exported: bool,
+) -> R<(Sexp, Option<Sexp>)> {
+    let value = namespace_lookup(package, symbol, exported)?;
+    Ok((value, namespace_cell(package, symbol, exported)))
+}
+
+unsafe fn namespace_cell(package: Sexp, symbol: Sexp, exported: bool) -> Option<Sexp> {
+    let heap = crate::heap();
+    let symbols = symbols();
+    let watch = |cell: Sexp| cell.set_gp_bits(gp::WATCHED, true);
+    let namespace = if package == symbols.base {
+        base_namespace()
+    } else {
+        let entry = heap.frame_cell(heap.known().namespace_registry, package)?;
+        let namespace = entry.cdr();
+        if namespace.kind() != SexpType::Environment || entry.has_gp(gp::ACTIVE_BINDING) {
+            return None;
+        }
+        watch(entry);
+        namespace
+    };
+    if namespace == base_namespace() || !exported {
+        return heap.frame_cell(namespace, symbol);
+    }
+    let environment_in = |env: Sexp, name: Sexp| -> Option<(Sexp, Sexp)> {
+        let cell = heap.frame_cell(env, name)?;
+        let value = cell.cdr();
+        (value.kind() == SexpType::Environment && !cell.has_gp(gp::ACTIVE_BINDING))
+            .then_some((cell, value))
+    };
+    let (info_cell, info) = environment_in(namespace, symbols.dot_namespace)?;
+    let (exports_cell, exports) = environment_in(info, symbols.exports)?;
+    let entry = heap.frame_cell(exports, symbol)?;
+    let internal = entry.cdr();
+    let renamed = internal.kind() == SexpType::String
+        && length(internal) > 0
+        && values::install_charsxp(internal.element(0)).ok()? != symbol;
+    if renamed || entry.has_gp(gp::ACTIVE_BINDING) {
+        return None;
+    }
+    watch(info_cell);
+    watch(exports_cell);
+    watch(entry);
+    let empty = empty_env();
+    let mut env = namespace;
+    while env != empty {
+        if env.has_gp(gp::FUNCTION_FRAME) {
+            return None;
+        }
+        if let Some(cell) = heap.frame_cell(env, symbol) {
+            heap.observe_environment(namespace);
+            return Some(cell);
+        }
+        env = env.enclosure();
+    }
+    None
 }
 
 /// Looks `symbol` up in a package's namespace (a namespace environment, or a package name as a
