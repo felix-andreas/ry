@@ -6114,14 +6114,6 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
     } else {
         return None;
     };
-    // A subscript the read cannot take, such as a negative or vector one, declines here, before
-    // the out-of-line read sets up its frame.
-    let index = *registers.add(*code.add(at + 4) as usize + 1);
-    if index.kind() != SexpType::String {
-        element_access::scalar_position(index, usize::MAX)?;
-    } else if !double {
-        return None;
-    }
     read_element_call(state, at, double)
 }
 
@@ -6190,43 +6182,21 @@ unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     }
     let slot = state.header.add(1 + slot as usize);
     let target = *slot;
+    let value = *registers.add(*code.add(at + 4) as usize);
+    let kind = target.kind();
     if !matches!(
-        target.kind(),
+        kind,
         SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
     ) {
         return None;
     }
-    // A numeric subscript out of bounds, such as the one past the end that appends, declines
-    // here, before the out-of-line store sets up its frame.
-    let index = *registers.add(*code.add(at + 3) as usize);
-    if index.kind() != SexpType::String {
-        element_access::scalar_position(index, target.length() as usize)?;
-    }
-    store_element(state, at, slot)
-}
-
-/// The rest of [`sub_assign_fast`] for the target in `slot`, out of line so that a store the
-/// handler declines on its subscript skips its frame setup.
-#[inline(never)]
-unsafe fn store_element(
-    state: &mut Activation<'_, '_>,
-    at: usize,
-    slot: *mut Sexp,
-) -> Option<usize> {
-    let heap = &mut *state.heap;
-    let known = *heap.known();
-    let code = state.code;
-    let registers = state.registers;
-    let element_kind = *code.add(at + 6);
-    let target = *slot;
-    let kind = target.kind();
+    // The subscript is checked first: one past the end, which appends, is the common decline.
     let index = *registers.add(*code.add(at + 3) as usize);
     let position = if index.kind() == SexpType::String {
         element_access::name_position(heap, target, index)?
     } else {
         element_access::scalar_position(index, target.length() as usize)?
     };
-    let value = *registers.add(*code.add(at + 4) as usize);
     let plain_scalar =
         |value: Sexp| value.length() == 1 && value.attrib() == known.nil && !value.is_altrep();
     let element = match (kind, element_kind) {
