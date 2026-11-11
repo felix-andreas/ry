@@ -3,7 +3,7 @@
 # dispatch, though the test names neither the helper nor the method, then the rest. The method's
 # name is not `format.shape`, so only its `S3method()` registration ties it to `format`.
 
-requires gnu-r r-package:testthat
+requires gnu-r r-package:testthat>=3.3.0
 
 file DESCRIPTION
 | Package: shapes
