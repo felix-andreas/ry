@@ -737,10 +737,15 @@ checked and refilled:
   collection inside the window frees exactly what GNU R would.
 - **Base `.Internal` wrappers are inlined.** A call of one of GNU R's "safe base internals"
   (`nchar`, `typeof`, `inherits`, `identical`, `match`, `rep_len`, `vector`, `which.max` and the
-  rest of the list in GNU R's `cmp.R`) compiles to a guard that the name still means base's
-  closure, the internal's arguments evaluated in the caller, and the internal called directly with
-  the original call, so an error reads `Error in nchar(x, ...)` as in GNU R. It applies only when
-  the closure's body is exactly `.Internal(f(formals...))` and every default is a constant. A
+  rest of the list in GNU R's `cmp.R`), or of a frame-free wrapper ry adds (`paste`, `paste0`,
+  `sprintf`, `character` and the rest of the `vector` family, `startsWith`, `make.unique`,
+  `.row_names_info`), compiles to a guard that the name still means base's closure, the internal's
+  arguments evaluated in the caller, and the internal called directly. It applies only when the
+  closure's body is exactly `.Internal(f(...))` over its formals and literals, and every default is
+  a constant. A `...` formal takes the arguments R's matching gives it and is passed on as the
+  internal's own arguments (`sprintf`) or as `list(...)` (`paste`). The internal sees base's
+  namespace as its environment, as it would from the closure's frame, and reports errors and
+  warnings against the original call, so a message reads `Error in nchar(x, ...)` as in GNU R. A
   failed guard makes the ordinary call, so a replaced base binding is always reached, where GNU
   R's compiled code keeps the original.
 - **Builtin checks are derived at registration.** Arity, names, replacement form and which

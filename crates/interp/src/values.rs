@@ -168,6 +168,7 @@ symbol_table! {
     message = "message",
     dot_device = ".Device",
     dot_internal = ".Internal",
+    list = "list",
     dot_primitive = ".Primitive",
     from = "from",
     ry_s4_initialize = "ryS4Initialize",

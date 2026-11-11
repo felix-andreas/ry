@@ -8,6 +8,13 @@
 # `area` (the part of ry the bug lives in), and a one-line `reason`.
 
 [[failure]]
+case = "calls__inlined_base_wrappers"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV on main: an error raised by an inlined .Internal from JIT code under GC stress crashes a later round (repro: rep_len(1, -i) in a loop under tryCatch, RY_GC_STRESS=1 RY_JIT=force)"
+provisional = true
+
+[[failure]]
 case = "bytecode__finalizer_under_wide_window"
 engine = "ry-gctorture-young"
 area = "gc"

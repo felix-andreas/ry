@@ -36,6 +36,10 @@ enum Command {
         /// (default: `$ORACLE_ENGINE`, then the stub).
         #[arg(long)]
         engine: Option<String>,
+        /// Run even when cases need packages that are not installed, skip those cases, and
+        /// mark the summary PARTIAL. Without it, such a run fails before it starts.
+        #[arg(long)]
+        allow_skips: bool,
         paths: Vec<PathBuf>,
     },
     /// Print the outcome of one file under GNU R.
@@ -171,7 +175,11 @@ fn main() -> ExitCode {
     }
     // Without GNU R, `compare` checks the second engine against the recorded outcomes, which is
     // how ry's runtime is tested on a machine that has only ry.
-    if let Command::Compare { engine, paths } = &cli.command
+    if let Command::Compare {
+        engine,
+        allow_skips,
+        paths,
+    } = &cli.command
         && !gnu_r_available()
     {
         let Some(engines) = second_engines(engine.as_deref()) else {
@@ -179,7 +187,7 @@ fn main() -> ExitCode {
         };
         eprintln!("GNU R was not found, so the engines are compared with the recorded outcomes");
         let selection = cases(paths.clone(), || engine_packages(engines[0].as_ref()));
-        return compare(None, &engines, &selection);
+        return compare(None, &engines, &selection, *allow_skips);
     }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
@@ -189,11 +197,20 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Verify { paths } => verify(&gnu_r, &cases(paths, installed_packages)),
         Command::Record { paths } => record(&gnu_r, &cases(paths, installed_packages)),
-        Command::Compare { engine, paths } => {
+        Command::Compare {
+            engine,
+            allow_skips,
+            paths,
+        } => {
             let Some(engines) = second_engines(engine.as_deref()) else {
                 return ExitCode::from(2);
             };
-            compare(Some(&gnu_r), &engines, &cases(paths, installed_packages))
+            compare(
+                Some(&gnu_r),
+                &engines,
+                &cases(paths, installed_packages),
+                allow_skips,
+            )
         }
         Command::Bench {
             ry,
@@ -521,6 +538,7 @@ fn compare(
     gnu_r: Option<&ProcessEngine>,
     engines: &[Box<dyn Engine>],
     selection: &Selection,
+    allow_skips: bool,
 ) -> ExitCode {
     let known = match known_failures() {
         Ok(known) => known,
@@ -529,6 +547,15 @@ fn compare(
             return ExitCode::from(2);
         }
     };
+    if selection.missing > 0 && !allow_skips {
+        eprintln!(
+            "{} need packages that are not installed (listed above), so the run would not cover \
+             the suite. Install them into the corpus library (`just corpus`) or set R_LIBS to a \
+             library that has them; pass --allow-skips for a partial run.",
+            plural(selection.missing, "case", "cases")
+        );
+        return ExitCode::FAILURE;
+    }
     let cases = &selection.runnable;
     match gnu_r {
         Some(_) => {
@@ -626,32 +653,32 @@ fn compare(
     }
     let mut failed = false;
     let mut ran = false;
+    let partial = if selection.missing > 0 {
+        "PARTIAL "
+    } else {
+        ""
+    };
     for (engine, tally) in engines.iter().zip(&tallies) {
-        let total = cases.len() - crashed.len() - tally.unavailable;
-        if total == 0 {
+        if cases.len() == crashed.len() + tally.unavailable {
             if tally.unavailable > 0 {
                 println!("{}: unavailable, so every case was skipped", engine.name());
             }
             continue;
         }
         ran = true;
+        let skipped = selection.missing + crashed.len() + tally.unavailable;
         let mut line = format!(
-            "{}: {} of {total} passed, {} known (same as main), {} new, {} listed but passing",
+            "{partial}{}: {} passed, {} failed ({} known, {} new), {skipped} skipped",
             engine.name(),
-            tally.passed,
+            tally.passed + tally.listed_but_passing,
+            tally.known + tally.new,
             tally.known,
             tally.new,
-            tally.listed_but_passing
         );
-        let skipped = selection.missing + crashed.len() + tally.unavailable;
         if skipped > 0 {
             let mut reasons = Vec::new();
             if selection.missing > 0 {
-                reasons.push(plural(
-                    selection.missing,
-                    "missing package",
-                    "missing packages",
-                ));
+                reasons.push(format!("{} missing a package", selection.missing));
             }
             if !crashed.is_empty() {
                 reasons.push(plural(crashed.len(), "GNU R crash", "GNU R crashes"));
@@ -659,10 +686,22 @@ fn compare(
             if tally.unavailable > 0 {
                 reasons.push(format!("{} with the engine unavailable", tally.unavailable));
             }
-            line.push_str(&format!(", {skipped} skipped ({})", reasons.join(", ")));
+            line.push_str(&format!(" ({})", reasons.join(", ")));
+        }
+        if tally.listed_but_passing > 0 {
+            line.push_str(&format!(
+                ", {} listed in {KNOWN_FAILURES_FILE} but passing",
+                tally.listed_but_passing
+            ));
         }
         println!("{line}");
         failed |= tally.new + tally.listed_but_passing > 0;
+    }
+    if selection.missing > 0 {
+        println!(
+            "PARTIAL: --allow-skips left out {}, so these counts do not cover the suite",
+            plural(selection.missing, "case", "cases")
+        );
     }
     for case in &crashed {
         println!("  GNU R crashed: {}", case.display());
