@@ -90,6 +90,10 @@ def main():
             sys.exit("error: --write records every program on the published engines only")
         if args.partial:
             sys.exit("error: --write records complete runs only, so it does not take --partial")
+        changes = sorted({line for tree in {checkout_of(args.ry), str(root)} for line in changed_paths(tree)})
+        if changes:
+            sys.exit("error: --write records a clean commit, but the working tree has changes; commit or "
+                     "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
     manifests = {suite: load_suite(suite) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
@@ -658,15 +662,29 @@ def metadata(args):
 
 
 def commit(ry):
-    """The commit of the checkout that built the measured ry, marked when that working tree has
-    changes outside tools/bench."""
-    checkout = subprocess.run(["git", "-C", str(pathlib.Path(ry).resolve().parent), "rev-parse", "--show-toplevel"],
-                              capture_output=True, text=True, check=True).stdout.strip()
-    head = subprocess.run(["git", "-C", checkout, "rev-parse", "--short", "HEAD"],
+    """The commit of the checkout that built the measured ry, marked `-dirty` when that working
+    tree has the changes `changed_paths` lists. `--write` refuses those, so a stored commit is
+    always clean."""
+    checkout = checkout_of(ry)
+    head = subprocess.run(["git", "-C", checkout, "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=no", "--", ".",
-                            ":(exclude)tools/bench"], capture_output=True, text=True, check=True).stdout.strip()
-    return head + ("-dirty" if dirty else "")
+    return head + ("-dirty" if changed_paths(checkout) else "")
+
+
+def checkout_of(ry):
+    return subprocess.run(["git", "-C", str(pathlib.Path(ry).resolve().parent), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def changed_paths(checkout):
+    """`git status` lines for what makes a measurement unreproducible from its commit: a change to
+    any tracked file, and a file git does not track under crates/ (built into ry) or tools/bench/
+    (the programs and the runner)."""
+    tracked = subprocess.run(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=no"],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+    untracked = subprocess.run(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=all", "--",
+                                "crates", "tools/bench"], capture_output=True, text=True, check=True).stdout.splitlines()
+    return tracked + [line for line in untracked if line.startswith("??")]
 
 
 if __name__ == "__main__":
