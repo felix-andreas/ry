@@ -76,6 +76,13 @@ set_second <- function(x) { x[[2L]] <- 1; x }
 formatted <- function(x) .Internal(sprintf('%s has %5.2f and %-4d items', c('a', 'b'), x, 3L))
 pasted <- function(x) .Internal(paste(list(c('a', 'b'), x), '-', NULL, FALSE))
 collapsed <- function(x) .Internal(paste0(list(c('a', 'b'), x), ', ', FALSE))
+swapped <- function(x) .Internal(gsub('([a-z]+) ([a-z]+)', '\\\\2-\\\\1', x, FALSE, FALSE, FALSE, FALSE))
+dotted <- function(x) .Internal(gsub('.', '_', x, FALSE, FALSE, TRUE, FALSE))
+guarded <- function(x) {
+  here <- .Internal(environment(NULL))
+  .Internal(.addCondHands('error', list(function(e) 1), here, here, FALSE))
+  x
+}
 ";
 
 /// Each shape's code, run once per iteration, and the most Rust allocations it may make.
@@ -93,6 +100,10 @@ const SHAPES: &[(&str, &str, usize)] = &[
     ("sprintf", "formatted(1.5)", 0),
     ("paste", "pasted('c')", 0),
     ("paste0 with collapse", "collapsed('c')", 0),
+    // The regex engine allocates the capture slots of each match itself.
+    ("gsub with groups", "swapped('hello world')", 1),
+    ("gsub with a fixed pattern", "dotted('a.b.c')", 0),
+    ("establish a handler", "guarded(1)", 0),
 ];
 
 const ITERATIONS: usize = 200;
@@ -173,6 +184,6 @@ unsafe fn evaluate(text: &str) -> Result<Sexp, String> {
 fn message(unwind: Unwind) -> String {
     match unwind {
         Unwind::Error(failure) => failure.message,
-        _ => String::new(),
+        other => format!("{other:?}"),
     }
 }

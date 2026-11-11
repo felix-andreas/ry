@@ -2262,8 +2262,14 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
         }
         SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
             let result = values::alloc_uninit(SexpType::Logical, count)?;
-            let flags = logical_view(operand);
-            kernels::not(Some(&flags), values::ints_mut(result));
+            if operand.kind() == SexpType::Logical {
+                kernels::not(Some(values::ints(operand)), values::ints_mut(result));
+            } else {
+                for (index, flag) in values::ints_mut(result).iter_mut().enumerate() {
+                    *flag = logical_at(operand, index);
+                }
+                kernels::not(None, values::ints_mut(result));
+            }
             for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
                 let value = get_attr(operand, symbol);
                 if value != nil() {

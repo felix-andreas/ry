@@ -319,20 +319,18 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
         SysKind::Frame => sys_frame_at(n, context),
         SysKind::NFrame => scalar_integer(frame_depth(context) as i32),
         SysKind::Calls => {
-            let depth = frame_depth(context);
-            let mut items = Vec::new();
-            for index in 1..=depth {
-                items.push((nil(), sys_call_at(index as i32, context, false)?));
+            let mut items = values::PairlistBuilder::new(SexpType::Pairlist);
+            for index in 1..=frame_depth(context) {
+                items.push(nil(), sys_call_at(index as i32, context, false)?)?;
             }
-            values::pairlist(&items, SexpType::Pairlist)
+            Ok(items.finish())
         }
         SysKind::Frames => {
-            let depth = frame_depth(context);
-            let mut items = Vec::new();
-            for index in 1..=depth {
-                items.push((nil(), sys_frame_at(index as i32, context)?));
+            let mut items = values::PairlistBuilder::new(SexpType::Pairlist);
+            for index in 1..=frame_depth(context) {
+                items.push(nil(), sys_frame_at(index as i32, context)?)?;
             }
-            values::pairlist(&items, SexpType::Pairlist)
+            Ok(items.finish())
         }
         SysKind::Parent => {
             if n == NA_INTEGER {
@@ -360,21 +358,21 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
             let Some(index) = context else {
                 return Ok(nil());
             };
-            let on_exit = interp().frames[index].on_exit.clone();
-            match on_exit.as_slice() {
-                [] => Ok(nil()),
+            let count = interp().frames[index].on_exit.len();
+            if count < 2 {
                 // A slot frame's list may hold the expression compiled for its slots.
-                [single] => Ok(crate::bytecode::source_of_body(*single)),
-                many => {
-                    let mut items = vec![(nil(), symbols().brace)];
-                    items.extend(
-                        many.iter().map(|&expression| {
-                            (nil(), crate::bytecode::source_of_body(expression))
-                        }),
-                    );
-                    values::pairlist(&items, SexpType::Language)
-                }
+                return Ok(match interp().frames[index].on_exit.first() {
+                    Some(&single) => crate::bytecode::source_of_body(single),
+                    None => nil(),
+                });
             }
+            let mut items = values::PairlistBuilder::new(SexpType::Language);
+            items.push(nil(), symbols().brace)?;
+            for position in 0..count {
+                let expression = interp().frames[index].on_exit[position];
+                items.push(nil(), crate::bytecode::source_of_body(expression))?;
+            }
+            Ok(items.finish())
         }
     }
 }
@@ -1253,7 +1251,7 @@ unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
 }
 
 pub(crate) unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
-    let mut args: Vec<Arg> = Vec::new();
+    let mut args = crate::eval::Args::new();
     for arg in call.args {
         if arg.tag == nil() && arg.value.kind() == SexpType::List {
             let names = values::names(arg.value);

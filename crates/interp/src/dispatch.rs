@@ -2113,7 +2113,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    state.handlers = state.frames[depth - 1].handlers.clone();
+    crate::conditions::restore_handlers(state.frames[depth - 1].handlers.clone());
     state
         .frame_closures
         .truncate(state.frames[depth - 1].closures);

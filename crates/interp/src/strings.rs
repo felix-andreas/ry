@@ -530,17 +530,17 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     let options = pattern_options(false, flag(call.arg(3)), flag(call.arg(2)))?;
     let forced_bytes = has_bytes(&[x, split]);
     let use_bytes = flag(call.arg(4)) || forced_bytes;
-    let splits: Vec<Option<String>> = if split.kind() == SexpType::String {
+    let splits: SmallVec<[Option<Cow<str>>; 1]> = if split.kind() == SexpType::String {
         (0..length(split))
-            .map(|index| subject_at(split, index, use_bytes).map(Cow::into_owned))
+            .map(|index| subject_at(split, index, use_bytes))
             .collect()
     } else {
-        Vec::new()
+        SmallVec::new()
     };
-    let mut matchers: Vec<Option<Matcher>> = (0..splits.len()).map(|_| None).collect();
+    let mut matchers: SmallVec<[Option<Matcher>; 1]> = (0..splits.len()).map(|_| None).collect();
     let count = length(x);
     let result = alloc(SexpType::List, count)?;
-    let mut pieces: Vec<(usize, usize)> = Vec::new();
+    let mut pieces = Pieces::new();
     // Pieces repeat (a code or a suffix of each id), so ASCII ones go through the call's memo.
     let mut memo = values::StringMemo::default();
     for index in 0..count {
@@ -592,8 +592,11 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// The byte ranges of the pieces `strsplit` cuts one string into.
+type Pieces = SmallVec<[(usize, usize); 16]>;
+
 /// Pushes the byte range of each character of `text` onto `pieces`.
-fn split_chars(text: &str, pieces: &mut Vec<(usize, usize)>) {
+fn split_chars(text: &str, pieces: &mut Pieces) {
     pieces.extend(
         text.char_indices()
             .map(|(offset, character)| (offset, offset + character.len_utf8())),
@@ -603,7 +606,7 @@ fn split_chars(text: &str, pieces: &mut Vec<(usize, usize)>) {
 /// Splits as GNU R does: each search runs on what is left of the text, so `^` matches at every
 /// piece, and an empty match at the start of the rest splits off one character. Pushes the byte
 /// range of each piece onto `pieces`.
-fn split_text(matcher: &Matcher, text: &str, pieces: &mut Vec<(usize, usize)>) -> R<()> {
+fn split_text(matcher: &Matcher, text: &str, pieces: &mut Pieces) -> R<()> {
     let mut offset = 0;
     while offset < text.len() {
         let rest = &text[offset..];
@@ -1214,7 +1217,7 @@ fn pad_from(out: &mut String, begin: usize, width: usize, left: bool) {
 }
 
 /// Inserts `count` copies of the ASCII `fill` at byte `at`, without a temporary string.
-fn insert_fill(out: &mut String, at: usize, fill: char, count: usize) {
+pub(crate) fn insert_fill(out: &mut String, at: usize, fill: char, count: usize) {
     debug_assert!(fill.is_ascii());
     out.extend(std::iter::repeat_n(fill, count));
     // SAFETY: the rotation moves the ASCII fill bytes, which are whole characters, to `at`, a
@@ -2223,8 +2226,10 @@ unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
         return Err(error("zero-length pattern"));
     }
     let matcher = Matcher::compile(&pattern, options, CompileErrors::Quoted)?;
-    let replacement =
-        subject_at(replacement, 0, use_bytes).map(|text| parse_replacement(&text, options));
+    let replacement_text = subject_at(replacement, 0, use_bytes);
+    let replacement = replacement_text
+        .as_deref()
+        .map(|text| parse_replacement(text, options));
     for index in 0..count {
         let charsxp = text.element(index);
         if charsxp == na_string() {
@@ -2238,23 +2243,23 @@ unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
             values::char_str(charsxp)
         };
         let substituted = match &replacement {
-            Some(replacement) => replace(&matcher, &element, replacement, global)?,
-            None => matcher.find_at(&element, 0)?.map(|_| String::new()),
+            Some(replacement) => with_text_buffer(|output| {
+                if !replace(&matcher, &element, replacement, global, output)? {
+                    return Ok(charsxp);
+                }
+                regex_result(output, forced_bytes)
+            })?,
+            None if matcher.find_at(&element, 0)?.is_some() => na_string(),
+            None => charsxp,
         };
-        match (substituted, &replacement) {
-            (None, _) => set_elt(result, index, charsxp),
-            (Some(_), None) => set_elt(result, index, na_string()),
-            (Some(substituted), Some(_)) => {
-                set_elt(result, index, regex_result(&substituted, forced_bytes)?)
-            }
-        }
+        set_elt(result, index, substituted);
     }
     Ok(result)
 }
 
 /// One part of a replacement string.
-enum ReplacementPiece {
-    Text(String),
+enum ReplacementPiece<'a> {
+    Text(&'a str),
     /// `\\1` to `\\9`.
     Group(usize),
     /// `\\U`, `\\L` and `\\E` (with `perl = TRUE`): how later groups are cased.
@@ -2268,52 +2273,55 @@ enum Case {
     Keep,
 }
 
-fn parse_replacement(text: &str, options: PatternOptions) -> Vec<ReplacementPiece> {
+/// The pieces of one replacement string, each literal borrowed from it.
+type Replacement<'a> = SmallVec<[ReplacementPiece<'a>; 4]>;
+
+fn parse_replacement(text: &str, options: PatternOptions) -> Replacement<'_> {
     if options.fixed {
-        return vec![ReplacementPiece::Text(text.to_owned())];
+        return smallvec![ReplacementPiece::Text(text)];
     }
-    let mut pieces = Vec::new();
-    let mut literal = String::new();
-    let mut chars = text.chars();
-    while let Some(character) = chars.next() {
+    let mut pieces = Replacement::new();
+    let mut literal_start = 0;
+    let mut characters = text.char_indices();
+    while let Some((offset, character)) = characters.next() {
         if character != '\\' {
-            literal.push(character);
             continue;
         }
-        let piece = match chars.next() {
-            Some(digit @ '1'..='9') => ReplacementPiece::Group(digit as usize - '0' as usize),
-            Some('U') if options.perl => ReplacementPiece::Case(Case::Upper),
-            Some('L') if options.perl => ReplacementPiece::Case(Case::Lower),
-            Some('E') if options.perl => ReplacementPiece::Case(Case::Keep),
-            Some(escaped) => {
-                literal.push(escaped);
-                continue;
-            }
-            None => break,
-        };
-        if !literal.is_empty() {
-            pieces.push(ReplacementPiece::Text(std::mem::take(&mut literal)));
+        if literal_start < offset {
+            pieces.push(ReplacementPiece::Text(&text[literal_start..offset]));
         }
-        pieces.push(piece);
+        let Some((escaped_offset, escaped)) = characters.next() else {
+            literal_start = text.len();
+            break;
+        };
+        literal_start = escaped_offset + escaped.len_utf8();
+        pieces.push(match escaped {
+            '1'..='9' => ReplacementPiece::Group(escaped as usize - '0' as usize),
+            'U' if options.perl => ReplacementPiece::Case(Case::Upper),
+            'L' if options.perl => ReplacementPiece::Case(Case::Lower),
+            'E' if options.perl => ReplacementPiece::Case(Case::Keep),
+            _ => ReplacementPiece::Text(&text[escaped_offset..literal_start]),
+        });
     }
-    if !literal.is_empty() {
-        pieces.push(ReplacementPiece::Text(literal));
+    if literal_start < text.len() {
+        pieces.push(ReplacementPiece::Text(&text[literal_start..]));
     }
     pieces
 }
 
-/// Replaces the first match, or every match when `global`, or returns `None` when nothing
-/// matches. An empty match right where the previous match ended is skipped, as GNU R does.
+/// Writes `text` to `output` with the first match replaced, or every match when `global`, and
+/// returns whether anything matched. An empty match right where the previous match ended is skipped, as GNU R does.
 fn replace(
     matcher: &Matcher,
     text: &str,
     replacement: &[ReplacementPiece],
     global: bool,
-) -> R<Option<String>> {
+    output: &mut String,
+) -> R<bool> {
     let need_groups = replacement
         .iter()
         .any(|piece| matches!(piece, ReplacementPiece::Group(_)));
-    let mut output = String::with_capacity(text.len());
+    output.reserve(text.len());
     let mut position = 0;
     let mut previous_end = None;
     let mut matched = false;
@@ -2323,7 +2331,7 @@ fn replace(
         } else {
             matcher
                 .find_at(text, position)?
-                .map(|span| vec![Some(span)])
+                .map(|span| smallvec![Some(span)])
         };
         let Some(groups) = groups else {
             break;
@@ -2378,11 +2386,10 @@ fn replace(
             break;
         }
     }
-    if !matched {
-        return Ok(None);
+    if matched {
+        output.push_str(&text[position.min(text.len())..]);
     }
-    output.push_str(&text[position.min(text.len())..]);
-    Ok(Some(output))
+    Ok(matched)
 }
 
 /// `regexpr` and `gregexpr`: match positions, with the attributes base R's `regmatches` reads.
@@ -2414,7 +2421,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         if groups == 0 {
             Ok(matcher
                 .find_at(element, position)?
-                .map(|span| vec![Some(span)]))
+                .map(|span| smallvec![Some(span)]))
         } else {
             matcher.captures_at(element, position)
         }
@@ -2817,14 +2824,14 @@ unsafe fn regex_result(text: &str, forced_bytes: bool) -> R<Sexp> {
 }
 
 /// The pattern's first element, or `None` for `NA`, read as [`subject_at`] reads text.
-unsafe fn pattern_argument(pattern: Sexp, bytes: bool) -> R<Option<String>> {
+unsafe fn pattern_argument<'a>(pattern: Sexp, bytes: bool) -> R<Option<Cow<'a, str>>> {
     if pattern.kind() != SexpType::String || length(pattern) == 0 {
         return Err(error("invalid 'pattern' argument"));
     }
     if length(pattern) > 1 {
         warning("argument 'pattern' has length > 1 and only the first element will be used")?;
     }
-    Ok(subject_at(pattern, 0, bytes).map(Cow::into_owned))
+    Ok(subject_at(pattern, 0, bytes))
 }
 
 /// Element `index` of a character vector as the regular expression engine sees it, or `None`
@@ -2886,7 +2893,7 @@ unsafe fn valid_subject(
 
 /// The byte ranges of a match (group 0) and of its capture groups, `None` for a group that took
 /// no part in the match.
-type Groups = Vec<Option<(usize, usize)>>;
+type Groups = SmallVec<[Option<(usize, usize)>; 4]>;
 
 /// How a TRE pattern that does not compile is reported. GNU R words the error differently on
 /// each path: the wide-character path of `regexpr`, `gregexpr` and `grep` (taken when the
@@ -2916,7 +2923,7 @@ impl CompileErrors {
 #[derive(Clone)]
 enum Matcher {
     /// A fixed pattern, with its searcher built once rather than on every search.
-    Literal(Box<memmem::Finder<'static>>),
+    Literal(Rc<memmem::Finder<'static>>),
     /// `fresh_start` as in [`Translation`], here and in `Automaton`.
     Pattern { regex: Rc<Regex>, fresh_start: bool },
     /// A POSIX pattern without backreferences, which finite automata can match in linear time.
@@ -2987,18 +2994,26 @@ impl LazyAutomata {
 const PATTERN_CACHE_SIZE: usize = 256;
 
 thread_local! {
-    static PATTERN_CACHE: RefCell<FxHashMap<(String, bool, bool), Matcher>> = RefCell::default();
+    /// Compiled patterns by text, with a slot for `fixed = TRUE` and one per combination of
+    /// `ignore.case` and `perl`, so a lookup borrows the pattern instead of building a key.
+    static PATTERN_CACHE: RefCell<FxHashMap<Box<str>, [Option<Matcher>; 5]>> = RefCell::default();
 }
 
 impl Matcher {
     unsafe fn compile(pattern: &str, options: PatternOptions, errors: CompileErrors) -> R<Matcher> {
-        if options.fixed {
-            return Ok(Matcher::Literal(Box::new(
-                memmem::Finder::new(pattern).into_owned(),
-            )));
+        let slot = if options.fixed {
+            4
+        } else {
+            usize::from(options.ignore_case) | usize::from(options.perl) << 1
+        };
+        let key = (pattern, slot);
+        if let Some(matcher) = PATTERN_CACHE.with_borrow(|cache| cache.get(pattern)?[slot].clone())
+        {
+            return Ok(matcher);
         }
-        let key = (pattern.to_owned(), options.ignore_case, options.perl);
-        if let Some(matcher) = PATTERN_CACHE.with_borrow(|cache| cache.get(&key).cloned()) {
+        if options.fixed {
+            let matcher = Matcher::Literal(Rc::new(memmem::Finder::new(pattern).into_owned()));
+            remember(key, &matcher);
             return Ok(matcher);
         }
         if options.perl {
@@ -3152,10 +3167,10 @@ impl Matcher {
             }));
         }
         match self {
-            Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
+            Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| smallvec![Some(span)])),
             Matcher::Approximate(regex) => approximate_search(regex, text, from),
             Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
-                Ok(self.find_at(text, from)?.map(|span| vec![Some(span)]))
+                Ok(self.find_at(text, from)?.map(|span| smallvec![Some(span)]))
             }
             Matcher::Automaton {
                 automata,
@@ -3262,12 +3277,18 @@ fn approximate_search(regex: &ApproximateRegex, text: &str, from: usize) -> R<Op
     ))
 }
 
-fn remember(key: (String, bool, bool), matcher: &Matcher) {
+fn remember((pattern, slot): (&str, usize), matcher: &Matcher) {
     PATTERN_CACHE.with_borrow_mut(|cache| {
+        if let Some(slots) = cache.get_mut(pattern) {
+            slots[slot] = Some(matcher.clone());
+            return;
+        }
         if cache.len() >= PATTERN_CACHE_SIZE {
             cache.clear();
         }
-        cache.insert(key, matcher.clone());
+        let mut slots: [Option<Matcher>; 5] = Default::default();
+        slots[slot] = Some(matcher.clone());
+        cache.insert(pattern.into(), slots);
     });
 }
 

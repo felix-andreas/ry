@@ -472,7 +472,13 @@ impl StringMemo<'_> {
         if self.off {
             return Ok(crate::heap().mk_char(bytes, Encoding::Native)?);
         }
+        // A call that makes only a few strings would spend more on building the table than
+        // the table saves.
+        const SHORT: usize = 16;
         self.lookups += 1;
+        if self.lookups <= SHORT && self.pieces.is_empty() {
+            return Ok(crate::heap().mk_char(bytes, Encoding::Native)?);
+        }
         if self.lookups == WINDOW {
             if self.hits < WINDOW / 8 {
                 self.off = true;

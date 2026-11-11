@@ -3176,7 +3176,7 @@ unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
     state.method_vars.truncate(frame.method_vars as usize);
     let (env, closures) = (frame.env, frame.closures);
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    state.handlers = frame.handlers;
+    conditions::restore_handlers(frame.handlers);
     state.restarts = frame.restarts;
     state.srcref = frame.srcref;
     if let Ok(value) = result
@@ -5212,7 +5212,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let result = catch_return(env, run_on_exit(depth, catch_return(env, result)));
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    state.handlers = state.frames[depth - 1].handlers.clone();
+    conditions::restore_handlers(state.frames[depth - 1].handlers.clone());
     state
         .frame_closures
         .truncate(state.frames[depth - 1].closures);

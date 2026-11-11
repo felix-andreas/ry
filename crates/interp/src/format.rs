@@ -6,6 +6,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        strings::{insert_fill, with_text_buffer},
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols},
     },
@@ -275,31 +276,48 @@ fn real_format_candidates(values: &[f64], settings: Settings) -> RealCandidates 
 
 /// One double in a given format, without padding.
 pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
+    let mut text = String::new();
+    // Writing into a `String` cannot fail, and the text stays empty if it ever did.
+    if push_real_with(&mut text, value, format, na).is_err() {
+        text.clear();
+    }
+    text
+}
+
+/// Appends `value` to `out` as [`format_real_with`] formats it.
+pub fn push_real_with(
+    out: &mut String,
+    value: f64,
+    format: RealFormat,
+    na: &str,
+) -> std::fmt::Result {
     if is_na_real(value) {
-        return na.to_owned();
+        out.push_str(na);
+        return Ok(());
     }
     if value.is_nan() {
-        return "NaN".into();
+        out.push_str("NaN");
+        return Ok(());
     }
     if value.is_infinite() {
-        return if value < 0.0 {
-            "-Inf".into()
-        } else {
-            "Inf".into()
-        };
+        out.push_str(if value < 0.0 { "-Inf" } else { "Inf" });
+        return Ok(());
     }
     // GNU R's `encodeReal0` writes a negative zero as a positive one.
     let value = if value == 0.0 { 0.0 } else { value };
     if format.exponent == 0 {
-        let text = format!("{:.*}", format.decimals, value);
+        let begin = out.len();
+        write!(out, "{:.*}", format.decimals, value)?;
         // `-0` prints as `0`.
+        let text = &out[begin..];
         if text.starts_with('-') && text[1..].bytes().all(|byte| byte == b'0' || byte == b'.') {
-            return text[1..].to_owned();
+            out.remove(begin);
         }
-        return text;
+        return Ok(());
     }
     // Adding zero turns `-0` into `0`, which is how it prints.
-    scientific_text(value + 0.0, format.decimals)
+    out.push_str(&scientific_text(value + 0.0, format.decimals));
+    Ok(())
 }
 
 /// `value` in scientific notation with `decimals` mantissa decimals and at least two exponent
@@ -438,7 +456,13 @@ pub(crate) fn output_decimal() -> String {
 }
 
 pub fn set_output_decimal(mark: &str) {
-    OUTPUT_DECIMAL.with(|decimal| *decimal.borrow_mut() = mark.to_owned());
+    OUTPUT_DECIMAL.with(|decimal| {
+        let mut decimal = decimal.borrow_mut();
+        if decimal.as_str() != mark {
+            decimal.clear();
+            decimal.push_str(mark);
+        }
+    });
 }
 
 /// GNU R 4.5.0 and later warn each time a double is written with a decimal mark that is not one
@@ -724,6 +748,14 @@ pub fn pad(text: &str, width: usize, left: bool) -> String {
         padding + text
     } else {
         text.to_owned() + &padding
+    }
+}
+
+/// Pads `out` with spaces on the left to `width` display columns, as [`pad`] does.
+fn pad_start(out: &mut String, width: usize) {
+    let current = display_width(out);
+    if current < width {
+        insert_fill(out, 0, ' ', width - current);
     }
 }
 
@@ -1075,33 +1107,52 @@ unsafe fn format_numbers(
         _ => None,
     }
     .unwrap_or(0);
-    let text_at = |index: usize| -> String {
-        match (vector.kind(), real_format) {
-            (SexpType::Real, Some(format)) => {
-                let text = format_real_with(values::reals(vector)[index], format, NA);
-                localize_decimal(pad(&text, format.width, true))
-            }
-            (SexpType::Logical, _) => match values::ints(vector)[index] {
-                NA_INTEGER => pad(NA, common, true),
-                value => pad(format_logical(value), common, true),
-            },
-            _ => match values::ints(vector)[index] {
-                NA_INTEGER => pad(NA, common, true),
-                value => pad(&value.to_string(), common, true),
-            },
-        }
-    };
+    let localized = OUTPUT_DECIMAL.with(|decimal| decimal.borrow().as_str() != ".");
     let result = alloc(SexpType::String, count)?;
     let mut width = None;
     for index in 0..count {
-        let text = text_at(index);
-        if real_format.is_some()
-            && *width.get_or_insert(display_width(&text)) != display_width(&text)
-        {
+        let fits = with_text_buffer(|out| {
+            match (vector.kind(), real_format) {
+                (SexpType::Real, Some(format)) => {
+                    push_real_with(out, values::reals(vector)[index], format, NA)
+                        .map_err(|_| error("formatting a number failed"))?;
+                    pad_start(out, format.width);
+                    if localized {
+                        *out = localize_decimal(std::mem::take(out));
+                    }
+                }
+                (SexpType::Logical, _) => {
+                    out.push_str(match values::ints(vector)[index] {
+                        NA_INTEGER => NA,
+                        value => format_logical(value),
+                    });
+                    pad_start(out, common);
+                }
+                _ => {
+                    match values::ints(vector)[index] {
+                        NA_INTEGER => out.push_str(NA),
+                        value => write!(out, "{value}")
+                            .map_err(|_| error("formatting a number failed"))?,
+                    }
+                    pad_start(out, common);
+                }
+            }
+            if real_format.is_some()
+                && *width.get_or_insert(display_width(out)) != display_width(out)
+            {
+                return Ok(false);
+            }
+            if trim {
+                let spaces = out.len() - out.trim_start().len();
+                out.drain(..spaces);
+            }
+            pad_start(out, min_width);
+            values::set_mkchar(result, index, out)?;
+            Ok(true)
+        })?;
+        if !fits {
             return Ok(None);
         }
-        let text = if trim { text.trim_start() } else { &text };
-        values::set_mkchar(result, index, &pad(text, min_width, true))?;
     }
     // Warned only once the result is final: the general path warns for itself.
     if real_format.is_some() {

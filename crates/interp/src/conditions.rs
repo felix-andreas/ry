@@ -49,6 +49,38 @@ pub struct RestartEntry {
     pub next: RestartStack,
 }
 
+/// The most released entries [`restore_handlers`] keeps for reuse.
+const HANDLER_POOL_SIZE: usize = 64;
+
+/// A stack entry for `handler`, reusing one a frame exit released when there is one.
+pub fn new_handler(handler: Handler) -> Rc<Handler> {
+    let state = interp();
+    if let Some(mut entry) = state.handler_pool.pop()
+        && let Some(slot) = Rc::get_mut(&mut entry)
+    {
+        *slot = handler;
+        return entry;
+    }
+    Rc::new(handler)
+}
+
+/// Makes `saved` the handler stack again, as a frame exit does, and keeps the entries above it
+/// that nothing else holds for [`new_handler`] to reuse.
+pub fn restore_handlers(saved: HandlerStack) {
+    let state = interp();
+    let mut released = std::mem::replace(&mut state.handlers, saved);
+    while let Some(mut entry) = released
+        && state.handler_pool.len() < HANDLER_POOL_SIZE
+    {
+        // An entry still on the restored stack, or saved by a frame or a caller, is shared.
+        let Some(handler) = Rc::get_mut(&mut entry) else {
+            break;
+        };
+        released = handler.next.take();
+        state.handler_pool.push(entry);
+    }
+}
+
 /// Whether an entry of `stack` has `closure` as its handler.
 pub(crate) fn handlers_hold(stack: &HandlerStack, closure: Sexp) -> bool {
     let mut entry = stack.as_ref();
@@ -684,7 +716,7 @@ unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     let mut stack = state.handlers.clone();
     for index in (0..length(classes)).rev() {
-        stack = Some(Rc::new(Handler {
+        stack = Some(new_handler(Handler {
             class: classes.element(index),
             handler: handlers.element(index),
             calling,
