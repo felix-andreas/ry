@@ -8872,6 +8872,15 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Heap allocation errors are built lazily.** The allocator's `ok_or(HeapError::...)` chains became `let ... else` returns: the eager form constructed and dropped a `HeapError` on every allocation, about a dozen instructions per `allocVector`.
 - **Not on this path.** `Riconv`, which `processx` calls to convert child output to UTF-8 while `rlang`'s tests run, costs about 1.8 million instructions per call and is most of that suite's remaining boundary share. It belongs to the string and encoding layer, not to the call boundary.
 - **Not changed.** Attributes stay a pairlist on the object. A dense attribute table would make lookups cheaper still, but it changes the image format; it is the follow-up in `backlog.md`.
+- **Closed: no further entry point is worth a direct path.** After `Rf_duplicate`'s, the whole C API boundary is 0.44% of the `testthat` application's instructions, and its largest entry, `R_existsVarInFrame`, is 0.08%. In the package test suites (release build, one process with `TESTTHAT_PARALLEL=false`) the largest remaining entries outside the string layer are small:
+
+  | entry point | cli | rlang | vctrs | Ir per call |
+  |---|---:|---:|---:|---:|
+  | `Rf_shallow_duplicate` | 0.41% | 0.37% | 0.44% | 1,030 |
+  | `R_existsVarInFrame` | 0.58% | 0.23% | 0.35% | 475 |
+  | `SETCAR`, `CAR`, `Rf_protect` | 0.1 to 0.3% each | | | |
+
+  A direct path roughly halves an entry's cost, so the two largest together would save about 0.5% of cli and less elsewhere. Reopen this only if a profile shows one entry above 2% of a named workload. Two vctrs costs that look like boundary costs are not: `Rf_allocVector` at about 11,000 Ir per call is probably collection charged to the allocator (unverified), and `INTEGER_RO` at about 19,000 Ir per call is compact-sequence materialization.
 
 ## Tier-0 call entry: raw pool reads, an out-of-line tier schedule, and a cleared register window
 
