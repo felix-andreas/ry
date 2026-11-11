@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
 # The oldest release that parses the justfile; tools/dev-setup.sh installs a pinned newer one.
@@ -35,6 +36,7 @@ def main():
     r = check_gnu_r()
     if r:
         check_oracle_packages(r)
+        check_libraries(r)
     corpus_complete = check_corpus()
     check_cache(corpus_complete)
     check_binaries()
@@ -158,6 +160,66 @@ def check_oracle_packages(r):
         report("warn", "oracle packages", f"rlang {versions['rlang']}, not {RLANG_VERSION}: the rlang cases and trace_back fuzzing skip", "sudo tools/dev-setup.sh")
     else:
         report("ok", "oracle packages", ", ".join(f"{p} {versions[p]}" for p in ORACLE_PACKAGES))
+
+
+def check_libraries(r):
+    """Whether `ry run` by hand loads the packages the reference R loads.
+
+    The oracle gives every engine the reference R's `.libPaths()` (crates/oracle/src/oracle.rs,
+    `library_environment`), so this matters only outside it: ry's default libraries are its bundled
+    base R's plus any GNU R user and site libraries it finds, such as Debian's
+    /usr/lib/R/site-library, and a case rerun by hand then loads other versions than the oracle did.
+    """
+    target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+    ry = os.environ.get("ORACLE_RY") or next((str(path) for path in [target / "debug/ry", target / "release/ry"] if path.exists()), None)
+    if not ry:
+        return
+    probe = 'cat(.libPaths(), sep = "\\n")'
+    code, output = run([r, "--vanilla", "--slave", "-e", probe])
+    if code != 0:
+        report("warn", "libraries", f"{r} cannot list its libraries: {output[-200:]}")
+        return
+    r_paths = output.splitlines()
+    with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
+        script.write(probe)
+        script.flush()
+        code, output = run([ry, "run", "--runtime", "ry", script.name])
+    if code != 0:
+        report("warn", "libraries", f"{ry} cannot list its libraries: {output[-200:]}")
+        return
+    ry_paths = output.splitlines()
+    ours, theirs = visible_packages(ry_paths), visible_packages(r_paths)
+    other = [f"{name} {ours[name][0]} from {ours[name][1]}" for name in sorted(ours.keys() & theirs.keys()) if ours[name][0] != theirs[name][0]]
+    absent = sorted(theirs.keys() - ours.keys())
+    if not other and not absent:
+        report("ok", "libraries", f"ry run loads the {len(theirs)} packages the reference R loads, at the same versions")
+        return
+    problems = []
+    if other:
+        problems.append(f"loads {', '.join(other[:4])}{' ...' if len(other) > 4 else ''} in place of the reference R's versions")
+    if absent:
+        problems.append(f"lacks {len(absent)} of the reference R's packages ({', '.join(absent[:4])}{' ...' if len(absent) > 4 else ''})")
+    report(
+        "warn",
+        "libraries",
+        f"ry run by hand searches {', '.join(ry_paths)}, not the reference R's {', '.join(r_paths)}, so it " + " and ".join(problems)
+        + "; the oracle passes the reference R's paths itself, so this affects only a case rerun by hand",
+        f"R_LIBS={':'.join(r_paths)} R_LIBS_SITE= R_LIBS_USER= ry run ...",
+    )
+
+
+def visible_packages(paths):
+    """Each package `library()` would load from `paths`, as name -> (version, library): the first library that has it wins."""
+    packages = {}
+    for library in paths:
+        for description in sorted(pathlib.Path(library).glob("*/DESCRIPTION")):
+            name = description.parent.name
+            if name in packages:
+                continue
+            fields = (line.split(":", 1) for line in description.read_text(errors="replace").splitlines() if ":" in line)
+            version = next((value.strip() for key, value in fields if key == "Version"), "?")
+            packages[name] = (version, library)
+    return packages
 
 
 def check_corpus():

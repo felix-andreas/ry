@@ -9,6 +9,7 @@
 //! a test whose value or problems differ between those runs is compared by status alone.
 
 use {
+    crate::library_environment,
     serde::{Deserialize, Serialize},
     std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -432,6 +433,7 @@ fn run_suite(
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
         .env("TZ", "UTC")
+        .envs(library_environment().iter().cloned())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)

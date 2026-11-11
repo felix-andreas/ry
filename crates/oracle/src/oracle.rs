@@ -61,6 +61,8 @@ pub struct Outcome {
     /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
     /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
     /// package installed by one engine makes the other warn that it was built under another R.
+    /// [`library_environment`] gives every engine the same value, so only a wrapper that sets
+    /// `R_LIBS` itself trips it.
     pub libraries: Option<String>,
 }
 
@@ -324,6 +326,7 @@ impl Engine for ProcessEngine {
                 "R_DEFAULT_PACKAGES",
                 "datasets,utils,grDevices,graphics,stats,methods",
             )
+            .envs(library_environment().iter().cloned())
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
         let output = run_command(command, self.timeout).map_err(|error| match error.kind() {
@@ -516,6 +519,38 @@ pub fn gnu_r_home() -> Option<String> {
             .filter(|home| !home.is_empty())
     })
     .clone()
+}
+
+/// The package libraries every engine searches: `R_LIBS` set to the reference GNU R's
+/// `.libPaths()`, with `R_LIBS_SITE` and `R_LIBS_USER` set empty so that no engine adds its own
+/// defaults. ry's defaults differ from GNU R's in both directions: the library of its bundled base
+/// R holds none of the reference R's packages, and it also searches the user and site libraries of
+/// any other GNU R it finds, such as Debian's `/usr/lib/R/site-library`, whose older data.table,
+/// rlang and withr then load in place of the reference R's. A caller's `R_LIBS` stays first,
+/// because the reference R puts it first. Empty when GNU R cannot be asked, which leaves the
+/// inherited environment as it is.
+pub fn library_environment() -> &'static [(String, String)] {
+    static ENVIRONMENT: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    ENVIRONMENT.get_or_init(|| {
+        let Ok(output) = Command::new(gnu_r_program())
+            .args(["--vanilla", "--slave", "--no-restore", "-e"])
+            .arg("cat(.libPaths(), sep = .Platform$path.sep)")
+            .env("R_LIBS_SITE", "")
+            .env("R_LIBS_USER", "")
+            .output()
+        else {
+            return Vec::new();
+        };
+        let paths = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || paths.is_empty() {
+            return Vec::new();
+        }
+        vec![
+            ("R_LIBS".to_string(), paths),
+            ("R_LIBS_SITE".to_string(), String::new()),
+            ("R_LIBS_USER".to_string(), String::new()),
+        ]
+    })
 }
 
 /// The release of GNU R, such as `4.3.3`, from the first line `R --version` prints.
@@ -788,7 +823,7 @@ fn case_requirements(case: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The packages GNU R can load, from its own library paths and `R_LIBS`.
+/// The packages GNU R can load from the libraries [`library_environment`] gives every engine.
 pub fn installed_packages() -> Option<Vec<String>> {
     let output = Command::new(gnu_r_program())
         .args([
@@ -797,6 +832,7 @@ pub fn installed_packages() -> Option<Vec<String>> {
             "-e",
             "cat(rownames(installed.packages()), sep = '\\n')",
         ])
+        .envs(library_environment().iter().cloned())
         .output()
         .ok()?;
     output.status.success().then(|| {
