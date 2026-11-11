@@ -6156,7 +6156,6 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
         return None;
     };
     read_element_call::<false>(state, at, double)
-        .or_else(|| read_string_element_call(state, at, double))
 }
 
 /// [`read_element_call`] of a character vector, reached only once the numeric kinds decline.
@@ -6183,12 +6182,18 @@ unsafe fn read_element_call<const STRING: bool>(
     let heap = &mut *state.heap;
     let first = *code.add(at + 4) as usize;
     let subject = *registers.add(first);
-    let position = element_access::element_position::<STRING>(
+    let Some(position) = element_access::element_position::<STRING>(
         heap,
         subject,
         *registers.add(first + 1),
         double,
-    )?;
+    ) else {
+        // A tail call, so the numeric read pays nothing for the character case.
+        if !STRING && subject.kind() == SexpType::String {
+            return read_string_element_call(state, at, double);
+        }
+        return None;
+    };
     let known = *heap.known();
     let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
     let second = arguments.cdr();
