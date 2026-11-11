@@ -1,6 +1,6 @@
 id = "packages"
 name = "Package test suites"
-summary = "The test suites of 26 pinned CRAN packages"
+summary = "pinned CRAN packages, each running its own test suite"
 description = """
 The packages come from the benchmark dependency set that AGENTS.md lists, pinned by version and source tarball SHA-256 in lock.tsv and installed with GNU R into one library that both engines load. Each run is the wall time of a whole process that runs the package's tests the way R CMD check does: testthat suites through test_dir() on the installed package, tinytest suites through run_test_dir(), and other packages' tests/*.R scripts one by one. The time therefore includes start-up and loading the package. Runs are offline, and test files that need the network are left out. The outcome (passed, failed, errors) is recorded per engine.
 """

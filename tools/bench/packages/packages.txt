@@ -1,7 +1,7 @@
-# Packages whose test suites `run.py` times, from the benchmark dependency set in AGENTS.md. Each
+# Packages whose test suites `just bench packages` times, from the benchmark dependency set in AGENTS.md. Each
 # line is a package, optionally followed by packages its tests need beyond its Depends, Imports and
 # LinkingTo (its Suggests are otherwise left out, so tests that need one skip on both engines).
-# `run.py lock` resolves these and their dependencies into lock.tsv.
+# `just bench-packages lock` resolves these and their dependencies into lock.tsv.
 abind
 assertthat
 brio
@@ -22,10 +22,10 @@ purrr
 R6
 rappdirs
 rlang
-snakecase
+snakecase tibble
 stringr
 uuid
 withr
 xts
 zeallot
-zoo
+zoo chron mondate strucchange timeDate tis tseries

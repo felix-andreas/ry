@@ -18,9 +18,10 @@ rounds. A suite's geometric mean has a bootstrap interval that resamples each pr
 
 A run fails, and writes nothing, when any program fails on any engine or prints a checksum that
 differs from GNU R's (a numeric checksum may differ by a relative 1e-10, the room a different
-summation order needs). The packages suite is the exception for checksums: test outcomes may differ
-between engines, which is recorded as a `tests_differ` flag, but a suite that does not run to the
-end fails the run. Flags mark a program without failing it: `too_short` when an engine's median is
+summation order needs). The packages suite is the exception, because there a package's own test
+suite is the program: test outcomes that differ between engines are recorded as a `tests_differ`
+flag, and a test suite that does not run to the end on an engine is recorded as a failure in that
+package's row, which leaves the package out of the geometric mean. Flags mark a program without failing it: `too_short` when an engine's median is
 under 0.1 s (a program whose GNU R time is that short is also left out of the geometric mean),
 `wide_interval` when the interval of a ratio reaches more than 10% from its median (such programs
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
@@ -184,13 +185,14 @@ def run_suite(suite, args, meta):
     if runner.network:
         print("the tests reached for the network, which skews both engines' times; add each test file "
               "to NETWORK_TESTS in tooling/packages.py:\n  " + "\n  ".join(sorted(set(runner.network))))
-    if args.write and not failures and not runner.network:
-        for program in results["programs"]:
-            program.pop("failures", None)
+    # A package's own test suite failing is a compatibility result, recorded in its row like
+    # tests_differ. One of our programs failing means the measurement itself is broken.
+    blocking = [] if suite == "packages" else failures
+    if args.write and not blocking and not runner.network:
         (here / suite / "results.json").write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
         print(f"wrote {here / suite / 'results.json'}")
     print()
-    return bool(failures or runner.network)
+    return bool(blocking or runner.network)
 
 
 def shuffle_round(shuffle, programs, table):
@@ -577,7 +579,7 @@ def metadata(args):
     except OSError:
         pass
     probe = subprocess.run([args.rscript, "--vanilla", "-e",
-                            "cat(R.version.string, '\\n', La_library(), '\\n', extSoftVersion()[['BLAS']], '\\n', sep = '')"],
+                            "cat(paste(R.version$major, R.version$minor, sep = '.'), '\\n', La_library(), '\\n', extSoftVersion()[['BLAS']], '\\n', sep = '')"],
                            capture_output=True, text=True, check=True).stdout.splitlines()
     version, lapack, blas = (probe + ["", "", ""])[:3]
     return {

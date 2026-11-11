@@ -98,7 +98,7 @@ def lock(args):
         print(f"{name} {version}", file=sys.stderr)
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         digests = dict(zip(resolved, pool.map(lambda item: sha256(fetch(source_url(*item))), resolved.items())))
-    lines = ["# package\tversion\tsha256 of the source tarball; written by `run.py lock`"]
+    lines = ["# package\tversion\tsha256 of the source tarball; written by `just bench-packages lock`"]
     lines += [f"{name}\t{resolved[name]}\t{digests[name]}" for name in sorted(resolved, key=str.lower)]
     (here / "lock.tsv").write_text("\n".join(lines) + "\n")
     print(f"locked {len(resolved)} packages for R {'.'.join(map(str, r_version))}", file=sys.stderr)
@@ -220,12 +220,12 @@ def driver(name, kind, tests):
 suppressPackageStartupMessages(library(testthat))
 result <- as.data.frame(test_dir({json.dumps(str(tests))}, package = {json.dumps(name)},
   load_package = "installed", reporter = "silent", stop_on_failure = FALSE, stop_on_warning = FALSE))
-cat("RESULT", sum(result$passed), sum(result$failed), sum(result$skipped), sum(result$error), "\\n")
+cat("\\nRESULT", sum(result$passed), sum(result$failed), sum(result$skipped), sum(result$error), "\\n")
 """
     return f"""
 suppressPackageStartupMessages(library({name}))
 result <- as.data.frame(tinytest::run_test_dir({json.dumps(str(tests))}, at_home = FALSE, verbose = 0))
-cat("RESULT", sum(result$result), sum(!result$result), 0L, 0L, "\\n")
+cat("\\nRESULT", sum(result$result), sum(!result$result), 0L, 0L, "\\n")
 """
 
 class RefusingProxy:

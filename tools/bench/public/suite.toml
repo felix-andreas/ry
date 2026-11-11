@@ -1,6 +1,6 @@
 id = "public"
 name = "Public R JIT benchmarks"
-summary = "54 standard programs from R compiler research (Ř, rcp)"
+summary = "standard programs from R compiler research (Ř, rcp)"
 description = """
 The programs are the benchmark suite that the Ř (rir) and rcp R compilers measure, the 57 programs of Kocourek, Křikava and Vitek's "Copy-and-Patch Just-in-Time Compiler for R" (VMIL 2025) minus three that cannot be sized to a few seconds. They are vendored unchanged from PRL-PRG/r-compile-server at commit b2b13a3150bddcc2d6dae8c37ecbbf1007170940 under its MIT licence, with the Benchmarks Game ports contributed by Leo Osvald and the Are We Fast Yet translations credited to Kalibera et al. Each file ends with a driver that runs the program once at a fixed size, chosen so that GNU R takes about 0.5 to 2.5 s, and prints its name, a checksum of its output and result, and its time. Each program runs once per fresh process from its own directory, so the time includes GNU R's byte compilation and ry's JIT tier-up, and its checksum must match GNU R's.
 """

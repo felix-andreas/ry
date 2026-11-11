@@ -1,7 +1,7 @@
 id = "kernels"
 name = "Numeric kernels (ours)"
 harness = "tools/bench/harness.R"
-summary = "Our programs whose time goes into loops, recursion and arithmetic on numbers"
+summary = "small programs we wrote whose time goes into loops, recursion and arithmetic on numbers"
 description = """
 Programs written for ry's benchmarks, each the hot path of numeric code: scalar loops, recursion,
 element loops over vectors, whole-vector arithmetic and small simulations, several taken from the

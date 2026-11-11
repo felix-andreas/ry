@@ -1,7 +1,7 @@
 id = "applications"
 name = "Application workloads (ours)"
 harness = "tools/bench/harness.R"
-summary = "Our programs in the shape of package and business code: calls, dispatch, conditions, records, tables"
+summary = "programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables"
 description = """
 Programs written for ry's benchmarks in the shape of the code real R packages and analyses run:
 validation at API boundaries, condition handling, S3, S4 and R6 objects, records as named lists,
