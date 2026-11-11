@@ -101,8 +101,15 @@ const GNU_R_BYTECODE_VERSION: i32 = 12;
 /// a closure compiles.
 pub struct State {
     /// Allocated once at [`REGISTER_FILE_CAPACITY`] and never grown past it, so a register
-    /// window's address is stable for as long as the window exists.
+    /// window's address is stable for as long as the window exists. A window grows over what
+    /// earlier windows left without clearing it; see [`State::trace`] for why that is sound.
     pub(crate) registers: Vec<Sexp>,
+    /// The longest the file has been since the last collection: the words past the length
+    /// up to here hold what released windows left.
+    high_water: usize,
+    /// What a new window holds while invariants are on, so that an instruction reading a
+    /// register it has not written fails instead of reading what an earlier window left.
+    poison: Option<Sexp>,
     /// Calls seen per uncompiled body. Keys are only compared, never dereferenced, so a body
     /// that died and whose address was reused merely compiles one call early.
     calls: FxHashMap<Sexp, u32>,
@@ -114,6 +121,8 @@ impl Default for State {
     fn default() -> State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
+            high_water: 0,
+            poison: None,
             calls: FxHashMap::default(),
             tier: None,
             call_plans: CallPlans::default(),
@@ -122,10 +131,30 @@ impl Default for State {
 }
 
 impl State {
-    pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
+    /// Marks the live windows and clears the words that released windows left above them.
+    ///
+    /// A window grows without clearing, so a register a frame has not written yet holds what
+    /// an earlier, released window stored there. Every word below the high-water mark is
+    /// therefore `NULL` or an object that was reachable at the last collection or allocated
+    /// since, and an object is freed only by a collection: as long as each collection clears
+    /// the words it does not mark, no word ever names a freed object. That holds because the
+    /// heap does not move objects; a moving or compacting collector would need the clearing
+    /// on every grow instead. A stale word inside a live window keeps its object alive until
+    /// the frame writes the register or returns, as a frame's own dead temporaries do.
+    pub(crate) unsafe fn trace(&mut self, marker: &mut Marker<'_>) {
         for &register in &self.registers {
             marker.mark(register);
         }
+        let length = self.registers.len();
+        if self.high_water > length {
+            // SAFETY: the capacity covers the high-water mark, and the words are only written.
+            let released = std::slice::from_raw_parts_mut(
+                self.registers.as_mut_ptr().add(length),
+                self.high_water - length,
+            );
+            released.fill(nil());
+        }
+        self.high_water = length;
         self.call_plans.trace(marker);
     }
 }
@@ -311,7 +340,8 @@ pub fn register_address(index: usize) -> *mut Sexp {
     unsafe { interp().bytecode.registers.as_mut_ptr().add(index) }
 }
 
-/// Grows the register file to `length` registers, filling new ones with `NULL`.
+/// Grows the register file to `length` registers. The new registers hold what released windows
+/// left there, or `NULL` (see [`State::trace`]).
 #[inline]
 pub fn reserve_registers(length: usize) -> R<()> {
     if length <= interp().bytecode.registers.len() {
@@ -330,15 +360,38 @@ fn grow_registers(length: usize) -> R<()> {
     }
     let start = registers.len();
     if length > start {
-        // Every call grows the file past the registers the last call released, so this runs
-        // once per call: `fill` stores the `NULL`s as wide writes, where `resize` cloned them
-        // one at a time.
-        // SAFETY: the capacity covers `length`, and `Sexp` is a plain pointer the next line
-        // initializes before anything reads it.
+        // SAFETY: the capacity covers `length`, and every word below the high-water mark is
+        // initialized; the words above it are set here.
         unsafe { registers.set_len(length) };
-        registers[start..length].fill(nil());
+        let state = &mut interp().bytecode;
+        if length > state.high_water {
+            let fresh = state.high_water.max(start);
+            state.registers[fresh..length].fill(nil());
+            state.high_water = length;
+        }
+        if syntax::testing::invariants_enabled() {
+            poison_window(start, length);
+        }
     }
     Ok(())
+}
+
+/// Fills a new window with the poison symbol, which [`Instruction::register`] refuses to read.
+#[cold]
+#[inline(never)]
+fn poison_window(start: usize, length: usize) {
+    let state = &mut interp().bytecode;
+    let poison = match state.poison {
+        Some(poison) => poison,
+        None => {
+            // SAFETY: the interpreter is installed while registers grow; a symbol is never freed.
+            let poison = unsafe { crate::heap().install(b"<unwritten register>") }
+                .unwrap_or_else(|error| panic!("cannot make the register poison: {error:?}"));
+            state.poison = Some(poison);
+            poison
+        }
+    };
+    state.registers[start..length].fill(poison);
 }
 
 /// Runs a byte-code object that appears as an expression, which only happens when code reads a
@@ -5352,7 +5405,14 @@ impl Instruction {
 
     #[inline(always)]
     unsafe fn register(self, index: usize) -> Sexp {
-        *self.registers.add(index)
+        let value = *self.registers.add(index);
+        #[cfg(debug_assertions)]
+        assert!(
+            interp().bytecode.poison != Some(value),
+            "instruction {} read register {index} before writing it",
+            self.at
+        );
+        value
     }
 
     #[inline(always)]
