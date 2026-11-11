@@ -30,7 +30,7 @@ The quality bar is four things.
   without the untyped-tier changes too; the frame release (`Heap::release_frame`) is the
   suspect.
 - ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
-  'lattice'`) and the `timeseries` workload of `just bench-real` fails.
+  'lattice'`) and the `timeseries` workload of `just bench applications` fails.
 - Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
@@ -43,7 +43,7 @@ The quality bar is four things.
 
 The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
 inlining are on main; shared baseline stubs and short encodings are on `perf/baseline-compact`.
-JIT on runs about 1% more instructions than JIT off on `bench-real` and is not faster in wall time;
+JIT on runs about 1% more instructions than JIT off on `just bench applications` and is not faster in wall time;
 the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and stays opt-in
 (`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons"). What is
 left, in order of expected gain:
@@ -75,7 +75,7 @@ left, in order of expected gain:
   `withCallingHandlers`.
 - A deoptimization exit that materializes the callee's frame, so tier 1 can inline callees with
   effects. Runtime work (closure calls, argument matching, allocation, collection) dominates
-  `bench-real` with the JIT off, so this and unboxing are the larger levers.
+  `just bench applications` with the JIT off, so this and unboxing are the larger levers.
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
 
@@ -122,7 +122,6 @@ left, in order of expected gain:
 
 ## Open: the real-world benchmark record predates paired rounds
 
-- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then write it in schema 1 (`decisions.md`, "Benchmark suites are directories the renderers only display"), so the page and README show its intervals and `fromLegacy` can go.
 
 ## Open: the benchmark packages under ry's runtime
 
@@ -131,7 +130,7 @@ left, in order of expected gain:
 - **Package install speed.** `R CMD INSTALL` of Matrix takes 39 s on ry against GNU R's 177 s (74 s with `MAKEFLAGS=-j4`), and almost all of it is the compiler (`decisions.md`, "Package builds run `make` in parallel"). The R half is about 10% slower than GNU R's on the same `tools` calls: MASS's Rd objects take 0.55 s and help indices 0.27 s; Matrix's S4 sourcing takes 2.7 s. Levers: Rd parsing (`tools:::.install_package_Rd_objects`), and the separate test-load process (about 0.2 s per package).
 
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
-- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/tooling/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
 - **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
 
@@ -197,7 +196,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 
 ## Open: collector throughput on the benchmark suites
 
-- **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
+- **Measure first.** Generate the suites (`python3 tools/bench/tooling/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
 - **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still allocates a position list for a general subscript of more than eight positions.
@@ -207,11 +206,11 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 
 ## Open: base R kernels against GNU R
 
-`just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
+`just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/internal/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
 
 - **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings took 1.1 s against GNU R's 0.46 s (one thread); re-measure.
 - **Grouping:** `order` on two keys runs at 0.88 of GNU R's time at 1e6 rows. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
-- **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes 1.4 to 1.5 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s. They are spread thinly (`execute_code` about 460 per period, then `run_closure`, `native_call`, `bind_arguments`, `match_args` and `mk_char` at 120 to 190 each), so outlining cold arms of `step` alone has little room; the open lever is function ordering and keeping cold paths out of the whole call path. The release build's PGO and BOLT layout (`decisions.md`, "The Linux release build is profile-guided") cut misses from 5,450 to about 3,050 and instructions from 185k to 160k per period, and period.apply 2e6 from 0.70 s to 0.56 s, measured on a faster machine than the figures above, which come from an earlier run of the plain build. The bench recipes measure the plain build. Closure-call overhead is a broader target than this one case: a closure call costs 0.75 µs against GNU R's 0.35 µs, `vapply` 8.2 µs against 3.4 and `pmin` 15.7 µs against 6.2, and this per-call cost is why ggplot2, lattice and PerformanceAnalytics take 1.2 to 1.9x GNU R's time to render. The aim is a closure call at or below GNU R, measured with `oracle gallery` (149 timed figures) beside period.apply. Two more levers are queued: the `frame_cell` lookups in the fill loop of the finance benchmark's `ledger` template (`tools/bench/templates/finance/ledger.R`, cost not yet measured in isolation), and the S4 metadata-cache-miss path (`slot<-`, `list()`, `possibleExtends`; see the start-up item in `MEMORY.md`). The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
+- **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes 1.4 to 1.5 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s. They are spread thinly (`execute_code` about 460 per period, then `run_closure`, `native_call`, `bind_arguments`, `match_args` and `mk_char` at 120 to 190 each), so outlining cold arms of `step` alone has little room; the open lever is function ordering and keeping cold paths out of the whole call path. The release build's PGO and BOLT layout (`decisions.md`, "The Linux release build is profile-guided") cut misses from 5,450 to about 3,050 and instructions from 185k to 160k per period, and period.apply 2e6 from 0.70 s to 0.56 s, measured on a faster machine than the figures above, which come from an earlier run of the plain build. The bench recipes measure the plain build. Closure-call overhead is a broader target than this one case: a closure call costs 0.75 µs against GNU R's 0.35 µs, `vapply` 8.2 µs against 3.4 and `pmin` 15.7 µs against 6.2, and this per-call cost is why ggplot2, lattice and PerformanceAnalytics take 1.2 to 1.9x GNU R's time to render. The aim is a closure call at or below GNU R, measured with `oracle gallery` (149 timed figures) beside period.apply. Two more levers are queued: the `frame_cell` lookups in the fill loop of the finance benchmark's `ledger` template (`tools/bench/tooling/templates/finance/ledger.R`, cost not yet measured in isolation), and the S4 metadata-cache-miss path (`slot<-`, `list()`, `possibleExtends`; see the start-up item in `MEMORY.md`). The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
 - **Array subassignment with empty indices:** `X[,,k] <- W` on a 1000 x 1000 x 20 double array inside a function builds about 16 MB of index temporaries per call, which come from fresh mappings (78k page faults over 20 calls, GNU R none), so it takes 0.14 s against GNU R's 0.07 s. It is the largest single cost in shootout `mandelbrot_noout_naive` outside the complex kernel; a strided copy over the empty dimensions needs no index vector.
 - **Matrix products** (`linalg.rs`, `real_product`) are ry's own kernels in reference BLAS's summation order (`decisions.md`, "base R's linear algebra"), so they run at reference BLAS's speed, not OpenBLAS's; not yet timed against a GNU R on OpenBLAS. A faster kernel may block over rows and columns and thread across columns, but must keep each entry's sum sequential in the inner index and use no FMA, or the bits move. CI has only OpenBLAS (setup-r installs it), so `test_linalg.rs` compares its LAPACK cases there with live GNU R; adding `libblas3 liblapack3` to the workflow's apt line (a human edit: workflow scope) would make CI check the pinned reference bits too.
 - **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows: `rollmean`, `rollapply`, `na.locf`, `endpoints`, `to.period`, `str_detect`, `str_replace_all` and `read_csv` are at or below GNU R. Still slower: `str_split` 1.54x, xts `period.apply` 1.39x (per-call interpreter cost, tier-0 work), `ymd` 1.29x, `fromJSON` 1.26x and `toJSON` 1.20x. `str_split` executes only 1.14x GNU R's instructions, so the rest of its gap is memory traffic in `allocVector` and `mkCharLenCE` (the heap's allocation path and string table). The jsonlite simplify step and lubridate's format training are R-level interpreter cost. At 1e6 rows these ratios swing by 30% between runs.
@@ -309,7 +308,7 @@ Smaller gaps:
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
 gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports on correct R. The
-three generated benchmark packages (`tools/bench/generate.py`) report nothing. To reproduce, give
+three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
 gap, in the Limitations section of `reference/type-system.mdx`.
@@ -582,9 +581,9 @@ protects construction but nothing after it.
 ## Open: standard library rows slower than GNU R
 
 `just bench-stdlib` compares each function with its fastest R equivalent at n = 1e6, and
-`tools/bench/stdlib/results.md` has the numbers. These rows are still slower, grouped by cause.
+`tools/bench/internal/stdlib/results.md` has the numbers. These rows are still slower, grouped by cause.
 
-- **Rerun the full bench.** `tools/bench/stdlib/results.md` predates the materialized-double R
+- **Rerun the full bench.** `tools/bench/internal/stdlib/results.md` predates the materialized-double R
   inputs and the Array paths of `List.min`/`List.max`; regenerate it with a full `just bench-stdlib`
   (about 75 minutes) and update the rows below.
 - **One string call per element against one vectorized call.** `Str.starts_with`,
@@ -746,8 +745,8 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
     `1:n` with `n <= length(x)`, and peel the first iteration so guards run once.
   - Compile latency stays a constraint: Cranelift takes milliseconds per function, so these passes
     run only in the optimizing tier, behind the cheap baseline tier and install-time images.
-  - Target: scalar and `x[i]` loops in the bench-why and bench-real programs within 2x of the same
-    loop in C, measured with `just bench-why` and callgrind.
+  - Target: scalar and `x[i]` loops in the kernels and applications programs within 2x of the same
+    loop in C, measured with `just bench kernels` and callgrind.
 
 - **Typed natives, the rest of the end shape** (`decisions.md`, "Typed closures run as native
   functions over records, tags and match"). Typed closures run as natives at their first call over
@@ -801,7 +800,7 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   Global function lookups (`bytecode::lookup_function`, `eval::find_fun`) walk 3 to 5
   environments with a hash probe each (`Heap::frame_cell`, 3.7% self): an inline cache checked
   against the binding epoch, or a direct cell for namespace and import lookups, would make that
-  one load. `bytecode::step` dispatch is 6.6% self. Reproduce with `tools/bench/generate.py` and
+  one load. `bytecode::step` dispatch is 6.6% self. Reproduce with `tools/bench/tooling/generate.py` and
   `just bench-compare`.
   Microbenchmarks against GNU R 4.3 (JIT on) show the per-call gap: 200k closure calls take
   190 ms against 83 ms, 50k S3 dispatches 100 against 59, 20k `tryCatch` 415 against 102, and a
@@ -899,10 +898,10 @@ change that does not pay.
 and short heap list in `interp`, `heap`, `jit`, `libr` and `typed` found 307 sites, 211 of them
 touched per operation rather than per load. Ranked by callgrind instructions (profiling build, JIT
 on, one repeat), what costs time is frame and lookup layout, not hashing: hash-map code, inlined
-or not, is 0.50% of instructions on the mean `bench-real` workload and 0.83% on `testthat_full`.
+or not, is 0.50% of instructions on the mean `just bench applications` workload and 0.83% on `testthat_full`.
 The 21-package corpus `--profile-summary` puts the time in the same places (builtins 28 to 32%,
 tier 0 23 to 27%, closure call setup 20 to 22%, GC 8 to 9%, S3 lookup about 2%) but cannot name a
-structure. In the table, "real" is the mean share over the nine `bench-real` workloads, "tt" is
+structure. In the table, "real" is the mean share over the nine `just bench applications` workloads, "tt" is
 `testthat_full`, and a share is inclusive of the functions the site calls. JIT inline caches and
 type feedback are the design and are not listed.
 
@@ -970,7 +969,7 @@ overhead, not allocation.
 
 - **Options as a symbol-indexed array.** `getOption` (`envir::option_value`) walks the `.Options` pairlist and compares names by CHARSXP pointer, which is linear in the number of options. The O(1) shape is a redesign, not a side table: `.Options` becomes a view over an array indexed by the option's symbol, so `GetOption`, `.Options<-` and `options()` keep GNU R's semantics with one source of truth. Rank it once a profile gives `getOption`'s measured share of the benchmark suites.
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
-- **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
+- **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/bench.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
 
 ## Open: untyped R against GNU R
 
@@ -989,7 +988,7 @@ overhead, not allocation.
   which only an `f` that reads `parent.frame()` can observe.
 
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
-about 3% slower than on GNU R, and `just bench-real` (`tools/bench/real/`, results in
+about 3% slower than on GNU R, and `just bench applications` (`tools/bench/applications/`, results in
 `benchmarks.mdx`) reproduces the gap on production-shaped workloads. `ry run --profile-summary
 FILE` (`crates/interp/src/profile_summary.rs`) gives the time split without revealing code, so a
 user can send one; recalibrate the workloads when a summary from a real code base arrives.
@@ -1000,7 +999,7 @@ Where the time goes, JIT on, from `--profile-summary` on the nine workloads: tie
 but `functional`: most hot code sits in closures called a few thousand times, under the entry
 threshold, so tier 0 and the call path decide the result.
 
-The testthat workload (`tools/bench/real/testthat.R`, 36 `test_that()` blocks per repeat) stands in
+The testthat workload (`tools/bench/applications/testthat.R`, 36 `test_that()` blocks per repeat) stands in
 for package CI. Its `--profile-summary`: tier 0 33%, builtins 26%, call setup 25%, GC 4.8%,
 compiled code 0.7%; 1.33M closure calls create 1.73M promises (1.30 per call, against 1.42 in a
 user's profile taken before promise elision), and a quarter of the calls go through the
@@ -1050,7 +1049,7 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
   n squared strings; it appends in place (`connections::push_text_line`). fasta 0.94 s, GNU R
   0.97 s; reversecomplement 0.18 s, GNU R 1.07 s.
 
-Public suites (`just bench-real --public all --filter /`, one run, JIT off against GNU R 4.3.3):
+Public suites (`just bench public --filter /`, one run, JIT off against GNU R 4.3.3):
 awfy 0.66x, rcp 0.55x, shootout 0.98x geometric mean; JIT on 1.35x, 2.48x and 1.29x. The
 JIT-off losers are scalar loops (rcp vector-while 0.35x, fannkuchredux_naive 0.38x,
 mandelbrot 0.41x), which tier-0 dispatch and scalar allocation decide.
@@ -2541,7 +2540,7 @@ The end-to-end guard rests on the corpus suites.
 - **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** The factor type outside
   Polars and the code-building reader are in (`decisions.md`, "Factors are ry's own codes plus
   one level table, outside Polars"), and at 1e7 the joins beat data.table on every question. At 1e8 both
-  data.table and ry run out of memory (`tools/bench/table/report.py` records it as "out of
+  data.table and ry run out of memory (`tools/bench/internal/table/report.py` records it as "out of
   memory"). Measured for ry, with libR's mimalloc settings:
   - Reading `join_x` (5.1 GB, 63.2 million `id6` levels) peaks at 7.35 GB against 3.9 GB live:
     2.9 GB of columns plus about 1.0 GB of level views. `join_big` is the same size, and q5's
@@ -2555,7 +2554,7 @@ The end-to-end guard rests on the corpus suites.
   - Next: give the reader's large transients an allocator that maps and unmaps whole regions
     (std's `Allocator` on the pinned nightly; hashbrown takes it with its `nightly` feature),
     keep a column's codes narrow while its level count allows, and sum the checksum in
-    `tools/bench/table/ry.R` per chunk rather than converting a whole column. Then run
+    `tools/bench/internal/table/ry.R` per chunk rather than converting a whole column. Then run
     `report.py DIR --rows 1e8 --joins-only` and the 1e8 group-by, write the tables with
     `--write`, and update `development/design/r-runtime.md` section 7, whose 1e8 join prose
     says neither engine fits.
@@ -2624,7 +2623,7 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop is engine-bound** (`tools/bench/table/ry.R`, "update subset", 1e6 rows:
+- **A filtered `:=` loop is engine-bound** (`tools/bench/internal/table/ry.R`, "update subset", 1e6 rows:
   0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
   5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
   engine code in a different process (libR.so allocates with glibc malloc, the Rust bench with
@@ -2664,7 +2663,7 @@ The end-to-end guard rests on the corpus suites.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done.** Its CSVs need about 16 GB of disk, and
-  `tools/bench/table/ops.R` needs more than 15 GB of memory, since `rbindlist(list(x, x))` holds
+  `tools/bench/internal/table/ops.R` needs more than 15 GB of memory, since `rbindlist(list(x, x))` holds
   the 5 GB table and a 10 GB result at once.
 
 ## Open: the runtime
@@ -3560,7 +3559,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 ## Benchmark code bases (measured)
 
 `just bench` generates the three 300K-line code bases (about 413K lines with tests) and prints this
-table; `tools/bench/lsp_latency.py` drives `ry server` over stdio. Release build, 4-core container,
+table; `tools/bench/tooling/lsp_latency.py` drives `ry server` over stdio. Release build, 4-core container,
 typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
@@ -3655,9 +3654,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor latency at 300,000 lines
 
-Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .bench/finbench
+Measure with `python3 tools/bench/tooling/lsp_latency.py --ry target/release/ry --root .bench/finbench
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
-table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
+table). Generate the code bases with `tools/bench/tooling/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
 - Keystroke to settled diagnostics on finbench (4 cores, 40 runs) meets the targets (median at most
   30 ms, 95th percentile at most 100 ms): a body edit settles at a 4 ms median and 6 ms p95, a

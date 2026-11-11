@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
-why = here / "why"
+STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 repository = "https://github.com/felix-andreas/ry"
 # Release archives built by nix name their interpreter by a /nix/store path, which most machines
 # lack; the system loader runs them the same way.
@@ -68,7 +68,7 @@ def main():
     parser.add_argument("suite", choices=sorted(datasets))
     parser.add_argument("--release", action="append", required=True, metavar="NAME=BINARY")
     parser.add_argument("--repeat", type=int, help="runs per engine; the fastest time and the largest peak are kept")
-    parser.add_argument("--project", help="check: the package to check, such as finbench from tools/bench/generate.py")
+    parser.add_argument("--project", help="check: the package to check, such as finbench from tools/bench/tooling/generate.py")
     args = parser.parse_args()
     releases = [release(spec) for spec in args.release]
     sitting = {"measured": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "machine": machine(), "r": r_version()}
@@ -96,7 +96,9 @@ def release(spec):
 
 
 def suite_programs(releases, repeat=3):
-    programs = sorted(path.stem for path in (why / "untyped").glob("*.R") if path.name != "harness.R")
+    # The programs with a typed version, so every release runs the same three columns.
+    programs = sorted(path.name.removesuffix(".typed.R") for suite in ("kernels", "applications")
+                      for path in (here / suite).glob("*.typed.R"))
     programs_commit = git("rev-parse", "--short=10", "HEAD").strip()
     engines = [(gnu_r_release(), "gnu_r", ["Rscript", "--vanilla"], "untyped")]
     for entry in releases:
@@ -112,7 +114,7 @@ def suite_programs(releases, repeat=3):
         for (entry, engine, _, _), runs in zip(engines, results):
             passed = [run for run in runs if "warm_s" in run]
             row = {**identity(entry), "program": program, "engine": engine, "repeat": repeat,
-                   "source": f"tools/bench/progress.py programs; programs from tools/bench/why at {programs_commit}"}
+                   "source": f"tools/bench/progress.py programs; programs from tools/bench/{kernels,applications} at {programs_commit}"}
             if passed:
                 row.update(warm_s=min(run["warm_s"] for run in passed), cold_s=min(run["cold_s"] for run in passed),
                            peak_mib=round(max(run["peak_mib"] for run in passed), 1), checksum=passed[0]["checksum"])
@@ -124,18 +126,21 @@ def suite_programs(releases, repeat=3):
 
 
 def run_program(command, variant, program):
-    # The scratch file sits beside the variant's ry.toml, so the typed run is checked in strict
-    # mode and `ry run` refuses to run it if strict mode finds an error.
-    scratch = why / variant / ".scratch-progress.R"
-    scratch.write_text((why / variant / "harness.R").read_text() + "\n" + (why / variant / f"{program}.R").read_text())
-    try:
+    # The typed run sits beside a strict ry.toml, so `ry run` refuses it if strict mode finds an error.
+    typed = variant == "typed"
+    source = next(path for suite in ("kernels", "applications")
+                  if (path := here / suite / (f"{program}.typed.R" if typed else f"{program}.R")).exists())
+    harness = here / ("harness.typed.R" if typed else "harness.R")
+    with tempfile.TemporaryDirectory() as folder:
+        if typed:
+            (pathlib.Path(folder) / "ry.toml").write_text(STRICT_CONFIG)
+        scratch = pathlib.Path(folder) / f"{program}.R"
+        scratch.write_text(harness.read_text() + "\n" + source.read_text())
         wall, peak, code, out, err = timed(command + [str(scratch)])
-    finally:
-        scratch.unlink()
     lines = [line for line in out.splitlines() if line.strip()]
     if code != 0 or not lines:
         return {"error": last_line(err, out, code)}
-    _, checksum, warm, cold = lines[-1].split()
+    _, checksum, _, warm, cold = lines[-1].split()
     return {"warm_s": float(warm), "cold_s": float(cold), "peak_mib": peak, "checksum": checksum}
 
 
@@ -231,7 +236,7 @@ def suite_s4(releases, repeat=3):
 def suite_check(releases, repeat=3, project=None):
     if project is None:
         sys.exit("error: check needs --project, such as the finbench package from "
-                 "`tools/bench/generate.py --domain finance --lines 300000 --files 500`")
+                 "`tools/bench/tooling/generate.py --domain finance --lines 300000 --files 500`")
     project = pathlib.Path(project).resolve()
     lines = sum(path.read_text().count("\n") for path in (project / "R").glob("*.R"))
     rows = []

@@ -1,0 +1,188 @@
+id = "packages"
+name = "Package test suites"
+summary = "pinned CRAN packages, each running its own test suite"
+description = """
+The packages come from the benchmark dependency set that AGENTS.md lists, pinned by version and source tarball SHA-256 in lock.tsv and installed with GNU R into one library that both engines load. Each run is the wall time of a whole process that runs the package's tests the way R CMD check does: testthat suites through test_dir() on the installed package, tinytest suites through run_test_dir(), and other packages' tests/*.R scripts one by one. The time therefore includes start-up and loading the package. Runs are offline, and test files that need the network are left out. The outcome (passed, failed, errors) is recorded per engine.
+"""
+
+[[programs]]
+id = "abind"
+display = "abind"
+version = "1.4-8"
+runner = "scripts"
+summary = "Combines multidimensional arrays, with scripts that check dimnames and array slicing output"
+
+[[programs]]
+id = "assertthat"
+display = "assertthat"
+version = "0.2.1"
+runner = "testthat"
+summary = "Easy pre and post assertions, tested through many small predicate calls"
+
+[[programs]]
+id = "brio"
+display = "brio"
+version = "1.1.5"
+runner = "testthat"
+summary = "Basic R input and output, with tests that read and write files through C code"
+
+[[programs]]
+id = "cachem"
+display = "cachem"
+version = "1.1.0"
+runner = "testthat"
+summary = "Caches R objects with automatic pruning, in memory and on disk"
+
+[[programs]]
+id = "cli"
+display = "cli"
+version = "3.6.6"
+runner = "testthat"
+summary = "Helpers for command line interfaces, with snapshot tests of styled and formatted text"
+
+[[programs]]
+id = "data.table"
+display = "data.table"
+version = "1.18.6.1"
+runner = "scripts"
+summary = "Extension of data.frame, with a large script suite of table operations backed by C code"
+
+[[programs]]
+id = "DBI"
+display = "DBI"
+version = "1.3.0"
+runner = "testthat"
+summary = "The R database interface, a set of S4 generics, with tests of SQL quoting, interpolation and a dummy driver"
+
+[[programs]]
+id = "digest"
+display = "digest"
+version = "0.6.39"
+runner = "tinytest"
+summary = "Compact hash digests of R objects, with tests that compare many hash algorithms against known values"
+
+[[programs]]
+id = "foreach"
+display = "foreach"
+version = "1.5.2"
+runner = "testthat"
+summary = "The foreach looping construct, with tests of iterators, result combiners, nesting and error handling"
+
+[[programs]]
+id = "fs"
+display = "fs"
+version = "2.1.0"
+runner = "testthat"
+summary = "Cross-platform file system operations based on libuv, with tests that create and inspect real files"
+
+[[programs]]
+id = "jsonlite"
+display = "jsonlite"
+version = "2.0.0"
+runner = "testthat"
+summary = "A JSON parser and generator, with round-trip tests over many R data types"
+
+[[programs]]
+id = "lgr"
+display = "lgr"
+version = "0.5.2"
+runner = "testthat"
+summary = "A logging framework built on R6 classes, with appenders, layouts and filters"
+
+[[programs]]
+id = "lubridate"
+display = "lubridate"
+version = "1.9.5"
+runner = "testthat"
+summary = "Date and time handling, with tests of parsing, time zones and period arithmetic"
+
+[[programs]]
+id = "memoise"
+display = "memoise"
+version = "2.0.1"
+runner = "testthat"
+summary = "Memoisation of functions, with tests of in-memory and file system caches"
+
+[[programs]]
+id = "PerformanceAnalytics"
+display = "PerformanceAnalytics"
+version = "2.1.0"
+runner = "testthat"
+summary = "Econometric tools for performance and risk analysis of xts return series"
+
+[[programs]]
+id = "progress"
+display = "progress"
+version = "1.2.3"
+runner = "testthat"
+summary = "Terminal progress bars, with tests of their rendering from R and from C++"
+
+[[programs]]
+id = "purrr"
+display = "purrr"
+version = "1.2.2"
+runner = "testthat"
+summary = "Functional programming tools, with tests of map functions and their error handling built on rlang and vctrs"
+
+[[programs]]
+id = "R6"
+display = "R6"
+version = "2.6.1"
+runner = "testthat"
+summary = "Encapsulated classes with reference semantics, with tests of inheritance, cloning and active bindings"
+
+[[programs]]
+id = "rappdirs"
+display = "rappdirs"
+version = "0.3.4"
+runner = "testthat"
+summary = "Determines where to save data, caches and logs, with tests over platform and environment variables"
+
+[[programs]]
+id = "rlang"
+display = "rlang"
+version = "1.3.0"
+runner = "testthat"
+summary = "Functions for base types and core R features, with a large suite of tests on environments, quosures and conditions"
+
+[[programs]]
+id = "snakecase"
+display = "snakecase"
+version = "0.11.1"
+runner = "testthat"
+summary = "Converts strings into any case, with tests that run many string transformations"
+
+[[programs]]
+id = "stringr"
+display = "stringr"
+version = "1.6.0"
+runner = "testthat"
+summary = "Consistent wrappers for common string operations, built on stringi"
+
+[[programs]]
+id = "withr"
+display = "withr"
+version = "3.0.3"
+runner = "testthat"
+summary = "Runs code with temporarily modified global state, with tests of options, environment variables and on.exit handlers"
+
+[[programs]]
+id = "xts"
+display = "xts"
+version = "0.14.3"
+runner = "tinytest"
+summary = "Extensible time series built on zoo, with tests of merging, subsetting and periodicity"
+
+[[programs]]
+id = "zeallot"
+display = "zeallot"
+version = "0.2.0"
+runner = "testthat"
+summary = "Multiple, unpacking and destructuring assignment with the %<-% operator"
+
+[[programs]]
+id = "zoo"
+display = "zoo"
+version = "1.9-1"
+runner = "scripts"
+summary = "S3 infrastructure for regular and irregular time series, with scripts compared against saved output"

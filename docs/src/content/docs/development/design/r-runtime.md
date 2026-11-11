@@ -1521,7 +1521,7 @@ columns as ALTREP vectors to native code. The user guide is [DataFrames](/refere
   exchange data.
 
 The claim that the frame outperforms data.table rests on a benchmark of its own
-(`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
+(`tools/bench/internal/table/`): the db-benchmark group-by and join questions (the suite H2O started and
 DuckDB Labs maintains), `:=` update loops and a keyed rolling join, run on the same machine against
 data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a table below (it
 generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
@@ -1615,7 +1615,7 @@ in-place update and so keep data.table's syntax. The Rust driver runs the same l
 same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R
 calls around it.
 
-`tools/bench/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
+`tools/bench/internal/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
 rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the
 same operations from Rust. All three columns give the same checksums. R calls to these names run
 data.table's own C under ry's runtime, which is the middle column; calls from R do not reach the
@@ -1654,7 +1654,7 @@ The three benchmark code bases each have a module built on data.table (`tables` 
 next to the data.table code, and the typed program uses it, so the typed module is ordinary ry
 code that checks clean in strict mode. `just bench-frames` generates both variants from one seed,
 strict-checks the typed one, runs each module's functions end to end on the same inputs (the
-driver is `tools/bench/frames/driver.R`), and refuses the result if any step's checksum differs.
+driver is `tools/bench/internal/table/frames_driver.R`), and refuses the result if any step's checksum differs.
 Each cell is a step's faster run in seconds; memory is each engine's peak resident size.
 
 <!-- bench-frames:start -->

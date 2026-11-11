@@ -106,16 +106,18 @@ perf:
     cargo test -p semantics --profile bench --test test_perf -- --ignored --nocapture
     cargo test -p ry-lang --profile bench --test test_perf -- --ignored --nocapture
 
-# Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
-bench *args:
-    cargo build --release -p ry-lang
-    python3 -I tools/bench/run.py {{ args }}
-
-# Measures the docs benchmark: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
-# `--write` stores the results in tools/bench/why/results.json, which every benchmark table on the site renders.
-bench-why *args:
+# Times one published benchmark suite (public, packages, kernels, applications, or all) on GNU R, ry and,
+# where a program has a typed version, ry typed in strict mode, in paired shuffled rounds with a checksum gate
+# against GNU R, e.g. `just bench kernels --rounds 3 --filter fib` or `just bench all --write` (10+ rounds,
+# stores each suite's results.json, which the READMEs and the benchmarks page render).
+bench suite *args:
     cargo build --release -p ry-lang -p libr -p rcmd
-    python3 -I tools/bench/why/run.py {{ args }}
+    python3 -I tools/bench/bench.py {{ suite }} {{ args }}
+
+# Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
+bench-check *args:
+    cargo build --release -p ry-lang
+    python3 -I tools/bench/tooling/check.py {{ args }}
 
 # Scores typed ry's hill climb: speed against Rust, friendliness cases, and seeded soundness fuzzing, e.g.
 # `just climb`, `just climb --only friendly`, or `just climb --log "adapt literal arithmetic"` to append a step to tools/climb/log.tsv.
@@ -123,44 +125,33 @@ climb *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/climb/run.py {{ args }}
 
-# Times the representative workload mix (tools/bench/real) on GNU R and on ry with the JIT on and off,
-# e.g. `just bench-real --repeat 9`, `just bench-real --baseline ../main/target/release/ry` (a second ry in the same rounds),
-# `just bench-real --suites .bench` (adds the generated packages' tests),
-# `just bench-real --public all` (adds the vendored public programs in tools/bench/real/suites)
-# or `just bench-real --write` (stores tools/bench/real/results.json, the record behind the table in benchmarks.mdx).
-bench-real *args:
-    cargo build --release -p ry-lang -p libr -p rcmd
-    python3 -I tools/bench/real/run.py {{ args }}
-
 # Rewrites the benchmark blocks of the two READMEs from the committed results files; `--check` only
 # reports a README that differs.
 bench-readme *args:
     python3 -I tools/bench/readme.py {{ args }}
 
-# Times the test suites of real CRAN packages, pinned in tools/bench/packages/lock.tsv, on GNU R and ry's runtime:
-# `just bench-packages install` fetches and installs the corpus from the rrepo CRAN mirror into .corpus/packages,
-# then `just bench-packages run [--filter NAME] [--repeat N] [--write]`; `just bench-packages lock` re-pins it.
+# Manages the package-test corpus pinned in tools/bench/packages/lock.tsv: `just bench-packages install` fetches and
+# installs it from the rrepo CRAN mirror into .corpus/packages, and `just bench-packages lock` re-pins it.
 bench-packages *args:
-    cargo build --release -p ry-lang -p libr -p rcmd
-    python3 -I tools/bench/packages/run.py {{ args }}
+    python3 -I tools/bench/tooling/packages.py {{ args }}
 
 # Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
 bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
-    python3 -I tools/bench/base/run.py {{ args }}
+    python3 -I tools/bench/internal/base/run.py {{ args }}
 
 # Times each List, Str, Dict and Result function on ry against its fastest GNU R equivalent (base R, purrr, stringr, stringi from R_LIBS_USER), e.g.
-# `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/stdlib/results.md`.
+# `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/internal/stdlib/results.md`.
 bench-stdlib filter="" n="1e6" *args:
     cargo build --release -p ry-lang -p libr
-    python3 -I tools/bench/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
+    python3 -I tools/bench/internal/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
 
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
 # (`--joins-only` runs the join questions alone).
 bench-table dir *args:
     cargo build --release -p ry-lang -p libr -p rcmd
-    python3 -I tools/bench/table/report.py {{ dir }} --write {{ args }}
+    python3 -I tools/bench/internal/table/report.py {{ dir }} --write {{ args }}
 
 # Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
@@ -518,7 +509,7 @@ release-kind version:
 bench-frames *args:
     cargo build --release -p ry-lang
     cargo build --release -p libr
-    python3 -I tools/bench/frames/run.py --write {{ args }}
+    python3 -I tools/bench/internal/table/frames.py --write {{ args }}
 
 # Install the benchmark dependency closure into .corpus/library (needs GNU R, network access and tools/corpus/system-packages.txt).
 corpus:
@@ -572,7 +563,7 @@ bench-s4-first-use dir="target/s4heavy" imports="" seed="20261102":
 
 # Generate the synthetic benchmark code bases, e.g. `just bench-gen --out .bench --lines 10000`.
 bench-gen *args:
-    python3 -I tools/bench/generate.py {{ args }}
+    python3 -I tools/bench/tooling/generate.py {{ args }}
 
 # Compare generated packages' tests under GNU R and ry's runtime test by test, e.g. `just bench-compare .bench/finbench`.
 bench-compare *args:
@@ -581,7 +572,7 @@ bench-compare *args:
 
 # Run a generated package's tests under GNU R, e.g. `just bench-test .bench/finbench`.
 bench-test package reporter="summary":
-    Rscript tools/bench/run-tests.R {{ package }} {{ reporter }}
+    Rscript tools/bench/tooling/run-tests.R {{ package }} {{ reporter }}
 
 # Differential fuzzing of the runtime: random programs under GNU R, ry's tier 0 and the forced JIT.
 # `just fuzz-differential 0 500` runs seeds 0 to 499; add `ry-gctorture` to the engines for stress.
@@ -609,7 +600,7 @@ scenarios name="":
 bench-migrate *args:
     cargo build --release -p ry-lang
     cargo build --release -p libr
-    python3 -I tools/bench/migrate/fuzz.py {{ args }}
+    python3 -I tools/bench/tooling/migrate_fuzz.py {{ args }}
 
 # Apply what agents staged in .github/pending for a maintainer (their token cannot write
 # .github/workflows): move each workflow into place, then commit and push.
