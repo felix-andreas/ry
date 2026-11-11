@@ -425,8 +425,7 @@ only for a failure main already has, never for one your own change introduces. A
 listed failure as `known` without its diff and ends with one line per engine:
 
 ```
-ry-jit-gctorture: 3 passed, 4 failed (4 known, 0 new), 0 skipped
-ry-gctorture-young: 4 passed, 3 failed (3 known, 0 new), 0 skipped
+ry-jit-gctorture: 409 passed, 16 failed (16 known, 0 new), 0 skipped
 ```
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
