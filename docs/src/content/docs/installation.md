@@ -33,6 +33,15 @@ nix profile install github:felix-andreas/ry                               # Nix 
 ry builds on nightly Rust, and `cargo install` does not read the toolchain the repository pins, so
 name `+nightly` yourself.
 
+For each release and nightly, the flake's Linux x86_64 package and dev shell come prebuilt from the
+binary cache `https://ry.cachix.org` (public key
+`ry.cachix.org-1:6OKbqSFUFIsagxwxTo06JWHSEWuEtQp4kgQtR/TuVyY=`). Other commits on main are not
+cached, so name a release tag to download instead of compiling, as in
+`nix profile install github:felix-andreas/ry/<tag>`.
+The flake names the cache, so Nix offers it when you build (`--accept-flake-config` accepts it
+without asking). If you are not a trusted Nix user, Nix ignores that offer, so run `cachix use ry`
+or add both values to `nix.conf` instead.
+
 Nightly snapshots for Linux x86_64 are on the [releases page](https://github.com/felix-andreas/ry/releases)
 under tags named `nightly.<date>.<time>.<hash>`; only the newest five are kept. They are untested
 snapshots for early feedback, so use a numbered release for anything else.
