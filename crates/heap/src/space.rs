@@ -84,9 +84,15 @@ const SLOT_INDEX_MULTIPLIERS: [u64; CLASS_COUNT] = {
     }
     multipliers
 };
-/// The byte a poisoned slot is filled with. As a kind byte it is no `SexpType`, so
-/// [`Sexp::kind`] panics on a freed object instead of reading garbage as some kind.
-pub(crate) const POISON: u8 = 0xDB;
+/// The byte a poisoned slot is filled with.
+const POISON: u8 = 0xDB;
+/// The kind byte of a poisoned slot. In a debug build it is no `SexpType`, so [`Sexp::kind`]
+/// panics on a freed object; a release build skips that check and reads `FREESXP`.
+pub(crate) const POISONED_KIND: u8 = if cfg!(debug_assertions) {
+    POISON
+} else {
+    SexpType::Free as u8
+};
 /// The bytes of freed small slots quarantine holds back from reuse before it gives the oldest
 /// back to the allocator.
 const QUARANTINE_BYTES: usize = 16 * 1024 * 1024;
@@ -1165,11 +1171,13 @@ unsafe fn drop_frame(object: Sexp) {
     }
 }
 
-/// Overwrites a freed object of `bytes` bytes with [`POISON`]. Its GC bits stay clear, so the
+/// Overwrites a freed object of `bytes` bytes with [`POISON`] under a [`POISONED_KIND`] kind
+/// byte. Its GC bits stay clear, so the
 /// collector never takes a stale reference to it for a marked object.
 pub(crate) unsafe fn poison(object: *mut u8, bytes: usize) {
     unsafe {
         std::ptr::write_bytes(object, POISON, bytes);
+        *object = POISONED_KIND;
         *object.add(1) = 0;
     }
 }

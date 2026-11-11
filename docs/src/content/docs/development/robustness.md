@@ -262,9 +262,12 @@ Collecting often is not enough on its own, because each sweep hands a freed slot
 next allocation, and a stale reference then reads a valid object. So while `RY_GC_STRESS` or
 `RY_GC_VERIFY` is on, in any build, the collector poisons every object it frees (fills it with
 `0xDB`) and quarantines its memory: the allocator skips the freed small slots until 16 MiB of newer
-ones have joined them, and holds freed large objects until 64 MiB have. Reading the kind of a freed
-object then panics with `read the kind of a freed object at <address>`. Without stress or
-verification, debug builds poison freed slots but reuse them at once, and release builds do neither.
+ones have joined them, and holds freed large objects until 64 MiB have. In a debug build, reading
+the kind of a freed object then panics with `read the kind of a freed object at <address>`. A
+release build skips that check, because it would cost every call of the hottest accessor in the
+runtime, so there a freed object reads as `FREESXP` and its other fields as poison. Without stress
+or verification, debug builds poison freed slots but reuse them at once, and release builds do
+neither.
 
 Before the argument-reference rooting fix, `datetime__year_overflow` crashed unstressed under the
 oracle harness. In a debug build of that tree, `RY_GC_STRESS=young` with quarantine panicked

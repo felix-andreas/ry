@@ -724,9 +724,11 @@ impl Sexp {
 
     pub unsafe fn kind(self) -> SexpType {
         let kind = unsafe { self.header().kind.get() };
-        // A live object's kind byte holds a `SexpType` discriminant. Any other byte is the
-        // poison of a freed slot, read through a stale reference.
-        if kind > SexpType::Free as u8 {
+        // A live object's kind byte holds a `SexpType` discriminant, and a freed one's holds
+        // `POISONED_KIND`. Debug builds poison with a byte that is no discriminant and check
+        // for it here; release builds poison with `FREESXP` instead, because the check costs
+        // instructions on every call of the hottest accessor in the runtime.
+        if cfg!(debug_assertions) && kind > SexpType::Free as u8 {
             freed_object(self);
         }
         unsafe { std::mem::transmute::<u8, SexpType>(kind) }
@@ -737,7 +739,7 @@ impl Sexp {
     /// freed memory is only sound while that memory belongs to the heap, so this is for tests
     /// and diagnostics.
     pub unsafe fn is_poisoned(self) -> bool {
-        unsafe { self.header().kind.get() == crate::space::POISON }
+        unsafe { self.header().kind.get() == crate::space::POISONED_KIND }
     }
 
     pub unsafe fn attrib(self) -> Sexp {

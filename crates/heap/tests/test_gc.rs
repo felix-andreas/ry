@@ -2064,7 +2064,7 @@ fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
 
 /// Under collection stress the collector poisons each object it frees and holds its memory back
 /// from reuse, so a stale reference reads poison instead of the object that would otherwise
-/// take the slot at the next allocation, and asking its kind panics.
+/// take the slot at the next allocation, and in a debug build asking its kind panics.
 #[test]
 fn stress_quarantines_and_poisons_freed_objects() {
     let mut heap = Heap::new();
@@ -2080,8 +2080,11 @@ fn stress_quarantines_and_poisons_freed_objects() {
         assert!(!later.contains(&small), "a quarantined slot is not handed out again");
         assert!(!later.contains(&large), "quarantined large memory is not handed out again");
         assert!(small.is_poisoned() && large.is_poisoned());
-        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| small.kind()));
-        assert!(read.is_err(), "the kind of a freed object panics");
+        // Only debug builds check the kind byte, since the check costs every call.
+        if cfg!(debug_assertions) {
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| small.kind()));
+            assert!(read.is_err(), "the kind of a freed object panics");
+        }
     }
     // Turning stress off gives the quarantined memory back.
     heap.update_policy(|policy| policy.stress = GcStress::Off);
