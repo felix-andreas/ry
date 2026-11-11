@@ -1068,8 +1068,6 @@ loop; feedback one `i32` per code word. Per `seq(1, 10, by = 2)` call (141.6k in
 about 106k): `execute_code` self 36.6k (about 680 ops), `call_builtin_reusing` 9.5k over 65 builtin
 calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
-- `crates/jit/tests/test_tiers.rs` `fuzz_typed_closures_agree_with_tier_zero` fails ("only 65 of 400 closures compiled at their first call") with main's tier-0 interpreter as well, so the cause is in the JIT's compile scheduling, not in tier 0.
-
 ## Open: performance and memory
 
 ### Tier-0 call entry and dispatch
