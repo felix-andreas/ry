@@ -52,6 +52,7 @@ PREFERENCE = [
 BUNDLED = {
     "zstd-sys": [("zstd (C library)", "zstd/LICENSE")],
     "lz4-sys": [("LZ4 (C library)", "liblz4/lib/LICENSE")],
+    "libdeflate-sys": [("libdeflate (C library)", "libdeflate/COPYING")],
     "libmimalloc-sys": [
         ("mimalloc (C library)", "c_src/mimalloc/v2/LICENSE"),
         ("mimalloc (C library)", "c_src/mimalloc/v3/LICENSE"),
