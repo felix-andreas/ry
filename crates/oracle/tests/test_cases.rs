@@ -25,10 +25,16 @@ fn case_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
 
-/// Cases that once read freed memory only under collection stress, run on every stress pass
-/// whatever the seed picks: `apply__lapply_closure_results_stay_rooted` read a freed argument
-/// promise that had left the pool while the call allocated.
-const REGRESSION_CASES: &[&str] = &["apply__lapply_closure_results_stay_rooted"];
+/// Cases that once read a freed argument reference after it left the pool, run on every stress
+/// pass whatever the seed picks. `apply__lapply_closure_results_stay_rooted` crashed only under
+/// collection stress; `datetime__year_overflow` crashed unstressed in S3 dispatch from a slot
+/// builtin call; the other two crashed now and then with the JIT forced.
+const REGRESSION_CASES: &[&str] = &[
+    "apply__lapply_closure_results_stay_rooted",
+    "datetime__year_overflow",
+    "assignment__dollar_in_place",
+    "environments__unread_loop_variable",
+];
 
 fn cases() -> Vec<PathBuf> {
     runnable_cases(find_cases(&case_directory()), installed_packages).0
