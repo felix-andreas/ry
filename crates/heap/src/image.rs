@@ -211,7 +211,9 @@ impl Heap {
     /// Everything the heap's roots, the fixed objects and `roots` reach is kept; the loader
     /// returns `roots`, in order. `replace` names an object the image stores in place of another
     /// everywhere it is referenced, such as a closure body's source in place of its compiled
-    /// code. `address` encodes each external pointer's address as a nonzero token the loading
+    /// code. The large objects among `last` go at the end of the large-object section, in that
+    /// order, after every other large object, so that the pages of objects a session may never
+    /// touch do not share a read-ahead window with those it does. `address` encodes each external pointer's address as a nonzero token the loading
     /// process can decode, or `None` when it cannot be carried. Strings that name a path at or
     /// under one of `prefixes` are listed so that a [`Relocation`] can move them.
     pub unsafe fn write_image(
@@ -221,6 +223,7 @@ impl Heap {
         roots: &[Sexp],
         prefixes: &[Vec<u8>],
         replace: &dyn Fn(Sexp) -> Option<Sexp>,
+        last: &[Sexp],
         address: &mut dyn FnMut(Sexp) -> Option<u64>,
     ) -> Result<HeapImage, ImageError> {
         let unsupported = |message: &str| Err(ImageError::Unsupported(message.to_owned()));
@@ -271,7 +274,7 @@ impl Heap {
         let mut out = Writer::default();
         out.bytes.extend_from_slice(MAGIC);
         out.u64(precondition);
-        let large = self.move_large_objects(&mut roots)?;
+        let large = self.move_large_objects(&mut roots, last)?;
         out.u64(IMAGE_LARGE_BASE as u64);
         out.u64(large.len() as u64 * 8);
         let mut large_objects: Vec<u64> = self
@@ -455,10 +458,23 @@ impl Heap {
     }
 
     /// Moves every large object to [`IMAGE_LARGE_BASE`], where the loading process maps them
-    /// too, and returns the section's bytes.
-    unsafe fn move_large_objects(&mut self, roots: &mut [Sexp]) -> Result<Vec<u64>, ImageError> {
+    /// too, and returns the section's bytes. Those in `last` go last, in its order.
+    unsafe fn move_large_objects(
+        &mut self,
+        roots: &mut [Sexp],
+        last: &[Sexp],
+    ) -> Result<Vec<u64>, ImageError> {
+        let mut rank: FxHashMap<Sexp, usize> = FxHashMap::default();
+        for (position, &object) in last.iter().enumerate() {
+            if self.large.contains(&object) {
+                rank.entry(object).or_insert(position);
+            }
+        }
         let mut old: Vec<Sexp> = self.large.iter().copied().collect();
-        old.sort_unstable_by_key(|object| object.as_ptr() as usize);
+        old.sort_unstable_by_key(|object| {
+            let position = rank.get(object).copied();
+            (position.is_some(), position, object.as_ptr() as usize)
+        });
         let mut offsets = Vec::with_capacity(old.len());
         let mut length = 0;
         for &object in &old {

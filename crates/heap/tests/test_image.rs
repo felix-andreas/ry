@@ -357,6 +357,7 @@ unsafe fn write(
             roots,
             prefixes,
             &|_| None,
+            &[],
             &mut encode,
         )
         .unwrap_or_else(|error| panic!("the image does not write: {error}"))

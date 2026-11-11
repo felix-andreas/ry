@@ -445,12 +445,18 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
 }
 
 /// Compiles every closure bound in a loaded namespace afresh, for the start-up image, and returns
-/// the new code objects. Code that start-up ran carries this process's caches, feedback and
-/// profile, so the image keeps only these fresh objects, which no call has touched yet, and stores
-/// any other code as its source. A start from the image then runs base R's functions compiled
-/// from their first call, and the pages of those it never calls stay shared with every other
-/// process that maps the file.
-pub unsafe fn compile_namespaces_for_image() -> R<FxHashSet<Sexp>> {
+/// the new code objects in the order they were compiled. Code that start-up ran carries this
+/// process's caches, feedback and profile, so the image keeps only these fresh objects, which no
+/// call has touched yet, and stores any other code as its source. A start from the image then
+/// runs base R's functions compiled from their first call.
+///
+/// The code goes on pages of its own ([`heap::Heap::segregate`]), so that a page start-up touches
+/// does not also hold code a session never runs: the image is mapped from the file, and a fault
+/// maps the pages around it too. Code of closures start-up already called comes first, those it
+/// compiled before those it called once, because a start from the image calls them again; the
+/// rest follows in the order the closures were made, which keeps the functions of one source
+/// file together.
+pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
     let heap = crate::heap();
     let registry = heap.known().namespace_registry;
     let mut namespaces = vec![heap.known().base_namespace];
@@ -462,8 +468,7 @@ pub unsafe fn compile_namespaces_for_image() -> R<FxHashSet<Sexp>> {
             namespaces.push(cell.cdr());
         }
     }
-    let mut fresh = FxHashSet::default();
-    let mut seen = FxHashSet::default();
+    let mut closures: Vec<(u8, Sexp)> = Vec::new();
     for namespace in namespaces {
         for symbol in crate::envir::env_symbols(namespace, true, false) {
             let Some(cell) = heap.frame_cell(namespace, symbol) else {
@@ -475,20 +480,36 @@ pub unsafe fn compile_namespaces_for_image() -> R<FxHashSet<Sexp>> {
             // A lazy-load promise start-up never forced stays unforced, and its closure
             // compiles when a session first calls it.
             let function = forced_value(cell.cdr());
-            if function.kind() != SexpType::Closure || !seen.insert(function) {
+            if function.kind() != SexpType::Closure {
                 continue;
             }
-            let body = closure_body(function);
-            if !worth_compiling(body) {
-                continue;
-            }
-            // A body the compiler rejects keeps running on the AST evaluator, as in `run_body`.
-            if let Ok(Some(code)) = compile(body, function) {
-                heap.set_cdr(function, code);
-                fresh.insert(code);
-            }
+            let body = function.cdr();
+            let started = if body.kind() == SexpType::Bytecode {
+                0
+            } else if interp().bytecode.calls.contains_key(&body) {
+                1
+            } else {
+                2
+            };
+            closures.push((started, function));
         }
     }
+    closures.sort_unstable_by_key(|&(started, function)| (started, function.as_ptr() as usize));
+    closures.dedup_by_key(|&mut (_, function)| function);
+    let mut fresh = Vec::new();
+    heap.segregate(true);
+    for (_, function) in closures {
+        let body = closure_body(function);
+        if !worth_compiling(body) {
+            continue;
+        }
+        // A body the compiler rejects keeps running on the AST evaluator, as in `run_body`.
+        if let Ok(Some(code)) = compile(body, function) {
+            heap.set_cdr(function, code);
+            fresh.push(code);
+        }
+    }
+    heap.segregate(false);
     Ok(fresh)
 }
 

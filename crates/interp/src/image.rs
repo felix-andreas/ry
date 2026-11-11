@@ -16,7 +16,7 @@
 use {
     crate::{
         builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R,
-        values::nil,
+        values::{self, nil},
     },
     heap::{
         Fixed, ImageError, Relocation,
@@ -353,6 +353,13 @@ pub(crate) unsafe fn write(
 ) -> Result<(), String> {
     let fresh = bytecode::compile_namespaces_for_image()
         .map_err(|_| "compiling the namespaces' closures failed".to_owned())?;
+    let mut last = Vec::new();
+    for &code in &fresh {
+        last.extend([code.car(), code.cdr(), code.tag()]);
+        last.extend((0..values::length(code.cdr())).map(|index| code.cdr().element(index)));
+    }
+    let mut fresh = fresh;
+    fresh.sort_unstable_by_key(|code| code.as_ptr() as usize);
     check_empty(before)?;
     let host_objects = (host.fixed_objects)()?;
     let primitives = primitives();
@@ -377,9 +384,15 @@ pub(crate) unsafe fn write(
             &roots,
             &prefixes,
             &|object| {
-                (object.kind() == SexpType::Bytecode && !fresh.contains(&object))
-                    .then(|| bytecode::source_of(object))
+                (object.kind() == SexpType::Bytecode
+                    && fresh
+                        .binary_search_by_key(&(object.as_ptr() as usize), |code| {
+                            code.as_ptr() as usize
+                        })
+                        .is_err())
+                .then(|| bytecode::source_of(object))
             },
+            &last,
             &mut |pointer| builtin_libraries::routine_token(pointer),
         )
         .map_err(|error| error.to_string())?;

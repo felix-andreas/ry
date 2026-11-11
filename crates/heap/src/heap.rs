@@ -967,6 +967,12 @@ impl Heap {
         self.inhibit = self.inhibit.saturating_sub(1);
     }
 
+    /// Makes small objects allocated from now until `segregate(false)` take only pages that hold
+    /// no other object, in allocation order (see [`crate::space::Space::set_segregating`]).
+    pub fn segregate(&mut self, on: bool) {
+        self.space.set_segregating(on);
+    }
+
     /// Allocates every object in the old generation until the matching
     /// [`Heap::end_pretenuring`], for a reader that builds objects which live as long as the
     /// session, such as a lazy-load fetch's closures. A minor collection would trace each of

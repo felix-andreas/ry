@@ -120,6 +120,8 @@ pub(crate) struct Space {
     parked_cursors: [Cursor; CLASS_COUNT],
     /// Whether `cursors` are the pretenuring ones ([`Space::set_pretenuring`]).
     pretenuring: bool,
+    /// Whether allocation takes only pages that hold no object ([`Space::set_segregating`]).
+    segregating: bool,
     /// Pages a pretenuring cursor entered since the last flush. They hold old objects and the
     /// pretenured ones, never a young object, so their allocated and unmarked slots are exactly
     /// the pretenured objects not yet flushed.
@@ -211,6 +213,7 @@ impl Space {
             cursors: [IDLE_CURSOR; CLASS_COUNT],
             parked_cursors: [IDLE_CURSOR; CLASS_COUNT],
             pretenuring: false,
+            segregating: false,
             pretenured_pages: Vec::new(),
             available: Default::default(),
             empty_pages: Vec::new(),
@@ -280,7 +283,12 @@ impl Space {
                     return NonNull::new(next);
                 }
             }
-            let page = match self.available[class].pop() {
+            let reused = if self.segregating {
+                None
+            } else {
+                self.available[class].pop()
+            };
+            let page = match reused {
                 Some(page) => page,
                 None => {
                     let page = match self.empty_pages.pop() {
@@ -759,6 +767,27 @@ impl Space {
         }
     }
 
+    /// Switches allocation between filling the free slots of pages that hold objects, as usual,
+    /// and taking only pages that hold none, so that what is allocated meanwhile lies on pages of
+    /// its own, in allocation order. The start-up image's writer uses it to keep code a session
+    /// may never run off the pages that start-up touches. Each switch ends the cursors' runs and
+    /// leaves their pages where the allocator finds free slots.
+    pub fn set_segregating(&mut self, on: bool) {
+        if self.segregating == on {
+            return;
+        }
+        release_runs(&mut self.cursors, &mut self.allocated, self.base);
+        for (class, cursor) in self.cursors.iter_mut().enumerate() {
+            // The page may have taken objects since the last sweep, which `live_slots` does not
+            // count yet, so it goes back with its class rather than through `file_page`.
+            if cursor.page != NO_PAGE {
+                self.available[class].push(cursor.page);
+            }
+            *cursor = IDLE_CURSOR;
+        }
+        self.segregating = on;
+    }
+
     pub fn has_pretenured(&self) -> bool {
         !self.pretenured_pages.is_empty()
     }
@@ -1003,11 +1032,12 @@ impl Space {
         for available in &mut self.available {
             available.clear();
         }
+        // The free slots of the image's pages stay unused until a major sweep files the pages:
+        // allocating into one would copy a page that the page cache otherwise shares, and would
+        // fault in pages of objects the process never reads, such as code it never runs.
         for page in 0..page_count {
             if self.page_class[page] == EMPTY_PAGE {
                 self.empty_pages.push(page as u32);
-            } else {
-                self.file_page(page as u32);
             }
         }
         self.marked_vector_cells = 0;
