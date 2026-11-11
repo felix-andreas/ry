@@ -1100,6 +1100,13 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 - On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. That is after the raw pool reads and the out-of-line tier schedule (`decisions.md`, "Tier-0 call entry"). `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine` for the handler. The register clear is about 16 of `grow_registers`' 57 and must stay. What remains needs superinstructions (a fused guard plus `GetFun`, a fused `GetVar` plus `Element`), together with a per-site epoch stamp that re-proves `effects::resolve` and a test that rebinds a base function between two calls at one site, or a thinner call path (the AOT track's call plans).
 
+### Queued with measured ceilings
+
+Shares are of each application's instructions (profiling build, one process); a ceiling is the item's whole inclusive cost, so a realistic gain is about half.
+
+- **S3 method resolution by a dense per-generic index.** `dispatch::resolve_s3` is 2.50% of testthat (62,000 calls at 1,659 instructions) and 2.47% of validation (270,000 calls at 870). The plan keys methods by interned class-symbol id per generic, which drops building `generic.class` names (`method_name`) and walking scopes (`lookup_in_scope`) on every dispatch. A whole `UseMethod` round trip already costs 15,700 instructions against GNU R's 36,500. Open question: does the session that landed the S3 and S4 inline caches (#344) still own this area?
+- **Widen `direct_c` to the shapes that reach `do_c`.** In validation `combine::do_c` is 3.04% (126,000 calls at 2,292 instructions), against about 900 per call through `direct_c`; testthat spends 0.09% there. ry is at GNU R's cost already (`c(a = 0.6, b = 0.4)` 4,100 against 3,500; three strings 2,100 against 2,200), so this is a validation-only win of about 1.5 to 2%.
+
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
