@@ -29,3 +29,11 @@ engine = "ry-gctorture-young"
 area = "interp"
 reason = "aborts: reads an object the collector freed (heap/src/object.rs freed_object)"
 provisional = true
+
+[[failure]]
+case = "s4__native_definitions"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV when the engine loads base R from ry's own home (main e3bb8627, 4 of 4 runs); passes with GNU R's home"
+provisional = true
+intermittent = true
