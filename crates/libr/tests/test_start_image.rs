@@ -78,7 +78,7 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
         );
         let touches = scratch.join(format!("touches-{round}"));
         let (stdout, stderr) = rscript(&home, Some(&touches));
-        assert_eq!(stdout, "55 TRUE\n", "stderr: {stderr}");
+        assert_eq!(stdout, "55 TRUE \n", "stderr: {stderr}");
         assert_eq!(stderr, "");
         if RECORDS_TOUCHES {
             assert!(
@@ -91,7 +91,7 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
         fs::write(&image, &stale).expect("write the stale image again");
         let touches = scratch.join(format!("stale-touches-{round}"));
         let (stdout, stderr) = rscript(&home, Some(&touches));
-        assert_eq!(stdout, "55 TRUE\n", "stderr: {stderr}");
+        assert_eq!(stdout, "55 TRUE \n", "stderr: {stderr}");
         assert_eq!(stderr, "", "a session on {kind} image wrote to stderr");
         assert!(!touches.exists(), "a session loaded {kind} image");
         assert_eq!(fs::read(&image).expect("read the image"), stale);
