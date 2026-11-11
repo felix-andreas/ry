@@ -1538,8 +1538,6 @@ which needs workflow scope, any scheduled fuzz job and its corpus cache, and an 
 
 ## Open: robustness harnesses
 
-- **Three `fuzz_iterations` harnesses ignore `FUZZ_SEED`.** `refactor_seed_mutations_keep_code_valid` (`crates/ide/tests/test_fuzz.rs`), `fuzz_the_intern_table_keeps_exactly_the_surviving_strings` (`crates/heap/tests/test_gc.rs`) and the reload fuzz (`crates/loader/tests/test_reload_fuzz.rs`) draw from one fixed generator, so `just fuzz-deep` reruns their same inputs each round. Convert each to `for_each_seed` with `SplitMix64(CONST ^ seed)`.
-
 Gaps in the simulation, fuzzing and scenario design that `development/robustness.md` specifies.
 
 - **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.

@@ -49,6 +49,7 @@ fn scenarios_hold() {
         "no scenarios found in {}",
         directory.display()
     );
+    corpus_library();
     let only = std::env::var("SCENARIO").ok();
     let mut failures = Vec::new();
     for path in paths {
@@ -389,7 +390,8 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         .filter(|step| step.words[0] == "requires")
         .flat_map(|step| step.words[1..].iter().cloned())
         .collect();
-    if let Some(reason) = missing_requirement(&requirements) {
+    let library = scenario_library(&requirements);
+    if let Some(reason) = missing_requirement(&requirements, library) {
         return Ok(Outcome::Skipped(reason));
     }
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -414,6 +416,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         spawned: None,
         hide_gnu_r: false,
         environment: BTreeMap::new(),
+        library,
     };
     for step in &steps {
         journey.run(step).map_err(|problem| {
@@ -498,12 +501,21 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-fn missing_requirement(requirements: &[String]) -> Option<String> {
+fn missing_requirement(requirements: &[String], library: Option<&Path>) -> Option<String> {
     for requirement in requirements {
         match requirement.as_str() {
             "gnu-r" => {
-                if which("Rscript").is_none() {
+                let Some(gnu_r) = gnu_r() else {
                     return Some("GNU R is not installed".to_owned());
+                };
+                // `--runtime gnu-r` embeds GNU R through its shared library.
+                if !gnu_r.home.join("lib").join("libR.so").is_file()
+                    && !gnu_r.home.join("lib").join("libR.dylib").is_file()
+                {
+                    return Some(format!(
+                        "GNU R at {} has no shared library; it was built without `--enable-R-shlib`",
+                        gnu_r.home.display()
+                    ));
                 }
             }
             "ry-runtime" => {
@@ -520,7 +532,11 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
                 let Some(package) = other.strip_prefix("r-package:") else {
                     return Some(format!("unknown requirement `{other}`"));
                 };
-                if let Some(reason) = missing_package(package, requirements) {
+                let (package, minimum) = match package.split_once(">=") {
+                    Some((package, minimum)) => (package, Some(minimum)),
+                    None => (package, None),
+                };
+                if let Some(reason) = missing_package(package, minimum, requirements, library) {
                     return Some(reason);
                 }
             }
@@ -529,12 +545,35 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
     None
 }
 
-/// Why `package` cannot load in a runtime the scenario runs on, checked with that runtime itself:
-/// ry's for `ry-runtime`, and for `gnu-r` the GNU R that `--runtime gnu-r` picks. A library
-/// built by one R version may not load in another, so asking any other R could pass a package
-/// the scenario then fails to load, or skip one it can.
-fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
-    let probe = format!("quit(status = !requireNamespace('{package}', quietly = TRUE))");
+/// Why `package` cannot load in a runtime the scenario runs on, or loads older than `minimum`,
+/// checked with that runtime itself: ry's for `ry-runtime`, and for `gnu-r` the GNU R that
+/// `--runtime gnu-r` picks. A library built by one R version may not load in another, so asking
+/// any other R could pass a package the scenario then fails to load, or skip one it can.
+fn missing_package(
+    package: &str,
+    minimum: Option<&str>,
+    requirements: &[String],
+    library: Option<&Path>,
+) -> Option<String> {
+    let valid = |text: &str| {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ".-".contains(character))
+    };
+    if !valid(package) || minimum.is_some_and(|minimum| !valid(minimum)) {
+        return Some(format!(
+            "`r-package:{package}` is not a package name with an optional `>=VERSION`"
+        ));
+    }
+    // Exit status 1 means the package does not load, and 2 that it loads older than `minimum`,
+    // with the installed version on stdout.
+    let mut probe = format!("if (!requireNamespace('{package}', quietly = TRUE)) quit(status = 1)\n");
+    if let Some(minimum) = minimum {
+        probe.push_str(&format!(
+            "if (packageVersion('{package}') < '{minimum}') {{ cat(format(packageVersion('{package}'))); quit(status = 2) }}\n"
+        ));
+    }
     let mut runtimes = Vec::new();
     if requirements.iter().any(|requirement| requirement == "ry-runtime") {
         let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("package-probe");
@@ -551,19 +590,16 @@ fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
             .current_dir(&directory)
             .env("XDG_CACHE_HOME", directory.join(".cache"))
             .env_remove("RY_LIBR")
-            .env_remove("RY_IMAGE");
+            .env_remove("RY_IMAGE")
+            .envs(library_variables(library));
         runtimes.push(("ry's runtime".to_owned(), command));
     }
     if requirements.iter().any(|requirement| requirement == "gnu-r") {
-        let rscript = std::env::var_os("R_HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join("bin").join("Rscript"))
-            .or_else(|| which("Rscript"));
-        let Some(rscript) = rscript else {
+        let Some(rscript) = gnu_rscript() else {
             return Some("GNU R is not installed".to_owned());
         };
         let mut command = Command::new(&rscript);
-        command.args(["-e", &probe]);
+        command.args(["-e", &probe]).envs(library_variables(library));
         runtimes.push((format!("GNU R at {}", rscript.display()), command));
     }
     if runtimes.is_empty() {
@@ -576,6 +612,13 @@ fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
             Ok(output) => output,
             Err(error) => return Some(format!("checking for {package} with {runtime}: {error}")),
         };
+        if output.status.code() == Some(2) {
+            return Some(format!(
+                "{package} {} in {runtime}, scenario needs >= {}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                minimum.unwrap_or("?")
+            ));
+        }
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.lines().rev().find(|line| !line.trim().is_empty());
@@ -588,6 +631,136 @@ fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// The package library a scenario's R processes search: the corpus library ([`corpus_library`])
+/// for a scenario that requires an R package, when every runtime it requires matches the R
+/// release that built the library. Other scenarios see the caller's variables untouched, so the
+/// ones about library defaults test the defaults.
+fn scenario_library(requirements: &[String]) -> Option<&'static Path> {
+    if !requirements.iter().any(|requirement| requirement.starts_with("r-package:")) {
+        return None;
+    }
+    let (library, release) = corpus_library()?;
+    if requirements.iter().any(|requirement| requirement == "gnu-r")
+        && gnu_r().map(|gnu_r| gnu_r.release.as_str()) != Some(release.as_str())
+    {
+        return None;
+    }
+    Some(library.as_path())
+}
+
+fn library_variables(library: Option<&Path>) -> impl Iterator<Item = (&'static str, &Path)> {
+    library
+        .into_iter()
+        .flat_map(|library| [("R_LIBS", library), ("R_LIBS_USER", library)])
+}
+
+/// The corpus library (`just corpus`, in `$RY_CORPUS_DIR/library`, else `.corpus/library`) and
+/// the R release that built it, when the caller set no `R_LIBS` and every package in it was built
+/// by the R release ry's runtime presents. A library built by another release would make
+/// `library()` warn, so it is not used. Setting `R_LIBS`, even to an empty value, turns it off.
+fn corpus_library() -> Option<&'static (PathBuf, String)> {
+    static LIBRARY: OnceLock<Option<(PathBuf, String)>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| {
+            if let Some(libraries) = std::env::var_os("R_LIBS") {
+                if libraries.is_empty() {
+                    eprintln!("scenarios: R_LIBS is empty, so no default package library");
+                } else {
+                    eprintln!("scenarios: R packages load from R_LIBS={}", libraries.to_string_lossy());
+                }
+                return None;
+            }
+            let corpus = std::env::var_os("RY_CORPUS_DIR")
+                .filter(|directory| !directory.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+            let library = corpus.join("library");
+            if !library.is_dir() {
+                return None;
+            }
+            let field = |path: &Path, name: &str| -> Option<String> {
+                let text = fs::read_to_string(path).ok()?;
+                let line = text.lines().find(|line| line.starts_with(name))?;
+                Some(line[name.len()..].trim().to_owned())
+            };
+            let presented = base_r()
+                .and_then(|base| field(&base.join("library/base/DESCRIPTION"), "Version:"));
+            let Some(presented) = presented else {
+                eprintln!(
+                    "scenarios: not using {}: ry's base R is not built, so its R release is unknown",
+                    library.display()
+                );
+                return None;
+            };
+            let built_by = |description: &Path| -> Option<String> {
+                let built = field(description, "Built:")?;
+                let release = built.strip_prefix("R ")?.split(';').next()?;
+                Some(release.trim().to_owned())
+            };
+            let mismatch = fs::read_dir(&library).ok().and_then(|entries| {
+                entries.flatten().find_map(|entry| {
+                    let description = entry.path().join("DESCRIPTION");
+                    if !description.is_file() {
+                        return None;
+                    }
+                    match built_by(&description) {
+                        Some(release) if release == presented => None,
+                        release => Some((entry.file_name(), release)),
+                    }
+                })
+            });
+            if let Some((package, release)) = mismatch {
+                eprintln!(
+                    "scenarios: not using {}: {} was built by R {}, not by R {presented}",
+                    library.display(),
+                    package.to_string_lossy(),
+                    release.as_deref().unwrap_or("of an unknown release")
+                );
+                return None;
+            }
+            eprintln!(
+                "scenarios: R packages load from {} (built by R {presented})",
+                library.display()
+            );
+            Some((library, presented))
+        })
+        .as_ref()
+}
+
+/// The `Rscript` of the GNU R that `gnu-r` scenarios run: `R_HOME`'s, else the one on `PATH`.
+fn gnu_rscript() -> Option<PathBuf> {
+    std::env::var_os("R_HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join("bin").join("Rscript"))
+        .or_else(|| which("Rscript"))
+}
+
+/// The GNU R that `gnu-r` scenarios run ([`gnu_rscript`]): its R home and release.
+struct GnuR {
+    home: PathBuf,
+    release: String,
+}
+
+fn gnu_r() -> Option<&'static GnuR> {
+    static GNU_R: OnceLock<Option<GnuR>> = OnceLock::new();
+    GNU_R
+        .get_or_init(|| {
+            let output = Command::new(gnu_rscript()?)
+                .args(["-e", "cat(R.home(), format(getRversion()), sep = '\\n')"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines();
+            let home = PathBuf::from(lines.next()?.trim());
+            let release = lines.next()?.trim().to_owned();
+            Some(GnuR { home, release })
+        })
+        .as_ref()
 }
 
 /// The base R tree ry's runtime loads in scenarios: the one `R_HOME` names, which emulates that
@@ -817,6 +990,8 @@ struct Journey {
     hide_gnu_r: bool,
     /// Variables `env` set for later `run` steps.
     environment: BTreeMap<String, String>,
+    /// The package library this scenario's R processes search ([`scenario_library`]).
+    library: Option<&'static Path>,
 }
 
 /// A `ry` process the journey started with `spawn` and has not stopped yet, such as a watcher.
@@ -1360,6 +1535,7 @@ impl Journey {
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
                     .env_remove("RY_LIBR")
                     .env_remove("RY_IMAGE")
+                    .envs(library_variables(self.library))
                     .envs(&self.environment);
                 if *program == "single-ry" {
                     // A release finds nothing beside it, so neither may the copy that stands in.
@@ -1389,6 +1565,7 @@ impl Journey {
                     .args(arguments)
                     .current_dir(&self.root)
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
+                    .envs(library_variables(self.library))
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
@@ -1554,7 +1731,7 @@ impl Journey {
                 }
             }
             ["debug", "start", path, options @ ..] => {
-                let mut session = DebugSession::start(&self.root)?;
+                let mut session = DebugSession::start(&self.root, self.library)?;
                 let program = self.root.join(path);
                 let mut launch = json!({ "program": program });
                 let mut breakpoints: BTreeMap<PathBuf, Vec<Value>> = BTreeMap::new();
@@ -2040,10 +2217,11 @@ struct DebugSession {
 const DEBUG_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl DebugSession {
-    fn start(root: &Path) -> Result<DebugSession, String> {
+    fn start(root: &Path, library: Option<&Path>) -> Result<DebugSession, String> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_ry"))
             .arg("debug-adapter")
             .current_dir(root)
+            .envs(library_variables(library))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
