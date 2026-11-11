@@ -974,7 +974,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads and corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), compiled call sites that force the strict arguments of `typeof`, `identical`, `inherits`, `is.vector` and `match` as GNU R's compiler does, so an argument that is still an unforced promise over R code (a caller's `g(k + 1L)`) takes the native entry too (per call, JIT off: `typeof` through two wrapper layers 9,232 to 6,317 instructions, GNU R 5,834; `typeof(k + 1L)` 6,729 to 4,162, GNU R 3,244), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, a native `Reduce(accumulate = TRUE)`, element assignments that stay in slot frames, and negative subscripts and builtin argument matching without allocation. Under the JIT, `x[[i]]`, `x[[i]] <- v` and `x[i] <- v` run at a tenth of GNU R's instructions or less; at tier 0 the scalar reads and stores, list stores included, cost no more than GNU R's net of the loop, through fast handlers for the ops around the builtin (the fourth table under "Builtin fast paths"). Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads and corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), compiled call sites that force the strict arguments of `typeof`, `identical`, `inherits`, `is.vector` and `match` as GNU R's compiler does, so an argument that is still an unforced promise over R code (a caller's `g(k + 1L)`) takes the native entry too (per call, JIT off: `typeof` through two wrapper layers 9,232 to 6,317 instructions, GNU R 5,834; `typeof(k + 1L)` 6,729 to 4,162, GNU R 3,244), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, a native `Reduce(accumulate = TRUE)`, element assignments that stay in slot frames, and negative subscripts and builtin argument matching without allocation. Under the JIT, `x[[i]]`, `x[[i]] <- v` and `x[i] <- v` run at a tenth of GNU R's instructions or less; at tier 0 the scalar reads and stores, list stores included, cost less than GNU R's net of the loop (`x[2L]` 4% more), through fast handlers for the ops around the builtin (the fourth table under "Builtin fast paths"). Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
 | (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through faster ry ports or parallelism; third-party C is not replaced | in progress | ry's own ports are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus. Built: vector kernels for the d/p/q functions, batched samplers, and AVX2 twister, tempering and inversion lanes, bit-identical to GNU R ("Distribution functions and the RNG run as vector kernels and batched samplers" in `decisions.md`). `rnorm` costs 67 instructions per normal (164 before); per element at length 1e6 `rnorm` is 3.2x GNU R, `runif` 5.7x, `qnorm` 3.0x, `pnorm` 1.7x and `rpois` 1.1x. The native bucket of `simulation` fell from 0.53 s (53%) to 0.30 s (40%), and the workload runs 1.26x faster (1.15 to 1.43 over 9 rounds). `sample` draws its indices in integers: per element at length 1e6, `sample(1e6)` is 2.7x GNU R and `sample(1e6, replace = TRUE)` 3.7x. Stats closures of the form `.Call(C_routine, ...)` enter their routine directly, without a frame, and decline to the R body on any warning or error ("Stats distribution closures enter their routine directly" in `decisions.md`): per call, `dnorm(x)` and `pnorm(x)` take about 0.46 µs (GNU R 1.0 and 1.1 µs) and `rnorm(1)` 0.68 µs (GNU R 2.8 µs). Next, toward 10x: the `qnorm` tail logarithms and `pnorm`'s `exp` as exact vector ports of glibc's FMA implementations, shared with the fused element-wise kernels |
@@ -1331,25 +1331,29 @@ primitive and object branches, the call and the jump cost about 300 instructions
 JIT than at tier 0.
 
 A fourth round gave tier 0 fast handlers for those ops (beside `GetFun`'s, which reads a
-binding cell from the lookup cache: the primitive and object branches, `CallBuiltin` on `[[` and `[` through
-`element_access::read_element`, and `SubAssign` in place, by position or by an existing ASCII
-name). Each declines to the general handler with no side effect, so the op stream the JIT reads
-does not change. Instructions per loop iteration at tier 0, measured with callgrind against GNU
-R 4.6.2 (an empty loop costs 213 at tier 0 and 99 in GNU R):
+binding cell from the lookup cache): the primitive and object branches, `CallBuiltin` on `[[`
+and `[` through `element_access::element_position`, and `SubAssign` in place, by position or by
+an existing ASCII name. Each declines to the general handler with no side effect, so the op
+stream the JIT reads does not change. Instructions per loop iteration at tier 0, measured with
+callgrind against GNU R 4.6.2 (an empty loop costs 180 at tier 0 and 99 in GNU R):
 
 | Loop body | Before | After | JIT | GNU R 4.6 |
 | --- | ---: | ---: | ---: | ---: |
-| `s <- x[[i]]` | 899 | 605 | 69 | 553 |
-| `s <- x[2L]` | 946 | 594 | 62 | 492 |
-| `x[[i]] <- 5` | 729 | 482 | 73 | 519 |
-| `x[i] <- 5` | 733 | 488 | 75 | 519 |
-| `x[[i]] <- 5`, a list | 705 | 504 | 270 | 687 |
-| `x[i] <- list(5)` | 1917 | 1088 | 2437 | 1941 |
-| `x$b <- k` | 1005 | 674 | 1084 | 878 |
-| `s <- x[["b"]]`, a list | 613 | 540 | 657 | 1293 |
+| `s <- x[[i]]` | 846 | 599 | 70 | 553 |
+| `s <- x[2L]` | 886 | 587 | 56 | 492 |
+| `x[[i]] <- 5` | 726 | 467 | 76 | 519 |
+| `x[i] <- 5` | 727 | 470 | 72 | 519 |
+| `x[[i]] <- 5`, a list | 708 | 486 | 268 | 687 |
+| `x[i] <- list(5)` | 1917 | 1050 | 2428 | 1941 |
+| `x$b <- k` | 1006 | 678 | 1080 | 878 |
+| `s <- x[["b"]]`, a list | 556 | 546 | 657 | 1293 |
+| `s <- x[-1L]`, declined | 1761 | 1853 | 1982 | 2113 |
+| `x[["b"]] <- 2`, a name append, declined | 3565 | 3672 | 4031 | 5243 |
 
-The JIT column shows where compiled code is now slower than tier 0: its fallback for a list's
-`[<-`, `$<-`, `$` and a name read calls the general path.
+Net of the loop, every read and store the handlers take is below GNU R except `x[2L]`, 4%
+above. A shape they decline pays for the attempt, about 5% on a negative subscript. The JIT
+column shows where compiled code is slower than tier 0: its fallback for a list's `[<-`, `$<-`,
+`$` and a name read calls the general path.
 
 ### How the static types feed the JIT
 
