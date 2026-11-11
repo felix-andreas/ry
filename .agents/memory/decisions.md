@@ -8834,10 +8834,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Merge rule.** An object's place is the lowest phase in which any run touched it (start-up, namespace load, other), then its earliest position as a fraction of that run's touches, so a long run does not push a short run's objects back.
 - **No advice.** `MADV_RANDOM` over the image makes each touched page its own read (see the rejected layouts in "The start image keeps base R's closures compiled"). Compaction removes the cost that advice was meant to address.
 - **Measured** on a quiet machine, a release build of the compacting writer with the trained order against main, each with its own start image:
-  - Image 17.2 MB on main, 16.1 MB compacted (19.2 MB with the compiled closures before compaction).
-  - Page cache dropped: empty run 0.94x [0.89, 0.99] (30 rounds), peak RSS 34.4 to 31.4 MB; testthat_full 1.02x [0.96, 1.09] (10 rounds), peak RSS 66.3 to 66.2 MB.
-  - Hot, 30 rounds: empty run 0.86x [0.82, 0.90], peak RSS 35.1 to 32.2 MB; testthat_full 0.95x [0.90, 1.00], peak RSS 66.6 to 66.6 MB.
-  - Image pages an empty start touches: 1309 4 KB pages (160 64 KB chunks) with the image in id order, 814 (102) with the trained order.
+  - Image 17,367,040 bytes on main, 16,384,000 compacted; the order covers 158,092 ids, trained on 941 programs.
+  - Ratios are wall time, branch over main (below 1 is faster), with 95% intervals.
+  - Page cache dropped: empty run 0.92x [0.90, 0.95] (100 rounds), peak RSS 34.9 to 31.1 MB; testthat_full 0.93x [0.88, 0.98] (30 rounds), peak RSS 66.5 to 65.6 MB.
+  - Hot, 30 rounds: empty run 0.89x [0.84, 0.95], peak RSS 35.5 to 31.8 MB; testthat_full 0.91x [0.86, 0.96], peak RSS 66.8 to 66.1 MB.
+  - Image pages an empty start touches: 1328 4 KB pages (158 64 KB chunks) with the image in id order, 821 (103) with the trained order.
 
 ## Native entries read promises over a pending frame without forcing them
 

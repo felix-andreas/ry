@@ -2737,7 +2737,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Symbols are not compacted with the start image.** Symbols keep their addresses because frame
   filters, slot indexes, hash tables and record layout tags hash them (decisions.md, "The start
   image is compacted in touch order at write time"). Moving them too needs every such table rebuilt
-  after the move; an empty start still touches 814 image pages where perfect packing would touch
+  after the move; an empty start still touches 821 image pages where perfect packing would touch
   about 480.
 - **Unforced base bindings still compile at run time.** The start image holds compiled code for
   every closure bound in a loaded namespace, but lazy-load bindings that start-up never forces
