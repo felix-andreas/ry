@@ -2956,7 +2956,7 @@ impl Compiler {
             if inlined {
                 return self.guarded(call, head, primitive, dst, &name, &args);
             }
-        } else if SAFE_BASE_INTERNALS.contains(&name.as_str())
+        } else if INLINED_BASE_INTERNALS.contains(&name.as_str())
             && let Some(inline) = self.inlined_internal(head, call)?
         {
             return self.internal(call, head, inline, dst);
@@ -3433,12 +3433,13 @@ impl Compiler {
     }
 
     /// For a call of base's closure `head` whose body is only `.Internal(f(...))`, the closure,
-    /// the internal and the expressions for the internal's arguments, as GNU R's compiler
-    /// inlines such a "safe base internal": each argument is the caller's expression for the
-    /// formal it names, or the formal's default, or a literal. Every default must be a constant,
-    /// every tag must name a formal exactly and each formal may appear once, so evaluating the
-    /// arguments in the internal's order forces them as the call would. `None` otherwise, for
-    /// the ordinary call.
+    /// the internal and the internal's arguments, as GNU R's compiler inlines such a "safe base
+    /// internal": each argument is the caller's expression for the formal it names, or the
+    /// formal's default, or a literal. Every default must be a constant, and each formal may
+    /// appear once, so evaluating the arguments in the internal's order forces them as the call
+    /// would. A `...` formal takes the arguments no other formal matches, as R matches them, and
+    /// the body may pass it on as `...` or as `list(...)`: `sprintf` and `paste` do. `None`
+    /// otherwise, for the ordinary call.
     unsafe fn inlined_internal(&self, head: Sexp, call: Sexp) -> R<Option<InlinedInternal>> {
         let heap = crate::heap();
         let Some(binding) = heap
@@ -3479,6 +3480,7 @@ impl Compiler {
         if eval::builtin_def(internal)?.kind != crate::builtins::Kind::Internal {
             return Ok(None);
         }
+        let dots_symbol = symbols().dots;
         let formals = values::pairlist_items(function.car());
         let constant = |value: Sexp| {
             !matches!(
@@ -3486,67 +3488,141 @@ impl Compiler {
                 SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
             )
         };
-        if formals.iter().any(|&(tag, default)| {
-            tag == symbols().dots || !(default == missing_arg() || constant(default))
-        }) {
+        if formals.len() > 64
+            || formals.iter().any(|&(tag, default)| {
+                tag != dots_symbol && !(default == missing_arg() || constant(default))
+            })
+        {
             return Ok(None);
         }
+        let dots_index = formals.iter().position(|(tag, _)| *tag == dots_symbol);
+        // Positions fill the formals before `...`, and a tag matches only those partially.
+        let positional = dots_index.unwrap_or(formals.len());
         let mut supplied: SmallVec<[Option<Sexp>; 8]> = SmallVec::from_elem(None, formals.len());
+        let mut dots: SmallVec<[(Sexp, Sexp); 6]> = SmallVec::new();
         let args = values::pairlist_items(call.cdr());
+        let exact = |tag: Sexp| {
+            formals
+                .iter()
+                .position(|(formal, _)| *formal == tag && tag != dots_symbol)
+        };
         for (tag, value) in &args {
-            if *value == symbols().dots || *value == missing_arg() {
+            if *value == dots_symbol || *value == missing_arg() || *tag == dots_symbol {
                 return Ok(None);
             }
-            if *tag != nil() {
-                let Some(index) = formals.iter().position(|(formal, _)| formal == tag) else {
-                    return Ok(None);
-                };
+            if *tag == nil() {
+                continue;
+            }
+            if let Some(index) = exact(*tag) {
                 if supplied[index].replace(*value).is_some() {
                     return Ok(None);
                 }
+                continue;
+            }
+            let name = symbol_name(*tag);
+            if dots_index.is_none()
+                || formals[..positional]
+                    .iter()
+                    .any(|(formal, _)| symbol_name(*formal).starts_with(&*name))
+            {
+                return Ok(None);
             }
         }
         for (tag, value) in &args {
-            if *tag == nil() {
-                let Some(slot) = supplied.iter_mut().find(|slot| slot.is_none()) else {
-                    return Ok(None);
-                };
-                *slot = Some(*value);
+            if *tag != nil() {
+                if exact(*tag).is_none() {
+                    dots.push((*tag, *value));
+                }
+                continue;
+            }
+            match supplied[..positional]
+                .iter_mut()
+                .find(|slot| slot.is_none())
+            {
+                Some(slot) => *slot = Some(*value),
+                None if dots_index.is_some() => dots.push((nil(), *value)),
+                None => return Ok(None),
             }
         }
         let mut used = 0u64;
-        let mut expressions = SmallVec::new();
-        for (_, argument) in values::pairlist_items(inner.cdr()) {
-            let expression = if argument.kind() == SexpType::Symbol {
+        let mut use_formal = |index: usize| {
+            let fresh = used & 1 << index == 0;
+            used |= 1 << index;
+            fresh
+        };
+        let mut arguments = SmallVec::new();
+        for (tag, argument) in values::pairlist_items(inner.cdr()) {
+            if tag != nil() {
+                return Ok(None);
+            }
+            if argument == dots_symbol {
+                // The internal reads `...` as its own arguments, without their tags.
+                let Some(index) = dots_index else {
+                    return Ok(None);
+                };
+                if !use_formal(index) || dots.iter().any(|(tag, _)| *tag != nil()) {
+                    return Ok(None);
+                }
+                arguments.extend(
+                    dots.iter()
+                        .map(|&(_, value)| InternalArgument::Value(value)),
+                );
+            } else if argument.kind() == SexpType::Language
+                && argument.car() == symbols().list
+                && argument.cdr().kind() == SexpType::Pairlist
+                && argument.cdr().car() == dots_symbol
+                && argument.cdr().tag() == nil()
+                && argument.cdr().cdr() == nil()
+            {
+                let Some(index) = dots_index else {
+                    return Ok(None);
+                };
+                // The body's `list` is base's, as the closure's environment is base's namespace.
+                let list = heap
+                    .frame_cell(heap.known().base_env, symbols().list)
+                    .map(|cell| forced_value(cell.cdr()));
+                if !use_formal(index)
+                    || list.is_none_or(|list| {
+                        list.kind() != SexpType::Builtin || values::primitive_name(list) != "list"
+                    })
+                {
+                    return Ok(None);
+                }
+                arguments.push(InternalArgument::List);
+            } else if argument.kind() == SexpType::Symbol {
                 let Some(index) = formals.iter().position(|(formal, _)| *formal == argument) else {
                     return Ok(None);
                 };
-                if index >= 64 || used & 1 << index != 0 {
+                if Some(index) == dots_index || !use_formal(index) {
                     return Ok(None);
                 }
-                used |= 1 << index;
-                match supplied[index] {
+                arguments.push(InternalArgument::Value(match supplied[index] {
                     Some(value) => value,
                     None if formals[index].1 != missing_arg() => formals[index].1,
                     None => return Ok(None),
-                }
+                }));
             } else if constant(argument) && argument != missing_arg() {
-                argument
+                arguments.push(InternalArgument::Value(argument));
             } else {
                 return Ok(None);
-            };
-            expressions.push(expression);
+            }
+        }
+        // Arguments the body never passes on would be dropped unevaluated.
+        if dots_index.is_some_and(|index| used & 1 << index == 0) {
+            return Ok(None);
         }
         Ok(Some(InlinedInternal {
             function,
             internal,
-            expressions,
+            arguments,
+            dots,
         }))
     }
 
     /// A call as [`Compiler::inlined_internal`] found it: a guard that `head` still names base's
     /// closure, the internal's arguments evaluated into a run of registers, and
-    /// [`Op::Internal`].
+    /// [`Op::Internal`]. A `list(...)` argument is built by base's `list` from the forwarded
+    /// arguments, with their tags.
     unsafe fn internal(
         &mut self,
         call: Sexp,
@@ -3561,11 +3637,54 @@ impl Compiler {
         let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
         let mark = self.next_register;
         let first = self.next_register;
-        for _ in &inline.expressions {
+        for _ in &inline.arguments {
             self.allocate();
         }
-        for (offset, &expression) in inline.expressions.iter().enumerate() {
-            self.expression(expression, first + offset as u32)?;
+        for (offset, argument) in inline.arguments.iter().enumerate() {
+            let register = first + offset as u32;
+            match *argument {
+                InternalArgument::Value(expression) => self.expression(expression, register)?,
+                InternalArgument::List => {
+                    let heap = crate::heap();
+                    let Some(list) = heap
+                        .frame_cell(heap.known().base_env, symbols().list)
+                        .map(|cell| forced_value(cell.cdr()))
+                    else {
+                        return Err(error("base's 'list' is not bound"));
+                    };
+                    let values: SmallVec<[Sexp; 6]> =
+                        inline.dots.iter().map(|&(_, value)| value).collect();
+                    let list_call = values::call(symbols().list, &values)?;
+                    let list_call_constant = self.constant(list_call);
+                    let mut cell = list_call.cdr();
+                    for &(tag, _) in &inline.dots {
+                        heap.set_tag(cell, tag);
+                        cell = cell.cdr();
+                    }
+                    let list_mark = self.next_register;
+                    let function_register = self.allocate();
+                    let list_constant = self.constant(list);
+                    self.emit(Op::Constant, &[function_register, list_constant]);
+                    let base = self.next_register;
+                    for _ in &inline.dots {
+                        self.allocate();
+                    }
+                    for (index, &(_, value)) in inline.dots.iter().enumerate() {
+                        self.expression(value, base + index as u32)?;
+                    }
+                    self.emit(
+                        Op::CallBuiltin,
+                        &[
+                            register,
+                            function_register,
+                            list_call_constant,
+                            base,
+                            inline.dots.len() as u32,
+                        ],
+                    );
+                    self.release_to(list_mark);
+                }
+            }
         }
         let call_constant = self.constant(call);
         let internal = self.constant(inline.internal);
@@ -3576,7 +3695,7 @@ impl Compiler {
                 call_constant,
                 internal,
                 first,
-                inline.expressions.len() as u32,
+                inline.arguments.len() as u32,
             ],
         );
         self.release_to(mark);
@@ -4599,9 +4718,13 @@ const RESPECIALIZE_SHIFT: u32 = 24;
 const RESPECIALIZE_MASK: u32 = 0xFF << RESPECIALIZE_SHIFT;
 const RESPECIALIZE_LIMIT: u32 = 4;
 
-/// The base closures whose `.Internal` GNU R's compiler inlines, because the internal evaluates
-/// its arguments and neither looks at the caller's frame nor at how it was called.
-const SAFE_BASE_INTERNALS: [&str; 20] = [
+/// The base closures whose `.Internal` the compiler inlines, because the internal evaluates its
+/// arguments, looks neither at the caller's frame nor at how it was called, and leaves the
+/// result visible. The first twenty are GNU R's compiler's "safe base internals"; the rest are
+/// wrappers that profiles of package code call often and that pass the same test: the
+/// `vector` family, the string builders that forward `...`, and environment and row-name
+/// queries.
+const INLINED_BASE_INTERNALS: [&str; 34] = [
     "atan2",
     "besselY",
     "beta",
@@ -4622,12 +4745,36 @@ const SAFE_BASE_INTERNALS: [&str; 20] = [
     "match",
     "rep.int",
     "rep_len",
+    "character",
+    "logical",
+    "integer",
+    "numeric",
+    "double",
+    "raw",
+    "paste",
+    "paste0",
+    "sprintf",
+    ".row_names_info",
+    "make.unique",
+    "startsWith",
+    "endsWith",
+    "isNamespace",
 ];
 
 struct InlinedInternal {
     function: Sexp,
     internal: Sexp,
-    expressions: SmallVec<[Sexp; 6]>,
+    arguments: SmallVec<[InternalArgument; 6]>,
+    /// The call's arguments the closure's `...` takes, with their tags.
+    dots: SmallVec<[(Sexp, Sexp); 6]>,
+}
+
+/// One argument of an inlined internal.
+enum InternalArgument {
+    /// The value of an expression evaluated in the caller.
+    Value(Sexp),
+    /// `list(...)` of the arguments the closure's `...` takes.
+    List,
 }
 
 /// Tier 0's specialized forms of [`Op::Arithmetic`], by opcode minus `OPS.len()`: the operator
@@ -9077,7 +9224,10 @@ unsafe fn op_internal(state: &mut Activation<'_, '_>, instruction: Instruction) 
             value: instruction.register(first + index),
         });
     }
-    let value = eval::call_inlined_internal(definition, call, function, &args, *state.header)?;
+    // The closure's frame would enclose base's namespace, which is where an internal that
+    // dispatches (`paste` and `match` on objects) looks up the generic, not the caller's frame.
+    let namespace = crate::heap().known().base_namespace;
+    let value = eval::call_inlined_internal(definition, call, function, &args, namespace)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     (*state.interp).visible = true;

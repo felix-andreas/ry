@@ -388,6 +388,17 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
     let env = promise.tag();
+    // Releasing a promise's last counted reference clears its environment, so an unforced
+    // promise without one was held by a root the counts do not see, and forcing it here would
+    // evaluate its code nowhere instead of where it was made.
+    if env == nil()
+        && !promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && (cfg!(debug_assertions)
+            || syntax::testing::invariants_enabled()
+            || heap::gc_stress_requested().is_some())
+    {
+        panic!("a promise was forced after its last counted reference was released");
+    }
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
     } else if env.has_gp(gp::PENDING_FRAME) {
@@ -1310,7 +1321,16 @@ pub(crate) unsafe fn call_inlined_internal(
     args: &[Arg],
     env: Sexp,
 ) -> R<Sexp> {
-    call_builtin_checked(definition, call, op, args, env, None, call)
+    // The wrapper's frame is gone, so its call is what the internal's errors and warnings
+    // report, as they would from inside the closure.
+    let state = interp();
+    let outer =
+        state
+            .assignment_call
+            .replace((crate::heap().known().unbound, call, state.frames.len()));
+    let result = call_builtin_checked(definition, call, op, args, env, None, call);
+    interp().assignment_call = outer;
+    result
 }
 
 /// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the
@@ -1900,14 +1920,14 @@ pub unsafe fn apply_closure(
     {
         return Ok(value);
     }
-    if supplied.is_none()
-        && crate::annotations::is_typed(function)
-        && let Some(tier) = bytecode::tier()
-    {
-        if let Some(value) = (tier.call)(function, args) {
-            return value;
+    if supplied.is_none() && crate::annotations::is_typed(function) {
+        force_typed_arguments(args)?;
+        if let Some(tier) = bytecode::tier() {
+            if let Some(value) = (tier.call)(function, args) {
+                return value;
+            }
+            crate::annotations::log_interpreted(call);
         }
-        crate::annotations::log_interpreted(call);
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -1923,6 +1943,46 @@ pub unsafe fn apply_closure(
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+}
+
+/// Forces, left to right, each argument promise that typed code wrote: a call from one typed
+/// function to another evaluates its arguments before the callee runs, as compiled typed code
+/// does, so the tiers agree on a typed program. An argument written in R code, including one a
+/// typed function receives through `...`, stays lazy.
+unsafe fn force_typed_arguments(args: &[Arg]) -> R<()> {
+    for arg in args {
+        let promise = arg.value;
+        if promise.kind() == SexpType::Promise
+            && promise.car() == unbound()
+            && written_in_typed_code(promise)
+        {
+            force_promise(promise)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `promise`'s code is in the body of a typed function: its environment is the frame of
+/// a live call of one. A typed function never runs on slots, so a promise over a slot frame is
+/// R code's.
+unsafe fn written_in_typed_code(promise: Sexp) -> bool {
+    if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        return false;
+    }
+    let env = promise.tag();
+    if env.has_gp(gp::PENDING_FRAME) {
+        return false;
+    }
+    interp()
+        .frames
+        .iter()
+        .rev()
+        .find(|frame| frame.env == env)
+        .is_some_and(|frame| {
+            // `eval` and other builtins push frames too, whose function has no formals to read.
+            frame.function.kind() == SexpType::Closure
+                && crate::annotations::is_typed(frame.function)
+        })
 }
 
 /// [`apply_closure`] for promises the caller built for this call alone and never reads again,
@@ -1942,14 +2002,14 @@ pub unsafe fn apply_closure_owning(
     {
         return Ok(value);
     }
-    if supplied.is_none()
-        && crate::annotations::is_typed(function)
-        && let Some(tier) = bytecode::tier()
-    {
-        if let Some(value) = (tier.call)(function, args) {
-            return value;
+    if supplied.is_none() && crate::annotations::is_typed(function) {
+        force_typed_arguments(args)?;
+        if let Some(tier) = bytecode::tier() {
+            if let Some(value) = (tier.call)(function, args) {
+                return value;
+            }
+            crate::annotations::log_interpreted(call);
         }
-        crate::annotations::log_interpreted(call);
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -2627,7 +2687,7 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
         }
     }
     let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
-    for (symbol, value) in method_vars {
+    for &(symbol, value) in &method_vars {
         if heap.frame_cell(env, symbol).is_none() {
             heap.define(env, symbol, resolved_value(value)?)?;
         }
@@ -2648,15 +2708,21 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     }
     activity::count(Counter::FramesReified);
     if syntax::testing::invariants_enabled() {
-        check_reified(index, env, &bindings);
+        check_reified(index, env, &bindings, &method_vars);
     }
     Ok(env)
 }
 
 /// The cross-check behind `syntax::testing::enable_invariants()`: the environment made from a
 /// slot frame binds each formal as the heap-frame path would have, to the same value with the
-/// same missing flag, and binds nothing it should not.
-unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
+/// same missing flag, and binds nothing but its body's locals and, for a method, its dispatch
+/// variables.
+unsafe fn check_reified(
+    index: usize,
+    env: Sexp,
+    bindings: &[Formal],
+    method_vars: &[(Sexp, Sexp)],
+) {
     let heap = crate::heap();
     for binding in bindings {
         let Some(cell) = heap.frame_cell(env, binding.symbol) else {
@@ -2678,7 +2744,7 @@ unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
     };
     for symbol in crate::envir::env_symbols(env, true, false) {
         assert!(
-            locals.contains(&symbol),
+            locals.contains(&symbol) || method_vars.iter().any(|&(name, _)| name == symbol),
             "frame {index}: a reified slot frame binds {:?}, which its body cannot bind",
             values::symbol_name(symbol)
         );

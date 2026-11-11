@@ -1083,7 +1083,16 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
     let mode = values::require_str(call.arg(0), "mode")?;
-    let count = crate::subset::length_argument(call.arg(1))?;
+    let length = call.arg(1);
+    let count = if values::length(length) == 1 {
+        values::as_real_scalar(length)
+    } else {
+        f64::NAN
+    };
+    if count.is_nan() || count < 0.0 {
+        return Err(error("invalid 'length' argument"));
+    }
+    let count = count as usize;
     let kind = match mode.as_ref() {
         "any" => SexpType::Logical,
         mode => mode_type(mode)

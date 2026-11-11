@@ -76,16 +76,37 @@ build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
 the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
 `RY_GC_STRESS=1`, which collects before every allocation once the script starts, and
-`ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable. Without `--engine` or `ORACLE_ENGINE` the second engine
+`ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable.
+`ry-jit-gctorture` combines `RY_JIT=force` with `RY_GC_STRESS=1`, so it checks that compiled code
+keeps every object it holds rooted. `--engine` takes a comma-separated list, such as
+`--engine ry,ry-jit-gctorture`, which runs GNU R once per case and prints a summary line per engine.
+A failure listed in `crates/oracle/known_failures.toml` reports as known rather than failing the run
+([Testing](/development/testing#known-oracle-failures) has the rule). Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
-Both engines must search the same package library, installed by GNU R. ry runs on GNU R's base
-R when the two releases differ, so a package that ry installed (its `DESCRIPTION` says it was built
-under ry's release) makes `library()` warn "package 'x' was built under R version 4.6.2". The
-driver therefore reports the `R_LIBS` each engine saw, and a case whose engines saw different values
-fails with that message instead of a diff. A wrapper given as `ORACLE_RY` must not set `R_LIBS`
-itself.
+Every engine searches the same libraries: any `R_LIBS` you set, then the corpus library, then the
+reference R's own. The corpus library is `.corpus/library` in the workspace (`$RY_CORPUS_DIR/library`
+when that is set), where `just corpus` installs the packages many cases need, and the oracle adds it
+whenever the directory exists. An `R_LIBS` set to the empty string leaves it out. The oracle asks
+GNU R for its `.libPaths()` once with those libraries in `R_LIBS` (and `R_LIBS_SITE` and
+`R_LIBS_USER` empty), then runs each engine, and the gallery and `oracle bench` runs too, with
+`R_LIBS` set to the answer and `R_LIBS_SITE` and `R_LIBS_USER` set empty. Without that, ry would search its own
+defaults: its bundled base R's library, which holds none of the reference R's packages, and any GNU
+R site or user library it finds, such as Debian's `/usr/lib/R/site-library`, whose data.table 1.14.10,
+rlang 1.1.3 and withr 2.5.0 would load in place of the reference R's. `just doctor` warns when
+`ry run` by hand loads other packages than the reference R and prints the variables that make it
+match:
+
+```sh
+R_LIBS=/opt/R/4.6.2/lib/R/library R_LIBS_SITE= R_LIBS_USER= ry run case.R
+```
+
+The packages themselves must be installed by GNU R. ry runs on GNU R's base R when the two releases
+differ, so a package that ry installed (its `DESCRIPTION` says it was built under ry's release)
+makes `library()` warn "package 'x' was built under R version 4.6.2". The driver therefore reports
+the `R_LIBS` each engine saw, and a case whose engines saw different values fails with that message
+instead of a diff. A wrapper given as `ORACLE_RY` must not set `R_LIBS` itself.
 
 ry's native fast paths for base closures (`crates/interp/src/base_fast_paths.rs`) install only on
 the GNU R release whose code they follow, recognised by a hash. Against an older GNU R, such as a
@@ -107,8 +128,8 @@ The oracle cases check graphics state by value, and the gallery checks what is d
 `finance.R`, grid, lattice, ggplot2) declares figures with `figure("name", { ... })`, and
 `oracle gallery` renders each one under GNU R and under ry's runtime on the `agg` (ragg), `png`,
 `pdf` and `svg` devices, then compares the images and times every render. A figure's visible value is printed, as at the top level, because lattice,
-ggplot2 and xts draw only when printed. A figure whose packages GNU R lacks is skipped, so set
-`R_LIBS` to the corpus library (`.corpus/library`) to run all of them.
+ggplot2 and xts draw only when printed. A figure whose packages GNU R lacks is skipped, and the
+gallery searches the corpus library like `compare` does, so `just corpus` is enough to run all of them.
 
 ragg rasterizes the same way under both engines, so `agg` is the sharp check: at most 0.2% of
 pixels may differ. `png` and `pdf` (rasterized with `pdftoppm` to `<figure>.pdf.png`) allow 5%, and there a pixel
@@ -214,7 +235,8 @@ gated on that version in `crates/interp` (`system::r_at_least`), so ry with `R_H
 
 Without any GNU R, `compare` checks the engine against each case's recorded outcome instead and says
 so on stderr. The engine then runs on ry's bundled base R 4.6.2, the release the recordings come
-from. A case that needs a package the engine cannot load is reported as `skip ... needs <package>`.
+from. A case that needs a package the engine cannot load is listed as `skip ... needs <package>`,
+and the run fails unless you pass `--allow-skips` ([Testing](/development/testing#known-oracle-failures)).
 
 ## The reference GNU R
 
@@ -232,7 +254,8 @@ cases depend on that build:
 - `utils__rprofmem` and `environments__sys_call_shares_arguments` call `Rprofmem()`, so they need
   memory profiling. Without it GNU R stops with "memory profiling is not available on this system".
 - The graphics cases need `png()` to draw through cairo, which R uses only when pango is present.
-  Without it the bitmap type falls back to Xlib, which needs an X11 display.
+  Without it the bitmap type falls back to Xlib, which needs an X11 display, even though
+  `capabilities("cairo")` reads `TRUE`. `tools/doctor.py` and `tools/reference-r.sh` therefore check `getOption("bitmapType")`.
 - Collation and a few string cases follow ICU, which R uses when its headers are installed.
 - The `datatable__*`, `grid__*` and knitr cases print what those packages' current CRAN releases
   print, and each declares the packages it needs in an `# oracle: requires` line.
