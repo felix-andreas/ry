@@ -596,6 +596,35 @@ fn find_program(name: &str) -> Option<PathBuf> {
     first_program_file(&directories, name, &extensions)
 }
 
+/// The program a Unix `which` finds for `name`: `name` itself when it holds a slash, otherwise
+/// the first executable file of that name in a `PATH` directory, where an empty entry is the
+/// working directory, reported as `./name`. `None` for an empty name or where nothing executable
+/// matches.
+#[cfg(unix)]
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &Path| {
+        path.metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    if name.is_empty() {
+        return None;
+    }
+    if name.contains('/') {
+        let path = PathBuf::from(name);
+        return executable(&path).then_some(path);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|directory| {
+        let candidate = if directory.as_os_str().is_empty() {
+            Path::new(".").join(name)
+        } else {
+            directory.join(name)
+        };
+        executable(&candidate).then_some(candidate)
+    })
+}
+
 /// The first file `name` with one of `extensions` added names in one of `directories`, trying
 /// every extension in a directory before the next directory.
 fn first_program_file(
@@ -795,8 +824,9 @@ pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     let count = length(names);
     let result = alloc(SexpType::String, count)?;
     crate::heap().root(result);
-    let texts: SmallVec<[Cow<'_, str>; 4]> =
-        (0..count).map(|index| values::char_str(names.element(index))).collect();
+    let texts: SmallVec<[Cow<'_, str>; 4]> = (0..count)
+        .map(|index| values::char_str(names.element(index)))
+        .collect();
     let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
     let mut found: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
     let mut failure = None;
@@ -841,8 +871,9 @@ pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
     // GNU R translates an `NA` element to the text "NA".
-    let texts: SmallVec<[Cow<'_, str>; 4]> =
-        (0..count).map(|index| values::char_str(names.element(index))).collect();
+    let texts: SmallVec<[Cow<'_, str>; 4]> = (0..count)
+        .map(|index| values::char_str(names.element(index)))
+        .collect();
     let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
     let replacements: SmallVec<[Cow<'_, str>; 4]> = (0..count)
         .map(|index| values::char_str(new_values.element(index)))
@@ -883,8 +914,9 @@ pub(crate) unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::Logical, count)?;
     // GNU R translates an `NA` element to the text "NA", and reports whether each variable is
     // unset afterwards, which `unsetenv()` guarantees for every name it accepts.
-    let texts: SmallVec<[Cow<'_, str>; 4]> =
-        (0..count).map(|index| values::char_str(names.element(index))).collect();
+    let texts: SmallVec<[Cow<'_, str>; 4]> = (0..count)
+        .map(|index| values::char_str(names.element(index)))
+        .collect();
     let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
     let mut present: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
     scan_environment(&keys, |index, _| present[index] = true);
@@ -1017,7 +1049,10 @@ fn variable_key(name: &[u8]) -> Option<u16> {
     if name.contains(&0) {
         return None;
     }
-    Some(u16::from_le_bytes([first, rest.first().copied().unwrap_or(b'=')]))
+    Some(u16::from_le_bytes([
+        first,
+        rest.first().copied().unwrap_or(b'='),
+    ]))
 }
 
 /// Whether the entry at `start` defines `name`.

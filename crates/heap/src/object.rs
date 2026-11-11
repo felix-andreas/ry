@@ -329,6 +329,13 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// An environment that some closure or other environment names as its
+    /// environment or enclosure, or that a cached lookup started from, so a cached lookup may
+    /// have walked through it. Replacing the
+    /// enclosure of an environment without the bit, such as `parent.env(e) <- p` right after
+    /// `e <- new.env()`, cannot change what any cached lookup found (see
+    /// `Heap::set_enclosure`).
+    pub const ENCLOSING: u16 = 1 << 0;
     /// An environment a compiled closure body is running on. The body keeps values in registers
     /// that do not count as references, which code running on the environment from elsewhere
     /// must respect before it updates a value in place.
