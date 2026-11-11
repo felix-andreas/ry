@@ -2902,6 +2902,211 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
 }
 
 #[test]
+fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
+    // Each case runs on tier 0 and on the typed core, which must agree on every value and error,
+    // and the typed core must take it. The cases cover boxes built and read natively, `match`
+    // over a known union and over any tag from R, results, dictionaries and text.
+    let helpers = [
+        "tier_parse <- function(row: Str) -> Result<I64, :Bad> \
+         match (Str.to_i64(row)) { :Ok(v) => :Ok(v * 2i64)\n :Err(_) => :Err(:Bad) }",
+        "tier_area <- function(r: Record{w: F64, h: F64}) -> F64 r$w * r$h",
+    ];
+    let cases: &[(&str, &[&str])] = &[
+        // A record's fields sit in name order, whatever order the literal gives them in, and a
+        // record passes natively to a typed closure.
+        (
+            "function(n: I64) -> F64 { r <- (h = 2, w = Num.to_f64(n)); tier_area(r) + r$h }",
+            &["{ x <- 3i64; FUNCTION(x) }"],
+        ),
+        // A tag union built in the body is matched exhaustively, with payloads bound by
+        // position and by name.
+        (
+            "function(n: I64) -> F64 { t <- if (n > 0i64) :Pos(Num.to_f64(n)) else if (n < 0i64) \
+             :Neg(by = 1) else :Zero\n match (t) { :Pos(v) => v * 2\n :Neg(by = b) => -b\n :Zero => 0 } }",
+            &[
+                "{ x <- 4i64; FUNCTION(x) }",
+                "{ x <- -4i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+            ],
+        ),
+        // A tag from R is any tag: a shape no arm names leaves the call to tier 0, which raises
+        // the error that no arm matches.
+        (
+            "function(t: :A(F64) | :B) -> F64 match (t) { :A(v) => v + 1\n :B => 0\n :A(..) => -1 }",
+            &[
+                "{ x <- :A(2.5); FUNCTION(x) }",
+                "{ x <- :B; FUNCTION(x) }",
+                "{ x <- :C; FUNCTION(x) }",
+                "{ x <- :A(\"s\"); FUNCTION(x) }",
+            ],
+        ),
+        // A tag result crosses back to R.
+        (
+            "function(n: I64) -> Result<I64, :Odd> if (n %% 2i64 == 0i64) :Ok(n) else :Err(:Odd)",
+            &["{ x <- 4i64; FUNCTION(x) }", "{ x <- 3i64; FUNCTION(x) }"],
+        ),
+        // Parsing gives a result, and `Result.with_default` unwraps it.
+        (
+            "function(s: Str) -> F64 Result.with_default(Str.to_f64(s), -1) + \
+             Num.to_f64(Result.with_default(Str.to_i64(s), 7i64))",
+            &[
+                "{ x <- \"42\"; FUNCTION(x) }",
+                "{ x <- \"2.5\"; FUNCTION(x) }",
+                "{ x <- \"nan\"; FUNCTION(x) }",
+                "{ x <- \"x\"; FUNCTION(x) }",
+            ],
+        ),
+        // A mapped typed closure, its `:Ok` payloads kept, and a dictionary folded and updated.
+        (
+            "function(rows: List<Str>) -> F64 { parsed <- List.map(rows, tier_parse)\n \
+             kept <- List.keep_oks(parsed, function(p: Result<I64, :Bad>) -> Result<I64, :Bad> p)\n \
+             totals <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+             if (row == \"drop\") :Err(:Missing) else :Ok(Result.with_default(found, 0) + 1)))\n \
+             Num.to_f64(List.sum(kept)) + Result.with_default(Dict.get(totals, \"1\"), -10) + \
+             Result.with_default(Dict.get(totals, \"drop\"), -100) }",
+            &[
+                "{ x <- List.from_r(c(\"1\", \"x\", \"1\", \"drop\", \"5\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
+        // Text: number formatting, repetition, case, splitting, joining and byte counts of
+        // inline and heap strings. An f-string runs as `paste0`, which this interpreter without
+        // base R lacks.
+        (
+            "function(n: I64, s: Str) -> Str { t <- Str.concat(Str.concat(s, \"-\"), Num.to_str(n))\n \
+             u <- Str.concat(Str.repeat(t, 3), Str.with_ascii_uppercased(s))\n \
+             parts <- Str.split_on(u, \"-\")\n \
+             Str.concat(Str.join_with(parts, \"+\"), Num.to_str(Str.count_utf8_bytes(u))) }",
+            &[
+                "{ k <- 12i64; x <- \"ab\"; FUNCTION(k, x) }",
+                "{ k <- 0i64; x <- \"héllo wörld, long enough\"; FUNCTION(k, x) }",
+                "{ k <- 1i64; x <- \"\"; FUNCTION(k, x) }",
+            ],
+        ),
+        // A loop that wraps its own value constructs a shape the `match` above it must already
+        // test for on the first call.
+        (
+            "function(t: :Seed | :Wrapped(:Seed), n: I64) -> F64 { cur <- t\n total <- 0\n \
+             i <- 0i64\n while (i < n) { total <- total + match (cur) { :Wrapped(x) => 1\n _ => 0 }\n \
+             cur <- :Wrapped(cur)\n i <- i + 1i64 }\n total }",
+            &[
+                "{ x <- :Seed; k <- 3i64; FUNCTION(x, k) }",
+                "{ x <- :Seed; k <- 3i64; FUNCTION(x, k) }",
+            ],
+        ),
+        // A repeated string longer than R allows fails instead of aborting.
+        (
+            "function(s: Str, n: I64) -> I64 Str.count_utf8_bytes(Str.repeat(s, n))",
+            &[
+                "{ x <- \"ab\"; k <- 3i64; FUNCTION(x, k) }",
+                "{ x <- \"ab\"; k <- 4000000000i64; FUNCTION(x, k) }",
+            ],
+        ),
+        (
+            "function(s: Str) -> Bool Str.starts_with(s, \"ab\") && !Str.ends_with(s, \"z\")",
+            &[
+                "{ x <- \"abc\"; FUNCTION(x) }",
+                "{ x <- \"abz\"; FUNCTION(x) }",
+                "{ x <- \"b\"; FUNCTION(x) }",
+            ],
+        ),
+    ];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            for helper in helpers {
+                run(helper);
+            }
+        }
+        for (case, &(definition, calls)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled, typed) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let outcomes: Vec<String> = calls
+                        .iter()
+                        .map(|call| run(&call.replace("FUNCTION", name)))
+                        .collect();
+                    jit::install_mode(Mode::Off);
+                    outcomes
+                };
+                let reference = run_all(&format!("boxes_reference_{case}"), Mode::Off);
+                let name = format!("boxes_compiled_{case}");
+                let compiled = run_all(&name, Mode::On);
+                let function = lower::parse_text(&name, "<test>")
+                    .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+                (reference, compiled, function.is_ok_and(typed::has_compiled))
+            };
+            assert_eq!(reference, compiled, "case {case}: FUNCTION <- {definition}");
+            assert!(
+                typed,
+                "case {case} did not run on the typed core: {definition}"
+            );
+            // SAFETY: the typed core's counters are thread-local and only read.
+            let live = unsafe { typed::values::ry_live_objects() };
+            assert_eq!(live, 0, "case {case} leaked {live} native values");
+        }
+    });
+}
+
+#[test]
+fn typed_calls_in_unforced_arguments_do_not_run() {
+    // R runs an argument only when the callee forces it. A typed call is not run ahead of the
+    // call that receives it, even though its native code changes nothing, because it may not
+    // finish.
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            jit::install_mode(Mode::On);
+            run("lazy_unused <- function(n: F64) -> F64 n + 1");
+            run("lazy_first <- function(a: F64, b: F64) -> F64 a");
+            run("lazy_wrapper <- function(x) lazy_first(x, lazy_unused(x))");
+            for _ in 0..3 {
+                assert_eq!(run("lazy_wrapper(2.5)"), run("2.5"));
+            }
+            let unused = lower::parse_text("lazy_unused", "<test>")
+                .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+            let ran = unused.is_ok_and(typed::has_compiled);
+            jit::install_mode(Mode::Off);
+            assert!(!ran, "an unforced typed argument ran");
+        }
+    });
+}
+
+#[test]
+fn typed_core_does_not_convert_dictionary_updates() {
+    // A dictionary's values all have its value type, so an update that gives a logical for a
+    // `F64` dictionary is an error on every tier, never a conversion.
+    let definition = "function(rows: List<Str>) -> F64 { totals <- List.walk(rows, Dict.empty(), \
+        function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> Dict.update(d, row, \
+        function(found: Result<F64, :Missing>) -> Result<F64, :Missing> :Ok(TRUE)))\n \
+        Result.with_default(Dict.get(totals, \"a\"), -1) }";
+    let call = "{ x <- List.from_r(c(\"a\", \"b\")); FUNCTION(x) }";
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        let (reference, compiled) = unsafe {
+            let run_in = |name: &str, mode: Mode| {
+                jit::install_mode(mode);
+                run(&format!("{name} <- {definition}"));
+                let outcomes: Vec<String> = (0..3)
+                    .map(|_| run(&call.replace("FUNCTION", name)))
+                    .collect();
+                jit::install_mode(Mode::Off);
+                outcomes
+            };
+            (
+                run_in("update_reference", Mode::Off),
+                run_in("update_compiled", Mode::On),
+            )
+        };
+        assert_eq!(reference, compiled);
+        assert!(reference[0].contains("must return"), "{reference:?}");
+    });
+}
+
+#[test]
 fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
     // Each case runs on tier 0 and on the typed core, which must agree on every value, error and
     // warning. The cases sit at the edges of native `I64` arithmetic, of list arithmetic fused

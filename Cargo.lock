@@ -4921,6 +4921,7 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "ssa",
+ "stacker",
 ]
 
 [[package]]

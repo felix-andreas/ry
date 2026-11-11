@@ -234,6 +234,19 @@ symbol_table! {
     old_options = "old_options",
     lhs = "lhs",
     rhs = "rhs",
+    handler = "handler",
+    handlers = "handlers",
+    classes = "classes",
+    parentenv = "parentenv",
+    restart = "restart",
+    restarts = "restarts",
+    exit = "exit",
+    finally = "finally",
+    description = "description",
+    interactive = "interactive",
+    nh = "nh",
+    r = "r",
+    restart_args = "restartArgs",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.

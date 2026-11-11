@@ -735,6 +735,14 @@ checked and refilled:
 - **A new register window is cleared.** Each call's window is filled with `NULL` when it grows, so
   a register the frame has not written yet never holds what an earlier call left there, and a
   collection inside the window frees exactly what GNU R would.
+- **Base `.Internal` wrappers are inlined.** A call of one of GNU R's "safe base internals"
+  (`nchar`, `typeof`, `inherits`, `identical`, `match`, `rep_len`, `vector`, `which.max` and the
+  rest of the list in GNU R's `cmp.R`) compiles to a guard that the name still means base's
+  closure, the internal's arguments evaluated in the caller, and the internal called directly with
+  the original call, so an error reads `Error in nchar(x, ...)` as in GNU R. It applies only when
+  the closure's body is exactly `.Internal(f(formals...))` and every default is a constant. A
+  failed guard makes the ordinary call, so a replaced base binding is always reached, where GNU
+  R's compiled code keeps the original.
 - **Builtin checks are derived at registration.** Arity, names, replacement form and which
   arguments a builtin accepts as native values are computed once per builtin (`Checks` in
   `crates/interp/src/builtins.rs`), so a call does not re-derive them from the builtin's name.
