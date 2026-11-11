@@ -36,10 +36,11 @@ use {
 pub const MANIFEST: &str = "ry-base.txt";
 
 /// ry's base R tree when one is installed outside the executable: `RY_BASE_R` when set, then a
-/// `base-r` directory beside the executable, one or two levels above it (`target/base-r`, which
-/// serves every profile's binaries and test executables of a development checkout), or in
-/// `../lib/ry/` (a distribution's package). A release carries its tree inside `ry` instead,
-/// which the host extracts (`repl::bundled_base`).
+/// `base-r` directory beside the executable or in `../lib/ry/` (a distribution's package), then
+/// one in any directory between the executable and the cargo target directory that holds it
+/// (`target/base-r`, which serves every profile's binaries and test executables of a development
+/// checkout, however deep cargo's build directory puts them). A release carries its tree inside
+/// `ry` instead, which the host extracts (`repl::bundled_base`).
 pub fn installed() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("RY_BASE_R").filter(|path| !path.is_empty()) {
         // Canonical, because the path ends up in `R_HOME` and in ry's cached R home, which a
@@ -48,15 +49,33 @@ pub fn installed() -> Option<PathBuf> {
     }
     let executable = std::env::current_exe().ok()?;
     let directory = executable.parent()?;
-    [
+    let beside = [
         directory.join("base-r"),
-        directory.join("../base-r"),
-        directory.join("../../base-r"),
         directory.join("../lib/ry/base-r"),
-    ]
-    .into_iter()
-    .find(|candidate| is_complete(candidate))
-    .and_then(|candidate| fs::canonicalize(candidate).ok())
+    ];
+    beside
+        .into_iter()
+        .chain(development_candidates(directory))
+        .find(|candidate| is_complete(candidate))
+        .and_then(|candidate| fs::canonicalize(candidate).ok())
+}
+
+/// `base-r` in each directory from `directory` up to the cargo target directory that contains
+/// it, which cargo marks with `CACHEDIR.TAG`. Outside a target directory there are none, so an
+/// installed `ry` never picks up an unrelated `base-r` higher up the file system.
+fn development_candidates(directory: &Path) -> Vec<PathBuf> {
+    let Some(target) = directory
+        .ancestors()
+        .find(|ancestor| ancestor.join("CACHEDIR.TAG").is_file())
+    else {
+        return Vec::new();
+    };
+    directory
+        .ancestors()
+        .take_while(|ancestor| *ancestor != target)
+        .chain([target])
+        .map(|ancestor| ancestor.join("base-r"))
+        .collect()
 }
 
 /// Whether `root` holds base R's R code, which a session sources first: the test every R home,
