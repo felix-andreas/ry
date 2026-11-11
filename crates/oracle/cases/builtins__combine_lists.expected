@@ -43,6 +43,14 @@
 | List of 2
 |  $ : num [1:2] 99 2
 |  $ : num 3
+| List of 2
+|  $ : num [1:2] 0 2
+|  $ : chr "s"
+| List of 3
+|  $ : num [1:2] 1 -1
+|  $ : chr "s"
+|  $ : num [1:2] -3 4
+|  num [1:2] 3 4
 | List of 3
 |  $ start: num 0
 |  $      : int 1

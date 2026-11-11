@@ -27,6 +27,15 @@ b <- c(a, list(3))
 b[[1]][1] <- 99
 str(a)
 str(b)
+x <- list(c(1, 2), "s")
+v <- c(3, 4)
+y <- c(x, list(v))
+y[[1]][2] <- -1
+y[[3]][1] <- -3
+x[[1]][1] <- 0
+str(x)
+str(y)
+str(v)
 
 named_loop <- function() {
   x <- list(start = 0)
