@@ -304,7 +304,6 @@ fn runtime_speed_stays_ahead_of_gnu_r() {
     );
 }
 
-/// The best warm time a benchmark program prints, as `name checksum median best cold`.
 /// A start-up or code image loads only into the build that wrote it, and a build that cannot load
 /// one starts the slow way. `tools/bench/bench.py` must fail a timed process that reports such an
 /// image, and refuse up front a build it cannot give a base R tree of its own.
@@ -401,6 +400,7 @@ bench.own_base_trees([sys.argv[2]])
     );
 }
 
+/// The best warm time a benchmark program prints, as `name checksum median best cold`.
 fn warm_seconds(command: &mut Command) -> f64 {
     let output = command
         .stderr(Stdio::null())
