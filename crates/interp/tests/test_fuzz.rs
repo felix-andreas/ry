@@ -24,8 +24,8 @@ use {
         },
         lower,
         testing::{
-            check_bytecode_agreement, check_code_image_file, check_code_image_load,
-            check_code_image_round_trip, check_element_access_agreement,
+            check_argument_reference_agreement, check_bytecode_agreement, check_code_image_file,
+            check_code_image_load, check_code_image_round_trip, check_element_access_agreement,
             check_environment_agreement, check_fused_agreement, check_image_bodies_round_trip,
             check_lowering_input, check_quickening_agreement, check_render_drawing,
             check_resume_at_every_pc, check_unserialize_input, with_interpreter,
@@ -128,6 +128,13 @@ fn deparse_round_trips_lowered_seeds() {
 #[test]
 fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| check_bytecode_agreement(&mut SplitMix64(seed)));
+}
+
+#[test]
+fn fuzz_argument_references_agree_with_the_ast_evaluator() {
+    for_each_seed(300, |seed| {
+        check_argument_reference_agreement(&mut SplitMix64(seed))
+    });
 }
 
 #[test]
