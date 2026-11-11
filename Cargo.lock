@@ -2546,6 +2546,7 @@ dependencies = [
  "similar",
  "syntax",
  "thiserror 2.0.17",
+ "toml",
 ]
 
 [[package]]

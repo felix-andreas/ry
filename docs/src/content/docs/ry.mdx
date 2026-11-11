@@ -274,7 +274,8 @@ strict
 
 `ry check --annotate` writes the inferred types into the file. Under strict mode, `ry run` and
 `ry load` refuse code with a strict-mode error, and a typed function compiles to native code before
-its first call. [Strict mode](/reference/type-system#strict-mode) lists what it reports.
+its first call. Typed ry is strict: a typed function's call of another typed function computes every
+argument before the call, while an argument written in R code stays lazy. [Strict mode](/reference/type-system#strict-mode) lists what it reports.
 
 ## Loading packages
 
