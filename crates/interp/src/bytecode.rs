@@ -487,7 +487,8 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
         if !worth_compiling(body) {
             continue;
         }
-        // A body the compiler rejects keeps running on the AST evaluator, as in `run_body`.
+        // An error is the compiler's way of rejecting a body (a `break` outside a loop, say), so
+        // such a body keeps running on the AST evaluator, as in `run_body`.
         if let Ok(Some(code)) = compile(body, function) {
             heap.set_cdr(function, code);
             fresh.push(code);

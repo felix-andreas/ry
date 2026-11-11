@@ -351,8 +351,11 @@ pub(crate) unsafe fn write(
     path: &Path,
     before: &Before,
 ) -> Result<(), String> {
+    // Compiling comes before `check_empty`, so the check also covers any interpreter state a
+    // rejected body could leave behind. Compiling runs no R code and adds no record layouts, so
+    // it cannot change the allocation state the check compares against `before`.
     let mut fresh = bytecode::compile_namespaces_for_image()
-        .map_err(|_| "compiling the namespaces' closures failed".to_owned())?;
+        .map_err(|error| format!("compiling the namespaces' closures failed: {error:?}"))?;
     fresh.sort_unstable_by_key(|code| code.as_ptr() as usize);
     check_empty(before)?;
     let host_objects = (host.fixed_objects)()?;
