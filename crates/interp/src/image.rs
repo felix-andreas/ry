@@ -351,6 +351,8 @@ pub(crate) unsafe fn write(
     path: &Path,
     before: &Before,
 ) -> Result<(), String> {
+    let fresh = bytecode::compile_namespaces_for_image()
+        .map_err(|_| "compiling the namespaces' closures failed".to_owned())?;
     check_empty(before)?;
     let host_objects = (host.fixed_objects)()?;
     let primitives = primitives();
@@ -374,7 +376,10 @@ pub(crate) unsafe fn write(
             before.precondition,
             &roots,
             &prefixes,
-            &|object| (object.kind() == SexpType::Bytecode).then(|| bytecode::source_of(object)),
+            &|object| {
+                (object.kind() == SexpType::Bytecode && !fresh.contains(&object))
+                    .then(|| bytecode::source_of(object))
+            },
             &mut |pointer| builtin_libraries::routine_token(pointer),
         )
         .map_err(|error| error.to_string())?;
