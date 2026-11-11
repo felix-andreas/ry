@@ -1106,7 +1106,7 @@ pub mod feedback {
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
     /// An attribute-free compact integer sequence.
-    pub const INTEGER_SEQUENCE: u16 = 1 << 13;
+    pub const INTEGER_SEQUENCE: u16 = 1 << 15;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
