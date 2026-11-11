@@ -250,7 +250,8 @@ cases depend on that build:
 - `utils__rprofmem` and `environments__sys_call_shares_arguments` call `Rprofmem()`, so they need
   memory profiling. Without it GNU R stops with "memory profiling is not available on this system".
 - The graphics cases need `png()` to draw through cairo, which R uses only when pango is present.
-  Without it the bitmap type falls back to Xlib, which needs an X11 display.
+  Without it the bitmap type falls back to Xlib, which needs an X11 display, even though
+  `capabilities("cairo")` reads `TRUE`. `tools/doctor.py` and `tools/reference-r.sh` therefore check `getOption("bitmapType")`.
 - Collation and a few string cases follow ICU, which R uses when its headers are installed.
 - The `datatable__*`, `grid__*` and knitr cases print what those packages' current CRAN releases
   print, and each declares the packages it needs in an `# oracle: requires` line.
