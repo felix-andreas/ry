@@ -492,6 +492,14 @@ the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it 
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
 
+Compare two builds only when each loads its own images. The start-up image and every `.ryc` load
+only into the build that wrote them, so of two builds sharing `target/base-r` one starts the slow
+way. `RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was written by another build of the
+runtime` (or why else it skipped the image) on standard error. `tools/bench/bench.py` probes each
+build this way, gives a build that cannot use its tree's images (or predates the flag) its own base
+R tree, built once into `target/bench-base-r/<hash of its libR>`, and fails any timed process that
+reports an unused image.
+
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
 the ratio ry / GNU R. The cases live in `tools/bench/internal/stdlib`: `ry.R` holds ry's side and `gnu.R`

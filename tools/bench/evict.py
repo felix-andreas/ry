@@ -22,12 +22,12 @@ import pathlib
 import sys
 
 
-def evict(executables):
-    """Evicts every file the ry builds at `executables` read at run time, and returns how many
-    files it evicted."""
+def evict(executables, trees=()):
+    """Evicts every file the ry builds at `executables` read at run time, and the base R `trees`
+    they are given through `RY_BASE_R`, and returns how many files it evicted."""
     seen = set()
     count = 0
-    for root in runtime_roots(executables):
+    for root in runtime_roots(executables) + [pathlib.Path(tree) for tree in trees]:
         for path in files_under(root):
             try:
                 status = os.stat(path)

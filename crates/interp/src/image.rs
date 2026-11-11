@@ -100,21 +100,44 @@ pub(crate) fn applies(interactive: bool, profiles: bool) -> bool {
             .all(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
 }
 
+/// Reports on standard error, when `RY_IMAGE_LOG` is set, why a start-up or code image built
+/// for this R home went unused, so a benchmark can refuse a run that measured a slow start
+/// (`tools/bench/bench.py`). Images are tied to the build that wrote them, so two builds sharing
+/// one R home differ by up to a sixth of their start-up cost without a visible sign otherwise.
+/// A deliberate opt-out ([`applies`], `RY_CODE_IMAGE=0`) and a package installed without a code
+/// image are not reported: neither is a build mismatch.
+pub(crate) fn report_unused(reason: &str) {
+    static LOGGING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *LOGGING
+        .get_or_init(|| std::env::var_os("RY_IMAGE_LOG").is_some_and(|value| !value.is_empty()))
+    {
+        crate::write_console(format!("ry: image unused: {reason}\n").as_bytes(), true);
+    }
+}
+
 /// Why an image did not load.
 pub(crate) enum LoadError {
-    /// Nothing changed yet, so the start can go the slow way.
+    /// The home has no image for this build: there is none, or another build of the runtime
+    /// wrote it. The start goes the slow way without a word, unless `RY_IMAGE_LOG` asks.
+    Absent(String),
+    /// The image is unreadable or damaged; nothing changed yet, so the start can go the slow way.
     Untouched(String),
     /// The image failed partway, after the heap took some of it, so the session cannot start.
     Partial(String),
 }
 
-/// Loads the image of the R home `home`. `Ok(false)` means there is none, or another build of
-/// the runtime wrote it, and the caller starts the slow way.
-pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadError> {
+/// Loads the image of the R home `home`. On any error but [`LoadError::Partial`] the caller
+/// starts the slow way.
+pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<(), LoadError> {
     let path = &path(home);
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoadError::Absent(format!(
+                "the start-up image {} does not exist",
+                path.display()
+            )));
+        }
         Err(failure) => {
             return Err(LoadError::Untouched(format!(
                 "cannot read {}: {failure}",
@@ -146,7 +169,10 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     // A development build changes its identity with every edit to the runtime, until the base
     // tree is rebuilt; that start is simply slow.
     if input.blob().map_err(untouched)? != host.identity.as_bytes() {
-        return Ok(false);
+        return Err(LoadError::Absent(format!(
+            "the start-up image {} was written by another build of the runtime",
+            path.display()
+        )));
     }
     let expected = input.u64().map_err(untouched)?;
     let damaged = || LoadError::Untouched(format!("{} is damaged", path.display()));
@@ -210,7 +236,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
         })?;
     restore_state(state, &roots, &relocation)
         .map_err(|error| LoadError::Partial(error.to_string()))?;
-    Ok(true)
+    Ok(())
 }
 
 /// Where a run of pages starts in the image file: the next 64 KiB boundary, so that the pages

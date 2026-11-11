@@ -8,6 +8,9 @@
 //! cargo build --release -p ry-lang -p libr
 //! cargo test -p ry-lang --release --test test_perf -- --ignored --nocapture
 //! ```
+//!
+//! One test runs by default: the benchmark runner's refusal to time a start that could not use
+//! its R home's images, which skips without `libR` beside the binary or a built base R tree.
 
 #![cfg(unix)]
 
@@ -302,6 +305,102 @@ fn runtime_speed_stays_ahead_of_gnu_r() {
 }
 
 /// The best warm time a benchmark program prints, as `name checksum median best cold`.
+/// A start-up or code image loads only into the build that wrote it, and a build that cannot load
+/// one starts the slow way. `tools/bench/bench.py` must fail a timed process that reports such an
+/// image, and refuse up front a build it cannot give a base R tree of its own.
+#[test]
+fn bench_refuses_a_start_from_another_builds_images() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let binary = Path::new(env!("CARGO_BIN_EXE_ry"));
+    let runtime = binary.with_file_name("libR.so");
+    let tree = workspace.join("target/base-r");
+    let start_image = Path::new("library/base/R/ry-start.image");
+    let code_image = Path::new("library/stats/R/stats.ryc");
+    if !runtime.exists() || !tree.join(start_image).is_file() || !tree.join(code_image).is_file() {
+        eprintln!("skipped: needs libR beside the binary and target/base-r (`just base-r`)");
+        return;
+    }
+    // Hard links keep the copy of the tree cheap, so it lives in the target directory, on the
+    // tree's file system; each image the test alters is written as a new file.
+    let directory = tempfile::tempdir_in(workspace.join("target")).expect("temporary directory");
+    let copy = directory.path().join("base-r");
+    let status = Command::new("cp")
+        .arg("-al")
+        .arg(&tree)
+        .arg(&copy)
+        .status()
+        .expect("cp runs");
+    assert!(status.success(), "cp -al {} failed", tree.display());
+    // Assembling an R home rewrites the tree's start-up image and base code images when another
+    // build wrote them, so the home is assembled first, and the images are altered after it, as
+    // when a second build's home rewrites a tree the first build's home already links.
+    let cache = directory.path().join("cache");
+    fs::write(
+        directory.path().join("probe.R"),
+        "invisible(stats::median(c(3, 1, 2)))\n",
+    )
+    .expect("write the probe");
+    let assembled = Command::new(binary)
+        .args(["run", "--runtime", "ry", "probe.R"])
+        .current_dir(directory.path())
+        .env("RY_BASE_R", &copy)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("ry runs");
+    assert!(assembled.status.success(), "ry run failed: {assembled:?}");
+    // Each image opens with an eight-byte magic number; the start-up image then gives its header's
+    // length, and both then give the identity of the build that wrote them as a length and bytes.
+    for (image, identity_byte) in [(start_image, 24), (code_image, 16)] {
+        let mut bytes = fs::read(copy.join(image)).expect("read the image");
+        bytes[identity_byte] ^= 0x55;
+        fs::remove_file(copy.join(image)).expect("unlink the image's hard link");
+        fs::write(copy.join(image), bytes).expect("write the altered image");
+    }
+    // A build without `ry-rcmd` beside it, which bench.py cannot build a base R tree for.
+    let lone = directory.path().join("lone");
+    fs::create_dir(&lone).expect("create a directory");
+    fs::hard_link(binary, lone.join("ry")).expect("link the binary");
+    let script = r#"
+import pathlib, sys
+sys.path.insert(0, "tools/bench")
+import bench
+work = pathlib.Path(sys.argv[3])
+bench.BENCH_TREES = work / "trees"
+env = dict(bench.os.environ, RY_IMAGE_LOG="1")
+status, out, err, _, _ = bench.spawn([sys.argv[1], "run", "--runtime", "ry", "probe.R"], env, cwd=work)
+print(f"timed run: status {status}: {err}")
+bench.own_base_trees([sys.argv[2]])
+"#;
+    let output = Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(script)
+        .arg(binary)
+        .arg(lone.join("ry"))
+        .arg(directory.path())
+        .current_dir(&workspace)
+        .env("RY_BASE_R", &copy)
+        .env("RY_LIBR", &runtime)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("python3 runs bench.py");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "timed run: status None: started without an image it should load (ry: image unused: "
+        ) && stdout.contains("was written by another build of the runtime"),
+        "a timed process that could not use an image must fail"
+    );
+    assert!(
+        !output.status.success()
+            && stderr.contains("cannot use the images of the base R tree it finds")
+            && stderr.contains("cannot build it a tree of its own without ry-rcmd and libR.so"),
+        "a build bench.py cannot give a base R tree must be refused"
+    );
+}
+
 fn warm_seconds(command: &mut Command) -> f64 {
     let output = command
         .stderr(Stdio::null())

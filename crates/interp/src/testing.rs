@@ -717,7 +717,7 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
             .unwrap_or_else(|_| panic!("a small image must write"));
         let entries = code_image::parse(&bytes, build, stamp)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
-            .unwrap_or_else(|| panic!("a written image must belong to its build"))
+            .unwrap_or_else(|unused| panic!("a written image must apply to its build: {unused:?}"))
             .entries;
         assert_eq!(entries.len(), records.len());
         let at = |offset: u64, length: u32| {
@@ -738,7 +738,10 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 Some(&stream[..])
             );
         }
-        assert_eq!(code_image::parse(&bytes, "another-build", stamp), Ok(None));
+        assert_eq!(
+            code_image::parse(&bytes, "another-build", stamp).map(|parsed| parsed.err()),
+            Ok(Some(code_image::Unused::Build))
+        );
         for other in [
             code_image::DatabaseStamp {
                 length: stamp.length + 1,
@@ -749,7 +752,10 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 ..stamp
             },
         ] {
-            assert_eq!(code_image::parse(&bytes, build, other), Ok(None));
+            assert_eq!(
+                code_image::parse(&bytes, build, other).map(|parsed| parsed.err()),
+                Ok(Some(code_image::Unused::Database))
+            );
         }
         let mut mutated = bytes.clone();
         for &(position, value) in &mutations {
@@ -759,7 +765,7 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 _ => mutated.truncate(at),
             }
         }
-        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, stamp) {
+        if let Ok(Ok(parsed)) = code_image::parse(&mutated, build, stamp) {
             assert!(
                 parsed.native_offset + parsed.native_length <= mutated.len() as u64,
                 "a parsed image must not name a native section outside the file"

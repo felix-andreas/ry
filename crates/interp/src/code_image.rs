@@ -357,10 +357,15 @@ unsafe fn give_up(database: u32, message: &str) {
     let state = &mut interp().code_image;
     state.databases.images[database as usize] = ImageSlot::Absent;
     drop_pending(state, database);
+    let image = path(&state.databases.paths[database as usize]);
     report_damage(&format!(
         "cannot use the code image {} ({message}), so its functions compile as they run; \
          reinstall the package to repair it",
-        path(&state.databases.paths[database as usize]).display()
+        image.display()
+    ));
+    crate::image::report_unused(&format!(
+        "the code image {} is damaged: {message}",
+        image.display()
     ));
 }
 
@@ -742,7 +747,7 @@ unsafe fn decode_pending(pending: &Pending, body: Sexp) -> Result<Sexp, String> 
 }
 
 /// Opens the image of `database`. `None` when there is none, `RY_CODE_IMAGE=0` turns images off,
-/// or another build wrote it; an error when it cannot be read or is damaged.
+/// or it does not apply ([`Unused`]); an error when it cannot be read or is damaged.
 fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     if std::env::var_os("RY_CODE_IMAGE").is_some_and(|value| value == "0") {
         return Ok(None);
@@ -755,7 +760,22 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     let Some(stamp) = DatabaseStamp::of(database)? else {
         return Ok(None);
     };
-    Ok(parse(file.bytes(), build, stamp)?.map(|parsed| {
+    let parsed = match parse(file.bytes(), build, stamp)? {
+        Ok(parsed) => parsed,
+        Err(unused) => {
+            crate::image::report_unused(&format!(
+                "the code image {} {}",
+                path(database).display(),
+                match unused {
+                    Unused::Format => "has another file format",
+                    Unused::Build => "was written by another build of the runtime",
+                    Unused::Database => "was written for another version of its database",
+                }
+            ));
+            return Ok(None);
+        }
+    };
+    Ok(Some({
         let native = if parsed.native_length == 0 {
             NativeSection::Absent
         } else {
@@ -777,23 +797,36 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     }))
 }
 
-/// The record table of an image, or `None` when it was written by another build or for another
-/// version of the database.
-pub fn parse(bytes: &[u8], build: &str, stamp: DatabaseStamp) -> Result<Option<Parsed>, String> {
+/// Why an image that reads fine does not apply to this process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unused {
+    /// Another layout version, which is another build's output.
+    Format,
+    /// Another build of the runtime wrote it.
+    Build,
+    /// It was written beside another version of its database.
+    Database,
+}
+
+/// The record table of an image, or why it does not apply.
+pub fn parse(
+    bytes: &[u8],
+    build: &str,
+    stamp: DatabaseStamp,
+) -> Result<Result<Parsed, Unused>, String> {
     let mut input = Reader { bytes };
     let failed = |failure: heap::ImageError| failure.to_string();
     if input.take(MAGIC.len()).map_err(failed)? != MAGIC {
-        // Another layout version is another build's output.
-        return Ok(None);
+        return Ok(Err(Unused::Format));
     }
     if input.blob().map_err(failed)? != build.as_bytes() {
-        return Ok(None);
+        return Ok(Err(Unused::Build));
     }
     let _flags = input.u32().map_err(failed)?;
     let length = input.u64().map_err(failed)?;
     let modified = input.u64().map_err(failed)?;
     if (DatabaseStamp { length, modified }) != stamp {
-        return Ok(None);
+        return Ok(Err(Unused::Database));
     }
     let count = input.u32().map_err(failed)? as usize;
     if count > bytes.len() / ENTRY_SIZE {
@@ -838,7 +871,7 @@ pub fn parse(bytes: &[u8], build: &str, stamp: DatabaseStamp) -> Result<Option<P
     {
         return Err("the native section lies outside the file".to_owned());
     }
-    Ok(Some(Parsed {
+    Ok(Ok(Parsed {
         entries,
         native_offset,
         native_length,

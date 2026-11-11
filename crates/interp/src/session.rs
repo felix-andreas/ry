@@ -56,13 +56,14 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         )
     {
         match crate::image::load(host, &home) {
-            Ok(true) => return start_from_image(&home),
-            Ok(false) => {}
+            Ok(()) => return start_from_image(&home),
+            Err(crate::image::LoadError::Absent(reason)) => crate::image::report_unused(&reason),
             Err(crate::image::LoadError::Untouched(message)) => {
                 write_console(
                     format!("ry: starting without the start-up image: {message}\n").as_bytes(),
                     true,
                 );
+                crate::image::report_unused(&message);
             }
             Err(crate::image::LoadError::Partial(message)) => {
                 return Err(error(format!(
