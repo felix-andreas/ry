@@ -75,7 +75,14 @@ left, in order of expected gain:
 - The JIT's first compile costs about 4 MB of peak RSS (code generator start-up). On
   `testthat_full` one compile of `isTRUE`'s body (3 KB of code) makes JIT on 4 MB above JIT off;
   a compile that saves microseconds should not cost megabytes (`decisions.md`, "withr's
-  environment and option helpers run natively", peak RSS).
+  environment and option helpers run natively", peak RSS). The cost is clean, file-backed
+  libR text, not heap: on the `conditions` application one tier-1 compile of `fetch()` pages in
+  about 3.3 MB, which resident-page symbolization puts entirely in `cranelift_*`, `regalloc2`
+  and `jit::codegen`. Anonymous memory and the GC peak do not rise, and with `RY_JIT=off` the
+  two builds' peaks are equal (47.85 against 47.80 MB). So a speed-up elsewhere that pushes a
+  hot body over the compile threshold shows up as a few MB of peak RSS. Levers: a lighter first
+  tier that does not start Cranelift, or code layout that keeps the code generator's pages
+  together (function ordering).
 - Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
