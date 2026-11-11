@@ -90,7 +90,7 @@ reason = "aborts: after a deopt exit, the collector reaches a freed object throu
 case = "print__deparse_undefined_s4_class"
 engine = "ry-jit-gctorture"
 area = "jit"
-reason = "SIGSEGV on main 41f9405, missing from the baseline"
+reason = "SIGSEGV on main 41f9405, missing from the baseline; in GNU R's home only, so ry's own home reports it as listed but passing"
 provisional = true
 
 [[failure]]
@@ -136,4 +136,11 @@ case = "kernels__elementwise"
 engine = "ry-gctorture-young"
 area = "interp"
 reason = "aborts: reads an object the collector freed (heap/src/object.rs freed_object)"
+provisional = true
+
+[[failure]]
+case = "s4__native_definitions"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV in ry's own home on main e3bb8627 (4 of 4 runs); passes in GNU R's home"
 provisional = true
