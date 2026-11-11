@@ -733,16 +733,14 @@ memoization), resident bytes per line, and the p50 and p95 latency from a keystr
 diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
 corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
 
-Run optimized tests with `cargo test-release`, an alias for `cargo test --profile bench`, which is
-what `just perf` and `cargo bench` use. The `bench` profile keeps `opt-level = 3` but uses thin
-local LTO and 16 codegen units. Plain `cargo test --release` builds with the release profile's fat
-LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS and takes 30 minutes on
-four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and 11 minutes under
-`cargo test-release`. Shipped binaries and every benchmark number in
-the docs come from `cargo build --release`, so a budget measured under `cargo test-release` can be
-slightly slower than a release binary. Debug builds keep line tables only (`[profile.dev] debug =
-"line-tables-only"`), which keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to
-inspect locals in a debugger.
+Run optimized tests with `cargo test-release`, an alias for `cargo test --profile iterate`, which is
+what `just perf` uses. The `iterate` profile keeps `opt-level = 3` but drops cross-crate LTO and
+uses 16 codegen units ([Build profiles](/development#build-profiles)). Plain `cargo test --release` builds
+with the release profile's fat LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS
+and takes 30 minutes on four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and
+11 minutes without it. A budget measured under `cargo test-release` can differ from a release
+binary's, so a number you quote comes from a release build. Debug builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which
+keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
 
 `crates/ry/tests/test_perf.rs` holds the memory budget of a whole cold `ry check --no-cache` with
 type errors on. It generates the three 300,000-line benchmark code bases with

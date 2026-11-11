@@ -151,21 +151,30 @@ def locked():
             entries.append((name, version, digest))
     return entries
 
+def source_tarball(name, version, digest):
+    """The package's locked source tarball in the corpus repository, downloaded when missing."""
+    target = corpus / "repo" / "src" / "contrib" / f"{name}_{version}.tar.gz"
+    if not (target.exists() and sha256(target.read_bytes()) == digest):
+        data = fetch(source_url(name, version))
+        if sha256(data) != digest:
+            raise SystemExit(f"{name} {version}: the tarball does not match lock.tsv")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return target
+
 def install_corpus(args):
-    contrib = corpus / "repo" / "src" / "contrib"
-    contrib.mkdir(parents=True, exist_ok=True)
-    def download(entry):
-        name, version, digest = entry
-        target = contrib / f"{name}_{version}.tar.gz"
-        if not (target.exists() and sha256(target.read_bytes()) == digest):
-            data = fetch(source_url(name, version))
-            if sha256(data) != digest:
-                raise SystemExit(f"{name} {version}: the tarball does not match lock.tsv")
-            target.write_bytes(data)
-        return name
-    with concurrent.futures.ThreadPoolExecutor(8) as pool:
-        names = list(pool.map(download, locked()))
+    # The binary cache keys its copy on lock.tsv and the reference R, so a restored library is
+    # exactly the locked set, built against the R that runs it (tools/cache.sh).
     library = corpus / "library"
+    restored = not library.is_dir() and subprocess.run(["bash", str(root / "tools/cache.sh"), "restore", "corpus"]).returncode == 0
+    contrib = corpus / "repo" / "src" / "contrib"
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        names = [name for name, _, _ in locked()]
+        list(pool.map(lambda entry: source_tarball(*entry), locked()))
+    # The cache holds the installed library only; the runner unpacks each package's tests from
+    # the source tarballs downloaded above.
+    if restored:
+        return
     library.mkdir(parents=True, exist_ok=True)
     # The library holds only the locked versions, so a package left over from an older lock or
     # a newer one in a system library cannot shadow them.
@@ -194,8 +203,9 @@ if (length(failed)) message("not installed: ", paste(failed, collapse = ", "))
 def unpack_tests(name, version, work):
     """Extracts the package's tests from its locked tarball and says how they run, or `None` when
     it ships none."""
-    tarball = corpus / "repo" / "src" / "contrib" / f"{name}_{version}.tar.gz"
-    with tarfile.open(tarball) as archive:
+    # A library restored from the binary cache comes without the source tarballs.
+    digest = next(digest for locked_name, locked_version, digest in locked() if (locked_name, locked_version) == (name, version))
+    with tarfile.open(source_tarball(name, version, digest)) as archive:
         members = [member for member in archive.getmembers()
                    if member.name.startswith((f"{name}/tests/", f"{name}/inst/tinytest/"))
                    and ".." not in member.name and (member.isfile() or member.isdir())]
