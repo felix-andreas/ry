@@ -2751,7 +2751,8 @@ unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
 
 /// `vector`, which has no attributes, one element longer, the new element unset: `vector`
 /// itself when `reuse` says nothing else sees it and it has room, and otherwise a copy with
-/// room to grow, which the caller binds.
+/// room to grow, which the caller binds. Nothing after this may fail, because an unshared
+/// list's elements move into the copy (see [`grow`]).
 pub(crate) unsafe fn append_room(vector: Sexp, reuse: bool) -> R<Sexp> {
     let count = length(vector);
     if reuse && grows_in_place(vector, count + 1) {
@@ -2759,7 +2760,15 @@ pub(crate) unsafe fn append_room(vector: Sexp, reuse: bool) -> R<Sexp> {
         return Ok(vector);
     }
     let result = alloc_with_room(vector.kind(), count + 1)?;
-    copy_prefix(values::materialize(vector)?, result, count)?;
+    if reuse
+        && matches!(vector.kind(), SexpType::List | SexpType::Expression)
+        && !vector.is_altrep()
+        && !values::maybe_shared(vector)
+    {
+        crate::heap().move_elements(result, vector);
+    } else {
+        copy_prefix(values::materialize(vector)?, result, count)?;
+    }
     Ok(result)
 }
 
