@@ -15,7 +15,7 @@
 //! starting the engine and loading packages.
 
 use {
-    crate::{gnu_r_home, gnu_r_program, installed_packages, ry_program},
+    crate::{gnu_r_home, gnu_r_program, installed_packages, library_environment, ry_program},
     std::{
         collections::BTreeMap,
         path::{Path, PathBuf},
@@ -519,7 +519,8 @@ fn render_all(
         .arg(selection)
         .args(&files)
         .env("LC_ALL", "C.UTF-8")
-        .env("TZ", "UTC");
+        .env("TZ", "UTC")
+        .envs(library_environment().iter().cloned());
     let finished = command
         .output()
         .map_err(|error| GalleryError::Setup(format!("could not start the renderer: {error}")))?;

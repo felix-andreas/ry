@@ -69,6 +69,18 @@ esac
 hash=$(inputs_hash "$tree")
 target=$(directory "$tree")
 
+# The tarballs are zstd. Without it on PATH, take it from nixpkgs, which restoring needs anyway,
+# rather than from apt: this script also runs on its own (tools/reference-r.sh calls it), without
+# root, and while an Ubuntu mirror is down.
+if [ "$command" != hash ] && ! command -v zstd >/dev/null && command -v nix >/dev/null; then
+	log "zstd: not on PATH, so taking it from nixpkgs"
+	zstd_bin=$(nix build --option warn-dirty false --no-link --print-out-paths --inputs-from "$root" 'nixpkgs#zstd^bin') || {
+		log "zstd: nix could not provide it; run sudo apt-get install zstd"
+		exit 1
+	}
+	PATH=$zstd_bin/bin:$PATH
+fi
+
 case $command in
 hash) echo "$hash" ;;
 restore)
