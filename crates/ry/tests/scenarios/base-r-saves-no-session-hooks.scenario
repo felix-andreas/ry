@@ -3,7 +3,6 @@
 # one a later runtime removed would keep running from a tree built before.
 
 requires ry-runtime
-hide gnu-r
 
 file hooks.R
 | saved <- new.env()
