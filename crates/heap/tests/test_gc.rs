@@ -2039,7 +2039,7 @@ fn interned_strings_are_unique_per_bytes_and_encoding() {
         (Encoding::Latin1, gp::LATIN1),
         (Encoding::Bytes, gp::BYTES),
     ];
-    for_each_seed(fuzz_iterations(20), |seed| {
+    for_each_seed(20, |seed| {
         let mut random = SplitMix64(seed);
         let mut heap = Heap::new();
         let mut seen: Vec<(Vec<u8>, u16, Sexp)> = Vec::new();
