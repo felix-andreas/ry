@@ -2699,6 +2699,15 @@ impl Heap {
         u64::from(symbol.symbol_payload().epoch.get()) + self.enclosure_epoch
     }
 
+    /// Raises `symbol`'s own share of its lookup stamp to `epoch`, so a test can reach the wrap
+    /// of that share without four billion definitions. Lowering it would let a stamp repeat.
+    #[doc(hidden)]
+    pub unsafe fn raise_symbol_epoch(&mut self, symbol: Sexp, epoch: u32) {
+        let share = &symbol.symbol_payload().epoch;
+        assert!(epoch >= share.get(), "a symbol's stamp share only grows");
+        share.set(epoch);
+    }
+
     /// The first binding of `symbol` on the search path, from the global environment to the
     /// base environment. GNU R keeps the same cache, because every free variable of top-level
     /// code and of functions defined there resolves along the search path, which in a session
