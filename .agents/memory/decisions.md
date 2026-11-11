@@ -1944,6 +1944,25 @@ grows from 107 MB to 136 MB, because the original text stays in it.
   `target/x86_64-unknown-linux-gnu/release`; `just bench` and the other bench recipes build
   `target/release` with plain `cargo build --release`, so a change is measured without a profile
   that was collected before it.
+- **BOLT lays out libR only, not the `ry` binary.** `ry` runs too little of any workload for its
+  layout to matter. These numbers were measured with callgrind on the nightly `just package`
+  build (PGO on every crate, BOLT on libR), started with `ry run --runtime ry` and the JIT on:
+
+  | | empty script | `library(testthat)` |
+  | --- | --- | --- |
+  | instructions in `ry` / in libR | 1.4M (2.1%) / 48.9M (72.6%) | 1.3M (0.5%) / 227.5M (81.0%) |
+  | code pages executed in `ry` / in libR | 192 / 516 | 190 / 595 |
+  | minor page faults, whole process (median of 15) | 4,005 | 6,714 |
+  | wall time (median of 15) | 28.9 ms | 78.3 ms |
+
+  On the full testthat workload, `ry` executes 0.05% of the instructions (plain release build).
+  Each code page executed in `ry` costs at most one fault, so `ry`'s text causes under 5% of the
+  start-up faults, and fewer than that, because the kernel maps the neighbouring pages of the
+  same file on each fault. So BOLT on `ry` would win less than the 10% that would justify a
+  second instrumented training run. PGO alone already cuts the pages `ry` executes at start-up
+  from 328 in the plain build to 192. The nightly workflow runs this pipeline: its log shows BOLT
+  instrumenting libR and then reordering the blocks of 6,313 functions. The release workflow
+  installs the same `bolt-20`, but no release has been cut since the pipeline landed.
 
 **S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
 calling frames to their top environment uncached, because function frames gain and lose bindings
