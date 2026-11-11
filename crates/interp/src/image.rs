@@ -15,7 +15,7 @@
 
 use {
     crate::{
-        builtin_libraries, bytecode, data_table, dispatch, format, heap, interp, unwind::R,
+        builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R,
         values::nil,
     },
     heap::{
@@ -127,7 +127,8 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     let cannot_read = |failure: std::io::Error| {
         LoadError::Untouched(format!("cannot read {}: {failure}", path.display()))
     };
-    let not_an_image = || LoadError::Untouched(format!("{} is not a start-up image", path.display()));
+    let not_an_image =
+        || LoadError::Untouched(format!("{} is not a start-up image", path.display()));
     let mut prefix = [0u8; 16];
     read_at(&file, &mut prefix, 0).map_err(cannot_read)?;
     if &prefix[..MAGIC.len()] != MAGIC {
@@ -135,8 +136,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     }
     let mut length = [0u8; 8];
     length.copy_from_slice(&prefix[MAGIC.len()..]);
-    let header_length =
-        usize::try_from(u64::from_le_bytes(length)).map_err(|_| not_an_image())?;
+    let header_length = usize::try_from(u64::from_le_bytes(length)).map_err(|_| not_an_image())?;
     let file_length = file.metadata().map_err(cannot_read)?.len();
     if header_length as u64 > file_length {
         return Err(not_an_image());
@@ -261,9 +261,8 @@ fn fill_from(file: &std::fs::File, memory: &mut [u8], offset: u64) -> Result<(),
     }
     #[cfg(not(unix))]
     {
-        read_at(file, memory, offset).map_err(|failure| {
-            ImageError::Invalid(format!("its pages cannot be read: {failure}"))
-        })
+        read_at(file, memory, offset)
+            .map_err(|failure| ImageError::Invalid(format!("its pages cannot be read: {failure}")))
     }
 }
 
@@ -405,7 +404,8 @@ pub(crate) unsafe fn write(
     // A process that has the old image mapped keeps its pages: renaming replaces the name,
     // where writing in place would truncate the mapped file under it.
     let partial = path.with_extension("image.partial");
-    let cannot_write = |failure: std::io::Error| format!("cannot write {}: {failure}", path.display());
+    let cannot_write =
+        |failure: std::io::Error| format!("cannot write {}: {failure}", path.display());
     std::fs::write(&partial, &out.bytes).map_err(cannot_write)?;
     std::fs::rename(&partial, path).map_err(cannot_write)
 }
@@ -531,14 +531,6 @@ unsafe fn save_state(roots: &mut Vec<Sexp>) -> Vec<u8> {
         out.blob(path.as_bytes());
     }
 
-    match data_table::namespace() {
-        Some(namespace) => {
-            out.u8(1);
-            out.u32(root(namespace));
-        }
-        None => out.u8(0),
-    }
-
     out.bytes
 }
 
@@ -620,10 +612,6 @@ unsafe fn restore_state(
         libraries.push((package, text(&path)?));
     }
     interp().builtin_libraries = libraries;
-
-    if input.u8()? != 0 {
-        data_table::set_namespace(root(&mut input)?);
-    }
 
     if !input.bytes.is_empty() {
         return Err(invalid("the session state has bytes past its end"));

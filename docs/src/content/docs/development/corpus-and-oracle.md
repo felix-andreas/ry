@@ -62,7 +62,7 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
+device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that data.table's own code prints and behaves under ry exactly as under GNU R). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
@@ -235,7 +235,9 @@ cases depend on that build:
   print, and each declares the packages it needs in an `# oracle: requires` line.
 
 Other builds differ in the last digits too: OpenBLAS changes `lm` and `arima` results, and the sign
-of `NA^NaN` depends on the compiler. glibc's `mktime` starts its search from the offset its last call
+of `NA^NaN` depends on the compiler. So does `NaN + NA_integer_` (and `*`) in a closure's first,
+uncompiled call, where GNU R's AST interpreter gives NA or NaN depending on how the C compiler
+ordered the operands, so a case about NaN and NA makes those calls with `NA_real_`. glibc's `mktime` starts its search from the offset its last call
 found, so a repeated wall-clock time with unknown daylight saving depends on what ran before; the
 cases that print one convert a summer time first.
 
@@ -269,7 +271,7 @@ just bench-gen --out .bench --lines 300000 --files 500
 just bench-test .bench/finbench
 ```
 
-`tools/bench/generate.py` writes `finbench`, `dsbench` and `biobench` under `--out`. Each is
+`tools/bench/tooling/generate.py` writes `finbench`, `dsbench` and `biobench` under `--out`. Each is
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
@@ -281,7 +283,7 @@ the generator erases the package with `ry debug erase` (so `target/release/ry` m
 an untyped run with the same seed generate the same program. Where a record or a tag union models the data better than S4, R6 or a named list, a template keeps both versions in `#@ typed` and `#@ untyped` blocks, so the typed program uses ry's own data types while the untyped one stays plain R (the finance `ledger`, data-science `readings` and biostatistics `followup` templates model their data as tags, tuples and records this way); the templates' `README.md` has the details. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
 
-The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
+The code comes from the R templates in `tools/bench/tooling/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is
 reached. Services that cannot run in a test (Azure, Bloomberg, ODBC) take an injectable client,
 so the tests never touch a network. `just bench-test` runs a package's tests against the corpus library, so run `just corpus` first.

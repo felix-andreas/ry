@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Faster namespace loads
+
+Loading a package's namespace does less work in R. `ls()` sorts names by a byte key per name, `methods::cacheMetaData()` handles packages whose old classes ask for the `Ops` group natively, the registered native routines are bound in one pass, and `readRDS()` of a path reads the file whole instead of through a connection. `loadNamespace("rlang")` in a fresh process takes 31 ms instead of 45 ms, and 30 load and unload cycles in one process take 0.54 s instead of 0.66 s.
+
 ### Package code is read without decompressing it
 
 A package's code image holds each lazy-loaded record uncompressed, and ry maps the image and reads records from it in place instead of inflating them from the `.rdb`. The base packages get such images when the start image is built. On the testthat workload no `.rdb` is opened, fetches take 33% fewer instructions, the whole run takes 1.3% fewer, and four workers together hold 10 MB less private memory.
@@ -48,7 +52,7 @@ native code follows; any other release runs its own R code unchanged.
 `<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
 `%*%` on small matrices and complex vector arithmetic run on compiled or direct paths. With the
 JIT on, the geometric mean speed-up over GNU R rises from 1.58x to 1.90x on the awfy programs,
-from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/real/run.py
+from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/bench.py
 --public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
 such as `(Inf+1i) / 0` match GNU R.
 
@@ -111,7 +115,7 @@ counts per call). None was re-measured for these notes.
 On the `bench-real` workloads (10 real-world programs, geometric mean of the speed relative to GNU R,
 `--repeat 3`), 0.4.3-beta runs 1.22 times as fast as GNU R with the JIT on and 1.28 times with it
 off. 0.4.2-beta measured 0.90 times with the JIT on. The new testthat workload
-(`tools/bench/real/testthat.R`) runs 1.12 times as fast with the JIT on and 1.23 times with it off.
+(`tools/bench/applications/testthat.R`) runs 1.12 times as fast with the JIT on and 1.23 times with it off.
 
 ### Also in this release
 

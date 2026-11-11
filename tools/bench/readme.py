@@ -1,51 +1,41 @@
 #!/usr/bin/env python3
-"""Writes the benchmark blocks of README.md and editors/code/README.md from the committed results
-files, `tools/bench/real/results.json` and `tools/bench/why/results.json`. GitHub and the VS Code
-Marketplace show a README as it is, so these blocks are generated text, and `--check` fails when a
-README differs from what this script would write.
+"""Writes the benchmark summary block of README.md and editors/code/README.md from the committed
+suites, each a directory `tools/bench/<suite>/` with a `suite.toml` and a `results.json`. GitHub and
+the VS Code Marketplace show a README as it is, so the block is generated text, and `--check` fails
+when a README differs from what this script would write.
 
-The rules match `docs/src/lib/benchmarks.ts`, which renders the same files on the site: a program
-that GNU R finishes in under 0.1 s is too short and left out of every geometric mean, only rows of
-kind `workload` count as application workloads, and a ratio has two decimals below 10x and none from
-10x up.
+The block is the summary table of the benchmarks page, which `docs/src/lib/benchmarks.ts` renders
+from the same files: one row per measured suite in a fixed order, with the geometric means the
+runner stored, and a ratio with two decimals below 10x and none from 10x up. A suite without a
+results file has no row.
 
 Usage: tools/bench/readme.py [--check]
 """
-import json, math, pathlib, re, statistics, sys
+import json, pathlib, re, sys, tomllib
+from decimal import ROUND_HALF_UP, Decimal
 
 root = pathlib.Path(__file__).resolve().parent.parent.parent
-real_results = root / "tools/bench/real/results.json"
-kernel_results = root / "tools/bench/why/results.json"
-main_readme = root / "README.md"
-extension_readme = root / "editors/code/README.md"
-# The largest gain, a typical loop, whole-vector arithmetic, which gains little, and a typed program
-# that loses.
-readme_programs = ["fib", "drawdown", "vector_arith", "orders"]
-too_short_seconds = 0.1
+bench = root / "tools/bench"
+readmes = [root / "README.md", root / "editors/code/README.md"]
+suite_order = ["public", "packages", "kernels", "applications"]
+marker = "bench-summary"
 
 def main():
     check = sys.argv[1:] == ["--check"]
     if sys.argv[1:] not in ([], ["--check"]):
         sys.exit("usage: tools/bench/readme.py [--check]")
-    real = json.loads(real_results.read_text())
-    kernels = json.loads(kernel_results.read_text())
-    blocks = {
-        main_readme: {"bench-summary": summary_block(real, kernels), "bench-why": kernel_block(kernels)},
-        extension_readme: {"bench-why": kernel_block(kernels)},
-    }
+    block = summary_block(load_suites())
     stale = []
-    for readme, replacements in blocks.items():
+    for readme in readmes:
         text = readme.read_text()
-        updated = text
-        for marker, block in replacements.items():
-            updated, count = re.subn(
-                rf"(<!-- {marker} -->\n).*?(<!-- /{marker} -->)",
-                lambda match: match[1] + block + "\n" + match[2],
-                updated,
-                flags=re.S,
-            )
-            if count != 1:
-                sys.exit(f"error: {readme} has no <!-- {marker} --> block to rewrite")
+        updated, count = re.subn(
+            rf"(<!-- {marker} -->\n).*?(<!-- /{marker} -->)",
+            lambda match: match[1] + block + "\n" + match[2],
+            text,
+            flags=re.S,
+        )
+        if count != 1:
+            sys.exit(f"error: {readme} has no <!-- {marker} --> block to rewrite")
         if updated == text:
             continue
         if check:
@@ -55,56 +45,59 @@ def main():
             print(f"wrote {readme}")
     if stale:
         names = ", ".join(str(readme.relative_to(root)) for readme in stale)
-        sys.exit(f"error: the benchmark blocks of {names} differ from the results files; run `just bench-readme`")
+        sys.exit(f"error: the benchmark block of {names} differs from the results files; run `just bench-readme`")
 
-def summary_block(real, kernels):
-    workloads = [row for row in real["workloads"] if row.get("kind", "workload") == "workload"]
-    timed_real = [row for row in workloads if row["gnu_r"] >= too_short_seconds]
-    timed_kernels = [row for row in kernels["programs"] if row["gnu_r"] >= too_short_seconds]
-    # The same rows as `benchmarkSummaryRows` in docs/src/lib/benchmarks.ts.
-    return "\n".join([
-        "| Suite | What it is | ry vs GNU R | ry typed |",
-        "| --- | --- | ---: | ---: |",
-        f"| Numeric kernels (ours) | {len(kernels['programs'])} small programs we wrote: loops, recursion and vector code"
-        f" | {ratio(geomean(row['gnu_r'] / row['ry'] for row in timed_kernels))}"
-        f" | {ratio(geomean(row['gnu_r'] / row['ry_typed'] for row in timed_kernels))} |",
-        f"| Application workloads (ours) | {len(workloads)} call-heavy programs we wrote: conditions, S3 and S4 objects,"
-        f" records, validation, simulation | {ratio(geomean(row['gnu_r'] / row['ry_jit'] for row in timed_real))} | not typed |",
-        "",
-        f"Geometric means; programs that finish in under {too_short_seconds} s are left out of them.",
-        "",
-        "- Numeric kernels " + lowercase_first(metadata(kernels, "kernels")),
-        "- Application workloads " + lowercase_first(metadata(real, "real")),
-    ])
+def load_suites():
+    """The measured suites in page order, each its manifest with its results beside it."""
+    suites = []
+    for manifest_path in bench.glob("*/suite.toml"):
+        results_path = manifest_path.with_name("results.json")
+        if not results_path.exists():
+            continue
+        manifest = tomllib.loads(manifest_path.read_text())
+        results = check_schema(json.loads(results_path.read_text()))
+        twin = next((suite for suite in suites if suite["id"] == manifest["id"]), None)
+        if twin:
+            sys.exit(f"error: benchmark suite `{manifest['id']}` is defined by both {twin['directory']} and {manifest_path.parent}")
+        suites.append({**manifest, "directory": manifest_path.parent, "results": results})
+    rank = lambda suite: (suite_order.index(suite["id"]) if suite["id"] in suite_order else len(suite_order), suite["id"])
+    return sorted(suites, key=rank)
 
-def kernel_block(kernels):
-    by_name = {row["program"]: row for row in kernels["programs"]}
-    lines = ["| program | ry | ry, typed |", "| --- | ---: | ---: |"]
-    for name in readme_programs:
-        row = by_name.get(name)
-        if row is None:
-            sys.exit(f"error: `{name}` is not in {kernel_results.relative_to(root)}; update `readme_programs`")
-        if row["gnu_r"] < too_short_seconds:
-            sys.exit(f"error: `{name}` is too short to show in the README; pick another program")
-        lines.append(f"| `{name}` | {ratio(row['gnu_r'] / row['ry'])} | {ratio(row['gnu_r'] / row['ry_typed'])} |")
-    return "\n".join(lines + ["", metadata(kernels, "kernels")])
+def summary_block(suites):
+    """The rows of `summaryRows` and the lines of `summaryMarkdown` in docs/src/lib/benchmarks.ts."""
+    lines = ["| Suite | What it is | ry vs GNU R | ry typed |", "| --- | --- | ---: | ---: |"]
+    for suite in suites:
+        geomean = suite["results"]["geomean"]
+        untyped = ratio(geomean["ry"]["median"]) if "ry" in geomean else "not measured"
+        typed = ratio(geomean["ry_typed"]["median"]) if "ry_typed" in geomean else "not typed"
+        lines.append(f"| {suite['name']} | {len(suite['results']['programs'])} {suite['summary']} | {untyped} | {typed} |")
+    lines += ["", "Geometric means of the speed-ups over GNU R; above 1x means ry is faster.", ""]
+    lines += [f"- {suite['name']}: {lowercase_first(metadata(suite['results']))}" for suite in suites]
+    lines += ["", "[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program."]
+    return "\n".join(lines)
 
-def metadata(results, suite):
-    """The same line `suiteMetadata` in docs/src/lib/benchmarks.ts prints under each chart."""
-    version = re.search(r"\d+\.\d+\.\d+", results["r"])
-    commit = f" at ry {results['commit']}" if "commit" in results else ""
-    samples = f"{results['repeat']} rounds" if suite == "real" else f"the best of {results['repeat']} processes per engine"
-    return (f"Measured on {results['date']}{commit} with GNU R {version[0] if version else results['r']} "
-            f"on {results['machine']}; {samples}.")
+def metadata(results):
+    """The line `suiteMetadata` in docs/src/lib/benchmarks.ts prints under each chart."""
+    meta = results["meta"]
+    # The first nine hex digits, keeping a marker such as `-dirty`, as `shortCommit` does.
+    commit = " at ry " + re.sub(r"^([0-9a-f]{9})[0-9a-f]*", r"\1", meta["ry_commit"]) if meta.get("ry_commit") else ""
+    machine = ", ".join([meta["machine"]["cpu"]]
+                        + ([f"{meta['machine']['cores']} cores"] if meta["machine"].get("cores") else [])
+                        + ([meta["machine"]["kernel"]] if meta["machine"].get("kernel") else []))
+    return f"Measured on {meta['date'][:10]}{commit} with GNU R {meta['gnu_r']['version']} on {machine}; {meta['rounds']} paired rounds."
 
 def lowercase_first(text):
     return text[:1].lower() + text[1:]
 
 def ratio(value):
-    return f"{value:.0f}x" if value >= 10 else f"{value:.2f}x"
+    # Rounds half up on the exact binary value, as JavaScript's toFixed does in `formatRatio`.
+    places = Decimal(1) if value >= 10 else Decimal("0.01")
+    return f"{Decimal(value).quantize(places, rounding=ROUND_HALF_UP)}x"
 
-def geomean(ratios):
-    return math.exp(statistics.fmean(math.log(value) for value in ratios))
+def check_schema(results):
+    if results.get("schema") != 1:
+        sys.exit(f"error: results.json has schema {results.get('schema')}, which this script does not read")
+    return results
 
 if __name__ == "__main__":
     main()

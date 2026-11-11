@@ -31,13 +31,13 @@ fn cold_check_memory_budget() {
     let out = tempfile::tempdir().expect("temporary directory");
     let status = Command::new("python3")
         .arg("-I")
-        .arg(workspace.join("tools/bench/generate.py"))
+        .arg(workspace.join("tools/bench/tooling/generate.py"))
         .args(["--lines", "300000", "--files", "500", "--out"])
         .arg(out.path())
         .stdout(Stdio::null())
         .status()
         .expect("python3 runs the generator");
-    assert!(status.success(), "tools/bench/generate.py failed");
+    assert!(status.success(), "tools/bench/tooling/generate.py failed");
 
     let mut over = Vec::new();
     for bench in BENCHES {
@@ -182,17 +182,25 @@ fn typed_array_dot_peak_memory_stays_near_gnu_r() {
         eprintln!("skipped: no GNU R installation on this machine");
         return;
     }
-    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench/why");
+    let bench = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench");
     let directory = tempfile::tempdir().expect("temporary directory");
-    let script = |variant: &str| {
+    let script = |typed: bool| {
+        let (variant, harness, program) = if typed {
+            ("typed", "harness.typed.R", "kernels/array_dot.typed.R")
+        } else {
+            ("untyped", "harness.R", "kernels/array_dot.R")
+        };
         let folder = directory.path().join(variant);
         fs::create_dir_all(&folder).expect("create the program's directory");
-        let source = programs.join(variant);
-        let harness = fs::read_to_string(source.join("harness.R")).expect("read the harness");
-        let program = fs::read_to_string(source.join("array_dot.R")).expect("read array_dot.R");
-        // The typed program runs in strict mode, which its directory's `ry.toml` turns on.
-        if source.join("ry.toml").exists() {
-            fs::copy(source.join("ry.toml"), folder.join("ry.toml")).expect("copy ry.toml");
+        let harness = fs::read_to_string(bench.join(harness)).expect("read the harness");
+        let program = fs::read_to_string(bench.join(program)).expect("read array_dot");
+        // The typed program runs in strict mode, as tools/bench/bench.py runs it.
+        if typed {
+            fs::write(
+                folder.join("ry.toml"),
+                "[check]\ntyping = true\nstrict = true\n",
+            )
+            .expect("write ry.toml");
         }
         let script = folder.join("array_dot.R");
         fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
@@ -211,12 +219,12 @@ fn typed_array_dot_peak_memory_stays_near_gnu_r() {
     let gnu_r = peak(
         Command::new("Rscript")
             .arg("--vanilla")
-            .arg(script("untyped")),
+            .arg(script(false)),
     );
     let ry = peak(
         Command::new(binary)
             .args(["run", "--runtime", "ry"])
-            .arg(script("typed")),
+            .arg(script(true)),
     );
     let ratio = ry as f64 / gnu_r as f64;
     eprintln!(
@@ -232,7 +240,7 @@ fn typed_array_dot_peak_memory_stays_near_gnu_r() {
     );
 }
 
-/// The least speedup over GNU R each benchmark program from `tools/bench/why/untyped` keeps,
+/// The least speedup over GNU R each benchmark program from `tools/bench` keeps,
 /// untyped and warm. Each sits a fifth or more below what it measures, since timings on a
 /// shared machine vary that much, and each is a program the
 /// runtime's allocation policy once slowed down without failing a memory budget: the vector
@@ -257,13 +265,15 @@ fn runtime_speed_stays_ahead_of_gnu_r() {
         eprintln!("skipped: no GNU R installation on this machine");
         return;
     }
-    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench/why/untyped");
-    let harness = fs::read_to_string(programs.join("harness.R")).expect("read the harness");
+    let bench = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench");
+    let harness = fs::read_to_string(bench.join("harness.R")).expect("read the harness");
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut slow = Vec::new();
     for (name, floor) in RUNTIME_SPEEDUPS {
-        let program = fs::read_to_string(programs.join(format!("{name}.R")))
-            .unwrap_or_else(|error| panic!("read {name}.R: {error}"));
+        let program = ["kernels", "applications"]
+            .iter()
+            .find_map(|suite| fs::read_to_string(bench.join(suite).join(format!("{name}.R"))).ok())
+            .unwrap_or_else(|| panic!("no benchmark program {name}.R"));
         let script = directory.path().join(format!("{name}.R"));
         fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
         // Other load on the machine only slows a run down, so the fastest of three is the time.
@@ -295,7 +305,7 @@ fn runtime_speed_stays_ahead_of_gnu_r() {
     );
 }
 
-/// The best warm time a benchmark program prints, as `name checksum best cold`.
+/// The best warm time a benchmark program prints, as `name checksum median best cold`.
 fn warm_seconds(command: &mut Command) -> f64 {
     let output = command
         .stderr(Stdio::null())
@@ -305,7 +315,7 @@ fn warm_seconds(command: &mut Command) -> f64 {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .last()
-        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|line| line.split_whitespace().nth(3))
         .and_then(|seconds| seconds.parse().ok())
         .unwrap_or_else(|| panic!("no timing line from {command:?}"))
 }

@@ -260,13 +260,53 @@ fn ry_base() -> Option<PathBuf> {
         .find(|candidate| rcmd::base::is_complete(candidate))
 }
 
-/// `PATH` without the directories that hold GNU R's `R` or `Rscript`, for `hide gnu-r`.
-fn path_without_gnu_r() -> std::ffi::OsString {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let kept: Vec<PathBuf> = std::env::split_paths(&path)
-        .filter(|directory| !directory.join("R").is_file() && !directory.join("Rscript").is_file())
-        .collect();
-    std::env::join_paths(kept).unwrap_or_default()
+/// `PATH` with GNU R's `R` and `Rscript` hidden, for `hide gnu-r`. A directory that holds either
+/// is replaced by a mirror of symbolic links to everything else in it, because dropping the
+/// directory would also drop whatever lives beside R there (`/usr/bin` holds `sh`).
+fn path_without_gnu_r() -> Result<&'static std::ffi::OsString, String> {
+    static PATH: OnceLock<Result<std::ffi::OsString, String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let mirrors = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("path-without-gnu-r");
+        if mirrors.exists() {
+            fs::remove_dir_all(&mirrors)
+                .map_err(|error| format!("clearing {}: {error}", mirrors.display()))?;
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut kept = Vec::new();
+        for (index, directory) in std::env::split_paths(&path).enumerate() {
+            if !directory.join("R").is_file() && !directory.join("Rscript").is_file() {
+                kept.push(directory);
+                continue;
+            }
+            let mirror = mirrors.join(index.to_string());
+            mirror_without_gnu_r(&directory, &mirror)?;
+            kept.push(mirror);
+        }
+        std::env::join_paths(kept).map_err(|error| format!("joining PATH: {error}"))
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
+
+fn mirror_without_gnu_r(directory: &Path, mirror: &Path) -> Result<(), String> {
+    fs::create_dir_all(mirror).map_err(|error| format!("creating {}: {error}", mirror.display()))?;
+    let entries =
+        fs::read_dir(directory).map_err(|error| format!("reading {}: {error}", directory.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("reading {}: {error}", directory.display()))?;
+        let name = entry.file_name();
+        if name == "R" || name == "Rscript" {
+            continue;
+        }
+        let link = mirror.join(&name);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(entry.path(), &link)
+            .map_err(|error| format!("linking {}: {error}", link.display()))?;
+        #[cfg(not(unix))]
+        fs::copy(entry.path(), &link)
+            .map_err(|error| format!("copying to {}: {error}", link.display()))?;
+    }
+    Ok(())
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -975,7 +1015,7 @@ impl Journey {
                 }
                 if self.hide_gnu_r {
                     command
-                        .env("PATH", path_without_gnu_r())
+                        .env("PATH", path_without_gnu_r()?)
                         .env_remove("R_HOME");
                 }
                 let output = command

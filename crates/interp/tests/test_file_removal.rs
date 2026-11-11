@@ -55,8 +55,12 @@ fn unlink_matches_gnu_r_on_generated_trees() {
 
 #[derive(Debug)]
 enum Entry {
-    File { read_only: bool },
-    Directory { read_only: bool },
+    File {
+        read_only: bool,
+    },
+    Directory {
+        read_only: bool,
+    },
     /// A link to another entry of the sandbox, by its path relative to the sandbox.
     Link(String),
     Fifo,
@@ -79,10 +83,7 @@ impl Plan {
     fn generate(random: &mut SplitMix64) -> Plan {
         let mut entries = vec![
             ("outside".to_owned(), Entry::Directory { read_only: false }),
-            (
-                "outside/kept".to_owned(),
-                Entry::File { read_only: false },
-            ),
+            ("outside/kept".to_owned(), Entry::File { read_only: false }),
             ("tree".to_owned(), Entry::Directory { read_only: false }),
         ];
         let mut directories = vec!["tree".to_owned()];
@@ -120,8 +121,8 @@ impl Plan {
             1 => "missing".to_owned(),
             _ => "tree".to_owned(),
         };
-        let working_directory = (random.below(5) == 0)
-            .then(|| directories[random.below(directories.len())].clone());
+        let working_directory =
+            (random.below(5) == 0).then(|| directories[random.below(directories.len())].clone());
         Plan {
             entries,
             target,

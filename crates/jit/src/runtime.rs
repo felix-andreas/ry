@@ -101,9 +101,13 @@ pub mod outcome {
     pub const OK: i32 = 0;
     pub const FAILED: i32 = 1;
     pub const INVALIDATED: i32 = 2;
+    /// A fused pass computed its expression, and execution goes on at its target.
+    pub const FUSED: i32 = 3;
+    /// A fused pass computed its expression, and a promise it forced invalidated the code.
+    pub const FUSED_INVALIDATED: i32 = 5;
     /// The instruction returned from the activation, leaving the value in its destination
     /// register: a finished [`interp::bytecode::Op::Prologue`].
-    pub const RETURNED: i32 = 3;
+    pub const RETURNED: i32 = 6;
     /// Load results: the slot's new status, or one of these.
     pub const LOAD_FAILED: i32 = 0;
     pub const LOAD_INVALIDATED: i32 = 4;
@@ -477,6 +481,31 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
+/// Runs the fused pass of the `Fused` instruction at `pc`: [`outcome::FUSED`] when it computed
+/// the expression, [`outcome::OK`] when it declined and the ordinary code runs, and either
+/// invalidated outcome when an argument's promise it forced rebound a function the code
+/// speculated on.
+pub unsafe extern "C" fn jit_fused(activation: *mut Activation, pc: i64) -> i32 {
+    unsafe {
+        checked(activation, outcome::FAILED, |activation| {
+            let machine = machine(activation);
+            let epoch = heap().binding_epoch();
+            let fused = scoped(|| bytecode::fused_step(machine, pc as usize));
+            let valid = || still_valid(compiled(activation), machine, epoch);
+            match fused {
+                Err(unwind) => {
+                    park(activation, unwind);
+                    outcome::FAILED
+                }
+                Ok(true) if valid() => outcome::FUSED,
+                Ok(true) => outcome::FUSED_INVALIDATED,
+                Ok(false) if valid() => outcome::OK,
+                Ok(false) => outcome::INVALIDATED,
+            }
+        })
+    }
+}
+
 /// Loads the variable `GetVar` at `pc` reads into its slot. Returns the slot's status.
 pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
     unsafe {
@@ -580,7 +609,8 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                             Ok((value, true))
                         }
                         Some(value) if value == values::missing_arg() => {
-                            let env = machine.reify(eval::Reify::Site("missing argument lookup"))?;
+                            let env =
+                                machine.reify(eval::Reify::Site("missing argument lookup"))?;
                             eval::eval_symbol(symbol, env).map(|value| (value, true))
                         }
                         _ => eval::eval_symbol(symbol, machine.enclosure())

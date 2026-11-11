@@ -947,6 +947,7 @@ const ROUTINES: &[Routine] = &[
     ("graphics", RoutineKind::External, "C_plot_new", 0),
     ("graphics", RoutineKind::External, "C_locator", -1),
     ("graphics", RoutineKind::External, "C_identify", -1),
+    ("tools", RoutineKind::C, "Renctest", 1),
     ("tools", RoutineKind::Call, "codeFilesAppend", 2),
     ("tools", RoutineKind::Call, "delim_match", 2),
     ("tools", RoutineKind::Call, "dirchmod", 2),

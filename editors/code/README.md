@@ -101,21 +101,25 @@ non-exhaustive-match
 
 ## Speed
 
-ry's runtime against GNU R on a few numeric kernels, as speed-ups, untyped and typed in strict
-mode. Loops and recursion gain the most; call-heavy code is slower than on GNU R:
+ry's runtime against GNU R, as the geometric mean of each benchmark suite's speed-ups:
 
-<!-- bench-why -->
-| program | ry | ry, typed |
-| --- | ---: | ---: |
-| `fib` | 80x | 140x |
-| `drawdown` | 6.90x | 29x |
-| `vector_arith` | 1.22x | 2.09x |
-| `orders` | 1.13x | 0.77x |
+<!-- bench-summary -->
+| Suite | What it is | ry vs GNU R | ry typed |
+| --- | --- | ---: | ---: |
+| Public R JIT benchmarks | 54 standard programs from R compiler research (Ř, rcp) | 2.84x | not typed |
+| Package test suites | 26 pinned CRAN packages, each running its own test suite | 2.02x | not typed |
+| Numeric kernels (ours) | 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers | 5.08x | 1.84x |
+| Application workloads (ours) | 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables | 1.77x | 2.41x |
 
-Measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
-<!-- /bench-why -->
+Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
 
-[Benchmarks](https://ry-lang.org/benchmarks) has the code of each program and the method.
+- Public R JIT benchmarks: measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
+- Package test suites: measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
+- Numeric kernels (ours): measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v338; 10 paired rounds.
+- Application workloads (ours): measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v338; 10 paired rounds.
+
+[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program.
+<!-- /bench-summary -->
 
 ## Settings
 

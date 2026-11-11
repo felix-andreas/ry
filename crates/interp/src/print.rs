@@ -5,7 +5,7 @@ use {
         builtins::{BuiltinDef, Call, internal},
         deparse,
         eval::{self, value_of},
-        format::{self, Settings, display_width, encode_string, pad},
+        format::{self, Settings, display_width, encode_element, encode_string, pad},
         interp,
         unwind::R,
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
@@ -409,10 +409,7 @@ unsafe fn print_named_vector(
     options: &PrintOptions,
 ) {
     let name_texts: Vec<String> = (0..items.len())
-        .map(|index| match values::string_at(names, index) {
-            Some(text) => text.into_owned(),
-            None => "<NA>".to_owned(),
-        })
+        .map(|index| encoded_name(names, index).unwrap_or_else(|| "<NA>".to_owned()))
         .collect();
     let width = measures
         .iter()
@@ -442,6 +439,13 @@ unsafe fn print_named_vector(
         text.push('\n');
     }
     out(&text);
+}
+
+/// A name or dimname as GNU R prints it, unquoted but with backslashes and control characters
+/// escaped, or `None` for `NA`.
+unsafe fn encoded_name(names: Sexp, index: usize) -> Option<String> {
+    values::string_at(names, index)?;
+    Some(encode_element(names.element(index), None))
 }
 
 /// The text of each column of a matrix, formatted per column as GNU R does.
@@ -627,10 +631,7 @@ unsafe fn print_matrix_rows(
     let row_labels: Vec<String> = (0..rows)
         .map(|row| {
             if row_names != nil() {
-                values::string_at(row_names, row).map_or_else(
-                    || options.na_string_noquote.clone(),
-                    |text| text.into_owned(),
-                )
+                encoded_name(row_names, row).unwrap_or_else(|| options.na_string_noquote.clone())
             } else {
                 format!("[{},]", row + 1)
             }
@@ -683,10 +684,7 @@ unsafe fn print_matrix_rows(
     let col_labels: Vec<String> = (0..cols)
         .map(|col| {
             if col_names != nil() {
-                values::string_at(col_names, col).map_or_else(
-                    || options.na_string_noquote.clone(),
-                    |text| text.into_owned(),
-                )
+                encoded_name(col_names, col).unwrap_or_else(|| options.na_string_noquote.clone())
             } else {
                 format!("[,{}]", col + 1)
             }

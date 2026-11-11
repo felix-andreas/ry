@@ -5,7 +5,7 @@ description: "Closure calls that keep their variables in the interpreter's regis
 
 A closure call today allocates an environment object, one binding cell per formal, and a promise for each argument
 that is not a constant. It releases them all when it returns. On the testthat workload
-(`tools/bench/real/testthat.R`, images on, JIT at its default), that work is the largest exclusive
+(`tools/bench/applications/testthat.R`, images on, JIT at its default), that work is the largest exclusive
 cost under callgrind:
 
 | Sink | Share of 8.03G instructions | Largest functions |

@@ -1,0 +1,112 @@
+# Runs the table benchmark's questions as R code on ry's DataFrame, under `ry run`,
+# and prints one tab-separated line per run:
+# `question  run  seconds  rows  cols  checksum`. Loading is not timed, as in db-benchmark, and
+# every question runs twice so the second run shows warm-cache behavior. The questions use the
+# Polars-style API. The `:=` loops use the data.table syntax the DataFrame keeps for
+# compatibility, because they measure in-place updates, which the Polars-style API does not do.
+#
+# Usage: ry run ry.R <data-dir> [groupby | joins]   (`groupby` runs only the ten group-by questions,
+#   `joins` only the five join questions)
+
+args <- commandArgs(trailingOnly = TRUE)
+dir <- args[[1]]
+# "groupby" or "joins" limits the run to those questions.
+part <- if (length(args) > 1L) args[[2]] else "all"
+cat("# ry DataFrame\n")
+
+read <- function(name, factors = TRUE) DataFrame.read_csv(file.path(dir, name), strings_as_factors = factors)
+
+checksum <- function(answer) {
+  if (!is.DataFrame(answer)) return(sum(as.numeric(answer)))
+  # One numeric column at a time, chosen from the schema: `as.list` would convert the whole
+  # answer to R vectors at once, which for q10's 1e8 groups doubles the memory the answer holds.
+  total <- 0
+  schema <- DataFrame.schema(answer)
+  for (name in names(schema)[schema %in% c("integer[]", "double[]")]) {
+    total <- total + sum(as.numeric(answer[[name]]), na.rm = TRUE)
+  }
+  total
+}
+
+report <- function(question, run, seconds, answer) {
+  rows <- if (is.DataFrame(answer)) nrow(answer) else length(answer)
+  cols <- if (is.DataFrame(answer)) ncol(answer) else 1L
+  cat(sprintf("%s\t%d\t%.4f\t%d\t%d\t%.6e\n", question, run, seconds, rows, cols, checksum(answer)))
+}
+
+time_question <- function(question, expr) {
+  expr <- substitute(expr)
+  for (run in 1:2) {
+    gc()
+    seconds <- system.time(answer <- eval(expr, parent.frame()))[["elapsed"]]
+    report(question, run, seconds, answer)
+    rm(answer)
+  }
+}
+
+if (part != "joins") {
+  x <- read("groupby.csv")
+  sum_of <- function(name) Expr.col(name) |> Expr.sum()
+  mean_of <- function(name) Expr.col(name) |> Expr.mean()
+  by <- function(...) DataFrame.group_by(x, ...)
+  time_question("groupby q1", by("id1") |> GroupBy.agg(sum_of("v1")))
+  time_question("groupby q2", by("id1", "id2") |> GroupBy.agg(sum_of("v1")))
+  time_question("groupby q3", by("id3") |> GroupBy.agg(sum_of("v1"), mean_of("v3")))
+  time_question("groupby q4", by("id4") |> GroupBy.agg(mean_of("v1"), mean_of("v2"), mean_of("v3")))
+  time_question("groupby q5", by("id6") |> GroupBy.agg(sum_of("v1"), sum_of("v2"), sum_of("v3")))
+  time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
+    median_v3 = Expr.col("v3") |> Expr.median(),
+    sd_v3 = Expr.col("v3") |> Expr.std()
+  ))
+  time_question("groupby q7", by("id3") |> GroupBy.agg(
+    range_v1_v2 = (Expr.col("v1") |> Expr.max()) - (Expr.col("v2") |> Expr.min())
+  ))
+  time_question("groupby q8", DataFrame.lazy(x) |>
+    LazyFrame.sort("v3", descending = TRUE) |>
+    LazyFrame.group_by("id6") |>
+    LazyGroupBy.agg(largest2_v3 = Expr.col("v3") |> Expr.head(2L)) |>
+    LazyFrame.collect())
+  time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(Expr.col("v1"), Expr.col("v2"))^2))
+  time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
+    sum_of("v3"),
+    count = Expr.len()
+  ))
+
+  if (part == "all") {
+    # `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
+    time_question("update full", {
+      for (step in 1:100) x[, v3 := v3 * 1.000001]
+      x[, .(v3 = sum(v3))]
+    })
+    time_question("update subset", {
+      for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
+      x[, .(v1 = sum(v1))]
+    })
+    time_question("update add", {
+      for (step in 1:100) x[, paste0("added", step) := v2 * step]
+      x[, .(added100 = sum(added100))]
+    })
+  }
+  rm(x)
+  invisible(gc())
+}
+
+if (part != "groupby") {
+  x <- read("join_x.csv")
+  small <- read("join_small.csv")
+  medium <- read("join_medium.csv")
+  big <- read("join_big.csv")
+  time_question("join q1", DataFrame.join(x, small, on = "id1"))
+  time_question("join q2", DataFrame.join(x, medium, on = "id2"))
+  time_question("join q3", DataFrame.join(x, medium, on = "id2", how = "left"))
+  time_question("join q4", DataFrame.join(x, medium, on = "id5"))
+  time_question("join q5", DataFrame.join(x, big, on = "id3"))
+  rm(x, small, medium, big)
+  invisible(gc())
+}
+
+if (part == "all") {
+  prices <- read("rolljoin_prices.csv", factors = FALSE)
+  trades <- read("rolljoin_trades.csv", factors = FALSE)
+  time_question("rolljoin keyed", DataFrame.join_asof(trades, prices, on = "time", by = "ticker"))
+}

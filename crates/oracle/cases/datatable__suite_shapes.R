@@ -1,6 +1,5 @@
 # oracle: requires data.table
-# Query shapes from data.table's own test suite: each answer must match data.table's, whether the
-# engine answers or declines.
+# Query shapes from data.table's own test suite: each answer must match GNU R's.
 library(data.table)
 dt <- data.table(a = c(1L, 1L, 2L, 3L), b = c(4, 5, 6, 7), c = c("x", "y", "x", "z"))
 # An untagged third argument is `by`.

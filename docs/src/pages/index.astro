@@ -1,6 +1,6 @@
 ---
 import Venn from "../components/Venn.astro";
-import { benchmarkRows, formatRatio, suiteMetadata, TOO_SHORT_SECONDS } from "../lib/benchmarks";
+import { baseline, formatRatio, isTooShort, measuredPrograms, suite, suiteMetadata } from "../lib/benchmarks";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -137,9 +137,9 @@ Error in ada$email :
   price = [1.5, 2, 4, 3]
 )
 sales |>
-  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(revenue = (col("units") * col("price")) |> Expr.sum())`,
+  GroupBy.agg(revenue = (Expr.col("units") * Expr.col("price")) |> Expr.sum())`,
         command: "ry run sales.R",
         output: `   region revenue
    <char>   <num>
@@ -160,11 +160,22 @@ Str.join_with(loud, " ")`,
     },
 ];
 
-// Read from tools/bench/why/results.json, which `just bench-why --write` regenerates, sorted by
-// speedup so the strongest results lead. The speedups span two orders of magnitude, so a bar's
-// width is logarithmic, and the 1x tick sits at log(2) of the scale.
-const benchmarks = benchmarkRows().sort((a, b) => b.speedup - a.speedup);
-const benchmarkScale = Math.log(1 + Math.max(...benchmarks.map((row) => row.speedup)));
+// The numeric kernels, untyped, from their committed results file, sorted by speedup so the
+// strongest results lead. The speedups span two orders of magnitude, so a bar's width is
+// logarithmic, and the 1x tick sits at log(2) of the scale.
+const kernels = suite("kernels");
+const benchmarks = (kernels === undefined ? [] : measuredPrograms(kernels))
+    .filter((program) => program.measurement.ratio.ry !== undefined && program.measurement.seconds[baseline] !== undefined && program.measurement.seconds.ry !== undefined)
+    .map((program) => ({
+        program: program.id,
+        display: program.display,
+        speedup: program.measurement.ratio.ry.median,
+        gnuR: program.measurement.seconds[baseline],
+        ry: program.measurement.seconds.ry,
+        tooShort: isTooShort(program.measurement),
+    }))
+    .sort((a, b) => b.speedup - a.speedup);
+const benchmarkScale = Math.log(1 + Math.max(1, ...benchmarks.map((row) => row.speedup)));
 const benchmarkWidth = (speedup: number) => Math.log(1 + speedup) / benchmarkScale;
 
 const migrationTabs: Sample[] = [
@@ -816,7 +827,7 @@ const year = new Date().getFullYear();
                                 {
                                     benchmarks.map((row, index) => (
                                         <tr class={[row.speedup < 1 && "is-slower", row.tooShort && "is-short"].filter(Boolean).join(" ") || undefined} style={`--x: ${benchmarkWidth(row.speedup)}; --k: ${index}`}>
-                                            <th scope="row">{row.program}{row.tooShort && <span class="bench-flag"> too short</span>}</th>
+                                            <th scope="row" title={row.display}>{row.program}{row.tooShort && <span class="bench-flag"> too short</span>}</th>
                                             <td class="bench-axis" aria-hidden="true">
                                                 <span class="bench-bar" />
                                             </td>
@@ -829,8 +840,9 @@ const year = new Date().getFullYear();
                             </tbody>
                         </table>
                         <p class="bench-foot">
-                            Untyped code on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale. A program that GNU R finishes in under {TOO_SHORT_SECONDS} s is too short for a stable ratio.{" "}
-                            {suiteMetadata("kernels")}{" "}
+                            Our numeric kernels, untyped, on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale.{" "}
+                            {benchmarks.some((row) => row.tooShort) && <>A program marked too short finishes in under {kernels?.results?.meta.tooShortSeconds ?? 0.1} s on GNU R, which is too little work for a stable ratio.{" "}</>}
+                            {kernels && suiteMetadata(kernels)}{" "}
                             <a href="/benchmarks">Full table, programs and method</a>
                         </p>
                     </div>
