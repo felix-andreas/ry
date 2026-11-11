@@ -3463,16 +3463,29 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
                 .expect("list cache")
                 .iter()
                 .filter(|entry| entry.is_dir())
-                .map(|entry| entry.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                .map(|entry| {
+                    entry
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .collect();
             names.sort();
             names
         };
         let held = cached_home(&cache, &libr, &rcmd, &base).expect("first home");
-        assert_eq!(cached_home(&cache, &libr, &rcmd, &base).expect("same home"), held);
+        assert_eq!(
+            cached_home(&cache, &libr, &rcmd, &base).expect("same home"),
+            held
+        );
         // A home from an older ry, which records no base, and a staging directory whose
         // assembly died: both are stale and unlocked.
-        put(&cache.join("00000000000000aa/.libr"), "/old/libR.so\n/old/ry").expect("old home");
+        put(
+            &cache.join("00000000000000aa/.libr"),
+            "/old/libR.so\n/old/ry",
+        )
+        .expect("old home");
         put(&cache.join("00000000000000aa/etc/Makeconf"), "").expect("old Makeconf");
         put(&cache.join(".00000000000000bb-1-000000001/.lock"), "").expect("dead staging");
         // A rebuilt libR makes the first home stale, but this process still holds it.
@@ -3480,7 +3493,12 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
         let second = cached_home(&cache, &libr, &rcmd, &base).expect("second home");
         let mut expected: Vec<String> = [&held, &second]
             .iter()
-            .map(|home| home.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .map(|home| {
+                home.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         expected.sort();
         assert_eq!(homes(), expected);
@@ -3493,7 +3511,11 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
         let third = cached_home(&cache, &libr, &rcmd, &base).expect("third home");
         assert_eq!(
             homes(),
-            [third.file_name().unwrap_or_default().to_string_lossy().into_owned()]
+            [third
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()]
         );
         fs::remove_dir_all(&root).expect("remove root");
     }

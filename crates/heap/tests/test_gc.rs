@@ -1969,9 +1969,7 @@ fn fuzz_interning_agrees_with_a_reference_map() {
 
 #[test]
 fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
-    for_each_seed(4, |seed| {
-        run_interning(500 + seed, 300, true)
-    });
+    for_each_seed(4, |seed| run_interning(500 + seed, 300, true));
 }
 
 #[test]
