@@ -653,11 +653,31 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   the writer's inline caches, type feedback and profile, so the image stores its source instead.
   A session therefore runs base R's functions as bytecode from their first call without
   compiling them, and the pages of code it never calls stay in the shared page cache.
-- **Fresh code fills start-up's free slots.** The writer allocates the fresh code after start-up,
-  so its small objects land in the holes start-up's collections left and its large objects follow
-  start-up's in the large section. Nothing is advised: a cold start reads ahead through code it
-  never runs, which costs an empty run about 1.6 MB of peak RSS but no wall time, while reading only the
-  touched pages makes each page its own read and slows a cold start by a fifth.
+- **Objects are laid out in touch order.** Before writing, the writer numbers every live object
+  with a stable id and moves every movable small object into dense pages in a recorded order of
+  first touch, so the pages a session reads at start-up are adjacent and the code it never runs
+  sits together at the end. Fixed objects, symbols, environments, ALTREP objects and the objects
+  that existed before start-up keep their addresses: frame filters, slot indexes, hash tables
+  and layout tags hash symbol addresses, and the precondition digest covers the rest. Large
+  objects go to the large section in the same order. Without an order the writer still
+  compacts, in id order. Nothing is advised, because reading only the touched pages makes each
+  page its own read and slows a cold start.
+- **The touch profile.** The layout build (`tools/layout/optimize.sh`) writes the image twice:
+  - The first write also writes `ids` into the layout directory (`ry-rcmd start-image BASE
+    --libr FILE --layout DIR`): for each id in turn, the object's address and size as two
+    little-endian `u64`s. Ids come from a depth-first walk over each object's handles (and an
+    environment's bound symbols and values), seeded in this order: fixed objects, global roots,
+    the precious set, the heap's globals, weak references, untracked objects, symbols sorted by
+    name, interned strings sorted by bytes, then every other live object by address. The same
+    heap state therefore gives the same ids in both writes.
+  - Each training run of `tools/layout/train.py --image-touch DIR` sets `RY_IMAGE_TOUCH=FILE`,
+    which protects the mapped image (x86-64 Linux only) and writes one line per first touch of a
+    16-byte granule: the address in hex and a phase, 0 for start-up, 1 inside a namespace load,
+    2 otherwise. The mix adds an empty program to the training programs.
+  - `tools/layout/image_order.py` maps the touches to ids and writes `order`, one decimal id per
+    line, sorted by the earliest phase any run touched the object in, then by its earliest
+    position relative to the run's length. The second write reads `order`; ids it does not list
+    follow in id order.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment
