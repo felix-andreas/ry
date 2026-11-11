@@ -145,7 +145,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | Command | Meaning |
 | --- | --- |
 | `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME` | Skip the scenario unless GNU R is installed, `libR.so` is built beside `ry` and ry's base R is built (`just base-r`), or GNU R has the package installed. |
-| `hide gnu-r` | Run every later `ry` with no GNU R: `PATH` loses the directories that hold `R` or `Rscript`, and `R_HOME` is unset. |
+| `hide gnu-r` | Run every later `ry` with no GNU R: `R` and `Rscript` vanish from `PATH` while everything beside them (such as `sh` in `/usr/bin`) stays, and `R_HOME` is unset. |
 | `client pull` / `client utf8` / `client cold` | Start the editor as a pull-diagnostics or UTF-8 client, or one whose first steps arrive before the startup warm-up has run. Must come before the first editor step. |
 | `file PATH` + body | Write a file; a running editor sees a watcher event. `$ROOT` in the body is the scenario's workspace. |
 | `env NAME VALUE` | Set a variable for every later `run`; `$ROOT` in the value is the scenario's workspace. |
