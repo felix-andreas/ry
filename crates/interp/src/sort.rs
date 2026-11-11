@@ -85,9 +85,11 @@ fn root_collate(left: &str, right: &str) -> Ordering {
         .then_with(|| left.cmp(right))
 }
 
-/// Whether the C library's `LC_COLLATE` is `C` or `POSIX`, so strings collate by code point.
-/// The C library owns the locale; this mirrors it so a comparison need not ask, and
-/// `refresh_collation` runs wherever the session changes the locale.
+/// Whether strings collate by code point: the C library's `LC_COLLATE` is `C` or `POSIX`, or, as
+/// in GNU R's `Scollate`, the `LC_ALL` environment variable (`LC_COLLATE` when `LC_ALL` is unset
+/// or empty) is exactly `C`. The C library owns the locale; this mirrors it so a comparison need
+/// not ask, and `refresh_collation` runs wherever the session changes the locale, which is also
+/// when GNU R reads the variables again.
 static C_COLLATION: AtomicBool = AtomicBool::new(true);
 
 fn c_collation() -> bool {
@@ -102,6 +104,12 @@ pub fn refresh_collation() {
         let name = unsafe { std::ffi::CStr::from_ptr(current) }.to_bytes();
         name == b"C" || name == b"POSIX"
     };
+    // With the variable at `C` and another collation locale, GNU R skips ICU and uses the C
+    // library's `strcoll`, which is code point order in the `C.UTF-8` locales ry runs under.
+    let variable = std::env::var_os("LC_ALL")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("LC_COLLATE"));
+    let c = c || variable.is_some_and(|value| value == "C");
     C_COLLATION.store(c, AtomicOrdering::Relaxed);
 }
 

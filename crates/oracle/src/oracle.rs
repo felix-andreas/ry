@@ -15,6 +15,7 @@ use {
     serde::Deserialize,
     similar::TextDiff,
     std::{
+        ffi::{OsStr, OsString},
         io::Read,
         path::{Path, PathBuf},
         process::{Command, Stdio},
@@ -629,19 +630,24 @@ pub fn gnu_r_home() -> Option<String> {
 /// defaults. ry's defaults differ from GNU R's in both directions: the library of its bundled base
 /// R holds none of the reference R's packages, and it also searches the user and site libraries of
 /// any other GNU R it finds, such as Debian's `/usr/lib/R/site-library`, whose older data.table,
-/// rlang and withr then load in place of the reference R's. A caller's `R_LIBS` stays first,
-/// because the reference R puts it first. Empty when GNU R cannot be asked, which leaves the
-/// inherited environment as it is.
+/// rlang and withr then load in place of the reference R's. The libraries
+/// [`libraries_ahead_of_reference`] picks come first, because the reference R puts `R_LIBS`
+/// first. Empty when GNU R cannot be asked, which leaves the inherited environment as it is.
 pub fn library_environment() -> &'static [(String, String)] {
     static ENVIRONMENT: OnceLock<Vec<(String, String)>> = OnceLock::new();
     ENVIRONMENT.get_or_init(|| {
-        let Ok(output) = Command::new(gnu_r_program())
+        let mut command = Command::new(gnu_r_program());
+        command
             .args(["--vanilla", "--slave", "--no-restore", "-e"])
             .arg("cat(.libPaths(), sep = .Platform$path.sep)")
             .env("R_LIBS_SITE", "")
-            .env("R_LIBS_USER", "")
-            .output()
-        else {
+            .env("R_LIBS_USER", "");
+        let explicit = std::env::var_os("R_LIBS");
+        match libraries_ahead_of_reference(explicit.as_deref(), corpus_library().as_deref()) {
+            Some(libraries) => command.env("R_LIBS", libraries),
+            None => command.env_remove("R_LIBS"),
+        };
+        let Ok(output) = command.output() else {
             return Vec::new();
         };
         let paths = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -654,6 +660,41 @@ pub fn library_environment() -> &'static [(String, String)] {
             ("R_LIBS_USER".to_string(), String::new()),
         ]
     })
+}
+
+/// The libraries searched ahead of the reference R's own: an explicit `R_LIBS` first, then the
+/// corpus library. Many cases need corpus packages (rlang, data.table, xts, knitr, lattice), and a
+/// run that does not find them skips those cases, so the corpus library is found without being
+/// named. An `R_LIBS` set to the empty string turns the corpus library off.
+pub fn libraries_ahead_of_reference(
+    explicit: Option<&OsStr>,
+    corpus: Option<&Path>,
+) -> Option<OsString> {
+    let mut libraries: Vec<PathBuf> = match explicit {
+        Some(explicit) if explicit.is_empty() => return None,
+        Some(explicit) => std::env::split_paths(explicit).collect(),
+        None => Vec::new(),
+    };
+    if let Some(corpus) = corpus
+        && !libraries.iter().any(|library| library == corpus)
+    {
+        libraries.push(corpus.to_path_buf());
+    }
+    match libraries.is_empty() {
+        true => None,
+        false => std::env::join_paths(libraries).ok(),
+    }
+}
+
+/// The corpus library `just corpus` installs into, `$RY_CORPUS_DIR/library` or else
+/// `.corpus/library` in the workspace, when that directory exists.
+pub fn corpus_library() -> Option<PathBuf> {
+    let corpus = std::env::var_os("RY_CORPUS_DIR")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+    let library = corpus.join("library");
+    library.is_dir().then_some(library)
 }
 
 /// The release of GNU R, such as `4.3.3`, from the first line `R --version` prints.
