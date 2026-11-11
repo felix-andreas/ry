@@ -967,11 +967,15 @@ pub unsafe fn materialize_references(index: usize) -> R<()> {
 }
 
 /// [`detach_reference`] for each argument reference in `args`, before they go to a call that
-/// may keep them past its return.
+/// may keep them past its return. Each promise is rooted in the current handle scope, which the
+/// caller opens around the call: the pool rooted the reference, and `args` is not scanned by the
+/// collector, so without the root a collection while the call binds its frame frees the promise.
+/// The call's scope ends only once the call returns, by which time the frame holds the promise.
 pub unsafe fn detach_references(args: &[Arg]) -> R<()> {
     for arg in args {
         if is_reference(arg.value) {
             detach_reference(arg.value)?;
+            crate::heap().root(arg.value);
         }
     }
     Ok(())
@@ -2234,10 +2238,10 @@ unsafe fn slot_default_fits(
 pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
     match matched_sources(function, args, call)? {
         Some(sources) => call_with_plan(call, function, &sources, args, sys_parent),
-        None => {
+        None => crate::scope(|| {
             detach_references(args)?;
             apply_closure_owning(call, function, args, sys_parent, None)
-        }
+        }),
     }
 }
 
@@ -2259,8 +2263,10 @@ pub unsafe fn call_with_plan(
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        detach_references(args)?;
-        return apply_closure(call, function, args, sys_parent, None);
+        return crate::scope(|| {
+            detach_references(args)?;
+            apply_closure(call, function, args, sys_parent, None)
+        });
     }
     let count = values::length(constants.element(bytecode::SLOTS).element(1));
     let header = state.bytecode.registers.len();
@@ -5234,11 +5240,19 @@ unsafe fn call_seeded(
     {
         return run_frame(call, function, frame, env, args, entry, &[]);
     }
-    if seeded {
-        detach_reference(args[0].value)?;
+    if !seeded {
+        let frame = bind_arguments(call, function, args, None)?;
+        return run_closure(call, function, frame, env, args, entry);
     }
-    let frame = bind_arguments(call, function, args, None)?;
-    run_closure(call, function, frame, env, args, entry)
+    // Detached, the reference leaves the pool that rooted it, and `args` is not scanned by the
+    // collector, while binding the frame allocates. The root lives in a handle scope of this call
+    // alone, which ends once the closure has returned and its frame no longer needs the promise,
+    // so a caller that makes many calls (`lapply`) keeps no root per call.
+    crate::scope(|| {
+        detach_references(&args[..1])?;
+        let frame = bind_arguments(call, function, args, None)?;
+        run_closure(call, function, frame, env, args, entry)
+    })
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
