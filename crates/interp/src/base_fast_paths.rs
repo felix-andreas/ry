@@ -38,6 +38,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysSetenv", 0, do_sys_setenv),
     internal("rySysWhich", 0, do_sys_which),
     internal("ryFormatDefault", 0, do_format_default),
+    internal("ryDeparse", 0, do_deparse),
+    internal("ryDeparseOpts", 0, do_deparse_opts),
     internal("ryReduce", 0, do_reduce),
     internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
     internal("ryMessage", 0, do_message),
@@ -57,6 +59,8 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
+    ("deparse", "ryDeparse", 0x0000000000000000),
+    (".deparseOpts", "ryDeparseOpts", 0x0000000000000000),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
@@ -2179,6 +2183,142 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         Err(other) => return Err(other),
     };
     finish(frame, result, true)
+}
+
+/// `deparse(expr, width.cutoff, backtick, control, nlines)`: the R body's default `backtick`
+/// calls `mode()` and `%in%`, and `.deparseOpts(control)` calls `pmatch()`, `unique()` and
+/// `sum()`, several closure calls that cost far more than the deparse itself. The arguments are
+/// forced in the order the body's `.Internal(deparse())` call forces them, a `backtick` left at
+/// its default is computed here, and `control` goes through [`deparse_options`].
+unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(expr) = argument(frame, symbols.expr)? else {
+        return decline();
+    };
+    let Some(width_cutoff) = argument(frame, symbols.width_cutoff)? else {
+        return decline();
+    };
+    let backtick = if is_default(frame, symbols.backtick)? {
+        // `mode(expr) %in% c("call", "expression", "(", "function")`: `mode()` answers "call"
+        // or "(" for a call, and "function" for a closure, builtin or special.
+        let backtick = matches!(
+            expr.kind(),
+            SexpType::Language
+                | SexpType::Expression
+                | SexpType::Closure
+                | SexpType::Builtin
+                | SexpType::Special
+        );
+        let backtick = values::scalar_logical(i32::from(backtick))?;
+        crate::heap().root(backtick);
+        backtick
+    } else {
+        let Some(backtick) = argument(frame, symbols.backtick)? else {
+            return decline();
+        };
+        backtick
+    };
+    let Some(control) = argument(frame, symbols.control)? else {
+        return decline();
+    };
+    let Some(options) = deparse_options(control)? else {
+        return decline();
+    };
+    let options = values::scalar_real(options)?;
+    crate::heap().root(options);
+    let Some(nlines) = argument(frame, symbols.nlines)? else {
+        return decline();
+    };
+    // A failing deparse is reported by the R body, from its own call.
+    let lines = match kernel(
+        crate::deparse::do_deparse,
+        &[expr, width_cutoff, backtick, options, nlines],
+        frame,
+    ) {
+        Ok(lines) => lines,
+        Err(Unwind::Error(_)) => return decline(),
+        Err(other) => return Err(other),
+    };
+    finish(frame, lines, true)
+}
+
+/// `.deparseOpts(control)`, the bit set of deparse options named by `control`.
+unsafe fn do_deparse_opts(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(control) = argument(frame, symbols().control)? else {
+        return decline();
+    };
+    match deparse_options(control)? {
+        Some(options) => finish(frame, values::scalar_real(options)?, true),
+        None => decline(),
+    }
+}
+
+/// What `.deparseOpts(control)` returns, for `NULL` or a character vector of option names
+/// spelled out in full, each at most once; `None` for anything the R body reports as an error
+/// or answers through partial matching. A bit's position is the option's 1-based position in
+/// `..deparseOpts`, as the R body counts them: 1 is "all", 10 "hexNumeric", 11 "digits17" and
+/// 13 "exact".
+unsafe fn deparse_options(control: Sexp) -> R<Option<f64>> {
+    if control == nil() {
+        return Ok(Some(0.0));
+    }
+    if control.kind() != SexpType::String || values::has_attributes(control) {
+        return Ok(None);
+    }
+    if length(control) == 0 {
+        return Ok(Some(0.0));
+    }
+    let table = eval::value_of(eval::find_var_in_frame(
+        symbols().deparse_options,
+        values::base_namespace(),
+    )?)?;
+    if table.kind() != SexpType::String || length(table) > 30 {
+        return Ok(None);
+    }
+    let bit = |position: u32| 1u32 << position;
+    let mut named = 0u32;
+    for index in 0..length(control) {
+        let name = values::string_elt(control, index);
+        if name == values::na_string() {
+            return Ok(None);
+        }
+        let Some(position) = (0..length(table))
+            .find(|&entry| values::string_elt(table, entry).bytes() == name.bytes())
+        else {
+            return Ok(None);
+        };
+        let position = bit(position as u32 + 1);
+        // `pmatch()` matches each table entry once, so a repeated name is not recognized.
+        if named & position != 0 {
+            return Ok(None);
+        }
+        named |= position;
+    }
+    if named & bit(1) != 0 {
+        if named & bit(13) != 0 {
+            return Ok(None);
+        }
+        let keeps_hex = named & bit(10) != 0;
+        named &= !bit(1);
+        named |= [2, 3, 4, 5, 6, 8, 12]
+            .into_iter()
+            .fold(0, |bits, position| bits | bit(position));
+        if !keeps_hex {
+            named |= bit(11);
+        }
+    } else if named & bit(13) != 0 {
+        named &= !bit(13);
+        named |= [2, 3, 4, 5, 6, 8, 10, 12]
+            .into_iter()
+            .fold(0, |bits, position| bits | bit(position));
+    }
+    if named & bit(10) != 0 && named & bit(11) != 0 {
+        return Ok(None);
+    }
+    // `sum(2^(opts - 2))`: position p is bit p - 2 of the result.
+    Ok(Some(f64::from(named >> 2)))
 }
 
 /// `assignNativeRoutines(dll, lib, env, nativeRoutines)`, the closure `loadNamespace()` defines
