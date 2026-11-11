@@ -1086,7 +1086,9 @@ pub const ARITHS: [(Arith, &str); 13] = [
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
 /// length-one vector and a plain vector is any other; both have no attributes and are not
 /// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
-/// it promises what a plain vector does not (no NA, no attributes) and its operators differ.
+/// it promises what a plain vector does not (no NA, no attributes) and its operators differ. A
+/// compact integer sequence (`1:n`, `seq_len(n)`) is its own kind too, because compiled code
+/// computes its elements instead of loading them.
 pub mod feedback {
     pub const INTEGER_SCALAR: u16 = 1 << 0;
     pub const DOUBLE_SCALAR: u16 = 1 << 1;
@@ -1103,6 +1105,8 @@ pub mod feedback {
     pub const BRANCH_TAKEN: u16 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    /// An attribute-free compact integer sequence.
+    pub const INTEGER_SEQUENCE: u16 = 1 << 13;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -1117,7 +1121,14 @@ pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u16 {
 /// The [`feedback`] bit for `value`.
 pub unsafe fn value_kind(value: Sexp) -> u16 {
     if value.is_altrep() {
-        return feedback::OTHER;
+        return if value.kind() == SexpType::Integer
+            && value.tag() == interp().compact_sequence_classes[0]
+            && !values::has_attributes(value)
+        {
+            feedback::INTEGER_SEQUENCE
+        } else {
+            feedback::OTHER
+        };
     }
     if value.is_array() {
         return match value.kind() {

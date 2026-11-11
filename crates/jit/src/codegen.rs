@@ -54,6 +54,9 @@ pub(crate) const FLAGS: i32 = 2;
 const REFCOUNT: i32 = 6;
 const ATTRIB: i32 = 8;
 pub(crate) const LENGTH: i32 = 16;
+/// An ALTREP instance's first data slot and its class.
+const CAR: i32 = 16;
+const TAG: i32 = 32;
 pub(crate) const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
 /// ry's `Array<T>`: its own JIT types (`Ty::IntArr` and so on), and it fails every guard for a
@@ -864,6 +867,12 @@ impl<'p> Translator<'p> {
                     let boxed = self.box_value(ty, unboxed);
                     self.store_register(src, boxed);
                     (boxed, self.builder.ins().load(I64, flags(), boxed, LENGTH))
+                } else if ty == Ty::IntSeq {
+                    let value = self.load_register(src);
+                    let (count, first, step) = self.sequence_info(value);
+                    self.builder.def_var(self.loop_firsts[index], first);
+                    self.builder.def_var(self.loop_steps[index], step);
+                    (value, count)
                 } else {
                     let value = self.load_register(src);
                     match refine {
@@ -950,7 +959,10 @@ impl<'p> Translator<'p> {
                 self.fill_edges()?;
                 self.builder.switch_to_block(body);
                 let sequence = self.load_register(src);
-                let element_ty = before.registers[src].element();
+                let element_ty = match before.registers[src] {
+                    Ty::IntSeq => Ty::Int,
+                    ty => ty.element(),
+                };
                 let width = if matches!(element_ty, Ty::Int | Ty::Lgl) {
                     4
                 } else {
@@ -961,6 +973,15 @@ impl<'p> Translator<'p> {
                 let next_index = self.builder.ins().iadd_imm_s(current, 1);
                 self.builder.def_var(self.loop_indexes[index], next_index);
                 match before.registers[src] {
+                    Ty::IntSeq => {
+                        let first = self.builder.use_var(self.loop_firsts[index]);
+                        let step = self.builder.use_var(self.loop_steps[index]);
+                        let position = self.builder.ins().fcvt_from_sint(F64, current);
+                        let offset = self.builder.ins().fmul(position, step);
+                        let number = self.builder.ins().fadd(first, offset);
+                        let element = self.builder.ins().fcvt_to_sint_sat(I32, number);
+                        self.assign_slot(&before, slot, element_ty, element);
+                    }
                     Ty::IntVec | Ty::DblVec => {
                         // A compact sequence computes its element from the first element and
                         // the increment; any other vector loads it from its storage.
@@ -2017,7 +2038,14 @@ impl<'p> Translator<'p> {
         match intrinsic {
             Intrinsic::Element => {
                 let vector = self.load_register(args[0]);
-                let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+                let sequence = types[0] == Ty::IntSeq;
+                let (length, first, step) = if sequence {
+                    let (length, first, step) = self.sequence_info(vector);
+                    (length, Some(first), Some(step))
+                } else {
+                    let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+                    (length, None, None)
+                };
                 let (index, in_range) = match types[1] {
                     Ty::Int => {
                         let index = self.use_register(args[1], Ty::Int);
@@ -2062,6 +2090,13 @@ impl<'p> Translator<'p> {
                 let scaled = self.builder.ins().imul_imm_s(offset, width);
                 let address = self.builder.ins().iadd(vector, scaled);
                 match result {
+                    Ty::Int if let (Some(first), Some(step)) = (first, step) => {
+                        let position = self.builder.ins().fcvt_from_sint(F64, offset);
+                        let distance = self.builder.ins().fmul(position, step);
+                        let number = self.builder.ins().fadd(first, distance);
+                        let value = self.builder.ins().fcvt_to_sint_sat(I32, number);
+                        self.builder.def_var(self.integers[dst], value);
+                    }
                     // A list element speculated to be a scalar is checked, then unboxed; any
                     // other element hands the read to tier 0.
                     Ty::Int | Ty::Lgl | Ty::Dbl if list => {
@@ -2119,6 +2154,11 @@ impl<'p> Translator<'p> {
             Intrinsic::Length => {
                 let value = if types[0].is_unboxed() {
                     self.builder.ins().iconst(I32, 1)
+                } else if types[0] == Ty::IntSeq {
+                    // A compact sequence is never longer than an integer can count.
+                    let vector = self.load_register(args[0]);
+                    let (length, _, _) = self.sequence_info(vector);
+                    self.builder.ins().ireduce(I32, length)
                 } else {
                     let vector = self.load_register(args[0]);
                     let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
@@ -4056,6 +4096,36 @@ impl<'p> Translator<'p> {
             Ty::DblVec => (SexpType::Real, false),
             Ty::LglVec => (SexpType::Logical, false),
             Ty::List => (SexpType::List, false),
+            Ty::IntSeq => {
+                // An ALTREP instance's class is its tag, which no ordinary vector has, so the
+                // flag is tested before the tag is read.
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let altrep = self.builder.ins().band_imm_u(bits, ALTREP_FLAG);
+                let altrep = self.builder.ins().icmp_imm_s(IntCC::NotEqual, altrep, 0);
+                let decided = self.builder.create_block();
+                let instance = self.builder.create_block();
+                self.builder.append_block_param(decided, I8);
+                let no = self.builder.ins().iconst(I8, 0);
+                self.builder
+                    .ins()
+                    .brif(altrep, instance, &[], decided, &[no]);
+                self.builder.switch_to_block(instance);
+                let class = self.builder.ins().load(I64, flags(), value, TAG);
+                let sequence = interp::interp().compact_sequence_classes[0];
+                let fits =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, class, sequence.as_ptr() as i64);
+                let attributes = self.builder.ins().load(I64, flags(), value, ATTRIB);
+                let plain = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, attributes, self.nil);
+                let fits = self.builder.ins().band(fits, plain);
+                self.builder.ins().jump(decided, &[fits]);
+                self.builder.switch_to_block(decided);
+                return self.builder.block_params(decided)[0];
+            }
             Ty::IntArr | Ty::DblArr | Ty::LglArr => {
                 // The Array bit promises no attributes, so the kind and the bits decide it.
                 let kind = match ty {
@@ -4131,6 +4201,18 @@ impl<'p> Translator<'p> {
             .ins()
             .icmp_imm_s(IntCC::Equal, actual, kind as i64);
         self.builder.ins().band(fits, compact)
+    }
+
+    /// The length, first element and increment of the compact integer sequence `value`, read
+    /// from the `c(n, n1, inc)` doubles of its first data slot. An ALTREP instance keeps that
+    /// slot where an ordinary vector keeps its length.
+    fn sequence_info(&mut self, value: Value) -> (Value, Value, Value) {
+        let info = self.builder.ins().load(I64, flags(), value, CAR);
+        let count = self.builder.ins().load(F64, flags(), info, DATA);
+        let count = self.builder.ins().fcvt_to_sint_sat(I64, count);
+        let first = self.builder.ins().load(F64, flags(), info, DATA + 8);
+        let step = self.builder.ins().load(F64, flags(), info, DATA + 16);
+        (count, first, step)
     }
 
     /// Whether a double position at least one is within `length`. R truncates the position,

@@ -76,6 +76,11 @@ pub enum Ty {
     Num,
     /// A boxed, attribute-free, non-ALTREP integer vector of any length.
     IntVec,
+    /// A boxed, attribute-free compact integer sequence (`1:n`, `seq_len(n)`, `seq_along(x)`):
+    /// compiled code computes an element from the sequence's first element and increment and
+    /// never reads its storage, which it does not have. It joins with nothing else, so no
+    /// vector operation or store sees one.
+    IntSeq,
     DblVec,
     LglVec,
     /// A boxed, attribute-free list.
@@ -204,6 +209,7 @@ pub fn from_feedback(bits: u16) -> Ty {
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
+        feedback::INTEGER_SEQUENCE => Ty::IntSeq,
         _ => Ty::Boxed,
     }
 }
@@ -2453,8 +2459,10 @@ impl<'a> Builder<'a> {
                 let src = operand(1);
                 let ty = state.registers[src];
                 let refine = match ty {
-                    // Code generation boxes an unboxed scalar sequence before the loop.
-                    Ty::IntVec
+                    // Code generation boxes an unboxed scalar sequence before the loop, and
+                    // steps through a compact sequence without expanding it.
+                    Ty::IntSeq
+                    | Ty::IntVec
                     | Ty::DblVec
                     | Ty::LglVec
                     | Ty::List
@@ -2500,7 +2508,10 @@ impl<'a> Builder<'a> {
             Op::ForStep => {
                 let slot = self.slot(self.constant(operand(2)));
                 self.push_edge(operand(3), state);
-                let element = state.registers[operand(1)].element();
+                let element = match state.registers[operand(1)] {
+                    Ty::IntSeq => Ty::Int,
+                    ty => ty.element(),
+                };
                 state.slots[slot] = Slot {
                     status: status::DIRTY,
                     ty: element,
@@ -3898,6 +3909,7 @@ pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
+        feedback::INTEGER_SEQUENCE => Ty::IntSeq,
         _ if values::is_function(value) => Ty::Fun(value),
         _ => Ty::Boxed,
     }
@@ -3956,8 +3968,12 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             (Intrinsic::Element, array.element())
         }
         ("[[", [Ty::List, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Boxed),
+        ("[" | "[[", [Ty::IntSeq, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Int),
         ("length", [ty])
-            if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
+            if ty.is_vector()
+                || ty.is_array()
+                || ty.is_numeric_scalar()
+                || matches!(ty, Ty::List | Ty::IntSeq) =>
         {
             (Intrinsic::Length, Ty::Int)
         }
@@ -4059,10 +4075,11 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
         }
     };
     Some(match (name, types) {
-        ("seq_len", [length]) if length.is_numeric_scalar() => Ty::IntVec,
-        ("seq_along", [along]) if along.is_plain() => Ty::IntVec,
+        // These make compact sequences from two elements on, the common case to guess.
+        ("seq_len", [length]) if length.is_numeric_scalar() => Ty::IntSeq,
+        ("seq_along", [along]) if along.is_plain() => Ty::IntSeq,
         // `1:n` makes integers even from double literals whenever the start is a whole number.
-        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => Ty::IntVec,
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => Ty::IntSeq,
         ("sum", _) if all(&numeric) => match widest() {
             Ty::Dbl => Ty::Dbl,
             _ => Ty::Int,
