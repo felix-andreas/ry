@@ -44,7 +44,7 @@ missing: DataFrame
 #---- an_annotation_types_a_read_without_a_file
 #: DataFrame{region: character[], units: integer[]}
 sales <- DataFrame.read_csv("elsewhere.csv")
-kept <- sales |> DataFrame.filter(col("units") > 1L)
+kept <- sales |> DataFrame.filter(Expr.col("units") > 1L)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 kept: DataFrame{region: character[], units: integer[]}
@@ -75,19 +75,19 @@ eu,9.5,north
 sales <- DataFrame.read_csv("data/sales.csv")
 regions <- DataFrame.read_csv("data/regions.csv")
 wider <- sales |>
-  DataFrame.filter(col("units") > 1L) |>
-  DataFrame.with_columns(revenue = col("units") * col("price"))
+  DataFrame.filter(Expr.col("units") > 1L) |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 joined <- DataFrame.join(wider, regions, on = "region", how = "left")
 totals <- joined |>
   DataFrame.group_by("zone") |>
-  GroupBy.agg(revenue = col("revenue") |> Expr.sum(), top = col("price_right") |> Expr.max())
+  GroupBy.agg(revenue = Expr.col("revenue") |> Expr.sum(), top = Expr.col("price_right") |> Expr.max())
 #++++
 sales: DataFrame{region: character[], units: integer[], price: double[]}
 regions: DataFrame{region: character[], price: double[], zone: character[]}
 wider: DataFrame{region: character[], units: integer[], price: double[], revenue: double[]}
 joined: DataFrame{region: character[], units: integer[], price: double[], revenue: double[], price_right: double[], zone: character[]}
 totals: DataFrame{zone: character[], revenue: double[], top: double[]}
-289..295 warning[unused] `totals` is assigned but never used.
+304..310 warning[unused] `totals` is assigned but never used.
 
 #---- a_lazy_scan_carries_the_schema_to_collect
 #~~~~ data/sales.csv
@@ -95,7 +95,7 @@ region,units
 eu,3
 #~~~~ main.R
 result <- LazyFrame.scan_csv("data/sales.csv") |>
-  LazyFrame.filter(col("units") > 1L) |>
+  LazyFrame.filter(Expr.col("units") > 1L) |>
   LazyFrame.select("region") |>
   LazyFrame.collect()
 #++++
@@ -108,10 +108,10 @@ region,units
 eu,3
 #~~~~ main.R
 sales <- DataFrame.read_csv("data/sales.csv")
-typo <- sales |> DataFrame.filter(col("unit") > 1L)
-text <- sales |> DataFrame.with_columns(bumped = col("region") + 1)
+typo <- sales |> DataFrame.filter(Expr.col("unit") > 1L)
+text <- sales |> DataFrame.with_columns(bumped = Expr.col("region") + 1)
 factors <- DataFrame.read_csv("data/sales.csv", strings_as_factors = TRUE)
-level <- factors |> DataFrame.select(col("region") * 2)
+level <- factors |> DataFrame.select(Expr.col("region") * 2)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 typo: Unknown
@@ -119,11 +119,11 @@ text: Unknown
 factors: DataFrame{region: factor, units: integer[]}
 level: Unknown
 46..50 warning[unused] `typo` is assigned but never used.
-84..90 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
-98..102 warning[unused] `text` is assigned but never used.
-147..160 error[type-mismatch] `+` needs numbers, but the column `region` is `character[]`
-241..246 warning[unused] `level` is assigned but never used.
-278..291 error[type-mismatch] `*` needs numbers, but the column `region` is `factor`
+89..95 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
+103..107 warning[unused] `text` is assigned but never used.
+152..170 error[type-mismatch] `+` needs numbers, but the column `region` is `character[]`
+251..256 warning[unused] `level` is assigned but never used.
+288..306 error[type-mismatch] `*` needs numbers, but the column `region` is `factor`
 
 #==== strict_columns
 #---- strict_mode_reports_a_query_on_unknown_columns
@@ -131,9 +131,9 @@ level: Unknown
 path <- file.path("data", "sales.csv")
 sales <- DataFrame.read_csv(path)
 kept <- sales |>
-  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = col("units") |> Expr.sum())
+  GroupBy.agg(total = Expr.col("units") |> Expr.sum())
 first <- sales |> DataFrame.head(2L)
 #++++
 path: character
@@ -141,7 +141,7 @@ sales: DataFrame
 kept: DataFrame
 first: DataFrame
 90..94 warning[unused] `kept` is assigned but never used.
-232..237 warning[unused] `first` is assigned but never used.
+242..247 warning[unused] `first` is assigned but never used.
 98..103 error[strict] strict mode: the columns of `sales` are unknown, so the column names and types this query uses are not checked. Give `sales` a type that lists its columns, as in `sales: DataFrame{units: TYPE}`
 
 #---- strict_mode_reports_a_chain_whose_first_steps_name_no_column
@@ -151,7 +151,7 @@ sales <- DataFrame.read_csv(path)
 kept <- sales |>
   DataFrame.head(5L) |>
   DataFrame.lazy() |>
-  LazyFrame.filter(col("units") > 1L) |>
+  LazyFrame.filter(Expr.col("units") > 1L) |>
   LazyFrame.select("units")
 #++++
 path: character
@@ -172,7 +172,7 @@ pick: fn(df: DataFrame) -> DataFrame
 #---- strict_mode_reports_a_query_on_a_frame_that_is_not_a_variable
 # typing: strict
 path <- file.path("data", "sales.csv")
-kept <- DataFrame.read_csv(path) |> DataFrame.filter(col("units") > 1L)
+kept <- DataFrame.read_csv(path) |> DataFrame.filter(Expr.col("units") > 1L)
 #++++
 path: character
 kept: DataFrame
@@ -188,7 +188,7 @@ eu,3
 path <- file.path("data", "sales.csv")
 #: DataFrame{region: character[], units: integer[]}
 annotated <- DataFrame.read_csv(path)
-kept <- annotated |> DataFrame.filter(col("units") > 1L)
+kept <- annotated |> DataFrame.filter(Expr.col("units") > 1L)
 read <- DataFrame.read_csv("data/sales.csv") |> DataFrame.select("region")
 #++++
 path: character
@@ -196,4 +196,4 @@ annotated: DataFrame{region: character[], units: integer[]}
 kept: DataFrame{region: character[], units: integer[]}
 read: DataFrame{region: character[]}
 146..150 warning[unused] `kept` is assigned but never used.
-203..207 warning[unused] `read` is assigned but never used.
+208..212 warning[unused] `read` is assigned but never used.

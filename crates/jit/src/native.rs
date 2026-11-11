@@ -39,8 +39,8 @@ use {
     interp::{
         annotations, bytecode,
         eval::{
-            PendingName, is_reference, peek_variable, pending_name, reference_value,
-            reference_variable, settle_unforced,
+            PendingName, is_reference, peek_variable, pending_name, reference_variable,
+            settle_unforced,
         },
         records, values,
     },
@@ -3206,7 +3206,10 @@ pub(crate) unsafe fn run(
 /// `...` must keep the value this call saw, as if tier 0 had forced it.
 unsafe fn force_read(read: &[(Sexp, Sexp)]) {
     for &(promise, value) in read {
-        settle_unforced(promise, value);
+        // Settling runs code only for a checked promise, which the reads above decline.
+        if let Err(unwind) = settle_unforced(promise, value) {
+            panic!("a promise read for native code failed to settle: {unwind:?}");
+        }
     }
 }
 
@@ -3235,12 +3238,11 @@ unsafe fn promise_value(
         match reference_variable(promise) {
             // The variable holds a promise of the caller's own argument, which the same rules
             // read in its own environment.
-            Some(inner)
-                if inner.kind() == SexpType::Promise && inner.car() == values::unbound() =>
-            {
+            Some(inner) if inner.kind() == SexpType::Promise => {
                 promise_value(inner, read, depth + 1)?
             }
-            _ => reference_value(promise)?,
+            Some(value) => value,
+            None => return None,
         }
     } else if matches!(
         expression.kind(),

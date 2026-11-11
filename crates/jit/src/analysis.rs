@@ -894,6 +894,15 @@ pub enum Action<'a> {
         objects: &'a [usize],
         dst: Option<(usize, Ty)>,
     },
+    /// Runs an [`Op::Fused`] pass in tier 0, reading the call operands it evaluated ahead from
+    /// `reads`. When the pass computes the expression, `dst` holds its value, checked to be of
+    /// type `ty`, and control goes to the jump target; otherwise it falls through to the
+    /// ordinary code.
+    Fused {
+        dst: usize,
+        ty: Ty,
+        reads: &'a [usize],
+    },
     /// The instruction's check always passes, so control falls through.
     FallThrough,
     /// Control always goes to the jump target.
@@ -1272,6 +1281,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SwitchArm
             | Op::Replace
             | Op::Missing
+            | Op::Namespace
             | Op::SuperAssign
             | Op::SetSrcref
             | Op::Resume
@@ -2312,8 +2322,9 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::PureUnlessObserved,
             ),
-            // `missing` reads the frame's bindings, so the variables must be written back first.
-            Op::Ast | Op::Missing => self.opaque_step(
+            // `missing` reads the frame's bindings, so the variables must be written back first,
+            // and `::` may load a namespace, which runs arbitrary code.
+            Op::Ast | Op::Missing | Op::Namespace => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -2386,9 +2397,33 @@ impl<'a> Builder<'a> {
                 }
                 Action::FallThrough
             }
-            // The fused pass is an interpreter shortcut: optimized code runs the ordinary code
-            // after it, which computes the same value.
-            Op::Fused | Op::Unfused => Action::FallThrough,
+            // A site that gave up keeps only its ordinary code.
+            Op::Unfused => Action::FallThrough,
+            Op::Fused => {
+                let program = self.constant(operand(1));
+                if program == values::nil() {
+                    return Ok(Action::FallThrough);
+                }
+                // The fused pass records its result's type at the instruction whose value it
+                // computes, so the jump to its target speculates on that type.
+                let ty = match bytecode::fused_result_site(program).map(|site| self.feedback_at(site))
+                {
+                    None | Some(Ty::Bottom) => Ty::Boxed,
+                    Some(ty) => ty,
+                };
+                let reads = self.slice(bytecode::fused_operand_registers(program));
+                // The pass reads variables from the frame and may force an argument's promise,
+                // so the variables are written back before it and reloaded after it.
+                state.flushed();
+                state.forget_slots();
+                state.visible = None;
+                let dst = operand(0);
+                let previous = state.registers[dst];
+                state.registers[dst] = ty;
+                self.push_edge(operand(2), state);
+                state.registers[dst] = previous;
+                Action::Fused { dst, ty, reads }
+            }
             Op::Jump | Op::Resume => {
                 self.push_edge(operand(0), state);
                 return Ok(Action::Jump);
@@ -4136,6 +4171,7 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
         Op::Guard => Some(inst.operand(4)),
+        Op::Fused => Some(inst.operand(2)),
         _ => None,
     }
 }
@@ -4156,6 +4192,7 @@ fn ends_block(op: Op) -> bool {
             | Op::ForStep
             | Op::LogicLeft
             | Op::Guard
+            | Op::Fused
             | Op::Return
     )
 }
@@ -4170,9 +4207,13 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     let kill = |register: usize, live: &mut [u64]| set_bit(live, register, false);
     let gen_ = |register: usize, live: &mut [u64]| set_bit(live, register, true);
     match inst.op {
-        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure | Op::Missing => {
-            kill(operand(0), live)
-        }
+        Op::Constant
+        | Op::GetVar
+        | Op::GetFun
+        | Op::Ast
+        | Op::Closure
+        | Op::Missing
+        | Op::Namespace => kill(operand(0), live),
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)

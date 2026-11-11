@@ -1,0 +1,26 @@
+[stdout]
+| [1] "15" "25" "30"
+| 3 x prettyNum(.Internal(format(x, trim, digits, nsmall, width, 3L,  | the decimal mark is less than one character wide; this will become an error 
+| 1 x prettyNum(.Internal(format(x, trim, digits, nsmall, width, 3L,  | 'big.mark' and 'decimal.mark' are both '', which could be confusing 
+| [1] "1ab5" " NA" 
+| 2 x prettyNum(.Internal(format(x, trim, digits, nsmall, width, 3L,  | the decimal mark is more than one character wide; this will become an error 
+| [1] " 1" "NA"
+| [1] "1+2ab5i" "    NA" 
+| 2 x prettyNum(.Internal(format(x, trim, digits, nsmall, width, 3L,  | the decimal mark is more than one character wide; this will become an error 
+| [1] "1·5"
+| [1] "0,250"
+| [1] 1,5  NA
+| 2,5 
+| printed
+| print.default(c(1.5, NA)) | the decimal mark is more than one character wide; this will become an error 
+|                                                                                                       2 
+| written
+| cat(2.5, NA_real_, z, 3L, "\\n") | the decimal mark is more than one character wide; this will become an error 
+|                                                                                                              4 
+| [1] 0
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

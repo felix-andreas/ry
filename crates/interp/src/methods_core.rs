@@ -1038,6 +1038,15 @@ unsafe fn quiet_value(symbol: Sexp, frame: Sexp) -> R<Option<Sexp>> {
     }
 }
 
+/// The value `get(name, envir = frame, inherits = FALSE)` returns, forcing a promise such as a
+/// lazy-load binding, or `None` when `frame` does not bind the name.
+unsafe fn forced_value(symbol: Sexp, frame: Sexp) -> R<Option<Sexp>> {
+    if crate::heap().frame_cell(frame, symbol).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(eval::value_of(eval::find_var_in_frame(symbol, frame)?)?))
+}
+
 unsafe fn quiet_binding(cell: Sexp, depth: u32) -> R<Option<Sexp>> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
         return Ok(None);
@@ -3866,13 +3875,39 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
     }
     if forced_arg(frame, "searchWhere")? != Some(place)
         || std::env::var_os("_R_TRACE_LOADNAMESPACE_").is_some_and(|value| !value.is_empty())
-        || crate::heap()
-            .frame_cell(place, install(".requireCachedGenerics")?)
-            .is_some()
     {
         bail!(skip);
     }
-    let Some(package) = quiet_value(symbols().dot_package_name, place)? else {
+    // `.requireCachedGenerics`, which `setOldClass()` with a prototype leaves to ask for `Ops`,
+    // joins the generics as `c(generics, others)` with its `package` attribute.
+    let mut required = Vec::new();
+    let required_symbol = install(".requireCachedGenerics")?;
+    if let Some(others) = forced_value(required_symbol, place)? {
+        let others_packages = get_attr(others, symbols().package);
+        if !matches!(others.kind(), SexpType::List | SexpType::String)
+            || others_packages.kind() != SexpType::String
+            || length(others_packages) != length(others)
+        {
+            bail!(skip);
+        }
+        for index in 0..length(others) {
+            let name = match others.kind() {
+                SexpType::String => others.element(index),
+                _ => {
+                    let item = others.element(index);
+                    if item.kind() != SexpType::String || length(item) != 1 {
+                        bail!(skip);
+                    }
+                    item.element(0)
+                }
+            };
+            if name == values::na_string() || others_packages.element(index) == values::na_string() {
+                bail!(skip);
+            }
+            required.push((name.bytes().to_vec(), others_packages.element(index).bytes().to_vec()));
+        }
+    }
+    let Some(package) = forced_value(symbols().dot_package_name, place)? else {
         bail!(skip);
     };
     if !is_plain_name(package) {
@@ -3909,6 +3944,7 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
         }
         generics.push((rest[..colon].to_vec(), rest[colon + 1..].to_vec()));
     }
+    generics.extend(required);
     // `generics[!dups]` with `dups <- duplicated(generics) & duplicated(packages)` drops a
     // generic, but `packages` keeps every entry, so the generic after a dropped one is paired
     // with the package at its old position.
@@ -3953,6 +3989,11 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
         }
         if generic_package.as_slice() == package_name
             && cache_own_generic(name, package_name, place, generic_table)?
+        {
+            continue;
+        }
+        if generic_package.as_slice() != package_name
+            && cache_foreign_generic(name, generic_package, place, generic_table)?
         {
             continue;
         }
@@ -4028,7 +4069,7 @@ fn trace_delegate(line: u32) {
 /// effect, when the definition is not a plain class, union or reference class representation,
 /// or when the class table holds a definition of the name from another package.
 unsafe fn cache_class_item(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp) -> R<bool> {
-    let Some(definition) = quiet_value(symbol, place)? else {
+    let Some(definition) = forced_value(symbol, place)? else {
         bail!(false);
     };
     let class = values::class_attr(definition);
@@ -4305,6 +4346,164 @@ unsafe fn cache_own_generic(
         }
     }
     Ok(true)
+}
+
+/// What `cacheMetaData(where)` does for a generic of another package that the namespace holds
+/// no methods for, such as the `Ops` that `setOldClass()` asks for: `.cacheGeneric()` finds the
+/// generic cached already, `.updateMethodsInTable()` resets the inherited methods of the generic
+/// and of every member of its group, and `cacheGenericsMetaData()` sets the methods of each
+/// primitive member. `false`, before any effect, unless every generic of the group is cached,
+/// holds its methods tables, agrees on the signature length (so `.checkGroupSigLength()` resets
+/// nothing) and has no table in the namespace to merge.
+unsafe fn cache_foreign_generic(
+    name: &[u8],
+    generic_package: &[u8],
+    place: Sexp,
+    generic_table: Sexp,
+) -> R<bool> {
+    let symbol = values::install_bytes(name)?;
+    let global = values::global_env();
+    if crate::heap().frame_cell(place, symbol).is_some()
+        || crate::heap().frame_cell(global, symbol).is_some()
+    {
+        bail!(false);
+    }
+    // `getGeneric(f, FALSE, searchWhere, fpkg)` searches from the namespace, not the cache.
+    let generic = crate::methods::visible_generic(symbol, place)?;
+    if generic == nil()
+        || generic.kind() != SexpType::Closure
+        || slot_text(generic, "package")? != generic_package
+        || !same_generic(quiet_value(symbol, generic_table)?, generic)
+        || length(get_attr(generic, install("group")?)) != 0
+    {
+        bail!(false);
+    }
+    // `.updateMethodsInTable()` finds the members in the generic cache and
+    // `cacheGenericsMetaData()` searches for them from the namespace; both must give the
+    // generics checked here.
+    let mut tables = Vec::new();
+    let mut primitives = Vec::new();
+    let mut pending = vec![generic];
+    let mut signature_length = None;
+    while let Some(node) = pending.pop() {
+        let environment = node.tag();
+        let (Some(methods_table), Some(all_table), Some(length_value)) = (
+            quiet_value(symbols().mtable, environment)?,
+            quiet_value(symbols().all_mtable, environment)?,
+            quiet_value(symbols().sig_length, environment)?,
+        ) else {
+            bail!(false);
+        };
+        if methods_table.kind() != SexpType::Environment
+            || all_table.kind() != SexpType::Environment
+            || all_table.has_gp(gp::FRAME_LOCKED)
+            || length(length_value) != 1
+            || !matches!(length_value.kind(), SexpType::Integer | SexpType::Real)
+        {
+            bail!(false);
+        }
+        let length_value = values::as_real_scalar(length_value);
+        if *signature_length.get_or_insert(length_value) != length_value {
+            bail!(false);
+        }
+        let mut table_name = b".__T__".to_vec();
+        table_name.extend_from_slice(slot_text(node, "generic")?);
+        table_name.push(b':');
+        table_name.extend_from_slice(slot_text(node, "package")?);
+        if crate::heap()
+            .frame_cell(place, values::install_bytes(&table_name)?)
+            .is_some()
+        {
+            bail!(false);
+        }
+        tables.push((methods_table, all_table));
+        if values::inherits(node, "groupGenericFunction") {
+            let members = get_attr(node, install("groupMembers")?);
+            if members.kind() != SexpType::List {
+                bail!(false);
+            }
+            for index in 0..length(members) {
+                let member = members.element(index);
+                if member.kind() != SexpType::String || length(member) != 1 {
+                    bail!(false);
+                }
+                let member_symbol = values::install_charsxp(member.element(0))?;
+                if crate::heap().frame_cell(global, member_symbol).is_some() {
+                    bail!(false);
+                }
+                // `getGeneric()` answers from the generic table first, which is the only place
+                // the generic of a primitive member such as `&` lives.
+                let cached = quiet_value(member_symbol, generic_table)?;
+                let visible = crate::methods::visible_generic(member_symbol, place)?;
+                let visible = match (cached, visible.kind()) {
+                    (Some(cached), SexpType::Nil | SexpType::Builtin | SexpType::Special)
+                        if cached.kind() == SexpType::Closure =>
+                    {
+                        cached
+                    }
+                    (_, SexpType::Closure) if same_generic(cached, visible) => visible,
+                    _ => bail!(false),
+                };
+                pending.push(visible);
+            }
+        } else {
+            let default = slot(node, symbols().default)?;
+            if matches!(default.kind(), SexpType::Builtin | SexpType::Special) {
+                primitives.push((default, node, methods_table));
+            } else if node != generic || values::inherits(default, "internalDispatchMethod") {
+                bail!(false);
+            }
+        }
+    }
+    // `.resetInheritedMethods()`: `.AllMTable` keeps the direct methods only, refilled from
+    // `.MTable` when one is missing. A `MethodWithNext` among them would be converted back.
+    let mut plans = Vec::with_capacity(tables.len());
+    for &(methods_table, all_table) in &tables {
+        let direct = crate::envir::env_symbols(methods_table, true, false);
+        let all = crate::envir::env_symbols(all_table, true, false);
+        let refill = direct.iter().any(|label| !all.contains(label));
+        for &label in &direct {
+            let source = if refill { methods_table } else { all_table };
+            let Some(value) = quiet_value(label, source)? else {
+                bail!(false);
+            };
+            if value.has_gp(gp::S4_OBJECT) && !is_method_definition(value) {
+                bail!(false);
+            }
+        }
+        let removed: Vec<Sexp> = all.into_iter().filter(|label| !direct.contains(label)).collect();
+        plans.push((methods_table, all_table, removed, refill.then_some(direct)));
+    }
+
+    for (methods_table, all_table, removed, refill) in plans {
+        for label in removed {
+            crate::heap()
+                .remove_binding(all_table, label)
+                .map_err(|error| crate::unwind::error(error.to_string()))?;
+        }
+        for label in refill.unwrap_or_default() {
+            let Some(value) = quiet_value(label, methods_table)? else {
+                return Err(crate::unwind::error(
+                    "a methods table holds an unforced promise",
+                ));
+            };
+            eval::define(label, value, all_table)?;
+        }
+    }
+    for (primitive, node, methods_table) in primitives {
+        crate::dispatch::set_primitive_methods(primitive, "set", node, methods_table)?;
+    }
+    Ok(true)
+}
+
+/// Whether the generic cache holds `generic` as `identical()` sees it, which is how
+/// `.cacheGenericTable()` decides that nothing changes. The two are often distinct copies of
+/// one generic: equal slots and the same environment, so the same methods tables.
+unsafe fn same_generic(cached: Option<Sexp>, generic: Sexp) -> bool {
+    cached.is_some_and(|cached| {
+        cached == generic
+            || crate::sort::identical(cached, generic, &crate::sort::IdenticalFlags::default())
+    })
 }
 
 /// Whether `value` is a method object of class `MethodDefinition` or `derivedDefaultMethod`,

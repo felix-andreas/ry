@@ -1,0 +1,22 @@
+[stdout]
+| txt R x1 csv 
+| txt R x1 csv 
+| txt R x1 csv 
+| patched patched patched 
+| patched patched patched 
+| txt R csv 
+| txt R csv 
+| D.TXT txt 
+| D.TXT txt 
+| 'no_such_name' is not an exported object from 'namespace:tools' 
+| 'no_such_name' is not an exported object from 'namespace:tools' 
+| 32 
+| 32 
+| TRUE 
+| TRUE 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -36,8 +36,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryStructure", 0, do_structure),
     internal("rySysGetenv", 0, do_sys_getenv),
     internal("rySysSetenv", 0, do_sys_setenv),
+    internal("rySysWhich", 0, do_sys_which),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
+    internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
     internal("ryMessage", 0, do_message),
     internal("rySignalCondition", 0, do_signal_condition),
 ];
@@ -53,11 +55,22 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("structure", "ryStructure", 0xe1de236049200229),
     ("Sys.getenv", "rySysGetenv", 0xe91342790fcd5c16),
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
+    ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
 ];
+
+/// The closures that a base function defines in its own body and that get a fast path: the
+/// outer function, the inner closure's name, the internal its prologue calls and the
+/// [`stable_hash`] of the inner closure's formals and body (GNU R 4.6.2).
+const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[(
+    "loadNamespace",
+    "assignNativeRoutines",
+    "ryAssignNativeRoutines",
+    0x26c985af62edd0db,
+)];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
 /// place so that every reference to it gets the fast path. ry builds its bundled base R itself,
@@ -72,6 +85,12 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
         let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
         if !install_prologue(function, name, internal_name, expected, print)? {
             missed.push(name);
+        }
+    }
+    for &(outer, inner, internal_name, expected) in NESTED_FAST_PATHS {
+        let function = eval::value_of(eval::find_var_in_frame(install(outer)?, namespace)?)?;
+        if !install_nested_prologue(function, inner, internal_name, expected, print)? {
+            missed.push(inner);
         }
     }
     if bundled && !missed.is_empty() {
@@ -115,37 +134,152 @@ pub(crate) unsafe fn install_prologue(
     if function.kind() != SexpType::Closure {
         return Ok(false);
     }
+    let body = crate::bytecode::closure_body(function);
+    let Some(block) = with_prologue(function.car(), body, name, internal_name, expected, print)?
+    else {
+        return Ok(false);
+    };
+    if block != body {
+        crate::heap().set_cdr(function, block);
+    }
+    Ok(true)
+}
+
+/// `body` with `.Internal(<internal_name>())` in front when `formals` and `body` hash to
+/// `expected`, or `body` itself when it opens with that prologue already; `None` otherwise.
+unsafe fn with_prologue(
+    formals: Sexp,
+    body: Sexp,
+    name: &str,
+    internal_name: &str,
+    expected: u64,
+    print: bool,
+) -> R<Option<Sexp>> {
     let prologue = values::lcons(
         symbols().dot_internal,
         values::cons(values::lcons(install(internal_name)?, nil())?, nil())?,
     )?;
-    let mut body = crate::bytecode::closure_body(function);
-    let mut already = false;
-    if body.kind() == SexpType::Language
+    let mut original = body;
+    let already = body.kind() == SexpType::Language
         && body.car() == symbols().brace
         && values::pairlist_length(body.cdr()) == 2
-        && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default())
-    {
-        body = body.cdr().cdr().car();
-        already = true;
+        && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default());
+    if already {
+        original = body.cdr().cdr().car();
     }
+    let hashed = if name == "Sys.which" {
+        configured_which_as_bundled(original)?
+    } else {
+        original
+    };
     let mut hash = FNV_OFFSET;
-    stable_hash(function.car(), &mut hash);
-    stable_hash(body, &mut hash);
+    stable_hash(formals, &mut hash);
+    stable_hash(hashed, &mut hash);
     if print {
         eprintln!("{name} {hash:#018x}");
     }
     if hash != expected {
+        return Ok(None);
+    }
+    if already {
+        return Ok(Some(body));
+    }
+    Ok(Some(values::lcons(
+        symbols().brace,
+        values::cons(prologue, values::cons(original, nil())?)?,
+    )?))
+}
+
+/// `Sys.which`'s `body` as ry's bundled base R has it. GNU R's configure writes the path of the
+/// `which` program it found into the body (`which <- "/usr/bin/which"`), so the body differs
+/// between builds of one release, and ry's own build writes `"which"`. The fast path never runs
+/// that program, so a body that differs only there is the same code to it.
+unsafe fn configured_which_as_bundled(body: Sexp) -> R<Sexp> {
+    let which = install("which")?;
+    let is_configured_which = |statement: Sexp| {
+        statement.kind() == SexpType::Language
+            && statement.car() == symbols().assign
+            && statement.cdr().car() == which
+            && statement.cdr().cdr().car().kind() == SexpType::String
+            && length(statement.cdr().cdr().car()) == 1
+    };
+    if body.kind() != SexpType::Language || body.car() != symbols().brace {
+        return Ok(body);
+    }
+    let mut statements = body.cdr();
+    while statements.kind() == SexpType::Pairlist && !is_configured_which(statements.car()) {
+        statements = statements.cdr();
+    }
+    if statements.kind() != SexpType::Pairlist {
+        return Ok(body);
+    }
+    let heap = crate::heap();
+    let copy = values::duplicate(body)?;
+    heap.root(copy);
+    let mut statements = copy.cdr();
+    while !is_configured_which(statements.car()) {
+        statements = statements.cdr();
+    }
+    let bundled = values::scalar_string("which")?;
+    heap.set_car(statements.car().cdr().cdr(), bundled);
+    Ok(copy)
+}
+
+/// Puts the prologue in front of the closure that `outer`'s body defines as
+/// `inner <- function(...) ...`, by changing that `function` expression, so every closure the
+/// outer function makes from it gets the fast path. Returns whether the expression has it.
+unsafe fn install_nested_prologue(
+    outer: Sexp,
+    inner: &str,
+    internal_name: &str,
+    expected: u64,
+    print: bool,
+) -> R<bool> {
+    if outer.kind() != SexpType::Closure {
         return Ok(false);
     }
-    if !already {
-        let block = values::lcons(
-            symbols().brace,
-            values::cons(prologue, values::cons(body, nil())?)?,
-        )?;
-        crate::heap().set_cdr(function, block);
+    let Some(definition) =
+        find_function_definition(crate::bytecode::closure_body(outer), install(inner)?)
+    else {
+        return Ok(false);
+    };
+    // `function(formals, body, srcref)`
+    let body_cell = definition.cdr().cdr();
+    let body = body_cell.car();
+    let Some(block) =
+        with_prologue(definition.cdr().car(), body, inner, internal_name, expected, print)?
+    else {
+        return Ok(false);
+    };
+    if block != body {
+        crate::heap().set_car(body_cell, block);
     }
     Ok(true)
+}
+
+/// The `function(...)` expression assigned to `name` by an `name <- function(...)` anywhere in
+/// `code`.
+unsafe fn find_function_definition(code: Sexp, name: Sexp) -> Option<Sexp> {
+    if code.kind() != SexpType::Language {
+        return None;
+    }
+    if code.car() == symbols().assign
+        && values::pairlist_length(code.cdr()) == 2
+        && code.cdr().car() == name
+    {
+        let value = code.cdr().cdr().car();
+        if value.kind() == SexpType::Language && value.car() == symbols().function {
+            return Some(value);
+        }
+    }
+    let mut rest = code.cdr();
+    while rest.kind() == SexpType::Pairlist {
+        if let Some(found) = find_function_definition(rest.car(), name) {
+            return Some(found);
+        }
+        rest = rest.cdr();
+    }
+    None
 }
 
 /// The native code for a whole call of a closure: the result, or `None` when the closure is to
@@ -155,8 +289,9 @@ pub type NativeEntry = unsafe fn(&[Arg]) -> R<Option<Sexp>>;
 /// How a registered closure's native code reads the call's arguments.
 #[derive(Clone, Copy)]
 pub enum Entry {
-    /// As the closure would receive them, untagged.
-    Whole(NativeEntry),
+    /// As the closure would receive them, untagged. `inlined` marks a closure GNU R's
+    /// compiler inlines (see [`NATIVE_ENTRIES`]).
+    Whole { code: NativeEntry, inlined: bool },
     /// Matched to the closure's formals, with the defaults filled in, and passed to the
     /// routine as the closure's body passes them ([`recognize_routine_closure`]).
     Routine(NativeEntry, RoutinePlan),
@@ -168,23 +303,44 @@ pub enum Entry {
 /// testthat-style code `identical`, `isTRUE`, `nrow`, `%in%` and `%||%` each take 1 to 2.5% of
 /// the run, and `typeof`, `inherits`, `is.factor`, `is.vector` and `isNamespace` are among the
 /// closures called most often.
-const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
-    ("identical", 0x53ecb73e41a5f29e, native_identical),
-    ("isTRUE", 0x092932cb0d38b378, native_is_true),
-    ("isFALSE", 0x02a0aba295284434, native_is_false),
-    ("nrow", 0xaf2f11bd0294734b, native_nrow),
-    ("ncol", 0xcf3f0da3fff33d98, native_ncol),
-    ("match", 0x8dee99370571e93c, native_match),
-    ("%in%", 0x2fb6d82723e3191f, native_in),
-    ("%||%", 0x3f61ec71bc0d9992, native_or_else),
-    ("typeof", 0x6fcb4f267ff82404, native_typeof),
-    ("inherits", 0x5adef86a3b8a8d6a, native_inherits),
-    ("is.factor", 0x31be66479af8cf70, native_is_factor),
-    ("is.data.frame", 0x7c700cf6459e2410, native_is_data_frame),
-    ("is.vector", 0xf347f791e9374052, native_is_vector),
-    ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
-    ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
-    ("getOption", 0x2778de423545af25, native_get_option),
+///
+/// The last column marks the closures GNU R's byte-code compiler inlines into their `.Internal`
+/// call (its "safe base internals"): compiled code evaluates their arguments in the caller and
+/// calls the builtin, so no frame of theirs exists while an argument is forced, and
+/// [`native_entry_by_value`] forces them from compiled code too.
+const NATIVE_ENTRIES: &[(&str, u64, NativeEntry, bool)] = &[
+    ("identical", 0x53ecb73e41a5f29e, native_identical, true),
+    ("isTRUE", 0x092932cb0d38b378, native_is_true, false),
+    ("isFALSE", 0x02a0aba295284434, native_is_false, false),
+    ("nrow", 0xaf2f11bd0294734b, native_nrow, false),
+    ("ncol", 0xcf3f0da3fff33d98, native_ncol, false),
+    ("match", 0x8dee99370571e93c, native_match, true),
+    ("%in%", 0x2fb6d82723e3191f, native_in, false),
+    ("%||%", 0x3f61ec71bc0d9992, native_or_else, false),
+    ("typeof", 0x6fcb4f267ff82404, native_typeof, true),
+    ("inherits", 0x5adef86a3b8a8d6a, native_inherits, true),
+    ("is.factor", 0x31be66479af8cf70, native_is_factor, false),
+    (
+        "is.data.frame",
+        0x7c700cf6459e2410,
+        native_is_data_frame,
+        false,
+    ),
+    ("is.vector", 0xf347f791e9374052, native_is_vector, true),
+    (
+        "isNamespace",
+        0x9dbd26992b319771,
+        native_is_namespace,
+        false,
+    ),
+    (
+        "Sys.unsetenv",
+        0x3bf70db0fa5a60ee,
+        native_sys_unsetenv,
+        false,
+    ),
+    ("readRDS", 0x92a81976dbd4c35a, native_read_rds, false),
+    ("getOption", 0x2778de423545af25, native_get_option, false),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -196,7 +352,7 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
         crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim();
     let mut missed = Vec::new();
     interp().native_entries.clear();
-    for &(name, expected, code) in NATIVE_ENTRIES {
+    for &(name, expected, code, inlined) in NATIVE_ENTRIES {
         let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
         if function.kind() != SexpType::Closure {
             missed.push(name);
@@ -212,7 +368,7 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
             missed.push(name);
             continue;
         }
-        register(function, Entry::Whole(code));
+        register(function, Entry::Whole { code, inlined });
     }
     if bundled && !missed.is_empty() {
         return Err(crate::unwind::error(format!(
@@ -427,21 +583,27 @@ pub unsafe fn register_routine_entries() -> R<()> {
 /// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively when its
 /// native code accepts the arguments. The closure's frame is never built, which is
 /// unobservable because the native code only reads arguments that are already values: a
-/// promise is read only when it is forced or when its code is a constant or a variable bound
-/// to a value, so nothing runs that could see the missing frame (`sys.calls()`, a handler, a
-/// traceback). A closure being debugged or traced runs as usual.
+/// promise is read only when it is forced or when reading it runs no code
+/// ([`eval::settled_without_code`]), so nothing runs that could see the missing frame
+/// (`sys.calls()`, a handler, a traceback). A closure being debugged or traced runs as usual.
 pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         return Ok(None);
     }
+    enter(function, registered(function), args)
+}
+
+/// [`native_entry`] for a closure that is not being debugged or traced, whose registered entry
+/// the caller has already looked up.
+unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<Sexp>> {
     let tagged = args.iter().any(|arg| arg.tag != nil());
-    let value = match registered(function) {
-        Some(Entry::Whole(code)) if !tagged => {
+    let value = match entry {
+        Some(Entry::Whole { code, .. }) if !tagged => {
             // An entry whose closure returns invisibly clears the flag itself.
             interp().visible = true;
             code(args)?
         }
-        Some(Entry::Whole(_)) => return Ok(None),
+        Some(Entry::Whole { .. }) => return Ok(None),
         Some(Entry::Routine(code, plan)) => {
             let Some(matched) = routine_arguments(function, plan, args)? else {
                 return Ok(None);
@@ -472,36 +634,69 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
 }
 
 /// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively from its
-/// unevaluated `arguments` when each is a constant or a variable bound to a value, so the call
-/// builds no promise at all. Reading such an argument runs no R code, so reading it now gives
-/// the value forcing its promise would give, and the native code reads only values; when it
-/// declines, nothing has changed and the caller builds the promises as usual. `lookup` gives a
-/// variable's value when reading it runs no R code ([`crate::effects::eager_argument`] in the
-/// caller's environment, or the slots of a caller that has none).
+/// unevaluated `arguments` when each is a constant or a variable, so the call builds no promise
+/// at all. `lookup` gives a variable's binding when reading it runs no R code
+/// ([`crate::effects::eager_argument`] in the caller's environment, or the slots of a caller
+/// that has none), and the entry reads a promise bound there only when its R body would read
+/// the argument and reading runs no code ([`resolved`]). When the native code declines, the
+/// caller builds the promises as usual.
+///
+/// From `compiled` code, the arguments of a closure GNU R's compiler inlines (see
+/// [`NATIVE_ENTRIES`]) are forced here, in order, whatever code that runs, because compiled GNU
+/// R forces them in the caller before the builtin runs.
 pub unsafe fn native_entry_by_value(
     function: Sexp,
     arguments: Sexp,
+    compiled: bool,
     lookup: impl Fn(Sexp) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+        return Ok(None);
+    }
+    let mut tagged = false;
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        tagged |= cell.tag() != nil();
+        if expression == missing_arg()
+            || expression == symbols().dots
+            || matches!(
+                expression.kind(),
+                SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            )
+        {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    let entry = registered(function);
+    let forcing = compiled && !tagged && matches!(entry, Some(Entry::Whole { inlined: true, .. }));
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
-        let value = match expression.kind() {
-            SexpType::Symbol => {
-                if expression == missing_arg() || expression == symbols().dots {
-                    return Ok(None);
-                }
-                match lookup(expression) {
-                    Some(value) => match resolved(value)? {
+        let value = if expression.kind() == SexpType::Symbol {
+            match lookup(expression) {
+                Some(value)
+                    if forcing
+                        && value.kind() == SexpType::Promise
+                        && value.car() == values::unbound() =>
+                {
+                    // A chain that ends without code settles to what forcing would give, and
+                    // far more cheaply than an evaluation.
+                    match eval::settled_without_code(value)? {
                         Some(value) => value,
-                        None => return Ok(None),
-                    },
-                    None => return Ok(None),
+                        None => eval::force_promise(value)?,
+                    }
                 }
+                // Otherwise the binding goes through as it is: each entry resolves only the
+                // arguments its R body would read, so an argument it skips (`getOption`'s
+                // `default` when the option is set) stays an unsettled promise.
+                Some(value) if value != missing_arg() => value,
+                _ => return Ok(None),
             }
-            SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(None),
-            _ => expression,
+        } else {
+            expression
         };
         args.push(Arg {
             tag: cell.tag(),
@@ -509,7 +704,7 @@ pub unsafe fn native_entry_by_value(
         });
         cell = cell.cdr();
     }
-    native_entry(function, &args)
+    enter(function, entry, &args)
 }
 
 /// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
@@ -550,7 +745,9 @@ unsafe fn routine_arguments(
         *slot = Some(arg.value);
     }
     if let Some(absent) = plan.absent
-        && matched.get(usize::from(absent)).is_some_and(Option::is_some)
+        && matched
+            .get(usize::from(absent))
+            .is_some_and(Option::is_some)
     {
         return Ok(None);
     }
@@ -612,65 +809,15 @@ unsafe fn reciprocal(x: Sexp) -> R<Option<Sexp>> {
 }
 
 /// The value an argument stands for when reading it runs no R code: a value, a forced promise's
-/// value, or the value of an unforced promise whose code is a constant or a variable bound to
-/// such an argument (a wrapper's formal passed on). Reading such a promise settles it, and every
-/// promise it reads through, as forcing would.
+/// value, or what [`eval::settled_without_code`] reads from an unforced promise.
 unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
-    resolved_through(argument, MAX_PROMISE_CHAIN)
-}
-
-/// How many promises of variables [`resolved`] reads through. A chain that reaches itself
-/// (`function(n = n)`) is an error GNU R reports when it forces it, so it must decline.
-const MAX_PROMISE_CHAIN: u32 = 8;
-
-unsafe fn resolved_through(argument: Sexp, depth: u32) -> R<Option<Sexp>> {
     if argument.kind() != SexpType::Promise {
         return Ok((argument != missing_arg()).then_some(argument));
     }
     if argument.car() != values::unbound() {
         return Ok(Some(argument.car()));
     }
-    if eval::is_reference(argument) {
-        let value = match eval::reference_variable(argument) {
-            Some(inner)
-                if inner.kind() == SexpType::Promise
-                    && inner.car() == values::unbound()
-                    && depth > 0 =>
-            {
-                resolved_through(inner, depth - 1)?
-            }
-            _ => eval::reference_value(argument),
-        };
-        return match value {
-            Some(value) => eval::settle_promise(argument, value).map(Some),
-            None => Ok(None),
-        };
-    }
-    if argument.has_gp(gp::CHECKED_PROMISE) {
-        return Ok(None);
-    }
-    let code = argument.cdr();
-    let value = match code.kind() {
-        SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
-            match eval::peek_variable(code, argument.tag()) {
-                Some(value) if value.kind() != SexpType::Promise => value,
-                Some(inner) if inner.car() != values::unbound() => inner.car(),
-                Some(inner) if inner != argument && depth > 0 => {
-                    match resolved_through(inner, depth - 1)? {
-                        Some(value) => value,
-                        None => return Ok(None),
-                    }
-                }
-                _ => return Ok(None),
-            }
-        }
-        SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
-            return Ok(None);
-        }
-        _ => code,
-    };
-    eval::settle_unforced(argument, value);
-    Ok(Some(value))
+    eval::settled_without_code(argument)
 }
 
 /// The values of exactly `N` arguments, all [`resolved`].
@@ -1002,6 +1149,63 @@ unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     )?;
     interp().visible = false;
     Ok(Some(value))
+}
+
+/// `readRDS(file)` for a path: the file read whole, inflated in one pass when it is gzip and
+/// unserialized from memory. The R body reads through a `gzfile()` connection, which hands the
+/// unserializer a few bytes at a time and costs about three times as much on the `Meta/*.rds`
+/// and `.rdx` files every namespace load reads. It declines for a path `gzfile()` would expand
+/// (`~`), a file it cannot open or read, an xz or bzip2 file, and a stream that does not
+/// unserialize, so the R body raises those errors and warnings itself.
+unsafe fn native_read_rds(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([file]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    if file.kind() != SexpType::String
+        || file.is_object()
+        || length(file) != 1
+        || file.element(0) == values::na_string()
+    {
+        return Ok(None);
+    }
+    let path = file.element(0).bytes();
+    if path.is_empty() || path.starts_with(b"~") {
+        return Ok(None);
+    }
+    let Ok(path) = std::str::from_utf8(path) else {
+        return Ok(None);
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(None);
+    };
+    let inflated;
+    let stream = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::MultiGzDecoder::new(bytes.as_slice());
+        let mut output = Vec::with_capacity(bytes.len() * 4);
+        if std::io::Read::read_to_end(&mut decoder, &mut output).is_err() {
+            return Ok(None);
+        }
+        inflated = output;
+        inflated.as_slice()
+    } else if bytes.starts_with(b"BZh") || bytes.starts_with(b"\xFD7zXZ") {
+        return Ok(None);
+    } else {
+        bytes.as_slice()
+    };
+    // `unserialize()` of memory also takes `save()` files, which `readRDS()` rejects.
+    if !(stream.starts_with(b"X\n") || stream.starts_with(b"B\n") || stream.starts_with(b"A\n"))
+    {
+        return Ok(None);
+    }
+    match crate::serialize::unserialize(stream, nil()) {
+        Ok(value) => {
+            interp().visible = true;
+            Ok(Some(value))
+        }
+        // The R body reads the same stream and reports the error against its own call.
+        Err(Unwind::Error(_)) => Ok(None),
+        Err(other) => Err(other),
+    }
 }
 
 /// Whether the fast paths that skip R frames may run. Setting `RY_FAST_PATHS=0` turns them off,
@@ -1512,8 +1716,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         && !out.is_object()
         && (0..length(out)).all(|position| {
             let element = out.element(position);
-            (element.kind().is_atomic() || element.kind() == SexpType::List)
-                && !element.is_object()
+            (element.kind().is_atomic() || element.kind() == SexpType::List) && !element.is_object()
         });
     if !plain {
         let tail = crate::lower::parse_text(
@@ -1532,7 +1735,11 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         crate::heap().root(no);
         let yes = values::scalar_bool(true)?;
         crate::heap().root(yes);
-        let value = kernel(crate::combine::do_unlist, &[out, no, yes], ClosureFrame::Env(frame))?;
+        let value = kernel(
+            crate::combine::do_unlist,
+            &[out, no, yes],
+            ClosureFrame::Env(frame),
+        )?;
         eval::define(out_symbol, value, frame)?;
         return finish(ClosureFrame::Env(frame), value, true);
     }
@@ -1707,6 +1914,41 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(value, symbols.names, x)?;
     }
     finish(frame, value, true)
+}
+
+/// Unix `Sys.which(names)` for a character vector without attributes: each name's program as
+/// `which` reports it, or "", named by the names. Base R runs `which` through `system()` once per
+/// name, which costs a shell each and fails outright where `PATH` holds no `sh`, as when utils'
+/// `.onLoad` asks for `uname` on such a `PATH`.
+unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
+    if !cfg!(unix) {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let Some(names) = argument(frame, install("names")?)? else {
+        return decline();
+    };
+    if names.kind() != SexpType::String || names.attrib() != nil() || length(names) == 0 {
+        return decline();
+    }
+    let count = length(names);
+    let result = values::alloc(SexpType::String, count)?;
+    crate::heap().root(result);
+    for index in 0..count {
+        let found = match values::string_at(names, index) {
+            None => values::na_string(),
+            Some(name) => {
+                #[cfg(unix)]
+                let path = crate::system::which(&name);
+                #[cfg(not(unix))]
+                let path: Option<std::path::PathBuf> = None;
+                values::mkchar(&path.map(|path| path.display().to_string()).unwrap_or_default())?
+            }
+        };
+        values::set_elt(result, index, found);
+    }
+    values::set_attr(result, symbols().names, names)?;
+    finish(frame, result, true)
 }
 
 /// `Sys.setenv(...)` where every argument is named and is a single string, so `unlist()` and
@@ -1902,12 +2144,13 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         args.push(value);
     }
     let decimal_mark = args[8];
-    // `prettyNum()` warns when the decimal mark equals the empty big mark.
+    // A mark other than one column warns, and the warning names `prettyNum()`'s call, which only
+    // the R body has. An empty mark also makes `prettyNum()` warn that it equals the big mark.
     if decimal_mark.kind() != SexpType::String
         || decimal_mark.is_object()
         || length(decimal_mark) != 1
         || decimal_mark.element(0) == values::na_string()
-        || decimal_mark.element(0).bytes().is_empty()
+        || crate::format::display_width(&values::char_str(decimal_mark.element(0))) != 1
     {
         return decline();
     }
@@ -1918,6 +2161,121 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         Err(other) => return Err(other),
     };
     finish(frame, result, true)
+}
+
+/// `assignNativeRoutines(dll, lib, env, nativeRoutines)`, the closure `loadNamespace()` defines
+/// to bind a package's registered native routines in its namespace (`useDynLib(pkg,
+/// .registration = TRUE)`): each routine's `NativeSymbolInfo` under its name with the
+/// registration prefix and suffix, and as the value the routine names named by those variables.
+/// The R body grows both vectors with `c()` once per routine inside two nested `lapply()`
+/// calls, about a tenth of a package's load. It declines, before any effect, where the R body
+/// warns (a name already bound, or bound twice), and when the namespace file lists symbols by
+/// name, which `getNativeSymbolInfo()` resolves.
+unsafe fn do_assign_native_routines(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(native_routines) = argument(frame, install("nativeRoutines")?)? else {
+        return decline();
+    };
+    // `parseNamespaceFile()` makes it with the class `NativeRoutineMap`, which has no methods.
+    let class = values::class_attr(native_routines);
+    if native_routines.kind() != SexpType::List
+        || (class != nil()
+            && (length(class) != 1 || class.element(0).bytes() != b"NativeRoutineMap"))
+    {
+        return decline();
+    }
+    if length(native_routines) == 0 {
+        return finish(frame, values::alloc(SexpType::String, 0)?, true);
+    }
+    let use_registration = values::list_get(native_routines, "useRegistration");
+    if use_registration.kind() != SexpType::Logical
+        || length(use_registration) != 1
+        || values::ints(use_registration)[0] == NA_LOGICAL
+        || length(values::list_get(native_routines, "symbolNames")) != 0
+    {
+        return decline();
+    }
+    let mut variables: Vec<(Sexp, Sexp)> = Vec::new();
+    let mut routine_names: Vec<Sexp> = Vec::new();
+    if values::ints(use_registration)[0] != 0 {
+        let fixes = values::list_get(native_routines, "registrationFixes");
+        if fixes.kind() != SexpType::String
+            || length(fixes) != 2
+            || (0..2).any(|index| {
+                fixes.element(index) == values::na_string()
+                    || !fixes.element(index).bytes().is_ascii()
+            })
+        {
+            return decline();
+        }
+        let Some(dll) = argument(frame, install("dll")?)? else {
+            return decline();
+        };
+        if dll.kind() != SexpType::List || !values::inherits(dll, "DLLInfo") {
+            return decline();
+        }
+        let info = values::list_get(dll, "info");
+        let Some(registered) = crate::builtins::internal_function(install("getRegisteredRoutines")?)
+        else {
+            return decline();
+        };
+        let routines = eval::call_builtin(
+            eval::builtin_def(registered)?,
+            nil(),
+            registered,
+            &[Arg { tag: nil(), value: info }],
+            values::global_env(),
+        )?;
+        crate::heap().root(routines);
+        let Some(env) = argument(frame, install("env")?)? else {
+            return decline();
+        };
+        if env.kind() != SexpType::Environment || routines.kind() != SexpType::List {
+            return decline();
+        }
+        let (prefix, suffix) = (fixes.element(0).bytes(), fixes.element(1).bytes());
+        for type_index in 0..length(routines) {
+            let routines_of_type = routines.element(type_index);
+            if routines_of_type.kind() != SexpType::List {
+                return decline();
+            }
+            for index in 0..length(routines_of_type) {
+                let symbol_info = routines_of_type.element(index);
+                let name = values::list_get(symbol_info, "name");
+                if name.kind() != SexpType::String
+                    || length(name) != 1
+                    || name.element(0) == values::na_string()
+                    || !name.element(0).bytes().is_ascii()
+                {
+                    return decline();
+                }
+                let mut variable = prefix.to_vec();
+                variable.extend_from_slice(name.element(0).bytes());
+                variable.extend_from_slice(suffix);
+                let variable = values::install_bytes(&variable)?;
+                if crate::heap().frame_cell(env, variable).is_some()
+                    || variables.iter().any(|&(bound, _)| bound == variable)
+                {
+                    return decline();
+                }
+                variables.push((variable, symbol_info));
+                routine_names.push(name.element(0));
+            }
+        }
+        for &(variable, symbol_info) in &variables {
+            eval::define(variable, symbol_info, env)?;
+        }
+    }
+    let value = values::alloc(SexpType::String, routine_names.len())?;
+    crate::heap().root(value);
+    let names = values::alloc(SexpType::String, variables.len())?;
+    crate::heap().root(names);
+    for (index, (&name, &(variable, _))) in routine_names.iter().zip(&variables).enumerate() {
+        crate::heap().set_element(value, index, name);
+        crate::heap().set_element(names, index, variable.car());
+    }
+    values::set_attr(value, symbols().names, names)?;
+    finish(frame, value, true)
 }
 
 /// `message(...)` that no handler takes, with arguments that are plain vectors: the text goes
