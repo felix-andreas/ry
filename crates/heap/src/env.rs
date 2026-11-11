@@ -323,6 +323,24 @@ impl Frame {
         self.live().map(|binding| binding.cell)
     }
 
+    /// Each live binding's symbol and cell, in slot order.
+    pub(crate) fn symbols_and_cells(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.live()
+            .flat_map(|binding| [binding.symbol, binding.cell])
+    }
+
+    /// Points each binding at the cell `forward` returns for its cell, for a writer that moves
+    /// cells. The symbols stay, so the index, the table and the filter stay valid.
+    pub(crate) fn forward_cells(&mut self, forward: &dyn Fn(Sexp) -> Option<Sexp>) {
+        for binding in self.bindings.iter_mut() {
+            if binding.symbol != REMOVED
+                && let Some(moved) = forward(binding.cell)
+            {
+                binding.cell = moved;
+            }
+        }
+    }
+
     /// The cells a minor collection must mark in this frame as a remembered parent: those past
     /// the slots it found old last time (see [`Spilled::scanned`]).
     pub(crate) fn unscanned_cells(&self) -> impl Iterator<Item = Sexp> + '_ {

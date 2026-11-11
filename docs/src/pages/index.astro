@@ -1,6 +1,6 @@
 ---
 import Venn from "../components/Venn.astro";
-import { baseline, formatRatio, isTooShort, measuredPrograms, suite, suiteMetadata } from "../lib/benchmarks";
+import { formatRatio, measuredSuites, mixedMachines, suiteSpeeds } from "../lib/benchmarks";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -160,23 +160,13 @@ Str.join_with(loud, " ")`,
     },
 ];
 
-// The numeric kernels, untyped, from their committed results file, sorted by speedup so the
-// strongest results lead. The speedups span two orders of magnitude, so a bar's width is
-// logarithmic, and the 1x tick sits at log(2) of the scale.
-const kernels = suite("kernels");
-const benchmarks = (kernels === undefined ? [] : measuredPrograms(kernels))
-    .filter((program) => program.measurement.ratio.ry !== undefined && program.measurement.seconds[baseline] !== undefined && program.measurement.seconds.ry !== undefined)
-    .map((program) => ({
-        program: program.id,
-        display: program.display,
-        speedup: program.measurement.ratio.ry.median,
-        gnuR: program.measurement.seconds[baseline],
-        ry: program.measurement.seconds.ry,
-        tooShort: isTooShort(program.measurement),
-    }))
-    .sort((a, b) => b.speedup - a.speedup);
-const benchmarkScale = Math.log(1 + Math.max(1, ...benchmarks.map((row) => row.speedup)));
-const benchmarkWidth = (speedup: number) => Math.log(1 + speedup) / benchmarkScale;
+// One row per measured suite, as in the README summary: ry's geometric-mean speed-up over GNU R,
+// untyped and typed. The speed-ups span 1x to over 20x, so a bar's width is logarithmic, and the
+// 1x tick sits at log(2) of the scale.
+const speeds = suiteSpeeds();
+const speedScale = Math.log(1 + Math.max(1, ...speeds.flatMap((row) => [row.ry?.median ?? 0, row.typed?.median ?? 0])));
+const speedWidth = (speedup: number) => Math.log(1 + speedup) / speedScale;
+const gnuRVersions = [...new Set(measuredSuites().map((suite) => suite.results?.meta.gnuR.version))].sort().join(" and ");
 
 const migrationTabs: Sample[] = [
     {
@@ -809,40 +799,38 @@ const year = new Date().getFullYear();
                         <div class="stage-head">
                             <span class="ftabs"><span class="ftab is-active">benchmarks</span></span>
                         </div>
-                        <table class="bench-table" style={`--one: ${benchmarkWidth(1)}`}>
-                            <caption class="visually-hidden">Run time of each program on GNU R and on ry, untyped, and how many times faster ry is.</caption>
+                        <table class="bench-table" style={`--one: ${speedWidth(1)}`}>
+                            <caption class="visually-hidden">The geometric-mean speed-up of ry over GNU R in each benchmark suite, untyped and typed.</caption>
                             <thead>
                                 <tr>
-                                    <th scope="col">program</th>
+                                    <th scope="col">suite</th>
                                     <th scope="col" class="bench-axis">
                                         <span class="visually-hidden">ry vs GNU R</span>
                                         <span class="bench-tick" aria-hidden="true">1x</span>
                                     </th>
-                                    <th scope="col" class="num">speedup</th>
-                                    <th scope="col" class="num bench-time">GNU R</th>
-                                    <th scope="col" class="num bench-time">ry</th>
+                                    <th scope="col" class="num"><span class="bench-key" aria-hidden="true" />ry</th>
+                                    <th scope="col" class="num"><span class="bench-key is-typed" aria-hidden="true" />typed</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {
-                                    benchmarks.map((row, index) => (
-                                        <tr class={[row.speedup < 1 && "is-slower", row.tooShort && "is-short"].filter(Boolean).join(" ") || undefined} style={`--x: ${benchmarkWidth(row.speedup)}; --k: ${index}`}>
-                                            <th scope="row" title={row.display}>{row.program}{row.tooShort && <span class="bench-flag"> too short</span>}</th>
+                                    speeds.map((row, index) => (
+                                        <tr style={`--k: ${index}`}>
+                                            <th scope="row" title={`${row.programs} ${row.summary}`}>{row.shortName}</th>
                                             <td class="bench-axis" aria-hidden="true">
-                                                <span class="bench-bar" />
+                                                {row.ry && <span class={["bench-bar", row.ry.median < 1 && "is-slower"].filter(Boolean).join(" ")} style={`--x: ${speedWidth(row.ry.median)}`} />}
+                                                {row.typed && <span class="bench-bar is-typed" style={`--x: ${speedWidth(row.typed.median)}`} />}
                                             </td>
-                                            <td class="num bench-ratio">{formatRatio(row.speedup)}</td>
-                                            <td class="num bench-time">{row.gnuR.toFixed(3)} s</td>
-                                            <td class="num bench-time">{row.ry.toFixed(3)} s</td>
+                                            <td class={["num bench-ratio", row.ry && row.ry.median < 1 && "is-slower"].filter(Boolean).join(" ")}>{row.ry ? formatRatio(row.ry.median) : <span class="bench-none">n/a</span>}</td>
+                                            <td class="num bench-ratio">{row.typed ? formatRatio(row.typed.median) : <span class="bench-none">not typed</span>}</td>
                                         </tr>
                                     ))
                                 }
                             </tbody>
                         </table>
                         <p class="bench-foot">
-                            Our numeric kernels, untyped, on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale.{" "}
-                            {benchmarks.some((row) => row.tooShort) && <>A program marked too short finishes in under {kernels?.results?.meta.tooShortSeconds ?? 0.1} s on GNU R, which is too little work for a stable ratio.{" "}</>}
-                            {kernels && suiteMetadata(kernels)}{" "}
+                            Geometric-mean speed-up over GNU R {gnuRVersions}, bars on a logarithmic scale.{" "}
+                            {mixedMachines() && <>The suites ran on different machines or BLAS libraries, so compare within a suite.{" "}</>}
                             <a href="/benchmarks">Full table, programs and method</a>
                         </p>
                     </div>
@@ -4281,7 +4269,7 @@ ry check .</code></pre>
                 color: oklch(0.9 0 0);
             }
 
-            /* Speedup over GNU R on one linear axis from zero, so the 1x tick shows where ry is slower. */
+            /* Each suite's speed-up over GNU R on one logarithmic axis from zero, so the 1x tick shows where ry is slower. */
             /* Every panel shares one grid cell, so the table grows into the height the tallest code tab sets. */
             .bench-table {
                 flex: 1;
@@ -4293,18 +4281,29 @@ ry check .</code></pre>
             }
             .bench-table th,
             .bench-table td {
-                padding: 0.55rem 0.9rem;
+                padding: 0.45rem 0.9rem;
                 text-align: left;
                 font-weight: 400;
                 white-space: nowrap;
             }
             .bench-table thead th {
-                padding-top: 1rem;
+                padding-top: 0.75rem;
                 color: var(--muted);
                 font-size: 0.85em;
             }
             .bench-table tbody th {
                 color: var(--foreground);
+            }
+            .bench-key {
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                margin-right: 0.45em;
+                border-radius: 2px;
+                background: var(--cap);
+            }
+            .bench-key.is-typed {
+                background: var(--cap-cyan);
             }
             .bench-table td {
                 color: var(--muted);
@@ -4323,7 +4322,7 @@ ry check .</code></pre>
             .bench-tick {
                 position: absolute;
                 bottom: 0;
-                padding-bottom: 0.55rem;
+                padding-bottom: 0.45rem;
                 left: calc(0.9rem + (100% - 1.8rem) * var(--one));
                 transform: translateX(-50%);
             }
@@ -4352,19 +4351,12 @@ ry check .</code></pre>
                 width: 1px;
                 background: color-mix(in oklch, var(--foreground) 18%, transparent);
             }
-            .bench-table .is-slower .bench-bar {
-                background: var(--muted);
-                border-radius: 0;
-            }
-            .bench-table .is-slower .bench-ratio {
+            .bench-table .bench-ratio.is-slower {
                 color: var(--muted);
             }
-            .bench-table .is-short .bench-bar {
-                opacity: 0.4;
-            }
-            .bench-flag {
-                font-weight: normal;
-                font-size: 0.8em;
+            .bench-none {
+                font-weight: 400;
+                font-size: 0.85em;
                 color: var(--muted);
             }
             .bench-bar {
@@ -4374,6 +4366,16 @@ ry check .</code></pre>
                 border-radius: 0 4px 4px 0;
                 background: var(--cap);
                 transform-origin: left;
+            }
+            .bench-bar + .bench-bar {
+                margin-top: 4px;
+            }
+            .bench-bar.is-typed {
+                background: var(--cap-cyan);
+            }
+            .bench-bar.is-slower {
+                background: var(--muted);
+                border-radius: 0;
             }
             .bench-foot {
                 margin: auto 0 0;
@@ -4413,9 +4415,9 @@ ry check .</code></pre>
                 .bench-table {
                     flex: none;
                 }
-                /* The bars need the width more than the times do, and the linked table has them. */
-                .bench-table .bench-time {
-                    display: none;
+                /* Suite names wrap so the bars keep their width. */
+                .bench-table tbody th {
+                    white-space: normal;
                 }
                 .bench-tick,
                 .bench-table thead .bench-axis::before,

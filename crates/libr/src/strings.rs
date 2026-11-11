@@ -422,12 +422,6 @@ pub unsafe extern "C" fn Riconv_close(descriptor: *mut std::ffi::c_void) -> c_in
     0
 }
 
-/// How two strings sort. GNU R sorts with the locale's collation; ry's runtime collates in
-/// code point order, which is what GNU R does in the C locale.
-pub fn collate(left: &str, right: &str) -> std::cmp::Ordering {
-    left.cmp(right)
-}
-
 /// The number of terminal columns `text` takes, counting East Asian wide characters as two.
 pub fn display_width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)

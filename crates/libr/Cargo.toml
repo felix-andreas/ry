@@ -101,6 +101,10 @@ name = "test_install"
 path = "tests/test_install.rs"
 
 [[test]]
+name = "test_start_image"
+path = "tests/test_start_image.rs"
+
+[[test]]
 name = "test_headers"
 path = "tests/test_headers.rs"
 

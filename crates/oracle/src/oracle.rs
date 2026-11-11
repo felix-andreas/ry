@@ -15,6 +15,7 @@ use {
     serde::Deserialize,
     similar::TextDiff,
     std::{
+        ffi::{OsStr, OsString},
         io::Read,
         path::{Path, PathBuf},
         process::{Command, Stdio},
@@ -117,6 +118,47 @@ pub struct KnownFailure {
     /// Seen failing on a branch but not yet on main.
     #[serde(default)]
     pub provisional: bool,
+    /// A crash under a collector-stress engine that depends on the host or on timing, so a run
+    /// where the case passes is not a stale entry.
+    #[serde(default)]
+    pub intermittent: bool,
+}
+
+/// The engines that collect before every allocation. Only their failures may be
+/// [`KnownFailure::intermittent`]: a crash there depends on where the collector happens to run,
+/// while a failure under any other engine reproduces on every host.
+pub const GC_TORTURE_ENGINES: [&str; 3] =
+    ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"];
+
+/// How one case's result under one engine counts against [`KNOWN_FAILURES_FILE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Passed,
+    /// A failure the file lists.
+    Known,
+    /// A failure the file does not list.
+    New,
+    /// A listed case that passes, so its entry is stale.
+    ListedButPassing,
+    /// An intermittent entry whose case passed this time.
+    IntermittentPassed,
+}
+
+/// The verdict for a case that `failed` or passed, given its entry in the known failures.
+pub fn verdict(failed: bool, entry: Option<&KnownFailure>) -> Verdict {
+    match (failed, entry) {
+        (false, None) => Verdict::Passed,
+        (false, Some(entry)) if entry.intermittent => Verdict::IntermittentPassed,
+        (false, Some(_)) => Verdict::ListedButPassing,
+        (true, Some(_)) => Verdict::Known,
+        (true, None) => Verdict::New,
+    }
+}
+
+/// Whether `verdict` fails the run: a new failure does, and so does a stale entry, so the change
+/// that fixes a case also deletes its entry.
+pub fn fails_run(verdict: Verdict) -> bool {
+    matches!(verdict, Verdict::New | Verdict::ListedButPassing)
 }
 
 /// The known failures, beside `Cargo.toml` in this crate.
@@ -129,15 +171,23 @@ struct KnownFailuresFile {
     failure: Vec<KnownFailure>,
 }
 
-/// Reads [`KNOWN_FAILURES_FILE`], refusing an entry that names an unknown engine, a case that
-/// does not exist, or the same case and engine twice, so a stale or mistyped entry cannot hide.
+/// Reads [`KNOWN_FAILURES_FILE`] beside this crate's `Cargo.toml`, as [`parse_known_failures`]
+/// checks it.
 pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = directory.join(KNOWN_FAILURES_FILE);
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    parse_known_failures(&text, directory)
+}
+
+/// Parses the known failures in `text`, the file in `directory`, refusing an entry that names an
+/// unknown engine, a case missing from `directory/cases`, the same case and engine twice, or
+/// `intermittent` outside [`GC_TORTURE_ENGINES`], so a stale or mistyped entry cannot hide.
+pub fn parse_known_failures(text: &str, directory: &Path) -> Result<Vec<KnownFailure>, String> {
+    let path = directory.join(KNOWN_FAILURES_FILE);
     let file: KnownFailuresFile =
-        toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
     for (index, entry) in file.failure.iter().enumerate() {
         if !ENGINES.contains(&entry.engine.as_str()) {
             return Err(format!(
@@ -146,6 +196,16 @@ pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
                 entry.case,
                 entry.engine,
                 ENGINES.join(", ")
+            ));
+        }
+        if entry.intermittent && !GC_TORTURE_ENGINES.contains(&entry.engine.as_str()) {
+            return Err(format!(
+                "{}: `{}` under `{}` is marked intermittent, which only an entry under {} may be, \
+                 because a failure under any other engine reproduces on every host",
+                path.display(),
+                entry.case,
+                entry.engine,
+                GC_TORTURE_ENGINES.join(", ")
             ));
         }
         if !directory
@@ -629,19 +689,24 @@ pub fn gnu_r_home() -> Option<String> {
 /// defaults. ry's defaults differ from GNU R's in both directions: the library of its bundled base
 /// R holds none of the reference R's packages, and it also searches the user and site libraries of
 /// any other GNU R it finds, such as Debian's `/usr/lib/R/site-library`, whose older data.table,
-/// rlang and withr then load in place of the reference R's. A caller's `R_LIBS` stays first,
-/// because the reference R puts it first. Empty when GNU R cannot be asked, which leaves the
-/// inherited environment as it is.
+/// rlang and withr then load in place of the reference R's. The libraries
+/// [`libraries_ahead_of_reference`] picks come first, because the reference R puts `R_LIBS`
+/// first. Empty when GNU R cannot be asked, which leaves the inherited environment as it is.
 pub fn library_environment() -> &'static [(String, String)] {
     static ENVIRONMENT: OnceLock<Vec<(String, String)>> = OnceLock::new();
     ENVIRONMENT.get_or_init(|| {
-        let Ok(output) = Command::new(gnu_r_program())
+        let mut command = Command::new(gnu_r_program());
+        command
             .args(["--vanilla", "--slave", "--no-restore", "-e"])
             .arg("cat(.libPaths(), sep = .Platform$path.sep)")
             .env("R_LIBS_SITE", "")
-            .env("R_LIBS_USER", "")
-            .output()
-        else {
+            .env("R_LIBS_USER", "");
+        let explicit = std::env::var_os("R_LIBS");
+        match libraries_ahead_of_reference(explicit.as_deref(), corpus_library().as_deref()) {
+            Some(libraries) => command.env("R_LIBS", libraries),
+            None => command.env_remove("R_LIBS"),
+        };
+        let Ok(output) = command.output() else {
             return Vec::new();
         };
         let paths = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -654,6 +719,41 @@ pub fn library_environment() -> &'static [(String, String)] {
             ("R_LIBS_USER".to_string(), String::new()),
         ]
     })
+}
+
+/// The libraries searched ahead of the reference R's own: an explicit `R_LIBS` first, then the
+/// corpus library. Many cases need corpus packages (rlang, data.table, xts, knitr, lattice), and a
+/// run that does not find them skips those cases, so the corpus library is found without being
+/// named. An `R_LIBS` set to the empty string turns the corpus library off.
+pub fn libraries_ahead_of_reference(
+    explicit: Option<&OsStr>,
+    corpus: Option<&Path>,
+) -> Option<OsString> {
+    let mut libraries: Vec<PathBuf> = match explicit {
+        Some(explicit) if explicit.is_empty() => return None,
+        Some(explicit) => std::env::split_paths(explicit).collect(),
+        None => Vec::new(),
+    };
+    if let Some(corpus) = corpus
+        && !libraries.iter().any(|library| library == corpus)
+    {
+        libraries.push(corpus.to_path_buf());
+    }
+    match libraries.is_empty() {
+        true => None,
+        false => std::env::join_paths(libraries).ok(),
+    }
+}
+
+/// The corpus library `just corpus` installs into, `$RY_CORPUS_DIR/library` or else
+/// `.corpus/library` in the workspace, when that directory exists.
+pub fn corpus_library() -> Option<PathBuf> {
+    let corpus = std::env::var_os("RY_CORPUS_DIR")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+    let library = corpus.join("library");
+    library.is_dir().then_some(library)
 }
 
 /// The release of GNU R, such as `4.3.3`, from the first line `R --version` prints.
