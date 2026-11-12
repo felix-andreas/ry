@@ -640,6 +640,7 @@ unsafe fn compile_in<'a>(
             rooted,
             registers: plan.registers,
             slots: plan.slots.to_vec(),
+            scratch: plan.scratch,
             frame: {
                 let table = machine.code.cdr().element(bytecode::SLOTS);
                 let names = if table == values::nil() {
@@ -774,10 +775,11 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             return None;
         }
         let cells = machine.base + compiled.registers;
-        if bytecode::reserve_registers(cells + compiled.slots.len()).is_err() {
+        let roots = compiled.slots.len() + compiled.scratch;
+        if bytecode::reserve_registers(cells + roots).is_err() {
             return None;
         }
-        std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
+        std::slice::from_raw_parts_mut(bytecode::register_address(cells), roots)
             .fill(values::nil());
         // Most compiled bodies have at most a few loops, so their state lives in a stack array.
         // A `SmallVec` here would be built by value and moved, copying its whole inline buffer

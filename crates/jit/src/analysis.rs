@@ -619,7 +619,7 @@ pub enum Intrinsic {
 
 /// Where a directly called closure's argument comes from.
 #[derive(Clone, Copy, Debug)]
-pub enum Argument {
+pub enum Argument<'a> {
     Unboxed {
         register: usize,
         ty: Ty,
@@ -629,6 +629,12 @@ pub enum Argument {
     /// A constant of the call that is not an unboxed scalar, passed as the object itself, as
     /// tier 0 passes it.
     Constant(Sexp),
+    /// `list(...)` of untagged items, built in scratch cell `cell` of the register window, which
+    /// roots it until the call has bound it.
+    List {
+        cell: usize,
+        items: &'a [Argument<'a>],
+    },
 }
 
 /// A callback-taking library function compiled code runs as a loop of its own.
@@ -891,7 +897,7 @@ pub enum Action<'a> {
         steps: &'a [(Action<'a>, StateId)],
         function: Sexp,
         call: Sexp,
-        args: &'a [Argument],
+        args: &'a [Argument<'a>],
         /// The callee's annotation checks, decided from the arguments' compile-time types.
         entry: Entry,
         /// For `x <- f(x, ...)`, the variable `x` when it may hold a value tier 0 moves into the
@@ -906,7 +912,7 @@ pub enum Action<'a> {
     NativeCall {
         steps: &'a [(Action<'a>, StateId)],
         native: &'static Native,
-        args: &'a [Argument],
+        args: &'a [Argument<'a>],
         dst: usize,
     },
     /// Runs a fast-path prologue in tier 0 as an opaque step, returning its value from compiled
@@ -1061,6 +1067,8 @@ pub struct Plan<'a> {
     pub live: Live<'a>,
     pub slots: List<'a, Sexp>,
     pub registers: usize,
+    /// Scratch cells after the slot cells, where a direct call builds its list arguments.
+    pub scratch: usize,
     pub loops: usize,
     pub speculations: List<'a, Speculation>,
     /// The edges leaving instruction `position` are `edges[edge_ranges[position]..edge_ranges[position + 1]]`:
@@ -1406,6 +1414,7 @@ pub unsafe fn plan<'a>(
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
         slots: List::new_in(arena),
         passed_from: 0,
+        scratch: 0,
         speculated: Map::with_hasher_in(FxBuildHasher, arena),
         speculations: List::new_in(arena),
         registers,
@@ -1470,6 +1479,7 @@ pub unsafe fn plan<'a>(
         live,
         slots: builder.slots,
         registers,
+        scratch: builder.scratch,
         loops,
         speculations: builder.speculations,
         edge_ranges,
@@ -1644,6 +1654,8 @@ struct Builder<'a> {
     /// direct call can peek the variable's value; the body never reads or assigns it, so it says
     /// nothing about which names the frame binds.
     passed_from: usize,
+    /// The most scratch cells one direct call builds its list arguments in.
+    scratch: usize,
     /// Speculation results by symbol, so each lookup resolves once.
     speculated: Map<'a, Sexp, Option<Sexp>>,
     speculations: List<'a, Speculation>,
@@ -3211,6 +3223,7 @@ impl<'a> Builder<'a> {
             inlined: false,
         };
         let mut args = List::new_in(self.arena);
+        let mut cells = 0;
         for (tag, expression) in values::pairlist_items(call.cdr()) {
             if tag != values::nil()
                 || expression == values::missing_arg()
@@ -3218,27 +3231,9 @@ impl<'a> Builder<'a> {
             {
                 return None;
             }
-            if expression.kind() == SexpType::Symbol
-                && let Some(slot) = self.peek_slot(&mut lowering, expression, true)
-                && !lowering.state.slots[slot].ty.is_unboxed()
-            {
-                args.push(Argument::Slot(slot));
-                continue;
-            }
-            if !matches!(
-                expression.kind(),
-                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
-            ) && !constant_type(expression).is_unboxed()
-            {
-                args.push(Argument::Constant(expression));
-                continue;
-            }
-            let register = self.lower_expression(&mut lowering, expression, 0)?;
-            args.push(Argument::Unboxed {
-                register,
-                ty: lowering.state.registers[register],
-            });
+            args.push(self.call_argument(&mut lowering, expression, &mut cells)?);
         }
+        self.scratch = self.scratch.max(cells);
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
@@ -3251,6 +3246,7 @@ impl<'a> Builder<'a> {
                     Argument::Unboxed { ty, .. } => ty,
                     Argument::Slot(slot) => after.slots[slot].ty,
                     Argument::Constant(value) => constant_type(value),
+                    Argument::List { .. } => Ty::List,
                 };
                 (ty.is_unboxed() || ty.is_vector()).then_some(ty)
             })
@@ -3299,6 +3295,62 @@ impl<'a> Builder<'a> {
             entry,
             rebinding,
             dst,
+        })
+    }
+
+    /// Lowers one argument of a direct call: a variable as its boxed slot, a constant as itself,
+    /// `list(...)` as a list built in a scratch cell, and anything else as an unboxed scalar.
+    unsafe fn call_argument(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        expression: Sexp,
+        cells: &mut usize,
+    ) -> Option<Argument<'a>> {
+        match expression.kind() {
+            SexpType::Symbol => {
+                if let Some(slot) = self.peek_slot(lowering, expression, true)
+                    && !lowering.state.slots[slot].ty.is_unboxed()
+                {
+                    return Some(Argument::Slot(slot));
+                }
+            }
+            SexpType::Language => {
+                let head = expression.car();
+                if head.kind() == SexpType::Symbol
+                    && values::symbol_name(head) == "list"
+                    && lowering.closed.is_none()
+                    && lowering.scope.is_empty()
+                {
+                    let function = self.resolve_head(lowering, head)?;
+                    base_builtin(function, head)?;
+                    let cell = *cells;
+                    *cells += 1;
+                    let mut items = List::new_in(self.arena);
+                    for (tag, item) in values::pairlist_items(expression.cdr()) {
+                        if tag != values::nil()
+                            || item == values::missing_arg()
+                            || item == values::symbols().dots
+                        {
+                            return None;
+                        }
+                        items.push(self.call_argument(lowering, item, cells)?);
+                    }
+                    return Some(Argument::List {
+                        cell,
+                        items: items.leak(),
+                    });
+                }
+            }
+            SexpType::Promise | SexpType::Bytecode => {}
+            _ if !constant_type(expression).is_unboxed() => {
+                return Some(Argument::Constant(expression));
+            }
+            _ => {}
+        }
+        let register = self.lower_expression(lowering, expression, 0)?;
+        Some(Argument::Unboxed {
+            register,
+            ty: lowering.state.registers[register],
         })
     }
 

@@ -581,6 +581,9 @@ impl<'p> Translator<'p> {
                         Argument::Constant(value) => {
                             self.builder.ins().iconst(I64, value.as_ptr() as i64)
                         }
+                        Argument::List { .. } => {
+                            return Err(Refusal("a list argument to a native function"));
+                        }
                         Argument::Unboxed { register, ty } if ty.in_variables() => {
                             self.use_register(register, ty)
                         }
@@ -1400,7 +1403,7 @@ impl<'p> Translator<'p> {
         steps: &'p [(Action<'p>, StateId)],
         function: Sexp,
         call: Sexp,
-        args: &[Argument],
+        args: &[Argument<'p>],
         entry: annotations::Entry,
         rebinding: Option<Sexp>,
         dst: (usize, Ty),
@@ -1461,31 +1464,7 @@ impl<'p> Translator<'p> {
             3,
         ));
         for (index, argument) in args.iter().enumerate() {
-            let (kind, bits) = match *argument {
-                Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
-                Argument::Constant(value) => (
-                    representation::BOXED,
-                    self.builder.ins().iconst(I64, value.as_ptr() as i64),
-                ),
-                Argument::Unboxed { register, ty } => {
-                    let value = self.use_register(register, ty);
-                    let (kind, bits) = match ty {
-                        Ty::Dbl => (
-                            representation::DOUBLE,
-                            self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
-                        ),
-                        Ty::Int => (
-                            representation::INTEGER,
-                            self.builder.ins().sextend(I64, value),
-                        ),
-                        _ => (
-                            representation::LOGICAL,
-                            self.builder.ins().sextend(I64, value),
-                        ),
-                    };
-                    (kind, bits)
-                }
-            };
+            let (kind, bits) = self.call_argument(*argument, failed)?;
             let kind = self.builder.ins().iconst(I64, kind as i64);
             self.builder
                 .ins()
@@ -1523,9 +1502,99 @@ impl<'p> Translator<'p> {
             .ok_or(Refusal("a helper without a result"))?;
         self.branch_on_outcome(result, continued, failed, invalidated);
         self.builder.switch_to_block(continued);
+        // The callee holds what it needs of each list, so the scratch cells let go of them.
+        let nil = self.builder.ins().iconst(I64, self.nil);
+        let mut pending: SmallVec<[Argument<'p>; 4]> = args.iter().copied().collect();
+        while let Some(argument) = pending.pop() {
+            if let Argument::List { cell, items } = argument {
+                self.store_scratch_cell(cell, nil);
+                pending.extend(items.iter().copied());
+            }
+        }
         self.forget_slots(&before);
         self.refine(dst.0, dst.1, next, after, position + 1);
         Ok(())
+    }
+
+    /// The representation and bits of a direct call's argument (see [`representation`]),
+    /// building a `list(...)` in its scratch cell first. A failed allocation leaves for
+    /// `failed`, which raises the error the helper parked.
+    fn call_argument(&mut self, argument: Argument<'p>, failed: Label) -> Result<(i32, Value), Refusal> {
+        Ok(match argument {
+            Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
+            Argument::Constant(value) => (
+                representation::BOXED,
+                self.builder.ins().iconst(I64, value.as_ptr() as i64),
+            ),
+            Argument::Unboxed { register, ty } => {
+                let value = self.use_register(register, ty);
+                match ty {
+                    Ty::Dbl => (
+                        representation::DOUBLE,
+                        self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
+                    ),
+                    Ty::Int => (
+                        representation::INTEGER,
+                        self.builder.ins().sextend(I64, value),
+                    ),
+                    _ => (
+                        representation::LOGICAL,
+                        self.builder.ins().sextend(I64, value),
+                    ),
+                }
+            }
+            Argument::List { cell, items } => {
+                let window_register = self.scratch_register(cell);
+                let register = iconst(&mut self.builder, window_register);
+                let length = iconst(&mut self.builder, items.len());
+                let made = self
+                    .call(
+                        runtime::jit_list_new as *const () as usize,
+                        &[I64, I64, I64],
+                        Some(I32),
+                        &[self.activation, length, register],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, made, 0);
+                self.guard(ok, failed);
+                for (index, &item) in items.iter().enumerate() {
+                    // An item list is built in its own cell before this list's element is
+                    // stored, so it is rooted while the items after it allocate.
+                    let (kind, bits) = self.call_argument(item, failed)?;
+                    let kind = self.builder.ins().iconst(I32, kind as i64);
+                    let index = iconst(&mut self.builder, index);
+                    let stored = self
+                        .call(
+                            runtime::jit_list_store as *const () as usize,
+                            &[I64, I64, I64, I32, I64],
+                            Some(I32),
+                            &[self.activation, register, index, kind, bits],
+                        )
+                        .ok_or(Refusal("a helper without a result"))?;
+                    let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, stored, 0);
+                    self.guard(ok, failed);
+                }
+                (
+                    representation::BOXED,
+                    self.builder.ins().load(
+                        I64,
+                        flags(),
+                        self.window,
+                        (8 * window_register) as i32,
+                    ),
+                )
+            }
+        })
+    }
+
+    /// The window register of scratch cell `cell`, after the slot cells.
+    fn scratch_register(&self, cell: usize) -> usize {
+        self.plan.registers + self.plan.slots.len() + cell
+    }
+
+    fn store_scratch_cell(&mut self, cell: usize, value: Value) {
+        let offset = (8 * self.scratch_register(cell)) as i32;
+        self.builder.ins().store(flags(), value, self.window, offset);
     }
 
     /// Continues at `continued` when a helper's `result` is [`outcome::OK`], and otherwise

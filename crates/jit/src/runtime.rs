@@ -148,6 +148,8 @@ pub struct Compiled {
     /// Tier 0's register count; the slot root cells follow.
     pub registers: usize,
     pub slots: Vec<Sexp>,
+    /// Scratch cells after the slot cells, which root the lists a direct call builds.
+    pub scratch: usize,
     /// Each slot's position in the code's slot table, which numbers a slot frame's variables,
     /// or `None` for a symbol the table does not number.
     pub frame: Box<[Option<usize>]>,

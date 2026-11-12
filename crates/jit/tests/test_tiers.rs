@@ -3461,6 +3461,28 @@ fn a_parked_return_value_survives_its_exit() {
     });
 }
 
+#[test]
+fn list_arguments_to_a_direct_call_survive_collection() {
+    // Each `list(...)` lives only in its scratch cell while the items after it allocate,
+    // including an inner list built before the outer one stores it.
+    with_interpreter(|| unsafe {
+        run("pick <- function(l) l[[2L]][[1L]] + l[[3L]] + length(l[[2L]][[2L]])");
+        run("f <- function(n) { s <- 0; for (i in 1:n) s <- s + pick(list(i, list(i * 2, \"a\"), 3)); s }");
+        jit::install_mode(Mode::Off);
+        let expected = run("f(20L)");
+        jit::install_mode(Mode::Force);
+        for _ in 0..3 {
+            assert_eq!(run("f(20L)"), expected);
+        }
+        let heap = interp::heap();
+        heap.update_policy(|policy| policy.stress = GcStress::EveryAllocation);
+        let outcome = run("f(20L)");
+        heap.update_policy(|policy| policy.stress = GcStress::Off);
+        jit::install_mode(Mode::Off);
+        assert_eq!(outcome, expected);
+    });
+}
+
 /// A compiled element operation must never cost more instructions than tier 0's handler for the
 /// same shape. The machine has no hardware counters to read, so each shape runs in a child of
 /// this test binary under cachegrind, which counts instructions exactly; the cost of one
