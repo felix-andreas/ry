@@ -1326,6 +1326,20 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     ) {
         return Err(call.error("unsupported type "));
     }
+    format_c_vector(vector, &mode, width, digits, &format, &flag)
+}
+
+/// The body of `formatC()`'s internal on an integer, double or character `vector`, for callers
+/// that hold the arguments as Rust values. `mode` is `"character"`, `"integer"` or another mode
+/// that formats doubles.
+pub(crate) unsafe fn format_c_vector(
+    vector: Sexp,
+    mode: &str,
+    width: i32,
+    digits: i32,
+    format: &str,
+    flag: &str,
+) -> R<Sexp> {
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();
@@ -1348,7 +1362,7 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             if format == "fg" && value == 0.0 {
                 number.push('0');
             } else {
-                c_format_into(&mut number, value, &format, digits, &flag, integer);
+                c_format_into(&mut number, value, format, digits, flag, integer);
             }
             &number
         };

@@ -26,6 +26,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
     },
     smallvec::SmallVec,
+    std::borrow::Cow,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -2399,27 +2400,15 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     } else {
         digits
     };
-    let mode = values::scalar_string(if integer { "integer" } else { "double" })?;
-    crate::heap().root(mode);
-    let width_value = values::scalar_integer(width)?;
-    crate::heap().root(width_value);
-    let digits_value = values::scalar_integer(internal_digits)?;
-    crate::heap().root(digits_value);
-    let format_value = values::scalar_string(format)?;
-    crate::heap().root(format_value);
-    let result = kernel(
-        crate::format::do_format_c,
-        &[
-            vector,
-            mode,
-            width_value,
-            digits_value,
-            format_value,
-            flag,
-            nil(),
-        ],
-        frame,
+    let result = crate::format::format_c_vector(
+        vector,
+        if integer { "integer" } else { "double" },
+        width,
+        internal_digits,
+        format,
+        &flag_text,
     )?;
+    crate::heap().root(result);
     if !specials.is_empty() {
         let left = width < 0 || flag_text == "-";
         let field = specials
@@ -2447,9 +2436,8 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         // !is.null(zero.print) || drop0trailing`, forced in that order.
         if !argument_is(frame, symbols.small_mark, |value| {
             string_scalar(value).as_deref() == Some("")
-        })? || !argument_is(frame, symbols.decimal_mark, |value| {
-            string_scalar(value).as_deref() == Some(".")
-        })? || !argument_is(frame, symbols.zero_print, |value| value == nil())?
+        })? || !decimal_mark_is_point(frame)?
+            || !argument_is(frame, symbols.zero_print, |value| value == nil())?
             || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
                 is_false(value)
             })?
@@ -2462,9 +2450,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     // `drop0trailing`, `preserve.width`, `big.interval` and `small.mark`, in that order.
     if !big_mark.is_ascii()
         || big_mark == "."
-        || !argument_is(frame, symbols.decimal_mark, |value| {
-            string_scalar(value).as_deref() == Some(".")
-        })?
+        || !decimal_mark_is_point(frame)?
         || !argument_is(frame, symbols.zero_print, |value| value == nil())?
         || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
             is_false(value)
@@ -2656,12 +2642,12 @@ fn with_big_marks(text: &str, mark: &str, interval: usize, keep_width: bool) -> 
 }
 
 /// A string vector of length one that is no object and not `NA`.
-unsafe fn string_scalar(value: Sexp) -> Option<String> {
+unsafe fn string_scalar<'a>(value: Sexp) -> Option<Cow<'a, str>> {
     if value.kind() != SexpType::String || length(value) != 1 || value.attrib() != nil() {
         return None;
     }
     let element = value.element(0);
-    (element != values::na_string()).then(|| values::char_str(element).into_owned())
+    (element != values::na_string()).then(|| values::char_str(element))
 }
 
 /// `None` when `value` is neither `NULL` nor a whole number of at most a million in a plain
@@ -2697,6 +2683,37 @@ unsafe fn argument_is(
     test: impl FnOnce(Sexp) -> bool,
 ) -> R<bool> {
     Ok(argument(frame, symbol)?.is_some_and(test))
+}
+
+/// Whether `formatC()`'s `decimal.mark` is `"."`. While it holds its own default promise,
+/// unforced, the answer is the `OutDec` option, read as `getOption("OutDec")` reads it, so the
+/// promise and the `getOption()` call it would make are skipped; that call has no side effect,
+/// and the fast path returns before the body could force the promise.
+unsafe fn decimal_mark_is_point(frame: ClosureFrame) -> R<bool> {
+    let symbol = symbols().decimal_mark;
+    if is_default(frame, symbol)? && default_is_unforced(frame, symbol) {
+        let mark = crate::envir::option_value(symbols().out_dec.car());
+        return Ok(string_scalar(mark).as_deref() == Some("."));
+    }
+    argument_is(frame, symbol, |value| {
+        string_scalar(value).as_deref() == Some(".")
+    })
+}
+
+/// Whether the formal `symbol` holds a default promise that has not been forced. The fast paths
+/// run only for base's own closures, so the promise's code is the formal's original default.
+unsafe fn default_is_unforced(frame: ClosureFrame, symbol: Sexp) -> bool {
+    let value = match frame.resolve() {
+        Ok(index) => match eval::slot_formal(index, symbol) {
+            Some((value, _)) => value,
+            None => return false,
+        },
+        Err(env) => match crate::heap().frame_cell(env, symbol) {
+            Some(cell) => cell.cdr(),
+            None => return false,
+        },
+    };
+    value.kind() == SexpType::Promise && value.car() == values::unbound()
 }
 
 /// `pmax(..., na.rm)` when every argument is `NULL` or an atomic vector that is no object, and

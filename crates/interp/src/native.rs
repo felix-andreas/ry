@@ -55,12 +55,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     })
     .invisible(),
     internal("dyn.unload", 1, no_host),
-    internal("is.loaded", 3, |call| unsafe {
-        let name = values::first_string(call.arg(0))
-            .map(|name| name.into_owned())
-            .unwrap_or_default();
-        scalar_bool(is_base_routine(&name))
-    }),
+    // Only base's routines are native here, and base forces symbols, so no name is loaded.
+    internal("is.loaded", 3, |_| unsafe { scalar_bool(false) }),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
     internal("getRegisteredRoutines", 1, |call| unsafe {
         match builtin_libraries::registered_routines(call.arg(0))? {
@@ -152,15 +148,11 @@ const fn fortran_routine(
     }
 }
 
-pub fn is_base_routine(name: &str) -> bool {
-    BASE_ROUTINES.iter().any(|routine| routine.name == name)
-}
-
 /// Runs a `.C`, `.Call` or `.Fortran` call whose `.NAME` is one of [`BASE_ROUTINES`], and
 /// returns `None` for any other routine, which the caller resolves itself. `.NAME` names a base
-/// routine when it is the `NativeSymbolInfo` base R binds (such as `.F_dqrdc2`, whose `dll` is
-/// base), or a string with no `PACKAGE` or `PACKAGE = "base"`, since base is the first library
-/// GNU R searches.
+/// routine only as the `NativeSymbolInfo` base R binds (such as `.F_dqrdc2`, whose `dll` is
+/// base). GNU R's base calls `R_forceSymbols`, so a lookup by name never finds its routines, and
+/// one restricted to `PACKAGE = "base"` is an error.
 pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Option<Sexp>> {
     let Some((first, rest)) = call.args.split_first() else {
         return Ok(None);
@@ -170,14 +162,18 @@ pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Opti
     // routine, the common case, declines without allocating.
     let name = match first.value.kind() {
         SexpType::String => {
-            let package = rest
-                .iter()
-                .find(|arg| arg.tag == known.package_arg)
-                .and_then(|arg| values::first_string(arg.value));
-            if package.is_some_and(|package| package != "base") {
+            let in_base = rest.iter().any(|arg| {
+                arg.tag == known.package_arg
+                    && values::first_string(arg.value).as_deref() == Some("base")
+            });
+            if !in_base {
                 return Ok(None);
             }
-            values::first_string(first.value)
+            return Err(call.error(format!(
+                "\"{}\" not available for {}() for package \"base\"",
+                values::first_string(first.value).unwrap_or_default(),
+                call.name()
+            )));
         }
         SexpType::List => {
             let dll = values::list_get(first.value, "dll");
@@ -322,8 +318,9 @@ unsafe fn no_host(call: &Call<'_>) -> R<Sexp> {
     )))
 }
 
-/// A `DLLInfo` object for a library with no routines, such as base.
-pub unsafe fn dll_info(name: &str, path: &str) -> R<Sexp> {
+/// A `DLLInfo` object with null handle and record pointers, which a host that loads the library
+/// fills in.
+pub unsafe fn dll_info(name: &str, path: &str, force_symbols: bool) -> R<Sexp> {
     let handle = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
     crate::heap().root(handle);
     let info = crate::heap().alloc_external_ptr(std::ptr::null_mut(), nil(), nil())?;
@@ -338,15 +335,21 @@ pub unsafe fn dll_info(name: &str, path: &str) -> R<Sexp> {
         ("dynamicLookup", scalar_bool(false)?),
         ("handle", handle),
         ("info", info),
-        ("forceSymbols", scalar_bool(false)?),
+        ("forceSymbols", scalar_bool(force_symbols)?),
     ])?;
     let class = values::scalar_string("DLLInfo")?;
     values::set_attr(result, symbols().class, class)?;
     Ok(result)
 }
 
+/// Base's `DLLInfo`. GNU R's base forces symbols, so its routines are reachable only through
+/// the `NativeSymbolInfo` objects base R binds, such as `.F_dqrdc2`.
+pub unsafe fn base_dll_info() -> R<Sexp> {
+    dll_info("base", "base", true)
+}
+
 unsafe fn loaded_dlls() -> R<Sexp> {
-    let mut items = vec![dll_info("base", "base")?];
+    let mut items = vec![base_dll_info()?];
     let mut names = vec!["base".to_owned()];
     for (name, info) in builtin_libraries::loaded()? {
         items.push(info);
@@ -380,7 +383,7 @@ pub unsafe fn empty_routines() -> R<Sexp> {
 /// Base's routine tables, listing [`BASE_ROUTINES`] by interface. Base registers no
 /// `.External` routines.
 pub unsafe fn base_routines() -> R<Sexp> {
-    let dll = dll_info("base", "base")?;
+    let dll = base_dll_info()?;
     let mut tables = Vec::new();
     let groups = [
         (Some(Interface::C), "CRoutine"),
