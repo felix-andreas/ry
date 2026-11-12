@@ -2973,6 +2973,44 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- :A(\"s\"); FUNCTION(x) }",
             ],
         ),
+        // A tag from R whose payload is a ry list converts deeply. An empty list converts when
+        // its storage records the item type, and a bare `[]` leaves the call to tier 0.
+        (
+            "function(t: :Many(List<I64>) | :One(I64)) -> I64 match (t) { :Many(xs) => \
+             List.sum(xs)\n :One(x) => x }",
+            &[
+                "{ x <- :Many([1i64, 2i64, 39i64]); FUNCTION(x) }",
+                "{ x <- :Many(.ry_items([], \"I64\")); FUNCTION(x) }",
+                "{ x <- :Many([]); FUNCTION(x) }",
+            ],
+        ),
+        // A tag from R of a shape the annotation rejects, such as `:One(2.5)` for `:One(I64)`,
+        // gives up for that shape alone: the function keeps its code for the calls after it. A
+        // whole double converts to the declared `I64` as the interpreter's return check does.
+        (
+            "function(t: :One(I64) | :Two) -> I64 match (t) { :One(x) => x\n :Two => 0i64 }",
+            &[
+                "{ x <- :One(3i64); FUNCTION(x) }",
+                "{ x <- :One(2.5); FUNCTION(x) }",
+                "{ x <- :One(2); FUNCTION(x) }",
+                "{ x <- :One(\"s\"); FUNCTION(x) }",
+                "{ x <- :Two; FUNCTION(x) }",
+            ],
+        ),
+        // Lists of lists, of strings and of tags convert too, and a list whose items differ
+        // in type is released before the call falls back.
+        (
+            "function(t: :Rows(List<List<F64>>) | :Names(List<Str>) | :Kids(List<:Leaf(I64)>)) \
+             -> F64 match (t) { :Rows(rows) => List.walk(rows, 0, \\(acc, r) acc + \
+             Num.to_f64(List.len(r)))\n :Names(ns) => Num.to_f64(List.len(ns))\n \
+             :Kids(ks) => List.walk(ks, 0, \\(acc, k) acc + match (k) { :Leaf(v) => Num.to_f64(v) }) }",
+            &[
+                "{ x <- :Rows([[1.5, 2.5], [3.5]]); FUNCTION(x) }",
+                "{ x <- :Names([\"a\", \"b\"]); FUNCTION(x) }",
+                "{ x <- :Kids([:Leaf(1i64), :Leaf(2i64)]); FUNCTION(x) }",
+                "{ x <- :Rows([[1.5], [:Leaf(1i64)]]); FUNCTION(x) }",
+            ],
+        ),
         // A tag result crosses back to R.
         (
             "function(n: I64) -> Result<I64, :Odd> if (n %% 2i64 == 0i64) :Ok(n) else :Err(:Odd)",
