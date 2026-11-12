@@ -17,6 +17,7 @@ use {
         values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
     },
     heap::{
+        Liveness,
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
         records::{Fields, Layout, NativeKind},
     },
@@ -82,11 +83,103 @@ pub unsafe fn tag_name(id: u32) -> String {
 /// Slot `index` as an R value. A raw slot becomes a fresh scalar, so the caller sees the same
 /// value whether or not the number was stored unboxed.
 pub unsafe fn slot_value(object: Sexp, index: usize) -> R<Sexp> {
+    if object.is_lazy_record() {
+        settle_lazy(object)?;
+    }
     match object.record_slot(index) {
         Slot::Handle(value) => Ok(value),
         Slot::Real(value) => values::scalar_real(value),
         Slot::Integer(value) => values::scalar_integer(value),
         Slot::Logical(value) => values::scalar_logical(value),
+    }
+}
+
+// Lazy records.
+
+/// The lazy records R holds ([`heap::object::LAZY_RECORD`]). Each stands for a value of the typed
+/// core, and that core fills its slots when R first reads one, so a value typed code returns and
+/// R only passes back to typed code is never converted. Each entry owns one reference to its
+/// record's value, which a collection releases once the record has died or been filled.
+#[derive(Default)]
+pub struct LazyRecords {
+    entries: Vec<(Sexp, u64)>,
+    native: Option<NativeValues>,
+}
+
+/// How the typed core fills a lazy record and releases its reference to a value.
+#[derive(Clone, Copy)]
+pub struct NativeValues {
+    pub settle: unsafe fn(Sexp) -> R<()>,
+    pub release: unsafe fn(u64),
+}
+
+impl LazyRecords {
+    /// Releases the values of the records the collection found dead or that were filled since.
+    /// A dead record's address cannot be reused before this runs, so an entry never mistakes a
+    /// new record for its own.
+    pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        let Some(native) = self.native else {
+            return;
+        };
+        self.entries.retain(|&(record, value)| {
+            let held = liveness.is_live(record)
+                && record.is_lazy_record()
+                && record.lazy_record_value() == value;
+            if !held {
+                (native.release)(value);
+            }
+            held
+        });
+    }
+}
+
+/// A rooted lazy record of `layout` with `slot_count` slots standing for the typed-core value
+/// `value`, whose reference it takes over when it is made.
+pub unsafe fn alloc_lazy(
+    layout: u32,
+    slot_count: usize,
+    value: u64,
+    native: NativeValues,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let record = heap.alloc_lazy_record(layout, slot_count, value)?;
+    heap.root(record);
+    let lazy = &mut interp().lazy_records;
+    lazy.native = Some(native);
+    lazy.entries.push((record, value));
+    Ok(record)
+}
+
+/// Fills `object` when it is a lazy record, before something reads its slots.
+pub unsafe fn settle(object: Sexp) -> R<()> {
+    if object.kind() == SexpType::Record && object.is_lazy_record() {
+        settle_lazy(object)?;
+    }
+    Ok(())
+}
+
+/// [`settle`] for a reader that can neither raise an error nor let a collection run, such as
+/// `identical()`. The collector waits until the record is filled, and running out of memory
+/// while filling it is fatal.
+pub unsafe fn settle_uncollected(object: Sexp) {
+    if object.kind() != SexpType::Record || !object.is_lazy_record() {
+        return;
+    }
+    let heap = crate::heap();
+    heap.inhibit_collection();
+    let settled = settle_lazy(object);
+    crate::heap().allow_collection();
+    if let Err(unwind) = settled {
+        panic!("filling a record of the typed core failed: {unwind:?}");
+    }
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn settle_lazy(object: Sexp) -> R<()> {
+    match interp().lazy_records.native {
+        Some(native) => (native.settle)(object),
+        None => panic!("a lazy record exists, but no typed core made one"),
     }
 }
 
