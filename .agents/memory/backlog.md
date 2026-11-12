@@ -127,7 +127,6 @@ left, in order of expected gain:
 Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
 
 - **Not compiled natively; the whole function runs in the interpreter:**
-  - a list literal, `[]` or `[x, i]`, which calls `.ry_array` (bounce, binarytrees, nbody, fasta, pidigits, scalar-while);
   - `List.repeat` with a computed count ("a count that is not a number": `integer_count` in `crates/typed/src/lower.rs` accepts constants only), in vector-for, vector-while, matrix-for, convolution and spectralnorm;
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
   - `List.with_capacity`, `List.swap` (fannkuchredux), `List.is_empty`, `Str.to_utf8`, `Dict.empty`, `Dict.to_list`, `Num.bitwise_and`, `Num.bitwise_xor` and `Num.shift_left_by` (mandelbrot).
