@@ -509,6 +509,17 @@ peak in those parts (whole process, anonymous, start image and `libR.so` residen
 `--baseline`, it also prints the paired ratio baseline / ry for each program and its geometric mean
 with a 95% interval, so a value above 1 means the build under test is faster.
 
+Layout moves single-program wall time too, so judge a wall regression on one program by what
+callgrind counts. Run the program on both builds under `valgrind --tool=callgrind --cache-sim=yes
+--branch-sim=yes` and compare instructions (`Ir`), simulated branch mispredictions and simulated
+cache misses. A regression that shows in those counts is real. A wall regression without them
+blocks a change only when it reproduces on two layouts: the change's build, and the change's build
+plus a no-op exported function (the control), which shifts the code placed after it. The public
+suite's `lapply` program shows why. Three builds ran it in the same instruction count (within
+0.1%), yet its simulated indirect-branch mispredictions were 0.6M, 8.6M and 10.6M, and the no-op
+function alone made the difference between the last two. Wall time followed the layout: the
+8.6M build ran `lapply` about 25% slower than the 0.6M build.
+
 Two builds can share `target/base-r` in a comparison, because each loads only images its own
 name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
 [the architecture page](/development/architecture#the-start-up-image)). A build's first start
