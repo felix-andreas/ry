@@ -127,9 +127,10 @@ left, in order of expected gain:
 Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
 
 - **Not compiled natively; the whole function runs in the interpreter:**
-  - `List.repeat` with a computed count ("a count that is not a number": `integer_count` in `crates/typed/src/lower.rs` accepts constants only), in vector-for, vector-while, matrix-for, convolution and spectralnorm;
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity`, `List.swap` (fannkuchredux), `List.is_empty`, `List.concat`, `List.sublist`, `List.take_first`, `List.drop_last`, `List.sort_with`, `Str.to_utf8`, `Str.from_utf8_lossy`, `Dict.empty`, `Dict.insert` and `Dict.to_list` (fasta, knucleotide, pidigits, reversecomplement, mandelbrot_ascii).
+  - `List.with_capacity` (fasta), and in knucleotide `List.sort_with`, `Dict.update` and `Dict.get` (both take or return a `Result`), a tuple index `entry[[2]]` and `<` on `Str`;
+  - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries);
+  - a record with a `List` field (pidigits' `Int`; see "A record cannot hold a `List` field" above).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
   - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
