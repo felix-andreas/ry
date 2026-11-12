@@ -126,7 +126,7 @@ rust_source = "tools/bench/typed/report.rs"
 [[programs]]
 id = "sales"
 display = "Sales table pipeline"
-summary = "Filters a million sales rows, adds a revenue column and totals it per region: a table pipeline."
+summary = "Filters a million sales rows, computes each row's revenue and totals it per region: column lists and a Dict keyed by a string."
 typed_source = "tools/bench/applications/sales.typed.R"
 rust_source = "tools/bench/typed/sales.rs"
 
