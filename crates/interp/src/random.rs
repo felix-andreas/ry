@@ -217,9 +217,7 @@ pub unsafe fn checkpoint() -> Option<Checkpoint> {
     if rng.state.kind() == Kind::UserSupplied || rng.normal_kind == NormalKind::UserSupplied {
         return None;
     }
-    let Some(cell) = crate::heap().frame_cell(global_env(), symbols().dot_random_seed) else {
-        return None;
-    };
+    let cell = crate::heap().frame_cell(global_env(), symbols().dot_random_seed)?;
     let seeds = cell.cdr();
     if cell.has_gp(gp::ACTIVE_BINDING)
         || seeds.kind() != SexpType::Integer
@@ -2392,11 +2390,10 @@ mod tests {
             let normal_kind = NORMALS[picks.below(NORMALS.len())];
             let skip = picks.below(1300);
             let length = picks.below(2500);
-            let mut rngs = [(); 2].map(|()| {
-                let mut rng = Rng::default();
-                rng.state = State::seeded(kind, seed as u32).expect("seeding a built-in generator");
-                rng.normal_kind = normal_kind;
-                rng
+            let mut rngs = [(); 2].map(|()| Rng {
+                state: State::seeded(kind, seed as u32).expect("seeding a built-in generator"),
+                normal_kind,
+                ..Rng::default()
             });
             for rng in &mut rngs {
                 for _ in 0..skip {

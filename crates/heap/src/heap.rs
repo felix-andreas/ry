@@ -3966,7 +3966,8 @@ impl Heap {
                         let start = card * CARD_ELEMENTS;
                         let mut card_younger = false;
                         for index in start..(start + CARD_ELEMENTS).min(length) {
-                            card_younger |= self.mark_child::<TENURED>(object.stored_element(index));
+                            card_younger |=
+                                self.mark_child::<TENURED>(object.stored_element(index));
                         }
                         *cards.add(card) = if card_younger {
                             CARD_UNTENURED

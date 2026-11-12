@@ -874,7 +874,7 @@ impl Heap {
         let large_base = input.u64()? as usize;
         let large_length = input.u64()? as usize;
         let large_objects = input.u64s()?;
-        if large_base != IMAGE_LARGE_BASE || large_length % PAGE_SIZE != 0 {
+        if large_base != IMAGE_LARGE_BASE || !large_length.is_multiple_of(PAGE_SIZE) {
             return Err(invalid("its large objects are not at the image address"));
         }
         let section = IMAGE_LARGE_BASE as *mut u8;
@@ -974,8 +974,8 @@ impl Heap {
         }
         let symbols = input.u64s()?;
         self.symbols.clear();
-        for pair in symbols.chunks_exact(2) {
-            self.symbols.insert(handle(pair[0])?, handle(pair[1])?);
+        for &[key, value] in symbols.as_chunks::<2>().0 {
+            self.symbols.insert(handle(key)?, handle(value)?);
         }
         self.roots.precious.clear();
         for _ in 0..input.u32()? {
@@ -1249,8 +1249,10 @@ impl<'a> Reader<'a> {
         let (words, rest) = self.bytes.split_at(count * 4);
         self.bytes = rest;
         Ok(words
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&word| u32::from_le_bytes(word))
             .collect())
     }
 
@@ -1262,12 +1264,10 @@ impl<'a> Reader<'a> {
                 .ok_or_else(|| invalid("a length is too large"))?,
         )?;
         Ok(bytes
-            .chunks_exact(8)
-            .map(|word| {
-                let mut array = [0u8; 8];
-                array.copy_from_slice(word);
-                u64::from_le_bytes(array)
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&word| u64::from_le_bytes(word))
             .collect())
     }
 }

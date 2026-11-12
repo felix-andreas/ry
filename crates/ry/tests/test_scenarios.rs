@@ -364,7 +364,11 @@ fn identical_runs_make_identical_collections() {
             .lines()
             .map(|line| {
                 let fields: Vec<&str> = line.split(' ').collect();
-                assert_eq!(fields.len(), 6, "a collection log line has six fields: {line}");
+                assert_eq!(
+                    fields.len(),
+                    6,
+                    "a collection log line has six fields: {line}"
+                );
                 [fields[0], fields[2], fields[3], fields[4]].join(" ")
             })
             .collect::<Vec<String>>()
@@ -378,7 +382,10 @@ fn identical_runs_make_identical_collections() {
             first.join("\n")
         );
     }
-    assert_eq!(first, second, "two identical runs made different collections");
+    assert_eq!(
+        first, second,
+        "two identical runs made different collections"
+    );
 }
 
 /// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and

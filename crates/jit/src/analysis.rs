@@ -2930,8 +2930,8 @@ impl<'a> Builder<'a> {
                 if symbol.kind() != SexpType::Symbol || self.locals.contains(&symbol) {
                     return None;
                 }
-                let found =
-                    resolve_variable(symbol, self.enclosure).filter(|found| self.portable(found))?;
+                let found = resolve_variable(symbol, self.enclosure)
+                    .filter(|found| self.portable(found))?;
                 let function = found.function;
                 expected = Some((callback, function));
                 speculation = Some(found);
@@ -3957,7 +3957,13 @@ impl<'a> Builder<'a> {
             && matches!(name, "[" | "[[")
             && !matches!(
                 types[1],
-                Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::IntArr | Ty::DblArr | Ty::LglArr | Ty::List
+                Ty::IntVec
+                    | Ty::DblVec
+                    | Ty::LglVec
+                    | Ty::IntArr
+                    | Ty::DblArr
+                    | Ty::LglArr
+                    | Ty::List
             ) {
             Fast::Read
         } else {
