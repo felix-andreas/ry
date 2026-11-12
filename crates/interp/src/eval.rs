@@ -2718,7 +2718,9 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
             Reify::Builtin(op) => builtin_def(op)?.name,
             Reify::Site(name) => name,
         };
-        interp().frames[index].reified_by = activity::label(name);
+        let reason = activity::label(name);
+        activity::count_reification(reason);
+        interp().frames[index].reified_by = reason;
     }
     materialize_references(index)?;
     let frame = &interp().frames[index];
@@ -5028,7 +5030,7 @@ pub(crate) unsafe fn switch_alternative(
         ));
     }
     for (position, arg) in alternatives.iter().enumerate() {
-        if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
+        if arg.tag.kind() == SexpType::Symbol && switch_name_matches(arg.tag.car(), text) {
             // Fall through empty alternatives to the next non-empty one, and to an invisible
             // NULL when every later one is empty.
             return Ok(alternatives[position..]
@@ -5092,6 +5094,16 @@ pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSele
     };
     warnings.report()?;
     Ok(SwitchSelector::Position(position))
+}
+
+/// Whether the alternative named `name` is the one the string selector `text` picks. GNU R
+/// compares the texts as `pmatch` does, translated to UTF-8 and with `NA` spelled "NA", so a
+/// latin1 selector picks its UTF-8 name and `NA_character_` picks an alternative named `NA`.
+pub(crate) unsafe fn switch_name_matches(name: Sexp, text: Sexp) -> bool {
+    if text == values::na_string() {
+        return name.bytes() == b"NA";
+    }
+    values::same_string(name, text)
 }
 
 unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {

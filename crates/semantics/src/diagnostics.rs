@@ -24,6 +24,7 @@ use {
             native_symbol,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
+        native::{NativeBlockerKind, Uncompiled},
         parse, prelude_enabled, project_type_definitions, statement_annotations,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
@@ -2667,8 +2668,8 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 }
 
 /// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
-/// strict origins for. An origin that is an assignment's value is phrased against the assigned
-/// name.
+/// strict origins and native blockers for. An origin that is an assignment's value is phrased
+/// against the assigned name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -2706,6 +2707,32 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(check) = item_check(db, item) else {
             continue;
         };
+        for blocker in &check.native_blockers {
+            // With inline annotations turned off no signature can be written inline, and the
+            // warning about the setting already says so. The setting is read here, not in the
+            // item check, so changing it rechecks no item.
+            if blocker.kind == NativeBlockerKind::Uncompiled(Uncompiled::DetachedSignature)
+                && !inline_annotations_enabled(db)
+            {
+                continue;
+            }
+            let range = blocker.range + offset;
+            let source = file
+                .text(db)
+                .get(usize::from(range.start())..usize::from(range.end()))
+                .unwrap_or_default();
+            let severity = if blocker.kind.is_error() {
+                Severity::Error
+            } else {
+                Severity::Warning
+            };
+            diagnostics.push(Diagnostic::new(
+                range,
+                severity,
+                blocker.kind.code(),
+                blocker.kind.message(source),
+            ));
+        }
         if check.strict_origins.is_empty() {
             continue;
         }

@@ -386,11 +386,7 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
 const MAX_SHAPE_ROUNDS: usize = 4;
 
 unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
-    let declared = if interp::annotations::returns_i64(function) {
-        Some(Type::I64)
-    } else {
-        interp::annotations::declared_return_type(function).and_then(declared_type)
-    };
+    let declared = declared_result(function);
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
     let mut refusal = Refusal::new("the result type depends on the recursion");
     let mut found = None;
@@ -398,7 +394,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         let mut guess = first;
         for _ in 0..=MAX_REVISIONS {
             let mut linker = Linker::default();
-            let lowered = match lower::lower(function, params, guess, &mut linker) {
+            let lowered = match lower::lower(function, params, guess, declared, &mut linker) {
                 Ok(lowered) => lowered,
                 Err(why) => {
                     refusal = why;
@@ -518,6 +514,22 @@ impl Callees for Linker {
             result: compiled.result,
         });
         Ok((self.callees.len() - 1, compiled.result))
+    }
+}
+
+/// The type a typed closure declares it returns, where one type of the typed core is that.
+unsafe fn declared_result(function: Sexp) -> Option<Type> {
+    if interp::annotations::returns_i64(function) {
+        return Some(Type::I64);
+    }
+    if let Some(ty) = interp::annotations::declared_return_type(function).and_then(declared_type) {
+        return Some(ty);
+    }
+    match interp::annotations::return_annotation(function)?.trim() {
+        "F64" => Some(Type::Dbl),
+        "Str" => Some(Type::Str),
+        "Bool" => Some(Type::Lgl),
+        _ => None,
     }
 }
 

@@ -607,8 +607,7 @@ impl Writer<'_, '_> {
             // A typed closure's signature lives in the session's registry, so the stream
             // carries it as the first attribute, which the reader puts back into its registry.
             let signature = if kind == SexpType::Closure {
-                interp::annotations::stream_signature(object)
-                    .map_err(|_| error("cannot write a typed function's signature"))?
+                interp::annotations::stream_signature(object)?
             } else {
                 None
             };
@@ -658,8 +657,7 @@ impl Writer<'_, '_> {
     /// [`interp::annotations::STREAM_ATTRIBUTE`], then the closure's own attributes `rest`.
     unsafe fn write_signature(&mut self, signature: Sexp, rest: Sexp) -> ApiResult<()> {
         runtime().heap.root(signature);
-        let name = interp::values::install(interp::annotations::STREAM_ATTRIBUTE)
-            .map_err(|_| error("cannot write a typed function's signature"))?;
+        let name = interp::values::install(interp::annotations::STREAM_ATTRIBUTE)?;
         let flags = pack_flags(SexpType::Pairlist.code(), 0, false, false, true);
         self.write_integer(flags as i32)?;
         self.write_item(name)?;

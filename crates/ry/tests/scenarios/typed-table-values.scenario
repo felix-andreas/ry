@@ -37,8 +37,9 @@ expect stdout "[1] 100\n[1] 70\n[1] 40"
 expect stderr "typed: `by_region` runs in the interpreter: no code for [Table, I64]: it waits on the interpreter to run `"
 expect stderr "typed: compiled for [Table, I64] -> Dbl"
 
-# A column is an R vector, which typed code cannot hold, so reading one outside a conversion
-# sends the function to the interpreter with a reason that names the fix.
+# A column is an R vector, which typed code cannot hold, so reading one outside a conversion is
+# a `native` error in strict mode. Without strict mode the function runs in the interpreter, with
+# a reason that names the same fix.
 
 file column.R
 | first_total <- function(totals: DataFrame{total: double[]}) -> F64 {
@@ -49,4 +50,15 @@ file column.R
 | print(first_total(totals))
 
 run ry run --runtime ry column.R
+expect exit 1
+expect stderr "reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(totals$total)`"
+
+file ry.toml
+| [check]
+| typing = true
+| strict = false
+
+run ry run --runtime ry column.R
+expect exit 0
+expect stdout "[1] 1.5"
 expect stderr "it uses a column of a table directly, and a column is an R vector: read it inside `List.from_r`"

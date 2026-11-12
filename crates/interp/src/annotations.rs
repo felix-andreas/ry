@@ -233,6 +233,7 @@ pub unsafe fn restore_signature(function: Sexp, carried: Sexp) -> R<()> {
         || names.kind() != SexpType::String
         || slots < FIRST_FORMAL_SLOT
         || values::length(texts) != slots
+        || values::length(names) + FIRST_FORMAL_SLOT != slots
     {
         return Ok(());
     }
@@ -456,6 +457,12 @@ pub struct Declared {
 pub unsafe fn declared_return_type(function: Sexp) -> Option<Declared> {
     let signature = signature_of(function)?;
     declared(mask_at(signature.element(MASKS), RETURN_SLOT))
+}
+
+/// The annotation text of what a typed closure returns, such as `F64` or `Str`.
+pub unsafe fn return_annotation(function: Sexp) -> Option<String> {
+    let text = text_at(signature_of(function)?, RETURN_SLOT);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Whether the formal at `position` of a typed closure declares `I64`, so a whole R number
