@@ -3346,6 +3346,15 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             "function(n: I64) -> I64 List.sum(.ry_items(List.map(List.range(1, n), \\(v) v * 2i64), \"I64\"))",
             &["{ x <- 3i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
         ),
+        // `List.with_capacity` gets its item type from `.ry_items` and fails on a negative room.
+        (
+            "function(n: I64) -> I64 { xs <- .ry_items(List.with_capacity(n), \"I64\"); for (i in List.range(1, n)) xs <- List.append(xs, i); List.sum(xs) }",
+            &[
+                "{ x <- 5i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+                "{ x <- -1i64; FUNCTION(x) }",
+            ],
+        ),
     ];
     with_interpreter(|| {
         for (case, &(definition, calls)) in cases.iter().enumerate() {

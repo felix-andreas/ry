@@ -738,6 +738,18 @@ const PRINTS: &[(&str, &str)] = &[
         "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_r(p) }",
         "[1] 1 2 3 4 5 6\n",
     ),
+    (
+        "{ p <- List.with_capacity(4L); p <- List.append(p, 1i64); List.sum(List.append(p, 2i64)) }",
+        "3i64\n",
+    ),
+    (
+        "{ p <- List.append(List.with_capacity(2L), (x = 1, y = 2)); List.append(p, (x = 3, y = 4)) }",
+        "[(x = 1, y = 2), (x = 3, y = 4)]\n",
+    ),
+    (
+        "List.sum(.ry_items(List.reserve(List.with_capacity(2L), 8L), \"F64\"))",
+        "[1] 0\n",
+    ),
     ("List.to_r(List.reserve(xs, 100L))", "[1] 3 1 2\n"),
     (
         "{ p <- list(1L, 2L); q <- p; p <- List.swap(p, 1L, 2L); c(List.to_r(p), List.to_r(q)) }",
