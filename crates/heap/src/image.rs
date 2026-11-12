@@ -26,7 +26,7 @@
 
 use {
     crate::{
-        Heap, HeapError,
+        Heap, HeapError, bump_symbol_epoch,
         env::{Frame, FrameImage, TableImage},
         object::{ExternalPtrObject, Header, Sexp, SexpType, Shape, flag_bits, gp, holds_handles},
         space::{IMAGE_LARGE_BASE, PAGE_SIZE, SlotIndex, virtual_memory},
@@ -307,6 +307,8 @@ impl Heap {
             }
         }
         for symbol in self.symbols.values() {
+            // Stamps saved in compiled code must not match after a load.
+            bump_symbol_epoch(&mut self.enclosure_epoch, *symbol);
             symbol.reset_symbol_caches();
         }
         self.collect_for_image(&keep(&roots));

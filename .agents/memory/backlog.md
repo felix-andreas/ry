@@ -24,6 +24,12 @@ The quality bar is four things.
 
 ## Open: broken on main
 
+- The code image leaves out every closure that calls an inlined base wrapper (`paste`,
+  `sprintf`, the `vector` family): tier 0 compiles such a call to an `Op::Guard` whose constant is
+  the wrapper's closure, and `serialize::Encoder` encodes only the closures in `BASE_FUNCTIONS`
+  (`local`), so `Unencodable("a closure")`. `install-code-image` and `install-machine-code`
+  scenarios fail on it (`written=3` of 4, `written=4` of 5). Encode the guard's closure as a
+  base function by name, as `local` is.
 - `test_tiers` `fuzz_typed_record_natives_agree_with_tier_zero` fails in the full suite (an old
   object "lost its mark" in `Heap::write_barrier_slow`, seed 104 or 121 depending on the build)
   but passes alone, so it depends on heap state earlier seeds leave behind. It fails on main
@@ -103,7 +109,7 @@ left, in order of expected gain:
 
 - **Box conversion at the boundary.** A record or tag argument from R converts deeply into boxes on every call, and a box result converts back (`typed::to_box`, `typed::from_box`): typed `expr_tree` spends about 46 of its 48 ms converting the tree, against 1.7 ms to evaluate `evaluate(build(14, 8))` built natively. The end shape keeps a box beside the R record it came from (or makes the R record a view of the box), so a value that crosses twice converts once. Boxes are also never scalar-replaced: a record built and read in one function is still allocated. `Str.to_i64` and `Str.to_f64` parse twice (`Op::Parses`, then `Op::Parse`). The design's pools (`typed-runtime.md`, "Representations") are not built.
 - **List functions that box every item.** `List.reverse`, the take, drop and sublist family and `List.split_at` move packed items through `arrays::gather`, but most of the others (`List.sort_asc`, `List.map`, `List.keep_if`, `List.concat`, ...) still go through `list_elements`, which allocates one scalar per item of an `F64` or `I64` list. A million-item list pays about 60 MiB of transient scalars that way. The end shape is a packed path per item kind, as `gather` has.
-- **`stop()` after an R call in typed code loses its message.** `stop` lowers to a give-up, and code that has called R cannot be run again, so the call raises the typed core's "cannot run again" error instead of the user's message. The end shape lowers `stop(msg)` to a native error raise with the message and the call. `sales` runs its `DataFrame` parameter on the table engine and is listed in `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`.
+- **Typed `sales` runs in the interpreter.** Its `DataFrame` parameter runs on the table engine, and it is listed in `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`.
 - **JIT-compiled callers skip native entries.** With the JIT on, a caller compiled to machine code calls `isTRUE` and the other `NATIVE_ENTRIES` closures as full closures (a loop of 17,000 `isTRUE(x)` calls takes no native entry); tier 0 takes the entry. Route compiled calls of base closures through `base_fast_paths` as tier 0 does.
 - **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. `sales` and `vasicek` pay it.
@@ -251,6 +257,11 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 - **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
+
+## Open: a dense id for interned strings (strings track)
+
+- S3 method lookup walks the calling function frames below the top environment on every dispatch, by name (`method_scope` and `lookup_in_scope` in `crates/interp/src/dispatch.rs`, about 260 and 180 instructions per call). It is most of the dispatch cost left in the validation workload, where `format()` dispatches from inside `vapply`. Closure frames in fixed slots could answer "no binding of this name in any function frame" without hashing, which belongs to the closure-frame work, not to dispatch (`decisions.md`, "S3 methods are found through one row per method symbol").
+- S3 dispatch maps each (generic, class) pair to its `generic.class` symbol through a hash map keyed by the generic's symbol and the class `CHARSXP` (`MethodCache::names` in `crates/interp/src/dispatch.rs`, about 69 instructions per lookup, 0.7% of the objects workload). A dense id per interned `CHARSXP`, stored in the string, would let that become an index, and would serve every other table keyed by an interned string. Interning the class as a symbol instead costs more than the hash (`decisions.md`, "S3 methods are found through one row per method symbol").
 
 ## Open: base R kernels against GNU R
 
@@ -1091,7 +1102,7 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
   interned it, and made `.Generic` with `mk_char`: `mk_char`, `install_char`, `method_symbol`,
   `char_str` and their mallocs were about 7.5% of `timeseries`. `MethodCache::names` maps the
   symbol pair to the name.
-- **The method cache flushed on every collection.** Now a GC root, keyed only on the binding epoch.
+- **The method cache flushed on every collection.** The S3 method rows are GC roots, valid under each method symbol's lookup stamp.
 - **`.Call` interned four control-argument names per call** (0.5% of `timeseries`).
 - **Tier-0 dispatch** is one loop over op words that carry their operand count, lookup sites
   keep slot hints into the frame, function lookups skip frames that cannot bind the symbol, and

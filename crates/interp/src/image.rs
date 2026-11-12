@@ -50,7 +50,7 @@ pub unsafe fn host_environment() -> Option<Sexp> {
 /// The start-up image's format stamp. Its last byte goes up whenever what an image holds or
 /// how it lays it out changes, so that an image from an older format reads as stale and is
 /// written again rather than misread.
-pub const MAGIC: &[u8; 8] = b"RYSTART\x06";
+pub const MAGIC: &[u8; 8] = b"RYSTART\x07";
 
 /// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
 /// format that the same build wrote. A missing or unreadable file is not.
