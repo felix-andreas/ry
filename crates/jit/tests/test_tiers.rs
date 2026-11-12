@@ -2943,6 +2943,8 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
         "tier_parse <- function(row: Str) -> Result<I64, :Bad> \
          match (Str.to_i64(row)) { :Ok(v) => :Ok(v * 2i64)\n :Err(_) => :Err(:Bad) }",
         "tier_area <- function(r: Record{w: F64, h: F64}) -> F64 r$w * r$h",
+        "tier_bump <- function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+         match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }",
     ];
     let cases: &[(&str, &[&str])] = &[
         // A record's fields sit in name order, whatever order the literal gives them in, and a
@@ -3039,6 +3041,24 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             &[
                 "{ x <- List.from_r(c(\"1\", \"x\", \"1\", \"drop\", \"5\")); FUNCTION(x) }",
                 "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
+        // A dictionary update that reads the payload where the key is found and where it is
+        // missing, and removes a key it set before, by a function written at the call and by a
+        // typed closure.
+        (
+            "function(rows: List<Str>) -> F64 { \
+             inline <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+             match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }))\n \
+             called <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, tier_bump))\n \
+             Num.to_f64(Dict.len(inline)) * 1000 + Result.with_default(Dict.get(inline, \"b\"), -1) * 100 + \
+             Num.to_f64(Dict.len(called)) * 10 + Result.with_default(Dict.get(called, \"a\"), -1) }",
+            &[
+                "{ x <- List.from_r(c(\"a\", \"b\", \"a\", \"c\", \"a\", \"b\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"a\", \"a\", \"a\", \"a\")); FUNCTION(x) }",
+                "{ x <- List.from_r(character(0)); FUNCTION(x) }",
             ],
         ),
         // Text: number formatting, repetition, case, splitting, joining and byte counts of

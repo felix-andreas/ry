@@ -4369,7 +4369,8 @@ impl Lowering<'_> {
         let dict = self.value(dict)?;
         let key = self.value(key)?;
         let key = self.dict_key(dict, key)?;
-        self.lookup_result(dict, key, "KeyNotFound")
+        let (result, _) = self.lookup_result(dict, key, "KeyNotFound")?;
+        Ok(result)
     }
 
     /// `Dict.insert(dict, key, value)`, which updates a uniquely held dictionary in place.
@@ -4458,19 +4459,25 @@ impl Lowering<'_> {
         self.convert_scalar(key, item)
     }
 
-    /// `:Ok(value)` when `dict` holds `key`, else `:Err(:missing)`.
+    /// `:Ok(value)` when `dict` holds `key`, else `:Err(:missing)`, and the position
+    /// [`Op::DictFind`] gave for the key.
     unsafe fn lookup_result(
         &mut self,
         dict: Local,
         key: Local,
         missing: &str,
-    ) -> Result<Local, Refusal> {
+    ) -> Result<(Local, Local), Refusal> {
         let Type::Dict { value: item, .. } = self.builder.ty(dict) else {
             return Err(Refusal::new(
                 "a lookup in something other than a dictionary",
             ));
         };
-        let contains = self.builder.emit(Type::Bool, Op::DictContains(dict, key));
+        let position = self.builder.emit(Type::I64, Op::DictFind(dict, key));
+        let first = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let contains = self.builder.emit(
+            Type::Bool,
+            Op::Compare(Compare::Ge, Item::I64, position, first),
+        );
         let (found, absent, join) = (
             self.builder.block(),
             self.builder.block(),
@@ -4484,7 +4491,7 @@ impl Lowering<'_> {
         self.builder.switch_to(found);
         let value = self
             .builder
-            .emit(Type::of_item(item), Op::DictGet(dict, key));
+            .emit(Type::of_item(item), Op::DictAt(dict, position));
         let ok = self.tag("Ok", &[value])?;
         self.builder.switch_to(absent);
         let reason = self.tag(missing, &[])?;
@@ -4501,11 +4508,17 @@ impl Lowering<'_> {
         self.builder.push(Some(result), Op::Copy(ok));
         self.builder.terminate(Terminator::Jump(join));
         self.builder.switch_to(join);
-        Ok(result)
+        Ok((result, position))
     }
 
     /// `Dict.update(dict, key, f)`: `f` gets `:Ok(value)` or `:Err(:Missing)`, and an `:Ok` it
     /// gives sets the key while an `:Err` removes it.
+    ///
+    /// A function written at the call is applied once where the key is found and once where it
+    /// is missing, not once to a result joined from the two. Its argument and usually its answer
+    /// are then each built by one instruction and only read, so [`crate::unbox`] removes both
+    /// boxes, and the update of a counter or a running total allocates nothing. A typed closure
+    /// called directly takes the joined result, so it is compiled for the one type it declares.
     unsafe fn dict_update(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
         let [dict, key, function] = arguments.exactly(3)?[..] else {
             return Err(Refusal::new("a malformed `Dict.update`"));
@@ -4520,10 +4533,79 @@ impl Lowering<'_> {
                 "a `Dict.update` of something other than a dictionary",
             ));
         };
-        let current = self.lookup_result(dict, key, "Missing")?;
-        let answer = self
-            .apply(callable, &[current])?
-            .ok_or(Refusal::new("an update that never completes"))?;
+        if let Callable::Typed(_) = callable {
+            let (current, position) = self.lookup_result(dict, key, "Missing")?;
+            let updated = self
+                .store_update(callable, current, dict, key, position, None)?
+                .ok_or(Refusal::new("an update that never completes"))?;
+            return Ok(updated);
+        }
+        let position = self.builder.emit(Type::I64, Op::DictFind(dict, key));
+        let first = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let contains = self.builder.emit(
+            Type::Bool,
+            Op::Compare(Compare::Ge, Item::I64, position, first),
+        );
+        let (found, absent, join) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
+        self.builder.terminate(Terminator::Branch {
+            condition: contains,
+            then: found,
+            otherwise: absent,
+        });
+        let result = self.builder.local(dict_ty);
+        let mut completes = false;
+        for present in [true, false] {
+            self.builder.switch_to(if present { found } else { absent });
+            let current = if present {
+                let value = self
+                    .builder
+                    .emit(Type::of_item(item), Op::DictAt(dict, position));
+                self.tag("Ok", &[value])?
+            } else {
+                let reason = self.tag("Missing", &[])?;
+                self.tag("Err", &[reason])?
+            };
+            let updated =
+                self.store_update(callable, current, dict, key, position, Some(present))?;
+            if let Some(updated) = updated {
+                self.builder.push(Some(result), Op::Copy(updated));
+                self.builder.terminate(Terminator::Jump(join));
+                completes = true;
+            }
+        }
+        if !completes {
+            return Err(Refusal::new("an update that never completes"));
+        }
+        self.builder.switch_to(join);
+        Ok(result)
+    }
+
+    /// Applies the function of a `Dict.update` to `current` and gives `dict` with its answer
+    /// stored under `key`, or `None` when the function never completes. `present` says whether
+    /// the dictionary is known to hold the key, at `position`, or known not to hold it; `None`
+    /// leaves that to `position`, which is negative for a missing key.
+    unsafe fn store_update(
+        &mut self,
+        callable: Callable,
+        current: Local,
+        dict: Local,
+        key: Local,
+        position: Local,
+        present: Option<bool>,
+    ) -> Result<Option<Local>, Refusal> {
+        let dict_ty = self.builder.ty(dict);
+        let Type::Dict { value: item, .. } = dict_ty else {
+            return Err(Refusal::new(
+                "a `Dict.update` of something other than a dictionary",
+            ));
+        };
+        let Some(answer) = self.apply(callable, &[current])? else {
+            return Ok(None);
+        };
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(answer), &[ok, err], &[])?;
         let updated = self.switch_shapes(
@@ -4533,7 +4615,7 @@ impl Lowering<'_> {
             None,
             &mut |lowering, shape| {
                 let layout = shape.map(|shape| shapes::shape(shape).layout);
-                match (shape, layout) {
+                let op = match (shape, layout) {
                     (Some(shape), Some(layout)) if layout == ok => {
                         let value = lowering.field(answer, shape, 0)?;
                         // A dictionary's values all have its value type, which `Dict.update`
@@ -4541,26 +4623,28 @@ impl Lowering<'_> {
                         if lowering.convert_scalar(value, item)? != value {
                             return Err(Refusal::new("an update to a value of another type"));
                         }
-                        Ok(Some(
-                            lowering
-                                .builder
-                                .emit(dict_ty, Op::DictInsert(dict, key, value)),
-                        ))
+                        match present {
+                            Some(false) => Op::DictInsert(dict, key, value),
+                            _ => Op::DictPut(dict, key, position, value),
+                        }
                     }
-                    (_, Some(layout)) if layout == err => Ok(Some(
-                        lowering.builder.emit(dict_ty, Op::DictRemove(dict, key)),
-                    )),
+                    (_, Some(layout)) if layout == err => match present {
+                        Some(false) => Op::Copy(dict),
+                        _ => Op::DictRemove(dict, key),
+                    },
                     _ => {
                         lowering.builder.terminate(Terminator::Fail);
                         let unreachable = lowering.builder.block();
                         lowering.builder.switch_to(unreachable);
-                        Ok(None)
+                        return Ok(None);
                     }
-                }
+                };
+                Ok(Some(lowering.builder.emit(dict_ty, op)))
             },
         )?;
-        let updated = updated.ok_or(Refusal::new("an update that never completes"))?;
-        self.usable(updated)?;
+        if let Some(updated) = updated {
+            self.usable(updated)?;
+        }
         Ok(updated)
     }
 

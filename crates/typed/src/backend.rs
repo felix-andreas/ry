@@ -1612,29 +1612,53 @@ impl Emitter<'_> {
                     &[dict, k0, k1],
                 ))
             }
-            Op::DictGet(dict, key) => {
+            Op::DictFind(dict, key) => {
+                let dict = self.one(*dict)?;
+                let (k0, k1) = self.item_words(*key)?;
+                SmallVec::from_slice(&self.call(
+                    address!(values::ry_dict_find),
+                    &[I64; 3],
+                    &[I64],
+                    &[dict, k0, k1],
+                ))
+            }
+            Op::DictAt(dict, position) => {
                 let Type::Dict { value, .. } = ty(*dict) else {
                     return Err(Refusal::new(
                         "a lookup in something other than a dictionary",
                     ));
                 };
                 let pointer = self.one(*dict)?;
+                let position = self.one(*position)?;
+                let column = self.builder.ins().load(
+                    I64,
+                    MemFlagsData::trusted(),
+                    pointer,
+                    values::DICT_VALUES,
+                );
+                let scaled = self.builder.ins().imul_imm_s(position, item_size(value));
+                let address = self.builder.ins().iadd(column, scaled);
+                let values = self.load_item(address, value);
+                self.dup(Type::of_item(value), &values);
+                values
+            }
+            Op::DictPut(dict, key, position, value) => {
+                let pointer = self.one(*dict)?;
+                let owned = self.owned(inst, 0);
                 let (k0, k1) = self.item_words(*key)?;
-                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    16,
-                    3,
-                ));
-                let out = self.builder.ins().stack_addr(I64, slot, 0);
-                let found = self.call(
-                    address!(values::ry_dict_get),
-                    &[I64; 4],
-                    &[I32],
-                    &[pointer, k0, k1, out],
-                )[0];
-                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
-                self.fail_if(missing, &inst.fail_drops)?;
-                self.load_item(out, value)
+                let position = self.one(*position)?;
+                let values = self.get(*value)?;
+                if !inst.moves(3) {
+                    self.dup(ty(*value), &values);
+                }
+                let (v0, v1) = self.item_words(*value)?;
+                let dict = self.call_words(
+                    address!(values::ry_dict_put),
+                    I64,
+                    &[pointer, owned, position, k0, k1, v0, v1],
+                );
+                self.fail_if_null(dict, inst)?;
+                SmallVec::from_slice(&[dict])
             }
             Op::DictInsert(dict, key, value) => {
                 let pointer = self.one(*dict)?;

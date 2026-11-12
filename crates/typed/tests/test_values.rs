@@ -1285,7 +1285,20 @@ fn dicts_follow_their_models() {
                         snapshots.push((dict, entries(&model, &order)));
                     }
                     dict = unsafe {
-                        ry_dict_insert(dict, owned as u32, key.lo, key.hi, value.lo, value.hi)
+                        if rng.below(2) == 0 {
+                            ry_dict_insert(dict, owned as u32, key.lo, key.hi, value.lo, value.hi)
+                        } else {
+                            let position = ry_dict_find(dict, key.lo, key.hi);
+                            ry_dict_put(
+                                dict,
+                                owned as u32,
+                                position,
+                                key.lo,
+                                key.hi,
+                                value.lo,
+                                value.hi,
+                            )
+                        }
                     };
                     if model.insert(key_text.clone(), value_text).is_none() {
                         order.push(key_text.clone());
@@ -1302,18 +1315,12 @@ fn dicts_follow_their_models() {
                     }
                 }
                 _ => {
-                    let mut out = [0u64; 2];
-                    let found = unsafe { ry_dict_get(dict, key.lo, key.hi, out.as_mut_ptr()) };
-                    assert_eq!(found == 1, model.contains_key(&key_text), "get {key_text}");
-                    assert_eq!(unsafe { ry_dict_contains(dict, key.lo, key.hi) }, found);
-                    if found == 1 {
-                        let value = Str {
-                            lo: out[0],
-                            hi: out[1],
-                        };
-                        assert_eq!(Some(&text_of(value)), model.get(&key_text));
-                        unsafe { ry_str_drop(value.lo, value.hi) };
-                    }
+                    let found = unsafe { ry_dict_find(dict, key.lo, key.hi) } >= 0;
+                    assert_eq!(found, model.contains_key(&key_text), "find {key_text}");
+                    assert_eq!(
+                        unsafe { ry_dict_contains(dict, key.lo, key.hi) } == 1,
+                        found
+                    );
                 }
             }
             if string_keys {

@@ -492,8 +492,15 @@ pub enum Op {
     DictNew,
     /// Whether the dictionary holds the key.
     DictContains(Local, Local),
-    /// The value of a key the dictionary holds, failing otherwise.
-    DictGet(Local, Local),
+    /// The column position of the key's entry as an `I64`, or -1 when the dictionary lacks the
+    /// key. A position holds for the same dictionary value until it is inserted into or removed
+    /// from.
+    DictFind(Local, Local),
+    /// The value at a position [`Op::DictFind`] gave for the same dictionary.
+    DictAt(Local, Local),
+    /// The dictionary with the key mapped to the value, given the position [`Op::DictFind`] gave
+    /// for the key in the same dictionary, so a key that is present is not hashed again.
+    DictPut(Local, Local, Local, Local),
     /// The dictionary with the key mapped to the value.
     DictInsert(Local, Local, Local),
     /// The dictionary without the key.
@@ -579,13 +586,15 @@ impl Op {
             | RepeatStr(a, b)
             | Split(a, b)
             | DictContains(a, b)
-            | DictGet(a, b)
+            | DictFind(a, b)
+            | DictAt(a, b)
             | DictRemove(a, b)
             | Push(a, b)
             | Extend(a, b) => SmallVec::from_slice(&[*a, *b]),
             Set(a, b, c) | DictInsert(a, b, c) | Swap(a, b, c) | Slice(a, b, c) => {
                 SmallVec::from_slice(&[*a, *b, *c])
             }
+            DictPut(a, b, c, d) => SmallVec::from_slice(&[*a, *b, *c, *d]),
             Concat(parts, separator) | PasteVectors(parts, separator) => {
                 let mut operands = parts.clone();
                 operands.push(*separator);
@@ -614,6 +623,7 @@ impl Op {
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
             Set(..) | DictInsert(..) => position != 1,
+            DictPut(..) => position == 0 || position == 3,
             DictRemove(..) | Swap(..) | Slice(..) => position == 0,
             Extend(..) => position < 2,
             Push(..) => true,
@@ -632,8 +642,8 @@ impl Op {
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
             | Same(..) | Step(..) | ItemAt(..) | Construct(..) | Field(..) | ShapeOf(_)
             | ByteCount(_) | Split(..) | Parses(..) | DictContains(..) | DictRemove(..)
-            | Push(..) | Unique(_) | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_)
-            | DictValues(_) => false,
+            | DictFind(..) | DictAt(..) | Push(..) | Unique(_) | Swap(..) | ToUtf8(_)
+            | DictLen(_) | DictKeys(_) | DictValues(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

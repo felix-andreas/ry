@@ -106,6 +106,8 @@ pub const BOX_FIELDS: usize = size_of::<Boxed>();
 pub const BOX_SHAPE: usize = std::mem::offset_of!(Boxed, shape);
 /// The most words a box holds, one bit each in its masks.
 pub const MAX_BOX_WORDS: u32 = 32;
+/// Where a dict's values column pointer sits.
+pub const DICT_VALUES: i32 = std::mem::offset_of!(Dict, values) as i32;
 
 /// The list's items belong to someone else (an R vector the compiler borrows).
 pub const VIEW: u8 = 1;
@@ -2353,31 +2355,37 @@ pub unsafe extern "C" fn ry_dict_insert(
     dict as *mut u8
 }
 
-/// 1 when `key` is present, with the value's words in `out[0]` and `out[1]` (a string value
-/// counted for the caller); 0 otherwise.
-pub unsafe extern "C" fn ry_dict_get(dict: *mut u8, key0: u64, key1: u64, out: *mut u64) -> u32 {
-    let dict = dict as *mut Dict;
-    let Some(position) = dict_find(dict, key0, key1) else {
-        return 0;
-    };
-    let value = value_slot(dict, position);
-    match (*dict).value_kind {
-        DBL | I64 => {
-            *out = *(value as *const u64);
-            *out.add(1) = 0;
-        }
-        STR => {
-            let item = *(value as *const Str);
-            str_dup(item);
-            *out = item.lo;
-            *out.add(1) = item.hi;
-        }
-        _ => {
-            *out = *(value as *const i32) as u32 as u64;
-            *out.add(1) = 0;
-        }
+/// The dict with `key` mapped to the value, as [`ry_dict_insert`] gives it, for a caller that
+/// holds the `position` [`ry_dict_find`] gave for `key` in this dict. A key that is present in
+/// a dict that is owned and unshared is written at its position, with no hashing.
+pub unsafe extern "C" fn ry_dict_put(
+    dict: *mut u8,
+    owned: u32,
+    position: i64,
+    key0: u64,
+    key1: u64,
+    value0: u64,
+    value1: u64,
+) -> *mut u8 {
+    let held = dict as *mut Dict;
+    if position < 0 || owned == 0 || (*held).count != 1 {
+        return ry_dict_insert(dict, owned, key0, key1, value0, value1);
     }
-    1
+    let value = value_slot(held, position as usize);
+    if (*held).value_kind == STR {
+        str_drop(*(value as *const Str));
+    }
+    write_item(value, (*held).value_kind, 0, value0, value1);
+    dict
+}
+
+/// The column position of `key`'s entry, where the values column holds its value, or -1 when
+/// the dict lacks the key.
+pub unsafe extern "C" fn ry_dict_find(dict: *mut u8, key0: u64, key1: u64) -> i64 {
+    match dict_find(dict as *mut Dict, key0, key1) {
+        Some(position) => position as i64,
+        None => -1,
+    }
 }
 
 /// The dict without `key`. The removed entry keeps its column position until half the entries
