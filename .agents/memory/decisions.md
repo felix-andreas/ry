@@ -9284,3 +9284,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why not a separate List representation.** An Array is already the one storage of a ry list in both the interpreter and typed code (typed `List.append` is `Op::Push`, which grows a uniquely held list in place), so the fix is ownership, not a new type.
 - **Impact.** Two million interpreted appends to `[]` take about 0.2 s. rcp `list-for` and `list-while` get typed ports (`tools/bench/public/rcp/*.typed.R`) that run in about 0.015 s, against about 0.35 s untyped.
 - **Pinned by** the Array growth and `move_undo` cases in `crates/interp/tests/test_standard_library.rs`.
+
+## A ry list is one item word
+
+- **Previous shape.** `ir::Item`, the type of a list item or a record field, had scalars, strings and boxes only, so a record with a `List` field or a `List<List<I64>>` refused, and pidigits (a big integer is a record of limbs) ran in the interpreter.
+- **Target shape.** `Item::Array(id)` is a ry list held as one counted pointer word. `id` interns the list's item type in `crates/typed/src/shapes.rs` (`array_of`, `array_item`), which keeps `Item` `Copy` and one word however deep the nesting. `Type::held_item` gives the item a value is stored as, and the places that store a value (list literals, `List.append`, record construction) use it; `Type::item` is unchanged, because comparison, `rep` and vector conversion must keep refusing a list of lists. `ry_list_drop` already dispatches on the header's kind, so a box releases a list field like any object word. In R, a list of ry lists is an R list of Arrays.
+- **Bool and logical join.** A `Bool` is a logical that is never `NA` in the same word, so a branch or `return` of a `Bool` against a logical joins as a logical (`joined` and `exit` in `lower.rs`). pidigits' comparison helpers return a comparison in one branch and `Bool.false` in another.
+- **An empty `I64` sum is 0.** `ry_sum_i64` and the summing programs of `ry_elementwise` give 0 for an empty list, as the standard library does for an empty list of either kind (`I64` storage survives an empty subset in the interpreter), instead of handing the call back.
+- **A copying push grows from the length.** `ry_list_push` on a shared list copies it with room from its length, not from the shared list's capacity, which otherwise doubled on every copy in a loop of field updates and asked for gigabytes after about 30 steps.
+- **Impact.** Typed pidigits runs natively, with the same checksum, in about 0.03 s against about 0.45 s untyped.
+- **Pinned by** `typed-record-list-fields.scenario` and the list-field cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs`, which also check that nothing leaks.
