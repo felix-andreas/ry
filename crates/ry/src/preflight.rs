@@ -21,6 +21,7 @@ use {
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
+        borrow::Cow,
         fs,
         path::{Path, PathBuf},
         sync::{Arc, LazyLock, Mutex, PoisonError},
@@ -493,25 +494,25 @@ fn findings(
 ///   whole `1e3` or `2.0` becomes `1000i64` or `2i64`, because the `i64` suffix takes only an
 ///   integer. The conversion is exact, digit by digit, because an `f64` rounds past 2^53.
 /// - A list the runtime may build empty is passed through `.ry_items` with its item type, so
-///   `List.map(xs, f)` runs as `.ry_items(List.map(xs, f), "I64")`.
+///   `List.map(xs, f)` runs as `.ry_items(List.map(xs, f), "I64")`, and a dictionary built from
+///   no entries with its key and value types, as in `.ry_items(Dict.empty(), "Dict<Str, I64>")`.
 ///
 /// Text after a rewrite on its line moves right.
 pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
     let mut program = Vec::with_capacity(input.len() + 16 * elaborations.len());
     let mut copied = 0;
     // The ends of the open `.ry_items` calls, innermost last, with the text that closes each.
-    let mut open: Vec<(usize, &'static str)> = Vec::new();
+    let mut open: Vec<(usize, Cow<'static, str>)> = Vec::new();
     let close_through = |program: &mut Vec<u8>,
                          copied: &mut usize,
-                         open: &mut Vec<(usize, &'static str)>,
+                         open: &mut Vec<(usize, Cow<'static, str>)>,
                          offset: usize| {
-        while let Some(&(end, items)) = open.last().filter(|(end, _)| *end <= offset) {
+        while let Some((end, items)) = open.pop_if(|(end, _)| *end <= offset) {
             program.extend_from_slice(&input[*copied..end]);
             program.extend_from_slice(b", \"");
             program.extend_from_slice(items.as_bytes());
             program.extend_from_slice(b"\")");
             *copied = end;
-            open.pop();
         }
     };
     for elaboration in elaborations {
@@ -535,7 +536,7 @@ pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
                 program.extend_from_slice(b"i64");
                 copied = end;
             }
-            Elaboration::TypedList(_, items) => {
+            Elaboration::TypedEmpty(_, items) => {
                 program.extend_from_slice(&input[copied..start]);
                 program.extend_from_slice(b".ry_items(");
                 copied = start;
