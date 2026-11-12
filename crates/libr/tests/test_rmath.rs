@@ -590,11 +590,34 @@ fn expectations_are_current() {
         "rmath_cases.R failed:\n{}",
         String::from_utf8_lossy(&status.stderr)
     );
+    let read = |directory: &Path, file: &str| {
+        std::fs::read_to_string(directory.join(file))
+            .unwrap_or_else(|error| panic!("{}: {error}", directory.join(file).display()))
+    };
+    // The header fingerprints the C math library, whose build moves the last digits of a few
+    // densities; on another one the case list is still checked, and the streams in full.
+    let same_math_library = read(&output, "rmath_expected.tsv").lines().next()
+        == read(&data_dir(), "rmath_expected.tsv").lines().next();
+    if !same_math_library {
+        eprintln!(
+            "this GNU R runs on another C math library than the recording, so the results in \
+             rmath_expected.tsv are not compared"
+        );
+    }
     for file in ["rmath_expected.tsv", "rmath_streams.tsv"] {
-        let fresh = std::fs::read_to_string(output.join(file)).expect("a fresh file");
-        let committed = std::fs::read_to_string(data_dir().join(file)).expect("a committed file");
+        let digits_comparable = same_math_library || file == "rmath_streams.tsv";
+        let comparable = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| match digits_comparable {
+                    true => line,
+                    false => line.rsplit_once('\t').map_or(line, |(case, _)| case),
+                })
+                .map(str::to_owned)
+                .collect()
+        };
         assert!(
-            fresh == committed,
+            comparable(&read(&output, file)) == comparable(&read(&data_dir(), file)),
             "{file} is stale: run `Rscript crates/libr/tests/data/rmath_cases.R`"
         );
     }

@@ -53,23 +53,12 @@ The quality bar is four things.
 - Per-safepoint liveness maps would close the rest. As a speed lever they are worth little: they remove only the register fill, about 16 of `grow_registers`' 57 instructions per call, roughly 0.3 points of `testthat_full` Ir.
 - Tier-1 deopt does not need them. Each deopt block is generated from the plan's liveness bitset at compile time, and compiled code keeps every boxed value in tier 0's register window or the frame, both of which are roots.
 
-## Open: the baseline tier and JIT on against JIT off
+## Open: JIT on against JIT off
 
-The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
-inlining are on main; shared baseline stubs and short encodings are on `perf/baseline-compact`.
-JIT on runs about 1% more instructions than JIT off on `just bench applications` and is not faster in wall time;
-the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and stays opt-in
-(`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons"). What is
-left, in order of expected gain:
+The baseline tier was deleted (`decisions.md`, "No baseline tier, and code images hold bytecode only"). JIT on runs about 1% more instructions than JIT off on `just bench applications` and is not faster in wall time. What is left, in order of expected gain:
 
-- One copy of each instruction handler: the baseline's step functions duplicate tier 0's
-  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds. Sharing one
-  `exec_*` body per op was tried and reverted: with every body inlined into tier 0 it still ran
-  13M more instructions (0.18%) on `testthat_full` with the JIT off, from code placement in
-  `execute_code` and `run_body`, and out-of-line bodies cost 64M. Re-land it only once that
-  placement measures neutral there (callgrind, bench profile, `RY_BENCH_REPEAT=2`).
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
-  (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
+  (it cost 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
 - Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
   `jit_step` (158,500 times in one `functional` body). Loads probe the frame inline
@@ -79,7 +68,7 @@ left, in order of expected gain:
   functions run more with the JIT on (`run` +30M, `execute_code` +12M, `run_get_var` +8M,
   `run_call_builtin` +8M, `run_call_generic` +5M). The likely cause is tier 0's type-feedback
   recording and entry and back-edge counting (unconfirmed; compare against
-  `RY_JIT_THRESHOLDS=0,0,0`).
+  `RY_JIT_THRESHOLDS=0,0`).
 - The JIT's first compile costs about 4 MB of peak RSS (code generator start-up). On
   `testthat_full` one compile of `isTRUE`'s body (3 KB of code) makes JIT on 4 MB above JIT off;
   a compile that saves microseconds should not cost megabytes (`decisions.md`, "withr's
@@ -91,7 +80,7 @@ left, in order of expected gain:
   hot body over the compile threshold shows up as a few MB of peak RSS. Levers: a lighter first
   tier that does not start Cranelift, or code layout that keeps the code generator's pages
   together (function ordering).
-- Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
+- Calls from tier-1 code while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
 - A deoptimization exit that materializes the callee's frame, so tier 1 can inline callees with
@@ -164,8 +153,13 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 ## Open: ahead-of-time compilation of typed ry (mid priority)
 
-Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). This extends the install-time compiler that writes machine code for a package's numeric functions into `R/<package>.ryc` (`crates/jit/src/ahead.rs`, CLI reference "build and install"); the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
+Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). The typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
 
+- **Owner and order.** The typed-native track owns this. It comes after native `vasicek` and `sales`, checker-enforced nativeness, and the typed-vs-Rust score.
+- **Start condition.** Work starts only once a measured win is named: the first-call compile cost of the typed core on a named workload, which this would remove.
+- **Design basis.** Design it against the current image format. Untyped install-time machine code was built and removed (`decisions.md`, "No baseline tier, and code images hold bytecode only"); the git history of `crates/jit/src/ahead.rs` and `crates/ssa/src/section.rs` is reference only, not code to revive wholesale.
+- **Precondition.** The typed benchmark programs run natively. `vasicek` (R calls per step) and `sales` (a `DataFrame` parameter) do not yet ("Open: the typed core", `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`).
+- **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
 - **Precondition.** The typed benchmark programs run natively, which `test_scenarios::typed_benchmarks_run_natively` holds them to.
 - **What the checker gives it.** In strict mode a native function without a `native` finding compiles (`decisions.md`, "Nativeness is a strict-mode diagnostic"), so the set of functions to compile ahead of time is the native functions of a strict-clean project, and a function listed in `test_scenarios::NATIVE_CHECK_EXCEPTIONS` is the remaining place where the build has to fall back.
 - **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image's native section, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
@@ -832,7 +826,7 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
     redundant type and NA guards, eliminate bounds checks on `x[i]` for `i` in `seq_along(x)` or
     `1:n` with `n <= length(x)`, and peel the first iteration so guards run once.
   - Compile latency stays a constraint: Cranelift takes milliseconds per function, so these passes
-    run only in the optimizing tier, behind the cheap baseline tier and install-time images.
+    run only in the optimizing tier.
   - Target: scalar and `x[i]` loops in the kernels and applications programs within 2x of the same
     loop in C, measured with `just bench kernels` and callgrind.
 
@@ -1112,7 +1106,7 @@ compiled code 0.7%; 1.33M closure calls create 1.73M promises (1.30 per call, ag
 user's profile taken before promise elision), and a quarter of the calls go through the
 argument-match cache because they pass names or `...` (the counter counts cache hits too). Its
 callgrind profile is flat, with no function above 2% of instructions, so the gains are fewer
-ops per call (the baseline tier, inline predicate fast paths) rather than one hotspot. Open:
+ops per call (inline predicate fast paths) rather than one hotspot. Open:
 promise elision covers few testthat arguments, because most are calls rather than constants or
 evaluated symbols; about 8 objects are allocated per closure call (10.9M freed over the run).
 
@@ -2802,17 +2796,6 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
-- **Install-time native code: the gaps.** The image's native section is written
-  (`crates/jit/src/ahead.rs`), but it compiles only scalar numeric closures for guessed argument
-  types (annotations, constant defaults, then double, integer and logical shapes), not the
-  checker's inferred types, which the install cannot query yet. Records are refused because each
-  process numbers record layouts anew. Coverage on real packages is small (rlang 16 of 1,294
-  functions, cli 28 of 897, testthat 13 of 1,101): the refusals are about the value domain
-  (`...`, strings, lists, base functions native code lacks, calls of closures that are not
-  native), not about missing facts, so checker types and argument facts lift only a few dozen
-  functions per package. Baseline code for every body from its first entry measured 8.06G
-  against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
-  until baseline code inlines fast paths.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by
