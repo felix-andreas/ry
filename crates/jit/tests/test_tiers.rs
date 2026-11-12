@@ -2929,6 +2929,25 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
     });
 }
 
+/// How far the cases of one test may raise the process's peak resident memory. Other tests run
+/// in parallel, so the bound leaves them room; a value built in full before a size check fails
+/// costs gigabytes.
+const PEAK_GROWTH_LIMIT: u64 = 1 << 30;
+
+/// The process's peak resident memory in bytes (`VmHWM`), where the system reports it.
+fn peak_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    let kilobytes: u64 = line
+        .trim_start_matches("VmHWM:")
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kilobytes * 1024)
+}
+
 #[test]
 fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
     // Each case runs on tier 0 and on the typed core, which must agree on every value and error,
@@ -3138,6 +3157,7 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 run(helper);
             }
         }
+        let peak_before = peak_resident_bytes();
         for (case, &(definition, calls)) in cases.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled, typed) = unsafe {
@@ -3166,6 +3186,16 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             // SAFETY: the typed core's counters are thread-local and only read.
             let live = unsafe { typed::values::ry_live_objects() };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
+        }
+        // A case that fails for a value too large to build, such as the repeated string past
+        // R's limit, must fail before building it, on every tier.
+        if let (Some(before), Some(after)) = (peak_before, peak_resident_bytes()) {
+            let grown = after.saturating_sub(before);
+            assert!(
+                grown < PEAK_GROWTH_LIMIT,
+                "the cases raised peak memory by {} MB",
+                grown >> 20
+            );
         }
     });
 }
