@@ -58,28 +58,68 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderCallers", 2, do_callers),
     internal("ryLoaderWaitEdits", 2, do_wait_edits),
     internal("ryLoaderCompile", 2, do_compile).invisible(),
+    internal("ryLoaderAttach", 0, do_attach).invisible(),
 ];
 
 /// Attaches the loader's R side as `tools:ry`, which gives the session `load_all()`: the
 /// environment the start-up image carries, or one [`build`] evaluates when the session started
 /// without an image.
 ///
+/// A profile may have attached the loader already with `.Internal(ryLoaderAttach())` and
+/// loaded packages with it. The loader then only moves to the front of the search path, where
+/// a session's start puts it, and keeps what it loaded.
+///
 /// # Safety
 /// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn attach() -> R<()> {
     scope(|| {
-        let runtime = match interp::image::host_environment() {
-            Some(runtime) => runtime,
-            None => build()?,
-        };
-        let setup = values::new_env(values::global_env())?;
-        define(install("runtime")?, runtime, setup)?;
-        let expressions = parse_text(ATTACH, "<ry loader>")?;
-        for index in 0..length(expressions) {
-            eval(expressions.element(index), setup)?;
+        if ATTACHED_BY_PROFILE.swap(false, Ordering::Relaxed) {
+            let moved = eval_script(MOVE_TO_FRONT, values::new_env(values::global_env())?)?;
+            if values::as_logical_scalar(moved) == 1 {
+                return Ok(());
+            }
+        }
+        attach_fresh()
+    })
+}
+
+/// `.Internal(ryLoaderAttach())`: attaches the loader while the session is still starting, for
+/// code a profile runs. The profiles are sourced before the session's start attaches the
+/// loader, and a worker process that a test runner starts loads the package from its profile.
+///
+/// An attached loader stays as it is, because attaching anew would forget what it loaded.
+unsafe fn do_attach(_call: &Call<'_>) -> R<Sexp> {
+    scope(|| {
+        let attached = eval_script(r#""tools:ry" %in% search()"#, values::base_env())?;
+        if values::as_logical_scalar(attached) != 1 {
+            attach_fresh()?;
+            ATTACHED_BY_PROFILE.store(true, Ordering::Relaxed);
         }
         Ok(())
-    })
+    })?;
+    Ok(nil())
+}
+
+static ATTACHED_BY_PROFILE: AtomicBool = AtomicBool::new(false);
+
+unsafe fn attach_fresh() -> R<()> {
+    let runtime = match interp::image::host_environment() {
+        Some(runtime) => runtime,
+        None => build()?,
+    };
+    let setup = values::new_env(values::global_env())?;
+    define(install("runtime")?, runtime, setup)?;
+    eval_script(ATTACH, setup)?;
+    Ok(())
+}
+
+unsafe fn eval_script(text: &str, environment: Sexp) -> R<Sexp> {
+    let expressions = parse_text(text, "<ry loader>")?;
+    let mut value = nil();
+    for index in 0..length(expressions) {
+        value = eval(expressions.element(index), environment)?;
+    }
+    Ok(value)
 }
 
 /// Evaluates the loader's R code into a new environment, the one [`attach`] puts on the search
@@ -89,10 +129,7 @@ pub unsafe fn attach() -> R<()> {
 /// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn build() -> R<Sexp> {
     let runtime = values::new_env(values::base_env())?;
-    let expressions = parse_text(RUNTIME_RY, "<ry loader>")?;
-    for index in 0..length(expressions) {
-        eval(expressions.element(index), runtime)?;
-    }
+    eval_script(RUNTIME_RY, runtime)?;
     Ok(runtime)
 }
 
@@ -114,6 +151,18 @@ unsafe fn do_changed(_call: &Call<'_>) -> R<Sexp> {
         .collect();
     values::string_vector(&roots)
 }
+
+/// `attach()` copies the bindings, and the loader's functions keep the environment they were
+/// defined in, which holds the session's state. False when the profile detached the loader.
+const MOVE_TO_FRONT: &str = r#"
+local({
+  if (!("tools:ry" %in% search())) return(FALSE)
+  runtime <- environment(get("load_all", envir = as.environment("tools:ry")))
+  detach("tools:ry", character.only = TRUE)
+  attach(runtime, name = "tools:ry", warn.conflicts = FALSE)
+  TRUE
+})
+"#;
 
 const ATTACH: &str = r#"
 runtime$.ry_packages <- new.env(parent = emptyenv())
