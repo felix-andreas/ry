@@ -27,7 +27,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::sync::atomic::{AtomicU64, Ordering},
+    std::sync::atomic::Ordering,
     thin_vec::ThinVec,
 };
 
@@ -175,19 +175,10 @@ pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
     None
 }
 
-/// How many times an active binding's function has run to read its value. Compiled code compares
-/// it around a variable load to learn that the load called a binding, which it must call again
-/// at every later read rather than reuse the value.
-static ACTIVE_BINDING_READS: AtomicU64 = AtomicU64::new(0);
-
-pub fn active_binding_reads() -> u64 {
-    ACTIVE_BINDING_READS.load(Ordering::Relaxed)
-}
-
 /// The value of a binding cell, calling an active binding's function.
 pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
-        ACTIVE_BINDING_READS.fetch_add(1, Ordering::Relaxed);
+        interp().active_binding_reads += 1;
         let function = cell.cdr();
         let value = apply(nil(), function, &[], values::global_env())?;
         return Ok(value);

@@ -580,7 +580,7 @@ pub unsafe extern "C" fn jit_load(
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let epoch = heap().binding_epoch();
-            let reads = eval::active_binding_reads();
+            let reads = interp::interp().active_binding_reads;
             let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));
             let result = finish_load(activation, slot, loaded, epoch);
             // Code that would reuse the value of a load that called an active binding hands the
@@ -589,7 +589,7 @@ pub unsafe extern "C" fn jit_load(
             // which only costs that variable its reuse.
             if volatile == 0
                 && result != outcome::LOAD_FAILED
-                && eval::active_binding_reads() != reads
+                && interp::interp().active_binding_reads != reads
             {
                 bytecode::record_active_binding(machine.code, pc as usize);
                 return outcome::LOAD_INVALIDATED;
