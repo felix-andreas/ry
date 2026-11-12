@@ -2770,7 +2770,8 @@ fn list_kind(kind: u32) -> Option<u8> {
     }
 }
 
-fn item_size(kind: u8) -> usize {
+/// The bytes one item of a list of `kind` takes.
+pub fn item_size(kind: u8) -> usize {
     match kind {
         DBL | I64 | OBJECT => 8,
         STR => 16,
