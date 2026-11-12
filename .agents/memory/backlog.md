@@ -130,8 +130,11 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 ## Open: ahead-of-time compilation of typed ry (mid priority)
 
-Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). Untyped install-time machine code was built and removed (`decisions.md`, "No baseline tier, and code images hold bytecode only"), so this starts from git history of `crates/jit/src/ahead.rs` and `crates/ssa/src/section.rs` if it writes into the image; the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
+Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). The typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
 
+- **Owner and order.** The typed-native track owns this. It comes after native `vasicek` and `sales`, checker-enforced nativeness, and the typed-vs-Rust score.
+- **Start condition.** Work starts only once a measured win is named: the first-call compile cost of the typed core on a named workload, which this would remove.
+- **Design basis.** Design it against the current image format. Untyped install-time machine code was built and removed (`decisions.md`, "No baseline tier, and code images hold bytecode only"); the git history of `crates/jit/src/ahead.rs` and `crates/ssa/src/section.rs` is reference only, not code to revive wholesale.
 - **Precondition.** The typed benchmark programs run natively. `vasicek` (R calls per step) and `sales` (a `DataFrame` parameter) do not yet ("Open: the typed core", `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`).
 - **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
 - **Step 2: a whole-program build of a typed script** (`ry build --exe` in `typed-runtime.md`), which compiles the script with the typed standard library and the packages it uses into one executable; untyped R in it stays on the JIT.
