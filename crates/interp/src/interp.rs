@@ -977,7 +977,6 @@ impl RootSource for InterpRoots {
         unsafe {
             let state = interp();
             state.bytecode.call_plans.clear_dead(liveness);
-            state.method_cache.clear_dead(liveness);
         }
     }
 }

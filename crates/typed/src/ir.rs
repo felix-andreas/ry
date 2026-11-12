@@ -280,6 +280,19 @@ pub enum Math {
     RoundAway = 15,
 }
 
+/// A bit operation on the 64-bit two's complement of two `I64`s.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bits {
+    And,
+    Or,
+    Xor,
+    ShiftLeft,
+    /// Shifts right, copying the sign bit in.
+    ShiftRight,
+    /// Shifts right, filling with zeros.
+    ShiftRightZf,
+}
+
 /// A reduction of a vector to a scalar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
@@ -317,6 +330,10 @@ pub enum Op {
     Or(Local, Local),
     /// A scalar function of a double (or, for `Neg` and `Abs`, of an integer).
     Math(Math, Item, Local),
+    /// A bit operation on two `I64`s. A shift fails unless its count is from 0 to 63.
+    Bits(Bits, Local, Local),
+    /// Whether a double is `NaN`, as a `Bool`. It fails on `NA`, which no library function takes.
+    IsNan(Local),
     /// `round(x, digits)` of a scalar double.
     RoundDigits(Local, Local),
     /// An integer, logical or `I64` scalar as a double.
@@ -325,6 +342,8 @@ pub enum Op {
     ToI64(Local),
     /// A logical scalar as an integer.
     LglToInt(Local),
+    /// An `I64` count as an integer, failing unless it is in `0..=i32::MAX`.
+    CountOfI64(Local),
     /// A logical as a branch condition: fails on `NA`.
     Truth(Local),
     /// Whether two integers that are not `NA` are equal, as a branch condition.
@@ -399,6 +418,10 @@ pub enum Op {
     },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
+    /// A call of an R function ([`crate::lower::RCall`]) with borrowed arguments, whose result,
+    /// if the destination exists, is converted to a native value. It fails when the R function
+    /// raises an error, which the call then raises.
+    CallR(usize, SmallVec<[Local; 4]>),
     /// A new box of this shape holding the fields, which it owns, in the shape's field order.
     Construct(u32, SmallVec<[Local; 4]>),
     /// Field `index` of a box known to have this shape.
@@ -443,9 +466,11 @@ impl Op {
             Copy(a)
             | Not(a)
             | Math(_, _, a)
+            | IsNan(a)
             | ToDbl(a)
             | ToI64(a)
             | LglToInt(a)
+            | CountOfI64(a)
             | Truth(a)
             | Length(a)
             | NewVector(_, a)
@@ -470,6 +495,7 @@ impl Op {
             | Parse(a)
             | Parses(_, a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
+            | Bits(_, a, b)
             | Compare(_, _, a, b)
             | And(a, b)
             | Or(a, b)
@@ -501,6 +527,7 @@ impl Op {
                 operands
             }
             CallTyped(_, arguments)
+            | CallR(_, arguments)
             | Construct(_, arguments)
             | Elementwise {
                 inputs: arguments, ..
@@ -542,6 +569,7 @@ impl Op {
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,
             Math(..) => true,
+            Bits(op, ..) => !matches!(op, self::Bits::And | self::Bits::Or | self::Bits::Xor),
             // `NA` formats differently in `as.character`, `paste` and `sprintf`, so the
             // interpreter formats it.
             Format(_) | FormatFixed(..) | FormatPadded(..) => true,

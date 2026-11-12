@@ -4,7 +4,7 @@
   "name": "Numeric kernels (ours)",
   "meta": {
     "date": "2026-11-12",
-    "ry_commit": "da560a9fe0368cf7f0dc4a8197cdbe13eb9d43fb",
+    "ry_commit": "69b966559cdaf34b06bfe60ec3b3f19ebfb2909a",
     "too_short_seconds": 0.1,
     "gnu_r": {
       "version": "4.6.2",
@@ -30,26 +30,26 @@
       "id": "array_dot",
       "display": "Dot product",
       "seconds": {
-        "gnu_r": 0.142,
-        "ry": 0.03,
-        "ry_typed": 0.004
+        "gnu_r": 0.146,
+        "ry": 0.032,
+        "ry_typed": 0.0045
       },
       "ratio": {
         "ry": {
-          "median": 4.5409,
-          "low": 4.4333,
-          "high": 4.7
+          "median": 4.5455,
+          "low": 4.4242,
+          "high": 4.7346
         },
         "ry_typed": {
-          "median": 33.625,
-          "low": 27.8,
-          "high": 35.25
+          "median": 32.5,
+          "low": 29.4,
+          "high": 34.875
         }
       },
       "peak_mib": {
         "gnu_r": 99.4,
-        "ry": 111.5,
-        "ry_typed": 77.7
+        "ry": 112.3,
+        "ry_typed": 78.7
       },
       "flags": [
         {
@@ -59,10 +59,6 @@
         {
           "kind": "too_short",
           "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
         }
       ]
     },
@@ -70,26 +66,26 @@
       "id": "array_filter",
       "display": "Counting filter",
       "seconds": {
-        "gnu_r": 0.116,
-        "ry": 0.0255,
+        "gnu_r": 0.117,
+        "ry": 0.026,
         "ry_typed": 0.01
       },
       "ratio": {
         "ry": {
-          "median": 4.5685,
-          "low": 4.4267,
-          "high": 4.6469
+          "median": 4.51,
+          "low": 4.1786,
+          "high": 4.6869
         },
         "ry_typed": {
-          "median": 11.55,
-          "low": 11.25,
+          "median": 11.65,
+          "low": 10.6364,
           "high": 11.75
         }
       },
       "peak_mib": {
-        "gnu_r": 99.4,
-        "ry": 106.6,
-        "ry_typed": 70.1
+        "gnu_r": 99.3,
+        "ry": 107.5,
+        "ry_typed": 71.1
       },
       "flags": [
         {
@@ -106,26 +102,26 @@
       "id": "array_map",
       "display": "Element map",
       "seconds": {
-        "gnu_r": 0.1935,
-        "ry": 0.0335,
+        "gnu_r": 0.2015,
+        "ry": 0.035,
         "ry_typed": 0.008
       },
       "ratio": {
         "ry": {
-          "median": 5.8091,
-          "low": 5.697,
-          "high": 6.0
+          "median": 5.7824,
+          "low": 5.6799,
+          "high": 5.9857
         },
         "ry_typed": {
-          "median": 24.125,
-          "low": 23.625,
-          "high": 25.375
+          "median": 24.4375,
+          "low": 23.3889,
+          "high": 24.875
         }
       },
       "peak_mib": {
         "gnu_r": 122.3,
-        "ry": 100.0,
-        "ry_typed": 70.1
+        "ry": 100.8,
+        "ry_typed": 71.1
       },
       "flags": [
         {
@@ -142,26 +138,26 @@
       "id": "array_sum",
       "display": "Element sum",
       "seconds": {
-        "gnu_r": 0.354,
-        "ry": 0.0885,
-        "ry_typed": 0.05
+        "gnu_r": 0.3595,
+        "ry": 0.088,
+        "ry_typed": 0.052
       },
       "ratio": {
         "ry": {
-          "median": 3.9663,
-          "low": 3.9376,
-          "high": 4.0276
+          "median": 4.0455,
+          "low": 3.7909,
+          "high": 4.2159
         },
         "ry_typed": {
-          "median": 7.06,
-          "low": 6.8735,
-          "high": 7.2041
+          "median": 7.13,
+          "low": 6.5185,
+          "high": 7.3136
         }
       },
       "peak_mib": {
         "gnu_r": 99.4,
-        "ry": 107.9,
-        "ry_typed": 70.4
+        "ry": 108.7,
+        "ry_typed": 71.1
       },
       "flags": [
         {
@@ -178,34 +174,30 @@
       "id": "closures",
       "display": "Closures and lapply",
       "seconds": {
-        "gnu_r": 0.5475,
-        "ry": 0.1855,
+        "gnu_r": 0.607,
+        "ry": 0.191,
         "ry_typed": 0.004
       },
       "ratio": {
         "ry": {
-          "median": 2.8777,
-          "low": 2.7635,
-          "high": 3.0599
+          "median": 3.16,
+          "low": 2.9838,
+          "high": 3.2344
         },
         "ry_typed": {
-          "median": 152.75,
-          "low": 139.625,
-          "high": 172.6667
+          "median": 155.375,
+          "low": 146.625,
+          "high": 170.8333
         }
       },
       "peak_mib": {
-        "gnu_r": 137.8,
-        "ry": 122.1,
-        "ry_typed": 51.4
+        "gnu_r": 137.7,
+        "ry": 122.8,
+        "ry_typed": 52.2
       },
       "flags": [
         {
           "kind": "too_short",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
           "engine": "ry_typed"
         }
       ]
@@ -214,26 +206,26 @@
       "id": "drawdown",
       "display": "Drawdown and volatility",
       "seconds": {
-        "gnu_r": 0.207,
-        "ry": 0.026,
+        "gnu_r": 0.2145,
+        "ry": 0.0265,
         "ry_typed": 0.006
       },
       "ratio": {
         "ry": {
-          "median": 7.9423,
-          "low": 7.75,
-          "high": 8.28
+          "median": 8.0977,
+          "low": 7.8188,
+          "high": 8.291
         },
         "ry_typed": {
-          "median": 34.5,
-          "low": 33.8333,
-          "high": 35.3333
+          "median": 35.25,
+          "low": 33.9286,
+          "high": 35.8333
         }
       },
       "peak_mib": {
         "gnu_r": 91.6,
-        "ry": 126.2,
-        "ry_typed": 131.5
+        "ry": 127.0,
+        "ry_typed": 132.3
       },
       "flags": [
         {
@@ -250,26 +242,26 @@
       "id": "fib",
       "display": "Recursive Fibonacci",
       "seconds": {
-        "gnu_r": 0.5525,
+        "gnu_r": 0.5855,
         "ry": 0.006,
         "ry_typed": 0.006
       },
       "ratio": {
         "ry": {
-          "median": 91.4167,
-          "low": 84.3929,
-          "high": 93.4167
+          "median": 95.0833,
+          "low": 90.7083,
+          "high": 98.0
         },
         "ry_typed": {
-          "median": 91.9167,
-          "low": 91.1667,
-          "high": 93.5833
+          "median": 95.0833,
+          "low": 80.6389,
+          "high": 99.3333
         }
       },
       "peak_mib": {
         "gnu_r": 69.2,
-        "ry": 41.9,
-        "ry_typed": 43.2
+        "ry": 42.5,
+        "ry_typed": 44.1
       },
       "flags": [
         {
@@ -279,6 +271,10 @@
         {
           "kind": "too_short",
           "engine": "ry_typed"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_typed"
         }
       ]
     },
@@ -286,19 +282,19 @@
       "id": "integer_loop",
       "display": "Collatz chains",
       "seconds": {
-        "gnu_r": 0.4355,
-        "ry": 0.038
+        "gnu_r": 0.454,
+        "ry": 0.039
       },
       "ratio": {
         "ry": {
-          "median": 11.6284,
-          "low": 11.1579,
-          "high": 11.9047
+          "median": 11.4808,
+          "low": 11.2308,
+          "high": 12.025
         }
       },
       "peak_mib": {
         "gnu_r": 69.4,
-        "ry": 49.1
+        "ry": 49.9
       },
       "flags": [
         {
@@ -311,19 +307,19 @@
       "id": "jackknife",
       "display": "Jackknife estimate",
       "seconds": {
-        "gnu_r": 0.291,
-        "ry": 0.2265
+        "gnu_r": 0.3105,
+        "ry": 0.231
       },
       "ratio": {
         "ry": {
-          "median": 1.259,
-          "low": 1.2294,
-          "high": 1.3592
+          "median": 1.3269,
+          "low": 1.2889,
+          "high": 1.368
         }
       },
       "peak_mib": {
         "gnu_r": 123.5,
-        "ry": 78.8
+        "ry": 80.1
       },
       "flags": []
     },
@@ -331,26 +327,26 @@
       "id": "log_rank",
       "display": "Log-rank statistic",
       "seconds": {
-        "gnu_r": 0.324,
-        "ry": 0.204,
-        "ry_typed": 0.2055
+        "gnu_r": 0.338,
+        "ry": 0.2085,
+        "ry_typed": 0.2165
       },
       "ratio": {
         "ry": {
-          "median": 1.5784,
-          "low": 1.554,
-          "high": 1.6533
+          "median": 1.652,
+          "low": 1.5787,
+          "high": 1.6898
         },
         "ry_typed": {
-          "median": 1.5577,
-          "low": 1.5092,
-          "high": 1.6144
+          "median": 1.5504,
+          "low": 1.516,
+          "high": 1.5926
         }
       },
       "peak_mib": {
-        "gnu_r": 125.1,
-        "ry": 69.5,
-        "ry_typed": 54.3
+        "gnu_r": 125.0,
+        "ry": 70.3,
+        "ry_typed": 55.1
       },
       "flags": []
     },
@@ -358,26 +354,26 @@
       "id": "loop_sum",
       "display": "Counted loop sum",
       "seconds": {
-        "gnu_r": 0.1595,
-        "ry": 0.026,
+        "gnu_r": 0.164,
+        "ry": 0.027,
         "ry_typed": 0.008
       },
       "ratio": {
         "ry": {
-          "median": 6.1346,
-          "low": 5.9266,
-          "high": 6.3704
+          "median": 6.0556,
+          "low": 5.8181,
+          "high": 6.3077
         },
         "ry_typed": {
-          "median": 19.625,
-          "low": 17.8125,
-          "high": 20.1875
+          "median": 20.0,
+          "low": 18.6111,
+          "high": 21.125
         }
       },
       "peak_mib": {
         "gnu_r": 69.3,
-        "ry": 42.8,
-        "ry_typed": 43.4
+        "ry": 43.7,
+        "ry_typed": 44.2
       },
       "flags": [
         {
@@ -394,19 +390,19 @@
       "id": "nested_loops",
       "display": "Pairwise distances",
       "seconds": {
-        "gnu_r": 0.127,
-        "ry": 0.03
+        "gnu_r": 0.128,
+        "ry": 0.0315
       },
       "ratio": {
         "ry": {
-          "median": 4.1973,
-          "low": 4.0806,
-          "high": 4.3747
+          "median": 4.0803,
+          "low": 3.9091,
+          "high": 4.3865
         }
       },
       "peak_mib": {
-        "gnu_r": 69.5,
-        "ry": 68.6
+        "gnu_r": 69.4,
+        "ry": 69.3
       },
       "flags": [
         {
@@ -419,19 +415,19 @@
       "id": "simulation",
       "display": "Path simulation",
       "seconds": {
-        "gnu_r": 0.3935,
-        "ry": 0.122
+        "gnu_r": 0.4015,
+        "ry": 0.1275
       },
       "ratio": {
         "ry": {
-          "median": 3.2355,
-          "low": 3.1822,
-          "high": 3.3167
+          "median": 3.2023,
+          "low": 3.0607,
+          "high": 3.3465
         }
       },
       "peak_mib": {
         "gnu_r": 171.7,
-        "ry": 134.1
+        "ry": 134.5
       },
       "flags": []
     },
@@ -439,32 +435,31 @@
       "id": "vasicek",
       "display": "Vasicek rate paths",
       "seconds": {
-        "gnu_r": 0.2525,
-        "ry": 0.127,
-        "ry_typed": 0.1205
+        "gnu_r": 0.2645,
+        "ry": 0.129,
+        "ry_typed": 0.078
       },
       "ratio": {
         "ry": {
-          "median": 1.9566,
-          "low": 1.888,
-          "high": 1.996
+          "median": 2.0164,
+          "low": 1.9499,
+          "high": 2.1543
         },
         "ry_typed": {
-          "median": 2.0778,
-          "low": 2.0079,
-          "high": 2.1345
+          "median": 3.3247,
+          "low": 3.2049,
+          "high": 3.5256
         }
       },
       "peak_mib": {
         "gnu_r": 160.2,
-        "ry": 88.2,
-        "ry_typed": 53.7
+        "ry": 88.9,
+        "ry_typed": 57.6
       },
       "flags": [
         {
-          "kind": "typed_refused",
-          "engine": "ry_typed",
-          "reason": "no code for [I64, I64, Dbl, Dbl, Dbl, Dbl, Dbl, I64]: it calls R's `set.seed`, which only the interpreter runs: call it outside the typed function and pass its result in; `vasicek` runs in the interpreter"
+          "kind": "too_short",
+          "engine": "ry_typed"
         }
       ]
     },
@@ -472,26 +467,26 @@
       "id": "vector_arith",
       "display": "Vector arithmetic",
       "seconds": {
-        "gnu_r": 0.1405,
-        "ry": 0.0545,
-        "ry_typed": 0.0515
+        "gnu_r": 0.157,
+        "ry": 0.057,
+        "ry_typed": 0.055
       },
       "ratio": {
         "ry": {
-          "median": 2.5888,
-          "low": 2.4997,
-          "high": 2.6667
+          "median": 2.7577,
+          "low": 2.5526,
+          "high": 2.8304
         },
         "ry_typed": {
-          "median": 2.7399,
-          "low": 2.6288,
-          "high": 2.8481
+          "median": 2.7577,
+          "low": 2.5414,
+          "high": 2.9186
         }
       },
       "peak_mib": {
         "gnu_r": 137.8,
-        "ry": 71.9,
-        "ry_typed": 70.0
+        "ry": 72.6,
+        "ry_typed": 71.0
       },
       "flags": [
         {
@@ -508,19 +503,19 @@
       "id": "vector_loop",
       "display": "Scale and shift",
       "seconds": {
-        "gnu_r": 0.22,
-        "ry": 0.0315
+        "gnu_r": 0.2285,
+        "ry": 0.0355
       },
       "ratio": {
         "ry": {
-          "median": 6.9081,
-          "low": 6.7626,
-          "high": 7.2258
+          "median": 6.4289,
+          "low": 6.1892,
+          "high": 6.6824
         }
       },
       "peak_mib": {
         "gnu_r": 170.4,
-        "ry": 186.0
+        "ry": 186.9
       },
       "flags": [
         {
@@ -532,15 +527,15 @@
   ],
   "geomean": {
     "ry": {
-      "median": 4.7505,
-      "low": 4.7082,
-      "high": 4.7933,
+      "median": 4.8135,
+      "low": 4.7583,
+      "high": 4.8601,
       "programs": 16
     },
     "ry_typed": {
-      "median": 14.4132,
-      "low": 14.1084,
-      "high": 14.6175,
+      "median": 15.1666,
+      "low": 14.8039,
+      "high": 15.3768,
       "programs": 11
     }
   }

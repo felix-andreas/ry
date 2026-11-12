@@ -16,8 +16,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, Block as IrBlock, Compare, Constant, Function, Inst, Item, Local, Math, Op,
-            Reduce, Terminator, Text, Type,
+            Arith, Bits, Block as IrBlock, Compare, Constant, Function, Inst, Item, Local, Math,
+            Op, Reduce, Terminator, Text, Type,
         },
         lower::SELF,
         shapes, values,
@@ -89,7 +89,11 @@ fn signature(params: &[Type], result: Type) -> Signature {
 }
 
 /// Compiles `function`, whose calls of other functions index `callees`.
-pub fn compile(function: &Function, callees: &[Callee]) -> Result<Code, Refusal> {
+pub fn compile(
+    function: &Function,
+    callees: &[Callee],
+    r_calls: &[usize],
+) -> Result<Code, Refusal> {
     ssa::with_module(|module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
@@ -100,6 +104,7 @@ pub fn compile(function: &Function, callees: &[Callee]) -> Result<Code, Refusal>
             builder,
             function,
             callees,
+            r_calls,
             own,
             host: CallConv::Host,
             variables: Vec::new(),
@@ -178,6 +183,8 @@ struct Emitter<'a> {
     builder: Builder,
     function: &'a Function,
     callees: &'a [Callee],
+    /// The address of each [`crate::lower::RCall`] the function makes, as `Op::CallR` indexes them.
+    r_calls: &'a [usize],
     own: FuncRef,
     host: CallConv,
     variables: Vec<SmallVec<[Variable; 2]>>,
@@ -690,6 +697,37 @@ impl Emitter<'_> {
                 };
                 SmallVec::from_slice(&[value])
             }
+            Op::Bits(op, a, b) => {
+                let (x, y) = (self.one(*a)?, self.one(*b)?);
+                if matches!(op, Bits::ShiftLeft | Bits::ShiftRight | Bits::ShiftRightZf) {
+                    // An unsigned comparison also catches a negative count.
+                    let out_of_range =
+                        self.builder
+                            .ins()
+                            .icmp_imm_u(IntCC::UnsignedGreaterThan, y, 63);
+                    self.fail_if(out_of_range, &inst.fail_drops)?;
+                }
+                let ins = self.builder.ins();
+                let value = match op {
+                    Bits::And => ins.band(x, y),
+                    Bits::Or => ins.bor(x, y),
+                    Bits::Xor => ins.bxor(x, y),
+                    Bits::ShiftLeft => ins.ishl(x, y),
+                    Bits::ShiftRight => ins.sshr(x, y),
+                    Bits::ShiftRightZf => ins.ushr(x, y),
+                };
+                SmallVec::from_slice(&[value])
+            }
+            Op::IsNan(a) => {
+                let x = self.one(*a)?;
+                let unordered = self.builder.ins().fcmp(FloatCC::Unordered, x, x);
+                let bits = self.builder.ins().bitcast(I64, MemFlagsData::new(), x);
+                let payload = self.builder.ins().band_imm_u(bits, 0xFFFF_FFFF);
+                let marked = self.builder.ins().icmp_imm_u(IntCC::Equal, payload, 1954);
+                let na = self.builder.ins().band(unordered, marked);
+                self.fail_if(na, &inst.fail_drops)?;
+                SmallVec::from_slice(&[self.logical(unordered)])
+            }
             Op::RoundDigits(a, digits) => {
                 let (x, digits) = (self.one(*a)?, self.one(*digits)?);
                 let rounded =
@@ -736,6 +774,16 @@ impl Emitter<'_> {
                 SmallVec::from_slice(&[value])
             }
             Op::LglToInt(a) => SmallVec::from_slice(&[self.one(*a)?]),
+            Op::CountOfI64(a) => {
+                let x = self.one(*a)?;
+                let outside = self.builder.ins().icmp_imm_u(
+                    IntCC::UnsignedGreaterThan,
+                    x,
+                    i64::from(i32::MAX),
+                );
+                self.fail_if(outside, &inst.fail_drops)?;
+                SmallVec::from_slice(&[self.builder.ins().ireduce(I32, x)])
+            }
             Op::Truth(a) => {
                 let x = self.one(*a)?;
                 let na = self.is_na_integer(x);
@@ -1245,6 +1293,7 @@ impl Emitter<'_> {
                 ))
             }
             Op::CallTyped(index, arguments) => self.call_typed(*index, arguments, inst)?,
+            Op::CallR(index, arguments) => self.call_r(*index, arguments, inst)?,
             Op::Construct(shape, fields) => self.construct(*shape, fields, inst)?,
             Op::Field(a, shape, index) => {
                 let pointer = self.one(*a)?;
@@ -1837,6 +1886,63 @@ impl Emitter<'_> {
         };
         let status = self.call(function, &[I64; 3], &[I32], &[x[0], x[1], out])[0];
         Ok((status, slot))
+    }
+
+    /// A call of an R function through [`crate::ry_call_r`], which reads the arguments' words
+    /// from a stack slot and writes the converted result's words after them.
+    fn call_r(
+        &mut self,
+        index: usize,
+        arguments: &[Local],
+        inst: &Inst,
+    ) -> Result<SmallVec<[Value; 2]>, Refusal> {
+        let site = *self
+            .r_calls
+            .get(index)
+            .ok_or(Refusal::new("a call of a missing R call"))?;
+        let result = match inst.dest {
+            Some(dest) => words(self.function.ty(dest)),
+            None => SmallVec::new(),
+        };
+        let mut inputs: SmallVec<[Value; 8]> = SmallVec::new();
+        for &argument in arguments {
+            inputs.extend(self.get(argument)?);
+        }
+        let size = 8 * (inputs.len() + 2) as u32;
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        for (position, &word) in inputs.iter().enumerate() {
+            self.builder
+                .ins()
+                .stack_store(I64, word, slot, 8 * position as i32);
+        }
+        let input = self.builder.ins().stack_addr(I64, slot, 0);
+        let output_offset = 8 * inputs.len() as i32;
+        let output = self.builder.ins().stack_addr(I64, slot, output_offset);
+        let site = self.iconst(site as i64);
+        let status = self.call(
+            address!(crate::ry_call_r),
+            &[I64; 3],
+            &[I32],
+            &[site, input, output],
+        )[0];
+        let failed = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
+        self.fail_if(failed, &inst.fail_drops)?;
+        Ok(result
+            .iter()
+            .enumerate()
+            .map(|(position, &machine)| {
+                self.builder.ins().stack_load(
+                    I64,
+                    machine,
+                    slot,
+                    output_offset + 8 * position as i32,
+                )
+            })
+            .collect())
     }
 
     fn call_typed(

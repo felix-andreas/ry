@@ -1762,6 +1762,8 @@ pub unsafe extern "C" fn ry_loader_changed() -> c_int {
 
 /// SIGINT requests a user interrupt, which the evaluator delivers at its next interrupt check. At
 /// the console the terminal is raw while it reads input, so Ctrl-C reaches the line editor then.
+/// A process started with SIGINT ignored, such as a background job of a non-interactive shell,
+/// keeps ignoring it, as GNU R's `init_signal_handlers` does.
 #[cfg(unix)]
 fn install_interrupt_handler() {
     extern "C" fn request_interrupt(_signal: c_int) {
@@ -1769,6 +1771,12 @@ fn install_interrupt_handler() {
     }
     // SAFETY: the handler only performs atomic stores, which are async-signal-safe.
     unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+        {
+            return;
+        }
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = request_interrupt as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);

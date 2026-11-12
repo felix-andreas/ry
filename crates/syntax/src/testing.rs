@@ -12,6 +12,7 @@ use {
         ops::Range,
         panic::{self, AssertUnwindSafe},
         path::{Path, PathBuf},
+        process::Command,
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -30,6 +31,40 @@ pub fn enable_invariants() {
 
 pub fn invariants_enabled() -> bool {
     INVARIANTS.load(Ordering::Relaxed)
+}
+
+/// A `cargo build` in the profile of the running test, for a test that needs another package's
+/// binary (`libR.so`, `ry-rcmd`) beside the binaries under test in `profile_directory`. That
+/// directory names the profile, except that `target/debug` is the `dev` profile.
+///
+/// The command drops the variables cargo sets for the test itself (`CARGO_PKG_NAME`,
+/// `CARGO_MANIFEST_DIR`, `OUT_DIR` and the like). Build scripts such as ring's declare
+/// `rerun-if-env-changed` on them, and cargo compares those against its own environment, so an
+/// inherited value would rebuild most of the dependency tree here and again in the next plain
+/// `cargo build`.
+pub fn cargo_build(profile_directory: &Path) -> Command {
+    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let profile = profile_directory.file_name().and_then(|name| name.to_str());
+    command.args([
+        "build",
+        "-q",
+        "--profile",
+        profile.filter(|&name| name != "debug").unwrap_or("dev"),
+    ]);
+    for (name, _) in env::vars_os() {
+        let set_for_the_test = name.to_str().is_some_and(|name| {
+            matches!(
+                name,
+                "OUT_DIR" | "CARGO_CRATE_NAME" | "CARGO_PRIMARY_PACKAGE" | "CARGO_TARGET_TMPDIR"
+            ) || ["CARGO_PKG_", "CARGO_MANIFEST_", "CARGO_BIN_"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        });
+        if set_for_the_test {
+            command.env_remove(name);
+        }
+    }
+    command
 }
 
 pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {

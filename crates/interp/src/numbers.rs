@@ -20,7 +20,8 @@ use {
         values::{self, length, nil, scalar_bool, scalar_integer, scalar_real},
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
-    std::cmp::Ordering,
+    rustc_hash::FxHashMap,
+    std::{cell::RefCell, cmp::Ordering},
 };
 
 /// The builtins whose operands may be native numbers: the arithmetic and comparison operators.
@@ -619,11 +620,41 @@ pub unsafe fn range(call: &Call<'_>, limit: usize) -> R<Sexp> {
 pub(crate) unsafe fn num_from_r(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["value"])?;
     let needed = "a single double or integer without attributes";
-    match r_source(value) {
-        Ok(Source::F64(number)) => scalar_real(number),
-        Ok(Source::Int(number)) => alloc(number),
-        Err(_) => Err(wrong(call, "value", needed, value)),
-    }
+    let number = match r_source(value) {
+        Ok(Source::F64(number)) => scalar_real(number)?,
+        Ok(Source::Int(number)) => alloc(number)?,
+        Err(_) => return Err(wrong(call, "value", needed, value)),
+    };
+    observe(call.call, number);
+    Ok(number)
+}
+
+thread_local! {
+    /// The R type the last run of each `Num.from_r` and `List.from_r` call gave, by call: the
+    /// type feedback that fixes the type compiled typed code gives the conversion of what an R
+    /// call returns, which depends on the R value.
+    static CONVERSIONS: RefCell<FxHashMap<Sexp, SexpType>> = RefCell::new(FxHashMap::default());
+}
+
+/// How many call sites [`CONVERSIONS`] holds before it starts again, since code that `eval`
+/// parses anew in a loop makes a new call every time.
+const MAX_CONVERSIONS: usize = 65536;
+
+/// The R type the last run of the `Num.from_r` or `List.from_r` call `call` gave.
+pub fn observed_conversion(call: Sexp) -> Option<SexpType> {
+    CONVERSIONS.with_borrow(|conversions| conversions.get(&call).copied())
+}
+
+unsafe fn observe(call: Sexp, value: Sexp) {
+    let kind = value.kind();
+    CONVERSIONS.with_borrow_mut(|conversions| {
+        if conversions.get(&call) != Some(&kind) {
+            if conversions.len() >= MAX_CONVERSIONS {
+                conversions.clear();
+            }
+            conversions.insert(call, kind);
+        }
+    });
 }
 
 /// `Num.to_r(number)`: an `I64` as an R integer when it fits 32 bits and is not the bit pattern R
@@ -694,6 +725,12 @@ pub(crate) unsafe fn str_from_r(call: &Call<'_>) -> R<Sexp> {
 /// a list of `F64`, `I64`, `Bool` or `Str` (an integer and a raw byte both become an `I64`), or
 /// the items of an R list converted the same way. Names are dropped; `NA`, a class and other attributes are refused.
 pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
+    let list = list_from_r_value(call)?;
+    observe(call.call, list);
+    Ok(list)
+}
+
+unsafe fn list_from_r_value(call: &Call<'_>) -> R<Sexp> {
     let [vector] = arguments(call, ["vector"])?;
     if vector.is_array() {
         return Ok(vector);
@@ -978,6 +1015,26 @@ pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
             let (left, right) = two_numbers(call)?;
             let (low, high) = (left.min(right), left.max(right));
             alloc(binary(name, Op::Subtract, high, low).map_err(fail)?)
+        }
+        "Num.bitwise_and" | "Num.bitwise_or" | "Num.bitwise_xor" => {
+            let (left, right) = two_numbers(call)?;
+            alloc(match name {
+                "Num.bitwise_and" => left & right,
+                "Num.bitwise_or" => left | right,
+                _ => left ^ right,
+            })
+        }
+        "Num.bitwise_not" => alloc(!one_number(call)?),
+        "Num.shift_left_by" | "Num.shift_right_by" | "Num.shift_right_zf_by" => {
+            let (number, bits) = named_numbers(call, ["number", "bits"])?;
+            let Some(bits) = u32::try_from(bits).ok().filter(|bits| *bits < 64) else {
+                return Err(fail(format!("`bits` must be from 0 to 63, not {bits}")));
+            };
+            alloc(match name {
+                "Num.shift_left_by" => number << bits,
+                "Num.shift_right_by" => number >> bits,
+                _ => ((number as u64) >> bits) as i64,
+            })
         }
         "Num.neg" => alloc(negate(one_number(call)?).map_err(fail)?),
         "Num.is_zero" => scalar_bool(one_number(call)? == 0),

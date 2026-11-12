@@ -22,7 +22,7 @@ apt_packages=(
 	libssl-dev libxml2-dev libgit2-dev unixodbc-dev libpoppler-cpp-dev libglpk-dev libnlopt-dev
 	libsodium-dev libuv1-dev libfreetype-dev libharfbuzz-dev libfribidi-dev libwebp-dev
 	libfontconfig1-dev
-	valgrind time curl ca-certificates python3-pip zstd sccache
+	valgrind time curl ca-certificates python3-pip zstd sccache locales
 )
 missing=()
 for package in "${apt_packages[@]}"; do
@@ -33,6 +33,9 @@ if [ ${#missing[@]} -gt 0 ]; then
 	apt-get update -qq
 	DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null
 fi
+
+# The locales oracle cases switch to, without which `oracle compare` refuses to run.
+bash "$root/tools/oracle-locales.sh"
 
 if [ "$(just --version 2>/dev/null)" != "just $just_version" ]; then
 	log "just: installing $just_version"
