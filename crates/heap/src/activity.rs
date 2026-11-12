@@ -12,7 +12,7 @@
 
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 /// The categories of the time split, in the order the summary prints them.
@@ -197,7 +197,15 @@ pub const BUILTIN_SLOTS: usize = 4096;
 /// The most [`label`]s [`count_package_fallback`] keeps a count for.
 pub const LABEL_SLOTS: usize = 1024;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// The hooks a call must run before its builtin or closure body: [`SUMMARY`] while a profile
+/// summary is collected, and [`PROFILE_TICK`] once per `Rprof` sampling interval. They share one
+/// byte so a call's fast path tests both with a single load ([`hooks`]).
+static HOOKS: AtomicU8 = AtomicU8::new(0);
+/// The [`HOOKS`] bit [`enabled`] reads.
+pub const SUMMARY: u8 = 1;
+/// The [`HOOKS`] bit set by `Rprof`'s timer thread and cleared once the R thread records a
+/// sample. GNU R takes its samples in a `SIGPROF` handler; ry checks the bit where calls begin.
+pub const PROFILE_TICK: u8 = 2;
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =
     [const { AtomicU64::new(0) }; Counter::ALL.len()];
@@ -215,12 +223,37 @@ pub const FRAME_SLOTS: usize = 1024;
 /// Whether a profile summary is being collected.
 #[inline(always)]
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    hooks() & SUMMARY != 0
 }
 
 /// Starts or stops publishing activities and counting events.
 pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
+    if on {
+        HOOKS.fetch_or(SUMMARY, Ordering::Relaxed);
+    } else {
+        HOOKS.fetch_and(!SUMMARY, Ordering::Relaxed);
+    }
+}
+
+/// The hook bits that are set; zero on a run with no profile summary and no `Rprof`.
+#[inline(always)]
+pub fn hooks() -> u8 {
+    HOOKS.load(Ordering::Relaxed)
+}
+
+/// Whether `Rprof`'s interval elapsed since the last sample.
+#[inline(always)]
+pub fn profile_ticked() -> bool {
+    hooks() & PROFILE_TICK != 0
+}
+
+/// Sets (`Rprof`'s timer) or clears (a recorded sample, a stopped profile) the profile tick.
+pub fn set_profile_tick(on: bool) {
+    if on {
+        HOOKS.fetch_or(PROFILE_TICK, Ordering::Relaxed);
+    } else {
+        HOOKS.fetch_and(!PROFILE_TICK, Ordering::Relaxed);
+    }
 }
 
 /// The current activity word, for the sampling thread.

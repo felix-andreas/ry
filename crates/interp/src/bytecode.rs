@@ -4758,6 +4758,7 @@ pub fn op_of(word: u32) -> Option<Op> {
     let index = (word & OP_MASK) as usize;
     let op = match OPS.get(index) {
         Some(&op) => op,
+        None if index == POSITIONAL_CALL_BUILTIN => Op::CallBuiltin,
         None if index < HANDLER_COUNT => Op::Arithmetic,
         None => return None,
     };
@@ -4860,8 +4861,15 @@ const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
     (Arith::GreaterEqual, true),
 ];
 
+/// Tier 0's form of [`Op::CallBuiltin`] for a site whose argument cells are all untagged and
+/// none empty, which is a fact of the call and so holds for every run of the site. Tier 0 writes
+/// it over the generic opcode the first time the site runs ([`quicken_call_builtin`]); its
+/// handler then fills the arguments straight from the registers, skipping the walk over the call's
+/// cells. Like the arithmetic forms, [`op_of`] reports it as the generic instruction.
+const POSITIONAL_CALL_BUILTIN: usize = OPS.len() + QUICK_ARITHMETIC.len();
+
 /// The size of tier 0's handler tables: every generic and specialized opcode.
-const HANDLER_COUNT: usize = OPS.len() + QUICK_ARITHMETIC.len();
+const HANDLER_COUNT: usize = POSITIONAL_CALL_BUILTIN + 1;
 
 // The interpreter turns a code word's low byte back into an `Op` by its discriminant.
 const _: () = {
@@ -6143,10 +6151,11 @@ macro_rules! handlers {
             let mut table: [Handler; HANDLER_COUNT] = [jump::<SINGLE>; HANDLER_COUNT];
             $(table[Op::$op as usize] = $name::<SINGLE>;)*
             let mut index = 0;
-            while OPS.len() + index < HANDLER_COUNT {
+            while index < QUICK_ARITHMETIC.len() {
                 table[OPS.len() + index] = table[Op::Arithmetic as usize];
                 index += 1;
             }
+            table[POSITIONAL_CALL_BUILTIN] = table[Op::CallBuiltin as usize];
             table
         }
     };
@@ -6696,8 +6705,7 @@ unsafe fn read_element_call<const STRING: bool>(
         || second.tag() != known.nil
         || arguments.car() == known.missing_arg
         || second.car() == known.missing_arg
-        || activity::enabled()
-        || crate::utils::PROFILE_TICK.load(std::sync::atomic::Ordering::Relaxed)
+        || activity::hooks() != 0
     {
         return None;
     }
@@ -6814,7 +6822,48 @@ const fn specialized_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HAN
     forms!(
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
     );
+    table[POSITIONAL_CALL_BUILTIN] = positional_call_builtin;
     table
+}
+
+/// The handler of [`POSITIONAL_CALL_BUILTIN`]: the element read of `[` and `[[` first, as for the
+/// generic instruction, then [`op_call_builtin_positional`].
+unsafe fn positional_call_builtin(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = call_builtin_fast(state, at) {
+        dispatch!(state, next);
+    }
+    let instruction = Instruction {
+        code: state.code,
+        at,
+        registers: state.registers,
+    };
+    let flow = op_call_builtin_positional(state, instruction);
+    let pc = advance::<false>(state, at, at + 1 + operand_count(Op::CallBuiltin), flow);
+    if pc == STOP {
+        return;
+    }
+    release(state);
+    dispatch!(state, pc)
+}
+
+/// Writes [`POSITIONAL_CALL_BUILTIN`] over the generic `CallBuiltin` at `word` when `count`
+/// untagged, non-empty cells make up `call`'s arguments, and otherwise marks the site as examined
+/// (the undo count at its limit) so that its later runs skip the walk.
+#[cold]
+#[inline(never)]
+unsafe fn quicken_call_builtin(word: *mut i32, call: Sexp, count: usize) {
+    let mut cell = call.cdr();
+    let mut cells = 0;
+    while cell != nil() && cell.tag() == nil() && cell.car() != missing_arg() {
+        cell = cell.cdr();
+        cells += 1;
+    }
+    let generic = op_word(Op::CallBuiltin);
+    *word = if cell == nil() && cells == count {
+        (generic & !OP_MASK) | POSITIONAL_CALL_BUILTIN as u32
+    } else {
+        generic | RESPECIALIZE_LIMIT << RESPECIALIZE_SHIFT
+    } as i32;
 }
 
 /// The opcode of the specialized form of `operator` on two integers or on doubles, if there is
@@ -7149,6 +7198,10 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let call = state.constant(instruction, 2);
     let first = instruction.operand(3);
     let count = instruction.operand(4);
+    let word = instruction.code.add(instruction.at).cast_mut();
+    if *word as u32 == op_word(Op::CallBuiltin) {
+        quicken_call_builtin(word, call, count);
+    }
     let definition = eval::builtin_def(function)?;
     if count == 1
         && let Some(unary) = definition.unary
@@ -7187,6 +7240,54 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         });
         cell = cell.cdr();
     }
+    let value = call_builtin(
+        definition,
+        call,
+        function,
+        &args,
+        *state.header,
+        Some(site(state, instruction)),
+    )?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+/// [`op_call_builtin`] at a [`POSITIONAL_CALL_BUILTIN`] site, whose arguments need neither their
+/// tags read nor an empty one rejected.
+#[inline(always)]
+unsafe fn op_call_builtin_positional(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let values = std::slice::from_raw_parts(
+        instruction.registers.add(instruction.operand(3)),
+        instruction.operand(4),
+    );
+    let definition = eval::builtin_def(function)?;
+    if let [value] = values
+        && let Some(unary) = definition.unary
+        && let Some(value) = unary(*value)?
+    {
+        (*state.interp).visible = true;
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
+    if definition.direct.is_some()
+        && !definition.checks.replacement
+        && let Some(value) = eval::call_direct(definition, call, values)?
+    {
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
+    let args: eval::Args = values
+        .iter()
+        .map(|&value| Arg { tag: nil(), value })
+        .collect();
     let value = call_builtin(
         definition,
         call,
