@@ -1,0 +1,12 @@
+[stdout]
+| [1] 1
+| NULL
+| NULL
+| [1] 200
+| [1] 0
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 0

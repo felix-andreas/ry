@@ -44,6 +44,15 @@ local({
     }
   }
 
+  # Whether testthat will start workers for a run of more than one file, by its own rule.
+  wants_workers <- function(root) {
+    setting <- Sys.getenv("TESTTHAT_PARALLEL")
+    if (!nzchar(setting)) {
+      setting <- read.dcf(file.path(root, "DESCRIPTION"), fields = "Config/testthat/parallel")[[1L]]
+    }
+    identical(toupper(setting), "TRUE")
+  }
+
   # testthat's worker processes load the package with `pkgload::load_all()`, which sources
   # every file and refuses a package with an import that is not installed. On ry's runtime a
   # worker loads it the way this process did instead: lazily, and under the project's switches
@@ -53,7 +62,6 @@ local({
   # so the call is replaced in that function's body. A testthat whose `queue_setup()` holds no
   # such call keeps its own workers.
   load_workers_with_ry <- function(switches) {
-    if (is.null(.ry_attach_call)) return(invisible())
     namespace <- asNamespace("testthat")
     setup <- get0("queue_setup", envir = namespace, mode = "function", inherits = FALSE)
     load <- call("{", quote(Sys.unsetenv("RY_RUN_FLAGS")), .ry_attach_call,
@@ -120,7 +128,7 @@ local({
     # error rather than a skip, and `skip_on_cran()` tests run.
     if (!nzchar(Sys.getenv("NOT_CRAN"))) Sys.setenv(NOT_CRAN = "true")
     choose_workers(jobs, cores)
-    load_workers_with_ry(switches)
+    if (!is.null(.ry_attach_call) && wants_workers(root)) load_workers_with_ry(switches)
     selected <- function() {
       files <- test_files(root)
       if (is.null(filter)) files else files[grepl(filter, context_name(files))]

@@ -4995,7 +4995,9 @@ pub(crate) unsafe fn switch_alternative(
     alternatives: &[Arg],
 ) -> R<Option<Sexp>> {
     let selector = switch_selector(selector, call)?;
-    if alternatives.is_empty() {
+    // The warning is about the call as written: `switch(x, ...)` names its alternatives even
+    // when the caller's `...` turns out to be empty.
+    if values::pairlist_length(call.cdr()) < 2 {
         crate::conditions::warning_call(call, "'switch' with no alternatives")?;
     }
     let missing = missing_arg();

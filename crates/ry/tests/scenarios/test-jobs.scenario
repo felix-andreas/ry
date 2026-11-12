@@ -1,0 +1,66 @@
+# A package author runs the suite on several cores with `ry test --jobs`. Each test file runs in
+# a worker process that loads the package the way `ry test` itself does, so the package needs
+# neither pkgload nor its uninstalled import, and the project's `ry.toml` holds in the workers.
+
+requires ry-runtime r-package:testthat>=3.3.0 r-package:callr
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+| Imports: notinstalledanywhere
+| Config/testthat/edition: 3
+file NAMESPACE
+| export(area)
+file ry.toml
+| [check]
+| object-systems = false
+file R/area.R
+| area <- function(width, height) width * height
+file tests/testthat/helper-worker.R
+| worker_facts <- function() {
+|   classes <- tryCatch({
+|     methods::setClass("Shape", representation(side = "numeric"))
+|     "allowed"
+|   }, error = function(e) "refused")
+|   paste0(
+|     "worker=", testthat::is_parallel(),
+|     " pkgload=", "pkgload" %in% loadedNamespaces(),
+|     " loader_masks_utils=", match("tools:ry", search()) < match("package:utils", search()),
+|     " classes=", classes
+|   )
+| }
+file tests/testthat/test-area.R
+| test_that("area multiplies", {
+|   expect_equal(area(2, 3), 6)
+|   expect_equal(worker_facts(), "worker=TRUE pkgload=FALSE loader_masks_utils=TRUE classes=refused")
+| })
+file tests/testthat/test-square.R
+| test_that("a square's area", {
+|   expect_equal(area(2, 2), 4)
+|   expect_equal(worker_facts(), "worker=TRUE pkgload=FALSE loader_masks_utils=TRUE classes=refused")
+| })
+file tests/testthat/test-wrong.R
+| test_that("a wrong expectation fails the run", expect_equal(area(2, 2), 5))
+
+run ry test --jobs 2 --reporter summary --runtime ry
+expect exit 1
+expect stdout "Starting 2 test processes."
+expect stdout "area: .."
+expect stdout "square: .."
+expect stdout "wrong: 1"
+expect stdout "Expected `area(2, 2)` to equal 5."
+
+# One job runs the files in the `ry test` process, as a run without the flag does here.
+run ry test --jobs 1 --reporter summary --runtime ry --filter wrong
+expect exit 1
+expect stdout lacks "test processes"
+expect stdout "wrong: 1"
+
+# A profile summary describes one process, so it cannot cover workers.
+run ry test --jobs 2 --runtime ry --profile-summary summary.txt
+expect exit 2
+expect stderr "--profile-summary measures one process"
+
+run ry test --jobs 0
+expect exit 2
+expect stderr "0 is not in 1.."
