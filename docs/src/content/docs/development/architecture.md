@@ -65,7 +65,13 @@ illegal dependency unrepresentable.
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library.
+  `DataFrame` and the standard library. A `for`, `while` or `repeat` loop in the global
+  environment compiles to tier 0 only once it is known to run at least
+  `bytecode::LOOP_COMPILE_ITERATIONS` (16) iterations: a `for` over at least 16 elements compiles
+  before its first iteration, and a `while` or `repeat` compiles after its 16th. Compiling a small
+  loop costs about what 9 interpreted iterations would, so 16 pays it back with margin, and a
+  shorter top-level loop runs in the AST evaluator
+  ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own

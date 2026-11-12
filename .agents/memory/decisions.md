@@ -9302,6 +9302,15 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Change gating is separate.** A change is still judged on plain release builds by `Ir`, with the no-op control for layout effects.
 - **Pinned by** `tools/bench/test_bench.py` (a fake archive), run from `test_release_metadata::the_benchmark_runner_records_the_release_archive_and_refuses_foreign_images`.
 
+## Top-level loops compile per evaluation, without a call frame or a tier
+
+- **Previous shape.** Only closure bodies compiled, so a loop the tree walker evaluated (top-level code, `source()`, `eval()`) ran about 6x slower than GNU R, which compiles every loop it evaluates in the global environment.
+- **Target shape.** `bytecode::run_loop`, called from `do_for`, `do_while` and `do_repeat`, compiles the loop with no local symbols (every variable is an environment binding) and runs it in an activation with no call frame, once the loop reaches `LOOP_COMPILE_ITERATIONS` (a `for` by its length, a `while` or `repeat` by restarting at an iteration boundary). Only the global environment qualifies, as in GNU R. The design and the open broadening step are in `docs/.../development/design/top-level-loops.md`.
+- **No code cache and no marker on the call.** The code is dropped after the evaluation, so a loop evaluated again compiles again, as in GNU R. A gp bit on the call would be serialized with it (`libr/src/serialize.rs` writes a language object's gp bits as its levels) and change `digest()` of a quoted loop.
+- **No optimizing tier.** `profile::TIER_OFF` keeps entry scheduling and tier 1 away from this code, because tier 1's frames and resume points assume a call frame. The tier-1 planner already takes `analysis::Frame::Global { env }` (no locals, no slots, variables as tier-0 steps, lookups speculated from the global environment, which `Machine::enclosure()` skips); wiring the entry is the remaining step, listed in the design page.
+- **One path per loop for compact sequences.** A global `for` over `1:n` of at least `LOOP_COMPILE_ITERATIONS` elements runs compiled, and `ForInit` steps the compact sequence. Every loop that stays in the tree walker (other environments, short sequences, a `return` in the body, the debugger) uses `do_for`'s own stepping, so `do_for` tries `run_loop` first and only then decides whether to expand the sequence.
+- **Pinned by** the oracle case `base__top_level_loops_compile`.
+
 ## Typed list literals compile natively, and an empty list of boxes settles its item type at first use
 
 - **Previous shape.** The typed core had no case for `.ry_array`, so `[a, b]` and `[]` read as an R call whose value typed code cannot use, and the whole closure ran in the interpreter (bounce, binarytrees, nbody, fasta, pidigits, scalar-while). `List.append` was not compiled either.
