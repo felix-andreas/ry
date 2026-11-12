@@ -768,10 +768,10 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         }
         count = count.max(argument.length);
     }
-    if count % format_count != 0
+    if !count.is_multiple_of(format_count)
         || arguments
             .iter()
-            .any(|argument| count % argument.length != 0)
+            .any(|argument| !count.is_multiple_of(argument.length))
     {
         return Err(error("arguments cannot be recycled to the same length"));
     }
