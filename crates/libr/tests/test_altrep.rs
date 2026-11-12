@@ -230,6 +230,25 @@ fn defaults_fall_back_as_gnu_r_s_do() {
     );
 }
 
+/// GNU R hides these dispatchers since 4.5, so its report cannot show them; ry exports them for
+/// binaries built against older R, and they reach the class's methods.
+#[test]
+fn dispatchers_gnu_r_hides_reach_the_class_methods() {
+    let r = r();
+    altreptest(&r);
+    let x = make(&r, "logical", 5);
+    assert_eq!(
+        r.integers(r.call("altreptest_sorted", &[x]).expect("sorted")),
+        vec![0, 1]
+    );
+    let sums = r.call("altreptest_sums", &[x]).expect("sums");
+    assert_eq!(r.integers(r.element(sums, 0)), vec![3]);
+    let x = make(&r, "pointer", 5);
+    let sums = r.call("altreptest_sums", &[x]).expect("sums");
+    let values: Vec<f64> = (0..3).flat_map(|i| r.reals(r.element(sums, i))).collect();
+    assert_eq!(values, vec![12.5, 0.5, 4.5]);
+}
+
 #[test]
 fn errors_in_methods_surface_as_r_errors() {
     let r = r();

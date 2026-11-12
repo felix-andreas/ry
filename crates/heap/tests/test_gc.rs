@@ -689,6 +689,27 @@ fn released_old_vectors_leave_the_peak_at_one_vector() {
     }
 }
 
+/// GNU R raises "max used" when it allocates, so a large vector made and dropped before any
+/// collection runs still counts toward the peak.
+#[test]
+fn a_large_vector_dropped_before_a_collection_counts_toward_the_peak() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.collect(Collection::Major);
+        heap.reset_max_usage();
+        let baseline = heap.stats().max_vector_cells;
+        let mark = heap.handle_mark();
+        big_vector(&mut heap, 1.0);
+        heap.release_handles(mark);
+        assert_eq!(heap.stats().minor_collections, 0);
+        let peak = heap.stats().max_vector_cells - baseline;
+        assert!(
+            peak >= BIG as u64,
+            "max used grew by {peak} cells, below the {BIG} cells of the vector"
+        );
+    }
+}
+
 #[test]
 fn a_dead_list_gives_up_its_large_elements() {
     let mut heap = Heap::new();
@@ -1027,9 +1048,9 @@ fn moved_elements_keep_their_counts_and_survive_in_the_new_vector() {
         heap.collect(Collection::Minor);
         heap.collect(Collection::Intermediate);
         heap.collect(Collection::Major);
-        for index in 0..400 {
+        for (index, &count) in counts.iter().enumerate() {
             assert_eq!(to.element(index).slice::<i32>(), &[index as i32]);
-            assert_eq!(to.element(index).refcount(), counts[index]);
+            assert_eq!(to.element(index).refcount(), count);
         }
     }
 }
@@ -1888,7 +1909,7 @@ fn run_interning(seed: u64, steps: usize, stress: bool) {
         Encoding::Latin1,
         Encoding::Bytes,
     ];
-    let mut text = |rng: &mut SplitMix64, longest: usize| -> Vec<u8> {
+    let text = |rng: &mut SplitMix64, longest: usize| -> Vec<u8> {
         // A small alphabet makes repeats common; lengths cross the scan's 4, 8 and 16-byte paths.
         let length = rng.below(longest + 1);
         (0..length)

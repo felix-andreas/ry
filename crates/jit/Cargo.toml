@@ -1,6 +1,6 @@
 [package]
 name = "jit"
-description = "ry's optimizing tier: compiles hot tier-0 bytecode to machine code, through a baseline tier and the shared SSA IR"
+description = "ry's optimizing tier: compiles hot tier-0 bytecode to machine code through the shared SSA IR"
 edition = "2024"
 version.workspace = true
 license = "GPL-2.0-or-later"
@@ -22,7 +22,6 @@ typed = { path = "../typed" }
 rustc-hash.workspace = true
 smallvec = "1.15"
 ssa = { path = "../ssa" }
-libc = "0.2"
 
 [dev-dependencies]
 syntax = { path = "../syntax" }

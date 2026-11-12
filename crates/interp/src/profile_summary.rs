@@ -756,6 +756,20 @@ fn report(
         }
     }
 
+    let reifications = activity::reifications();
+    if !reifications.is_empty() {
+        let total: u64 = reifications.iter().map(|(_, count)| count).sum();
+        writeln!(out, "\n## Slot frames turned into environments\n")?;
+        writeln!(out, "| reason | frames | share |\n| --- | ---: | ---: |")?;
+        for (reason, count) in reifications {
+            writeln!(
+                out,
+                "| {reason} | {count} | {:.1}% |",
+                100.0 * count as f64 / total as f64
+            )?;
+        }
+    }
+
     writeln!(out, "\n## Events\n")?;
     writeln!(out, "| event | count |\n| --- | ---: |")?;
     for counter in Counter::ALL {

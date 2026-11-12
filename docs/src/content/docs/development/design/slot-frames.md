@@ -164,6 +164,16 @@ These are hot in package code and work from the slots and the frame reference al
   `x <<- value` and `switch(selector, ...)` over the frame's `...`, which `slot_special_call` in
   `bytecode.rs` runs on the slots.
 - `parent.frame()` that is only passed on or compared (see above).
+- `x[i]` and `x[[i]]` whose other arguments are constants, empty or locals, such as `s[[field]]`
+  with `field` a formal (`slot_subject_call` in `bytecode.rs`). The subject evaluates first. An
+  object subject then looks for its method before anything else runs (GNU R's `DispatchOrEval`
+  order), starting from the enclosure, which answers as the frame would because the check refuses
+  a frame with a local named like a method of the generic or named `.packageName`. Only a method
+  found reifies the frame, so that the method's promises (a fresh promise of `field` in the frame,
+  so `substitute(i)` in the method returns `field`) have an environment to point at. Without a
+  method, the other arguments evaluate from the slots after the lookup, and a formal that is
+  missing, also deeply through the caller's promise of a missing argument, passes on as an empty
+  argument. An S4 subject and a frame subject of `[` take the environment's path.
 
 ### The C API
 
@@ -393,8 +403,9 @@ builtin that asked, or a named site such as `"function definition"` or `"method 
 | `frame with an environment` | the callee has no slot table and always gets a heap frame |
 
 The section prints the direct share, the direct share of calls that did not observe their
-environment, and the table of classes. The counting runs only while a profile summary is
-collected.
+environment, and the table of classes. A second section, "Slot frames turned into environments",
+counts every reification by its cause, whatever the frame's function, so it also covers base R
+and script closures. The counting runs only while a profile summary is collected.
 
 ## Prior decision
 
@@ -408,5 +419,3 @@ where frame work is about 2.2k instructions per call.
 - Whether the JIT's tier 1 should read slots directly. It already keeps its own slots for the same
   symbols (`crates/jit/src/analysis.rs`) and writes them back to the heap frame. With slot frames,
   tier 1 could share the interpreter's slots, which would remove its write-back.
-- The baseline tier probes the heap frame inline at fixed offsets (`heap::env::layout`). It would
-  read slots by index instead.

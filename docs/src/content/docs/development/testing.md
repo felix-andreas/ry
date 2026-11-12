@@ -360,7 +360,10 @@ against values read from data.table, `test_lazy.rs` there checks the Polars-styl
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
-without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
+without R. The optimizer cases `test_numerics.rs` holds bit for bit are skipped, with a message,
+where they cannot match: against a fresh GNU R that does not call the reference BLAS, and, for the
+trust-region case, where the C library's `hypot` rounds differently from the recording's (its
+`hypot` case fingerprints it). `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
 extreme arguments. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
@@ -507,6 +510,14 @@ analysis core, polars, graphics): they were mapped because they sit next to hot 
 size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
 grow only by about what the change adds. Resident text is checked on the shipped layout
 (`tools/layout/optimize.sh`) when a release is cut.
+
+A change that allocates less can still raise anonymous peak RSS, because fewer collections change which heap pages fill before the next one. Such a rise is exempt only when all three of these hold, and the change's description shows each:
+
+- `RY_GC_LOG` gives the same peak old-generation bytes (the last column) on both builds;
+- `valgrind --tool=massif` gives the same malloc peak, and with `--pages-as-heap=yes` the same mapped size;
+- a control that puts the missing allocations back, such as one throwaway `c(1, 2)` per loop iteration, closes the gap.
+
+`formatC()`'s direct kernel call met all three: report's VmHWM rose by about 1 MB, all of it in one GC arena, and the control closed it to about 0.1 MB.
 
 Layout moves single-program wall time too, and with it callgrind's simulated branch mispredictions
 and cache misses. Only the instruction count (`Ir`) holds still. So judge a regression on one
@@ -816,6 +827,17 @@ disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user jou
 `crates/ry/tests/scenarios/`. [Robustness](/development/robustness/) documents both, including the
 scenario format and the replay variables.
 
+`native_diagnostics_agree_with_the_typed_core` in the same file holds the strict-mode
+[native function](/reference/type-system#native-functions) findings to what the native compiler
+does. It checks each program of a corpus in strict mode, runs it with `RY_TYPED_LOG=1`, and fails
+when a function without a `native` or `interpreted` finding runs in the interpreter. The corpus is
+the typed benchmark programs, the friendly climb programs, and `crates/ry/tests/native/*.R`, where a
+program's header states what it shows: `# blocked: f, g` names the functions that must get a
+finding, and `# boundary: h` the ones with an R type in their signature. Add a program there for a
+construct the compiler gains or the checker starts to report. The test also fails when no natively
+running function of the corpus calls a standard library function that
+`semantics::native::COMPILED_STD` lists as compiled.
+
 ## Incrementality
 
 A fixture checks what an edit produces, but not how much work it took to get there.
@@ -861,7 +883,12 @@ what `just perf` uses. The `iterate` profile keeps `opt-level = 3` but drops cro
 uses 16 codegen units ([Build profiles](/development#build-profiles)). Plain `cargo test --release` builds
 with the release profile's fat LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS
 and takes 30 minutes on four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and
-11 minutes without it. A budget measured under `cargo test-release` can differ from a release
+11 minutes without it. A test that needs another package's binary (`libR.so`, `ry-rcmd`) builds it
+with `syntax::testing::cargo_build`, a `cargo build` in the profile the test runs in, so it lands
+beside that `ry`. The helper drops the variables cargo sets for the test (`CARGO_PKG_NAME`,
+`OUT_DIR` and so on): build scripts such as ring's rerun when those change, so a nested `cargo
+build` that inherits them rebuilds most of the dependency tree, and the next plain build rebuilds
+it back. A budget measured under `cargo test-release` can differ from a release
 binary's, so a number you quote comes from a release build. Debug builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which
 keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
 

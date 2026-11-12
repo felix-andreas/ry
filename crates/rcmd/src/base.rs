@@ -433,7 +433,7 @@ for (package in packages) {
         }
     }
 }
-invisible(.Internal(ryCodeImageWrite(FALSE, FALSE, FALSE)))
+invisible(.Internal(ryCodeImageWrite(FALSE, FALSE)))
 "#;
 
 fn run_in_home(

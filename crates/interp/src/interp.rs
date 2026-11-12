@@ -25,6 +25,21 @@
 // what keeps its state in registers between instructions. The toolchain is a pinned nightly.
 #![feature(explicit_tail_calls)]
 #![allow(incomplete_features)]
+// Numeric ports (loess, splines, fft, linpack) keep the reference algorithms' index-based loops and
+// literal constants so they stay comparable line by line with the C and Fortran originals, and the
+// byte-level readers keep explicit chunk sizes.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::excessive_precision,
+    clippy::explicit_counter_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::assign_op_pattern,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::type_complexity
+)]
 
 pub mod annotations;
 pub mod apply_results;
@@ -277,6 +292,12 @@ impl FrameStack {
     }
 }
 
+impl Default for FrameStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Drops what a popped frame owns, leaving only plain values in its slot.
 #[inline(always)]
 fn release(frame: &mut Frame) {
@@ -365,15 +386,19 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if depth == 0 {
-        state.references_used = 0;
-    }
     if !state.pending_closures.is_empty() {
         state
             .pending_closures
             .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
+    // An unwind to top level skips the releases of the calls it leaves, so their argument
+    // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 && state.references_used != 0 {
+        // SAFETY: `state` is the interpreter's own state, which `release_references` reads
+        // through `interp()`, and it is not used after this call.
+        unsafe { eval::release_references(0) };
+    }
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,
@@ -406,6 +431,9 @@ pub struct Hooks {
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
     pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
+    /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
+    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -441,6 +469,14 @@ pub struct Hooks {
 /// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
 pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
+/// The summaries an ALTREP class may answer for its vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AltrepSummary {
+    Sum,
+    Min,
+    Max,
+}
+
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,6 +491,9 @@ pub struct Interp {
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
+    /// which [`crate::base_fast_paths::finish`] answers by clearing it.
+    pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
     /// The dispatch variables of every method slot frame, back to back in frame order (see
@@ -688,6 +727,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     state.interp = Some(Interp {
         frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),
@@ -775,6 +815,7 @@ pub fn default_hooks() -> Hooks {
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_summary: |_, _, _| Ok(None),
         defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
@@ -937,8 +978,7 @@ impl RootSource for InterpRoots {
         // SAFETY: as for `trace`.
         unsafe {
             let state = interp();
-            state.bytecode.call_plans.clear_dead(liveness);
-            state.method_cache.clear_dead(liveness);
+            state.bytecode.clear_dead(liveness);
         }
     }
 }

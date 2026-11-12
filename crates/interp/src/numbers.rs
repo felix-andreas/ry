@@ -354,7 +354,7 @@ pub fn convert(source: Source) -> Option<i64> {
         Source::Int(value) => Some(value),
         Source::F64(value) => {
             (value.is_finite() && value.fract() == 0.0 && (-LIMIT..LIMIT).contains(&value))
-                .then(|| value as i64)
+                .then_some(value as i64)
         }
     }
 }
@@ -1015,6 +1015,26 @@ pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
             let (left, right) = two_numbers(call)?;
             let (low, high) = (left.min(right), left.max(right));
             alloc(binary(name, Op::Subtract, high, low).map_err(fail)?)
+        }
+        "Num.bitwise_and" | "Num.bitwise_or" | "Num.bitwise_xor" => {
+            let (left, right) = two_numbers(call)?;
+            alloc(match name {
+                "Num.bitwise_and" => left & right,
+                "Num.bitwise_or" => left | right,
+                _ => left ^ right,
+            })
+        }
+        "Num.bitwise_not" => alloc(!one_number(call)?),
+        "Num.shift_left_by" | "Num.shift_right_by" | "Num.shift_right_zf_by" => {
+            let (number, bits) = named_numbers(call, ["number", "bits"])?;
+            let Some(bits) = u32::try_from(bits).ok().filter(|bits| *bits < 64) else {
+                return Err(fail(format!("`bits` must be from 0 to 63, not {bits}")));
+            };
+            alloc(match name {
+                "Num.shift_left_by" => number << bits,
+                "Num.shift_right_by" => number >> bits,
+                _ => ((number as u64) >> bits) as i64,
+            })
         }
         "Num.neg" => alloc(negate(one_number(call)?).map_err(fail)?),
         "Num.is_zero" => scalar_bool(one_number(call)? == 0),

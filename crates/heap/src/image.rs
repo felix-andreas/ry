@@ -26,7 +26,7 @@
 
 use {
     crate::{
-        Heap, HeapError,
+        Heap, HeapError, bump_symbol_epoch,
         env::{Frame, FrameImage, TableImage},
         object::{ExternalPtrObject, Header, Sexp, SexpType, Shape, flag_bits, gp, holds_handles},
         space::{IMAGE_LARGE_BASE, PAGE_SIZE, SlotIndex, virtual_memory},
@@ -161,9 +161,9 @@ fn words_as_bytes(words: &[u64]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 8) }
 }
 
-/// Fills a run of memory with the bytes an image stored for it: by reading them, or by mapping
-/// the file over it.
-pub type Fill<'a> = &'a mut dyn FnMut(&mut [u8]) -> Result<(), ImageError>;
+/// Fills a run of memory with the bytes an image stored for it, which start at the given offset
+/// in their section: by reading them, or by mapping the file over the memory.
+pub type Fill<'a> = &'a mut dyn FnMut(&mut [u8], usize) -> Result<(), ImageError>;
 
 /// A 64-bit digest of a sequence of words.
 pub struct Digest(u64);
@@ -307,6 +307,8 @@ impl Heap {
             }
         }
         for symbol in self.symbols.values() {
+            // Stamps saved in compiled code must not match after a load.
+            bump_symbol_epoch(&mut self.enclosure_epoch, *symbol);
             symbol.reset_symbol_caches();
         }
         self.collect_for_image(&keep(&roots));
@@ -452,6 +454,16 @@ impl Heap {
                 .cast::<*mut c_void>()
                 .write_unaligned(std::ptr::null_mut());
         }
+        // An empty page is zeroes a loading process has already, so the file leaves it out.
+        let page_words = PAGE_SIZE / 8;
+        let mut stored = 0;
+        for page in 0..pages.len() / page_words {
+            if !self.space.is_empty_page(page) {
+                pages.copy_within(page * page_words..(page + 1) * page_words, stored);
+                stored += page_words;
+            }
+        }
+        pages.truncate(stored);
 
         for value in [
             self.old_small_bytes as u64,
@@ -872,7 +884,7 @@ impl Heap {
         let large_base = input.u64()? as usize;
         let large_length = input.u64()? as usize;
         let large_objects = input.u64s()?;
-        if large_base != IMAGE_LARGE_BASE || large_length % PAGE_SIZE != 0 {
+        if large_base != IMAGE_LARGE_BASE || !large_length.is_multiple_of(PAGE_SIZE) {
             return Err(invalid("its large objects are not at the image address"));
         }
         let section = IMAGE_LARGE_BASE as *mut u8;
@@ -902,35 +914,29 @@ impl Heap {
             .map(|object| (object, self.size_of(object)))
             .collect();
         let header = size_of::<Header>();
-        let mut fill_pages = |memory: &mut [u8]| -> Result<(), ImageError> {
-            let saved: Vec<Vec<u8>> = kept
-                .iter()
-                .map(|&(object, size)| {
-                    std::slice::from_raw_parts(
-                        object.as_ptr().cast::<u8>().add(header),
-                        size - header,
-                    )
+        let saved: Vec<Vec<u8>> = kept
+            .iter()
+            .map(|&(object, size)| {
+                std::slice::from_raw_parts(object.as_ptr().cast::<u8>().add(header), size - header)
                     .to_vec()
-                })
-                .collect();
-            pages(memory)?;
-            for (&(object, _), contents) in kept.iter().zip(&saved) {
-                std::ptr::copy_nonoverlapping(
-                    contents.as_ptr(),
-                    object.as_ptr().cast::<u8>().add(header),
-                    contents.len(),
-                );
-            }
-            Ok(())
-        };
-        self.space.load_image(&mut input, &held, &mut fill_pages)?;
+            })
+            .collect();
+        let loaded = self.space.load_image(&mut input, &held, pages);
+        for (&(object, _), contents) in kept.iter().zip(&saved) {
+            std::ptr::copy_nonoverlapping(
+                contents.as_ptr(),
+                object.as_ptr().cast::<u8>().add(header),
+                contents.len(),
+            );
+        }
+        loaded?;
         if large_length > 0 {
             if !virtual_memory::commit(section, large_length) {
                 return Err(ImageError::Heap(HeapError::CannotAllocate {
                     bytes: large_length,
                 }));
             }
-            large(std::slice::from_raw_parts_mut(section, large_length))?;
+            large(std::slice::from_raw_parts_mut(section, large_length), 0)?;
         }
 
         self.remembered.clear();
@@ -972,8 +978,8 @@ impl Heap {
         }
         let symbols = input.u64s()?;
         self.symbols.clear();
-        for pair in symbols.chunks_exact(2) {
-            self.symbols.insert(handle(pair[0])?, handle(pair[1])?);
+        for &[key, value] in symbols.as_chunks::<2>().0 {
+            self.symbols.insert(handle(key)?, handle(value)?);
         }
         self.roots.precious.clear();
         for _ in 0..input.u32()? {
@@ -1247,8 +1253,10 @@ impl<'a> Reader<'a> {
         let (words, rest) = self.bytes.split_at(count * 4);
         self.bytes = rest;
         Ok(words
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&word| u32::from_le_bytes(word))
             .collect())
     }
 
@@ -1260,12 +1268,10 @@ impl<'a> Reader<'a> {
                 .ok_or_else(|| invalid("a length is too large"))?,
         )?;
         Ok(bytes
-            .chunks_exact(8)
-            .map(|word| {
-                let mut array = [0u8; 8];
-                array.copy_from_slice(word);
-                u64::from_le_bytes(array)
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&word| u64::from_le_bytes(word))
             .collect())
     }
 }

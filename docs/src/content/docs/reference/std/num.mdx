@@ -12,7 +12,8 @@ Functions over single numbers, `integer` or `double`, and eight constants (`Num.
 failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning; its unchecked twin
 (`Num.add` beside `Num.add_checked`) stops with an error in that case. A `NaN` result, such as
 `Inf - Inf` or `Num.sin(Inf)`, is `:Err(:Undefined)` from a checked operation and an error from
-any other. The bit operations take integers as 32-bit two's complement.
+any other. The bit operations work on an `I64`'s 64-bit two's complement, and on an R number's
+32 bits when no argument is an `I64`.
 
 | Function | Summary |
 | --- | --- |
@@ -78,11 +79,11 @@ any other. The bit operations take integers as 32-bit two's complement.
 | [`Num.asin`](#numasin) | The arcsine in radians. |
 | [`Num.acos`](#numacos) | The arccosine in radians. |
 | [`Num.is_nan`](#numis_nan) | Whether the number is `NaN`. |
-| [`Num.bitwise_and`](#numbitwise_and) | The bits set in both integers, in 32-bit two's complement. |
+| [`Num.bitwise_and`](#numbitwise_and) | The bits set in both integers. |
 | [`Num.bitwise_or`](#numbitwise_or) | The bits set in either integer. |
 | [`Num.bitwise_xor`](#numbitwise_xor) | The bits set in exactly one of the integers. |
 | [`Num.bitwise_not`](#numbitwise_not) | The integer with every bit flipped, which is `-number - 1`. |
-| [`Num.shift_left_by`](#numshift_left_by) | Shifts the bits left by `bits`, from 0 to 31. |
+| [`Num.shift_left_by`](#numshift_left_by) | Shifts the bits left by `bits`, from 0 to 63 for an `I64` and from 0 to 31 for an R number. |
 | [`Num.shift_right_by`](#numshift_right_by) | Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative. |
 | [`Num.shift_right_zf_by`](#numshift_right_zf_by) | Shifts the bits right by `bits`, filling with zeros. |
 | [`Num.count_one_bits`](#numcount_one_bits) | The number of set bits. |
@@ -125,7 +126,7 @@ Num.to_str(1 / 3)
 #> "0.333333333333333"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1072)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1073)
 
 ## `Num.compare`
 
@@ -154,7 +155,7 @@ Num.compare(2, 1)
 #> :GT
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1080)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1081)
 
 ## `Num.min`
 
@@ -183,7 +184,7 @@ Num.min(2, 1)
 #> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1088)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1089)
 
 ## `Num.max`
 
@@ -212,7 +213,7 @@ Num.max(2.5, 1)
 #> 2.5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1096)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1097)
 
 ## `Num.is_lt`
 
@@ -241,7 +242,7 @@ Num.is_lt(1, 2)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1104)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1105)
 
 ## `Num.is_gt`
 
@@ -270,7 +271,7 @@ Num.is_gt(1, 2)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1112)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1113)
 
 ## `Num.is_lte`
 
@@ -299,7 +300,7 @@ Num.is_lte(2, 2)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1120)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1121)
 
 ## `Num.is_gte`
 
@@ -328,7 +329,7 @@ Num.is_gte(1.5, 2)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1128)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1129)
 
 ## `Num.is_approx_eq`
 
@@ -345,7 +346,7 @@ Num.is_approx_eq(0.1 + 0.2, 0.3)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1137)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1138)
 
 ## `Num.is_zero`
 
@@ -374,7 +375,7 @@ Num.is_zero(-0)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1145)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1146)
 
 ## `Num.is_positive`
 
@@ -403,7 +404,7 @@ Num.is_positive(0)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1153)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1154)
 
 ## `Num.is_negative`
 
@@ -432,7 +433,7 @@ Num.is_negative(-1)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1161)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1162)
 
 ## `Num.is_even`
 
@@ -461,7 +462,7 @@ Num.is_even(4)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1169)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1170)
 
 ## `Num.is_odd`
 
@@ -490,7 +491,7 @@ Num.is_odd(-3)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1177)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1178)
 
 ## `Num.is_multiple_of`
 
@@ -519,7 +520,7 @@ Num.is_multiple_of(12, 4)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1185)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1186)
 
 ## `Num.is_finite`
 
@@ -548,7 +549,7 @@ Num.is_finite(1 / 0)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1193)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1194)
 
 ## `Num.is_infinite`
 
@@ -577,7 +578,7 @@ Num.is_infinite(-1 / 0)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1201)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1202)
 
 ## `Num.abs`
 
@@ -606,7 +607,7 @@ Num.abs(-3)
 #> 3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1209)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1210)
 
 ## `Num.abs_diff`
 
@@ -635,7 +636,7 @@ Num.abs_diff(3, 10)
 #> 7i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1217)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1218)
 
 ## `Num.neg`
 
@@ -664,7 +665,7 @@ Num.neg(2.5)
 #> -2.5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1225)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1226)
 
 ## `Num.ceiling`
 
@@ -693,7 +694,7 @@ Num.ceiling(1.2)
 #> 2i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1233)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1234)
 
 ## `Num.floor`
 
@@ -722,7 +723,7 @@ Num.floor(-1.2)
 #> -2i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1241)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1242)
 
 ## `Num.round`
 
@@ -751,7 +752,7 @@ Num.round(2.5)
 #> 3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1249)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1250)
 
 ## `Num.truncate`
 
@@ -780,7 +781,7 @@ Num.truncate(-1.7)
 #> -1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1257)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1258)
 
 ## `Num.pow`
 
@@ -810,7 +811,7 @@ Num.pow(2, 10)
 #> 1024i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1266)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1267)
 
 ## `Num.sin`
 
@@ -840,7 +841,7 @@ Num.sin(0)
 #> 0
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1275)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1276)
 
 ## `Num.cos`
 
@@ -869,7 +870,7 @@ Num.cos(0)
 #> 1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1283)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1284)
 
 ## `Num.tan`
 
@@ -898,7 +899,7 @@ Num.tan(0)
 #> 0
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1291)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1292)
 
 ## `Num.atan`
 
@@ -927,7 +928,7 @@ Num.atan(1) * 4
 #> 3.14159265358979
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1299)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1300)
 
 ## `Num.add_checked`
 
@@ -956,7 +957,7 @@ Num.add_checked(9223372036854775807i64, 1i64)
 #> :Err(:Overflow)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1307)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1308)
 
 ## `Num.sub_checked`
 
@@ -985,7 +986,7 @@ Num.sub_checked(10, 3)
 #> :Ok(7i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1315)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1316)
 
 ## `Num.mul_checked`
 
@@ -1014,7 +1015,7 @@ Num.mul_checked(1e308, 10)
 #> :Err(:Overflow)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1323)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1324)
 
 ## `Num.add_saturated`
 
@@ -1043,7 +1044,7 @@ Num.add_saturated(9223372036854775807i64, 1i64)
 #> 9223372036854775807i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1331)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1332)
 
 ## `Num.sub_saturated`
 
@@ -1072,7 +1073,7 @@ Num.sub_saturated(-9223372036854775807i64, 2i64)
 #> -9223372036854775808i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1339)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1340)
 
 ## `Num.mul_saturated`
 
@@ -1101,7 +1102,7 @@ Num.mul_saturated(4294967296i64, 4294967296i64)
 #> 9223372036854775807i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1347)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1348)
 
 ## `Num.add_wrap`
 
@@ -1130,7 +1131,7 @@ Num.add_wrap(9223372036854775807i64, 1i64)
 #> -9223372036854775808i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1355)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1356)
 
 ## `Num.sub_wrap`
 
@@ -1159,7 +1160,7 @@ Num.sub_wrap(-9223372036854775808i64, 1i64)
 #> 9223372036854775807i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1363)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1364)
 
 ## `Num.mul_wrap`
 
@@ -1188,7 +1189,7 @@ Num.mul_wrap(4294967296i64, 4294967296i64)
 #> 0i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1371)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1372)
 
 ## `Num.div_checked`
 
@@ -1217,7 +1218,7 @@ Num.div_checked(7, 2)
 #> :Ok(3.5)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1379)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1380)
 
 ## `Num.div_trunc_checked`
 
@@ -1249,7 +1250,7 @@ Num.div_trunc_checked(Inf, Inf)
 #> :Err(:Undefined)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1390)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1391)
 
 ## `Num.div_ceil_checked`
 
@@ -1278,7 +1279,7 @@ Num.div_ceil_checked(7, 2)
 #> :Ok(4i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1398)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1399)
 
 ## `Num.rem_checked`
 
@@ -1307,7 +1308,7 @@ Num.rem_checked(-7, 2)
 #> :Ok(-1i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1406)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1407)
 
 ## `Num.sqrt_checked`
 
@@ -1336,7 +1337,7 @@ Num.sqrt_checked(-1)
 #> :Err(:SqrtOfNegative)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1414)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1415)
 
 ## `Num.log_checked`
 
@@ -1365,7 +1366,7 @@ Num.log_checked(exp(2))
 #> :Ok(2)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1422)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1423)
 
 ## `Num.from_r`
 
@@ -1399,7 +1400,7 @@ Num.from_r(2.5)
 #> 2.5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1431)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1432)
 
 ## `Num.to_r`
 
@@ -1430,7 +1431,7 @@ Num.to_r(5i64)
 #> 5L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1442)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1443)
 
 ## `Num.to_f64`
 
@@ -1459,7 +1460,7 @@ Num.to_f64(3i64)
 #> 3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1450)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1451)
 
 ## `Num.to_i64_checked`
 
@@ -1489,7 +1490,7 @@ Num.to_i64_checked(-3.7)
 #> :Err(:OutOfBounds)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1459)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1460)
 
 ## `Num.to_i64`
 
@@ -1519,7 +1520,7 @@ Num.to_i64(-3.0)
 #> -3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1468)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1469)
 
 ## `Num.add`
 
@@ -1549,7 +1550,7 @@ List.walk([1, 2, 3], 0, Num.add)
 #> 6i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1477)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1478)
 
 ## `Num.sub`
 
@@ -1579,7 +1580,7 @@ Num.sub(10, 4)
 #> 6i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1486)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1487)
 
 ## `Num.mul`
 
@@ -1608,7 +1609,7 @@ Num.mul(6, 7)
 #> 42i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1494)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1495)
 
 ## `Num.div`
 
@@ -1638,7 +1639,7 @@ Num.div(7, 2)
 #> 3.5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1503)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1504)
 
 ## `Num.div_trunc`
 
@@ -1667,7 +1668,7 @@ Num.div_trunc(-7, 2)
 #> -3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1511)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1512)
 
 ## `Num.div_ceil`
 
@@ -1696,7 +1697,7 @@ Num.div_ceil(7, 2)
 #> 4i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1519)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1520)
 
 ## `Num.rem`
 
@@ -1725,7 +1726,7 @@ Num.rem(-7, 2)
 #> -1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1527)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1528)
 
 ## `Num.pow_int`
 
@@ -1755,7 +1756,7 @@ Num.pow_int(3, 4)
 #> 81i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1536)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1537)
 
 ## `Num.sqrt`
 
@@ -1785,7 +1786,7 @@ Num.sqrt(16)
 #> 4
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1545)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1546)
 
 ## `Num.log`
 
@@ -1815,7 +1816,7 @@ Num.log(Num.e)
 #> 1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1554)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1555)
 
 ## `Num.asin`
 
@@ -1844,7 +1845,7 @@ Num.asin(1)
 #> 1.5707963267949
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1562)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1563)
 
 ## `Num.acos`
 
@@ -1873,7 +1874,7 @@ Num.acos(1)
 #> 0
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1570)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1571)
 
 ## `Num.is_nan`
 
@@ -1903,7 +1904,7 @@ Num.is_nan(0 / 0)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1579)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1580)
 
 ## `Num.bitwise_and`
 
@@ -1925,14 +1926,14 @@ Num.bitwise_and <- function(first, second)
 </TabItem>
 </Tabs>
 
-The bits set in both integers, in 32-bit two's complement.
+The bits set in both integers.
 
 ```r ry run runtime=ry dput
 Num.bitwise_and(12, 10)
-#> 8L
+#> 8i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1587)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1588)
 
 ## `Num.bitwise_or`
 
@@ -1958,10 +1959,10 @@ The bits set in either integer.
 
 ```r ry run runtime=ry dput
 Num.bitwise_or(12, 10)
-#> 14L
+#> 14i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1595)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1596)
 
 ## `Num.bitwise_xor`
 
@@ -1983,15 +1984,16 @@ Num.bitwise_xor <- function(first, second)
 </TabItem>
 </Tabs>
 
-The bits set in exactly one of the integers. A result whose bit pattern is -2147483648 is an
-error, because R uses that value for `NA`; the same holds for every bit operation.
+The bits set in exactly one of the integers. On R numbers, a result whose bit pattern is
+-2147483648 is an error, because R uses that value for `NA`; the same holds for every bit
+operation.
 
 ```r ry run runtime=ry dput
 Num.bitwise_xor(12, 10)
-#> 6L
+#> 6i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1604)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1606)
 
 ## `Num.bitwise_not`
 
@@ -2017,10 +2019,10 @@ The integer with every bit flipped, which is `-number - 1`.
 
 ```r ry run runtime=ry dput
 Num.bitwise_not(5)
-#> -6L
+#> -6i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1612)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1614)
 
 ## `Num.shift_left_by`
 
@@ -2042,14 +2044,15 @@ Num.shift_left_by <- function(number, bits)
 </TabItem>
 </Tabs>
 
-Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
+Shifts the bits left by `bits`, from 0 to 63 for an `I64` and from 0 to 31 for an R number.
+Bits shifted past the top are lost, as in Roc.
 
 ```r ry run runtime=ry dput
 Num.shift_left_by(1, 4)
-#> 16L
+#> 16i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1620)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1623)
 
 ## `Num.shift_right_by`
 
@@ -2075,10 +2078,10 @@ Shifts the bits right by `bits`, copying the sign bit in, so a negative number s
 
 ```r ry run runtime=ry dput
 Num.shift_right_by(-16, 2)
-#> -4L
+#> -4i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1628)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1631)
 
 ## `Num.shift_right_zf_by`
 
@@ -2104,10 +2107,10 @@ Shifts the bits right by `bits`, filling with zeros.
 
 ```r ry run runtime=ry dput
 Num.shift_right_zf_by(-16, 28)
-#> 15L
+#> 68719476735i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1636)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1639)
 
 ## `Num.count_one_bits`
 
@@ -2136,7 +2139,7 @@ Num.count_one_bits(255)
 #> 8L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1644)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1647)
 
 ## `Num.count_leading_zero_bits`
 
@@ -2165,7 +2168,7 @@ Num.count_leading_zero_bits(1)
 #> 31L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1652)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1655)
 
 ## `Num.count_trailing_zero_bits`
 
@@ -2194,7 +2197,7 @@ Num.count_trailing_zero_bits(8)
 #> 3L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1660)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1663)
 
 ## `Num.pi`
 
@@ -2210,7 +2213,7 @@ Num.pi
 #> 3.14159265358979
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1668)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1671)
 
 ## `Num.tau`
 
@@ -2226,7 +2229,7 @@ Num.tau
 #> 6.28318530717959
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1676)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1679)
 
 ## `Num.e`
 
@@ -2242,7 +2245,7 @@ Num.e
 #> 2.71828182845905
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1684)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1687)
 
 ## `Num.max_i64`
 
@@ -2258,7 +2261,7 @@ Num.max_i64
 #> 9223372036854775807i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1692)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1695)
 
 ## `Num.min_i64`
 
@@ -2274,7 +2277,7 @@ Num.min_i64
 #> -9223372036854775808i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1700)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1703)
 
 ## `Num.max_f64`
 
@@ -2290,7 +2293,7 @@ Num.max_f64
 #> 1.79769313486232e+308
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1708)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1711)
 
 ## `Num.min_f64`
 
@@ -2306,7 +2309,7 @@ Num.min_f64
 #> -1.79769313486232e+308
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1716)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1719)
 
 ## `Num.infinity_f64`
 
@@ -2322,7 +2325,7 @@ c(Num.infinity_f64, -Num.infinity_f64)
 #> c(Inf, -Inf)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1724)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1727)
 
 ## `Num.nan_f64`
 
@@ -2333,4 +2336,4 @@ Num.nan_f64
 
 Not a number, the `F64` that arithmetic such as `0 / 0` produces. It is not R's `NA`.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1727)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1730)

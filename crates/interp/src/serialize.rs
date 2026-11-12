@@ -541,6 +541,19 @@ impl Reader<'_> {
                 {
                     closures.push(object);
                 }
+                // A typed closure's stream carries its signature as the first attribute, which
+                // goes back into the registry and is no attribute of the closure in memory.
+                let mut attributes = attributes;
+                if object_kind == SexpType::Closure
+                    && attributes.kind() == SexpType::Pairlist
+                    && attributes.tag().kind() == SexpType::Symbol
+                    && values::symbol_name(attributes.tag()) == crate::annotations::STREAM_ATTRIBUTE
+                {
+                    crate::heap().root(object);
+                    crate::heap().root(attributes);
+                    crate::annotations::restore_signature(object, attributes.car())?;
+                    attributes = attributes.cdr();
+                }
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
                 }
@@ -1707,6 +1720,7 @@ pub unsafe fn encode_code(
         out,
         source,
         trained,
+        guarded: None,
     };
     encoder.code(code, 0)
 }
@@ -1828,14 +1842,18 @@ mod tag {
     pub const BASE_FUNCTION: u8 = 20;
 }
 
-/// Base closures the compiler resolves while compiling and keeps as constants, found again by
-/// name in the base environment.
-const BASE_FUNCTIONS: &[&str] = &["local"];
+/// The namespace a [`tag::BASE_FUNCTION`] constant is found in. Only base closures are written
+/// by name, because only base is guaranteed to be loaded, with the same functions, wherever an
+/// image is read.
+const BASE_NAMESPACE_NAME: &str = "base";
 
 struct Encoder<'a> {
     out: &'a mut Vec<u8>,
     source: &'a SourceNumbers,
     trained: bool,
+    /// The symbol the guard of the constant being written names, which is the name a base
+    /// closure in a guard is written under.
+    guarded: Option<Sexp>,
 }
 
 impl Encoder<'_> {
@@ -1868,6 +1886,7 @@ impl Encoder<'_> {
             return Err(Unencodable("a code object without its fixed constants"));
         }
         let shapes = shape_constants(words)?;
+        let guards = guard_constants(words)?;
         self.value(constants.element(SOURCE), depth + 1)?;
         let caches = length(constants.element(EPOCHS));
         if caches > words.len().saturating_mul(4) {
@@ -1952,7 +1971,13 @@ impl Encoder<'_> {
                 write_signed(self.out, 0);
                 continue;
             }
-            self.value(constants.element(index), depth + 1)?;
+            self.guarded = guards
+                .iter()
+                .find(|&&(expected, _)| expected == index)
+                .map(|&(_, symbol)| constants.element(symbol));
+            let written = self.value(constants.element(index), depth + 1);
+            self.guarded = None;
+            written?;
         }
         Ok(())
     }
@@ -2008,15 +2033,29 @@ impl Encoder<'_> {
                 self.bytes(definition.name.as_bytes());
                 return Ok(());
             }
+            // A closure of base, which the compiler keeps as a guard's expected function or
+            // resolves while compiling, is written as its name, and found again by name where
+            // the image is read.
             SexpType::Closure => {
-                for name in BASE_FUNCTIONS {
-                    if base_function(name) == Some(value) {
-                        self.out.push(tag::BASE_FUNCTION);
-                        self.bytes(name.as_bytes());
-                        return Ok(());
-                    }
+                let environment = value.tag();
+                if environment != known.base_namespace && environment != known.base_env {
+                    return Err(Unencodable("a closure"));
                 }
-                return Err(Unencodable("a closure"));
+                let symbol = self
+                    .guarded
+                    .filter(|&symbol| {
+                        symbol.kind() == SexpType::Symbol && base_function_of(symbol) == Some(value)
+                    })
+                    .or_else(|| {
+                        heap.frame_symbols(known.base_env)
+                            .into_iter()
+                            .find(|&symbol| base_function_of(symbol) == Some(value))
+                    })
+                    .ok_or(Unencodable("a base closure bound to no name"))?;
+                self.out.push(tag::BASE_FUNCTION);
+                self.bytes(BASE_NAMESPACE_NAME.as_bytes());
+                self.bytes(symbol.car().bytes());
+                return Ok(());
             }
             SexpType::Bytecode => {
                 self.out.push(tag::CODE);
@@ -2168,10 +2207,26 @@ fn shape_constants(words: &[i32]) -> Result<SmallVec<[usize; 4]>, Unencodable> {
     Ok(shapes)
 }
 
-/// The base closure bound to `name`, once something forced its lazy-load promise.
-unsafe fn base_function(name: &str) -> Option<Sexp> {
+/// The `(expected function, symbol)` constant indices of every `Guard`.
+fn guard_constants(words: &[i32]) -> Result<SmallVec<[(usize, usize); 4]>, Unencodable> {
+    use crate::bytecode::{Op, op_of, operand_count};
+    let mut guards = SmallVec::new();
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or(Unencodable("an invalid instruction"))?;
+        if op == Op::Guard
+            && let (Some(&symbol), Some(&expected)) = (words.get(pc + 1), words.get(pc + 2))
+        {
+            guards.push((expected as usize, symbol as usize));
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(guards)
+}
+
+/// The base closure bound to `symbol`, once something forced its lazy-load promise.
+unsafe fn base_function_of(symbol: Sexp) -> Option<Sexp> {
     let heap = crate::heap();
-    let symbol = values::install(name).ok()?;
     let cell = heap.frame_cell(heap.known().base_env, symbol)?;
     let mut value = cell.cdr();
     if value.kind() == SexpType::Promise {
@@ -2344,10 +2399,18 @@ impl Decoder<'_, '_> {
             }
             tag::BASE_FUNCTION => {
                 let count = self.input.count()?;
+                let namespace = String::from_utf8_lossy(self.input.take(count)?).into_owned();
+                let count = self.input.count()?;
                 let name = String::from_utf8_lossy(self.input.take(count)?).into_owned();
-                return base_function(&name).ok_or_else(|| {
+                if namespace != BASE_NAMESPACE_NAME {
+                    return Err(error(format!(
+                        "the code image names a function of namespace '{namespace}'"
+                    )));
+                }
+                let symbol = values::install(&name)?;
+                return base_function_of(symbol).ok_or_else(|| {
                     error(format!(
-                        "the code image names base function '{name}', which is unbound"
+                        "the code image names base function '{name}', which is not a closure in base"
                     ))
                 });
             }

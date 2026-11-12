@@ -1,0 +1,18 @@
+[stdout]
+| [1] 1
+| [1] 1
+| [1] 1
+| [1] 1
+| [1] "break failed"
+| [1] 2
+| [1] 4
+| [1] 6
+| [1] 8
+| [1] "next failed"
+| [1] 6
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 6

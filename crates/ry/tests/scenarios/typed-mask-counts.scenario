@@ -1,0 +1,49 @@
+# Typed code counts a logical list built from list comparisons and `&`, `|` and `!` in one pass,
+# without building the intermediate lists. The counts agree with the unfused path when an input
+# is reassigned between the comparison and the count, when the mask is also returned, when the
+# count sits in a branch, and when a scalar takes part. Lists of different lengths stop the native
+# code, and the interpreter reports the error.
+
+requires ry-runtime
+
+file masks.R
+| reassigned <- function(xs: List<I64>) -> I64 {
+|   ys <- xs
+|   m <- ys > 2
+|   ys <- List.map(ys, \(x) x * 10)
+|   List.count_if(m, \(b) b) + List.count_if(ys > 2, \(b) b)
+| }
+| negated <- function(xs: List<F64>, flags: List<Bool>) -> I64 {
+|   List.count_if(!(xs < 1.5f64) | flags, \(b) b)
+| }
+| shared <- function(xs: List<I64>) -> List<Bool> {
+|   m <- xs >= 3
+|   n <- List.count_if(m, \(b) b)
+|   if (n > 1) m else !m
+| }
+| branchy <- function(xs: List<I64>, go: Bool) -> I64 {
+|   m <- xs == 2
+|   if (go) List.count_if(m, \(b) b) else 0
+| }
+| scalar <- function(xs: List<I64>, flag: Bool) -> I64 List.count_if(xs > 1 & flag, \(b) b)
+| undefined <- function(xs: List<F64>) -> I64 List.count_if(xs > 0f64, \(b) b)
+| mismatch <- function(xs: List<I64>, ys: List<I64>) -> I64 List.count_if(xs > 1 & ys > 1, \(b) b)
+| five <- List.from_r(1:5); three <- List.from_r(c(2L, 2L, 3L)); two <- List.from_r(1:2); first <- List.from_r(1:3)
+| doubles <- [1f64, 2f64, 0f64]; flags <- [FALSE, FALSE, TRUE]
+| print(reassigned(five))
+| print(negated(doubles, flags))
+| print(shared(five))
+| print(branchy(three, TRUE))
+| print(scalar(five, TRUE)); print(scalar(five, FALSE))
+| print(tryCatch(mismatch(first, two), error = function(e) conditionMessage(e)))
+| over <- function(xs: List<F64>) -> List<Bool> !(xs > 1f64)
+| names <- function(xs: List<Str>) -> List<Bool> xs == "a"
+| d <- [0.5f64, 2f64]; s <- ["a", "b"]
+| print(over(d)); print(names(s))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry masks.R
+expect exit 0
+expect stdout "8i64\n2i64\n[FALSE, FALSE, TRUE, TRUE, TRUE]\n2i64\n4i64\n0i64\n[1] \"`&` needs lists of the same length, but they have 3 and 2 items; a list is never recycled\"\n[TRUE, FALSE]\n[TRUE, FALSE]"
+expect stderr "typed: compiled for [Vector { item: Dbl, array: true }, Vector { item: Lgl, array: true }] -> I64"
+expect stderr "typed: `mismatch` runs in the interpreter"

@@ -26,35 +26,36 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
     },
     smallvec::SmallVec,
+    std::borrow::Cow,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("ryMatchArg", 0, do_match_arg),
-    internal("ryStopifnot", 0, do_stopifnot),
-    internal("rySetdiff", 0, do_setdiff),
-    internal("ryIntersect", 0, do_intersect),
-    internal("ryStructure", 0, do_structure),
-    internal("rySysGetenv", 0, do_sys_getenv),
-    internal("rySysSetenv", 0, do_sys_setenv),
-    internal("rySysWhich", 0, do_sys_which),
-    internal("ryFormatDefault", 0, do_format_default),
-    internal("ryFormatC", 0, do_format_c),
-    internal("ryPmax", 0, do_pmax),
-    internal("ryDeparse", 0, do_deparse),
-    internal("ryDeparseOpts", 0, do_deparse_opts),
-    internal("ryReduce", 0, do_reduce),
-    internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
-    internal("ryMessage", 0, do_message),
-    internal("ryWarning", 0, do_warning),
-    internal("rySignalCondition", 0, do_signal_condition),
-    internal("ryTryCatch", 0, do_try_catch),
-    internal("ryTryCatchList", 0, do_try_catch_list),
-    internal("ryDoTryCatch", 0, do_do_try_catch),
-    internal("ryWithRestarts", 0, do_with_restarts),
-    internal("ryWithOneRestart", 0, do_with_one_restart),
-    internal("ryDoWithOneRestart", 0, do_do_with_one_restart),
-    internal("ryTryInvokeRestart", 0, do_try_invoke_restart),
-    internal("ryInvokeRestart", 0, do_invoke_restart_named),
+    internal("ryMatchArg", 0, do_match_arg).prologue(),
+    internal("ryStopifnot", 0, do_stopifnot).prologue(),
+    internal("rySetdiff", 0, do_setdiff).prologue(),
+    internal("ryIntersect", 0, do_intersect).prologue(),
+    internal("ryStructure", 0, do_structure).prologue(),
+    internal("rySysGetenv", 0, do_sys_getenv).prologue(),
+    internal("rySysSetenv", 0, do_sys_setenv).prologue(),
+    internal("rySysWhich", 0, do_sys_which).prologue(),
+    internal("ryFormatDefault", 0, do_format_default).prologue(),
+    internal("ryFormatC", 0, do_format_c).prologue(),
+    internal("ryPmax", 0, do_pmax).prologue(),
+    internal("ryDeparse", 0, do_deparse).prologue(),
+    internal("ryDeparseOpts", 0, do_deparse_opts).prologue(),
+    internal("ryReduce", 0, do_reduce).prologue(),
+    internal("ryAssignNativeRoutines", 0, do_assign_native_routines).prologue(),
+    internal("ryMessage", 0, do_message).prologue(),
+    internal("ryWarning", 0, do_warning).prologue(),
+    internal("rySignalCondition", 0, do_signal_condition).prologue(),
+    internal("ryTryCatch", 0, do_try_catch).prologue(),
+    internal("ryTryCatchList", 0, do_try_catch_list).prologue(),
+    internal("ryDoTryCatch", 0, do_do_try_catch).prologue(),
+    internal("ryWithRestarts", 0, do_with_restarts).prologue(),
+    internal("ryWithOneRestart", 0, do_with_one_restart).prologue(),
+    internal("ryDoWithOneRestart", 0, do_do_with_one_restart).prologue(),
+    internal("ryTryInvokeRestart", 0, do_try_invoke_restart).prologue(),
+    internal("ryInvokeRestart", 0, do_invoke_restart_named).prologue(),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -716,18 +717,7 @@ unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<
             interp().visible = true;
             code(&matched)?
         }
-        None if tagged => return Ok(None),
-        None => {
-            // A closure with install-time machine code carries the same mark.
-            let value = match crate::code_image::native_hooks() {
-                Some(hooks) => (hooks.call)(function, args).transpose()?,
-                None => None,
-            };
-            if value.is_some() && activity::enabled() {
-                crate::eval::count_package_call(function, None, args);
-            }
-            return Ok(value);
-        }
+        None => return Ok(None),
     };
     if value.is_some() {
         activity::count(Counter::NativeEntries);
@@ -1326,7 +1316,7 @@ pub(crate) fn decline() -> R<Sexp> {
 
 /// The frame of the closure whose prologue is running: its environment, or a slot frame that
 /// has none, whose formals the helpers below read from its slots so the frame stays without one.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClosureFrame {
     Env(Sexp),
     Slots(usize),
@@ -1335,10 +1325,16 @@ pub(crate) enum ClosureFrame {
 impl ClosureFrame {
     /// The frame the builtin `call` was made from.
     pub(crate) unsafe fn of(call: &Call<'_>) -> ClosureFrame {
-        if call.rho != nil() || call.frame == crate::NO_SLOTS {
-            ClosureFrame::Env(call.rho)
+        ClosureFrame::running(call.rho, call.frame)
+    }
+
+    /// The frame of code running with environment `env` and slot owner `slot_owner`, as a
+    /// builtin it calls sees it.
+    pub(crate) fn running(env: Sexp, slot_owner: u32) -> ClosureFrame {
+        if env != nil() || slot_owner == crate::NO_SLOTS {
+            ClosureFrame::Env(env)
         } else {
-            ClosureFrame::Slots(call.frame as usize)
+            ClosureFrame::Slots(slot_owner as usize)
         }
     }
 
@@ -1356,7 +1352,19 @@ impl ClosureFrame {
 }
 
 /// Finishes the call of the closure whose frame is `frame` with `value`, as `return(value)`.
+/// A prologue that compiled code runs through [`crate::bytecode::Op::Prologue`] hands the value
+/// back to that instruction, which returns it from the activation, so neither a `return()` jump
+/// nor the environment a slot frame would need as its target is made.
 pub(crate) unsafe fn finish(frame: ClosureFrame, value: Sexp, visible: bool) -> R<Sexp> {
+    let state = interp();
+    if state
+        .prologue
+        .is_some_and(|marked| marked.resolve() == frame.resolve())
+    {
+        state.prologue = None;
+        state.visible = visible;
+        return Ok(value);
+    }
     let env = match frame.resolve() {
         Err(env) => env,
         Ok(index) => eval::pending_env(index)?,
@@ -2381,27 +2389,15 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     } else {
         digits
     };
-    let mode = values::scalar_string(if integer { "integer" } else { "double" })?;
-    crate::heap().root(mode);
-    let width_value = values::scalar_integer(width)?;
-    crate::heap().root(width_value);
-    let digits_value = values::scalar_integer(internal_digits)?;
-    crate::heap().root(digits_value);
-    let format_value = values::scalar_string(format)?;
-    crate::heap().root(format_value);
-    let result = kernel(
-        crate::format::do_format_c,
-        &[
-            vector,
-            mode,
-            width_value,
-            digits_value,
-            format_value,
-            flag,
-            nil(),
-        ],
-        frame,
+    let result = crate::format::format_c_vector(
+        vector,
+        if integer { "integer" } else { "double" },
+        width,
+        internal_digits,
+        format,
+        &flag_text,
     )?;
+    crate::heap().root(result);
     if !specials.is_empty() {
         let left = width < 0 || flag_text == "-";
         let field = specials
@@ -2429,9 +2425,8 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         // !is.null(zero.print) || drop0trailing`, forced in that order.
         if !argument_is(frame, symbols.small_mark, |value| {
             string_scalar(value).as_deref() == Some("")
-        })? || !argument_is(frame, symbols.decimal_mark, |value| {
-            string_scalar(value).as_deref() == Some(".")
-        })? || !argument_is(frame, symbols.zero_print, |value| value == nil())?
+        })? || !decimal_mark_is_point(frame)?
+            || !argument_is(frame, symbols.zero_print, |value| value == nil())?
             || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
                 is_false(value)
             })?
@@ -2444,9 +2439,7 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     // `drop0trailing`, `preserve.width`, `big.interval` and `small.mark`, in that order.
     if !big_mark.is_ascii()
         || big_mark == "."
-        || !argument_is(frame, symbols.decimal_mark, |value| {
-            string_scalar(value).as_deref() == Some(".")
-        })?
+        || !decimal_mark_is_point(frame)?
         || !argument_is(frame, symbols.zero_print, |value| value == nil())?
         || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
             is_false(value)
@@ -2638,12 +2631,12 @@ fn with_big_marks(text: &str, mark: &str, interval: usize, keep_width: bool) -> 
 }
 
 /// A string vector of length one that is no object and not `NA`.
-unsafe fn string_scalar(value: Sexp) -> Option<String> {
+unsafe fn string_scalar<'a>(value: Sexp) -> Option<Cow<'a, str>> {
     if value.kind() != SexpType::String || length(value) != 1 || value.attrib() != nil() {
         return None;
     }
     let element = value.element(0);
-    (element != values::na_string()).then(|| values::char_str(element).into_owned())
+    (element != values::na_string()).then(|| values::char_str(element))
 }
 
 /// `None` when `value` is neither `NULL` nor a whole number of at most a million in a plain
@@ -2679,6 +2672,37 @@ unsafe fn argument_is(
     test: impl FnOnce(Sexp) -> bool,
 ) -> R<bool> {
     Ok(argument(frame, symbol)?.is_some_and(test))
+}
+
+/// Whether `formatC()`'s `decimal.mark` is `"."`. While it holds its own default promise,
+/// unforced, the answer is the `OutDec` option, read as `getOption("OutDec")` reads it, so the
+/// promise and the `getOption()` call it would make are skipped; that call has no side effect,
+/// and the fast path returns before the body could force the promise.
+unsafe fn decimal_mark_is_point(frame: ClosureFrame) -> R<bool> {
+    let symbol = symbols().decimal_mark;
+    if is_default(frame, symbol)? && default_is_unforced(frame, symbol) {
+        let mark = crate::envir::option_value(symbols().out_dec.car());
+        return Ok(string_scalar(mark).as_deref() == Some("."));
+    }
+    argument_is(frame, symbol, |value| {
+        string_scalar(value).as_deref() == Some(".")
+    })
+}
+
+/// Whether the formal `symbol` holds a default promise that has not been forced. The fast paths
+/// run only for base's own closures, so the promise's code is the formal's original default.
+unsafe fn default_is_unforced(frame: ClosureFrame, symbol: Sexp) -> bool {
+    let value = match frame.resolve() {
+        Ok(index) => match eval::slot_formal(index, symbol) {
+            Some((value, _)) => value,
+            None => return false,
+        },
+        Err(env) => match crate::heap().frame_cell(env, symbol) {
+            Some(cell) => cell.cdr(),
+            None => return false,
+        },
+    };
+    value.kind() == SexpType::Promise && value.car() == values::unbound()
 }
 
 /// `pmax(..., na.rm)` when every argument is `NULL` or an atomic vector that is no object, and
@@ -3425,9 +3449,9 @@ unsafe fn make_restart_for(make_restart: Sexp, name: Sexp, spec: Sexp) -> R<Sexp
     let mut position = 0;
     while formal.kind() == SexpType::Pairlist {
         let symbol = formal.tag();
-        let value = if symbol == names.handler && spec.kind() != SexpType::String {
-            spec
-        } else if symbol == names.description && spec.kind() == SexpType::String {
+        let value = if (symbol == names.handler && spec.kind() != SexpType::String)
+            || (symbol == names.description && spec.kind() == SexpType::String)
+        {
             spec
         } else {
             eval::eval(formal.car(), env)?

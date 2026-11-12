@@ -1024,12 +1024,14 @@ pub fn runnable_cases(
     for (case, requirements) in cases.into_iter().zip(required) {
         let absent: Vec<String> = requirements
             .into_iter()
-            .filter(|requirement| match requirement.strip_prefix(LOCALE_REQUIREMENT) {
-                Some(locale) => !locale_installed(locale),
-                None => installed
-                    .as_ref()
-                    .is_some_and(|installed| !installed.iter().any(|name| name == requirement)),
-            })
+            .filter(
+                |requirement| match requirement.strip_prefix(LOCALE_REQUIREMENT) {
+                    Some(locale) => !locale_installed(locale),
+                    None => installed
+                        .as_ref()
+                        .is_some_and(|installed| !installed.iter().any(|name| name == requirement)),
+                },
+            )
             .collect();
         match absent.is_empty() {
             true => runnable.push(case),
@@ -1040,6 +1042,21 @@ pub fn runnable_cases(
 }
 
 const LOCALE_REQUIREMENT: &str = "locale ";
+
+/// Whether `case` declares, in a leading `# oracle: library-dependent` comment, that its recorded
+/// last digits are those of the libraries GNU R ran on: BLAS and LAPACK (`lm`, `optim`, matrix
+/// products) or the C math library. Another build of those libraries moves the digits, and an
+/// optimizer's iteration count or warnings with them, so only a GNU R on the recorded libraries
+/// can confirm such a case's expectation.
+pub fn library_dependent(case: &Path) -> bool {
+    std::fs::read_to_string(case).is_ok_and(|text| {
+        text.lines()
+            .take_while(|line| line.starts_with('#'))
+            .any(|line| line.trim_end() == LIBRARY_DEPENDENT)
+    })
+}
+
+const LIBRARY_DEPENDENT: &str = "# oracle: library-dependent";
 
 fn case_requirements(case: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(case) else {

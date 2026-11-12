@@ -1326,6 +1326,20 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     ) {
         return Err(call.error("unsupported type "));
     }
+    format_c_vector(vector, &mode, width, digits, &format, &flag)
+}
+
+/// The body of `formatC()`'s internal on an integer, double or character `vector`, for callers
+/// that hold the arguments as Rust values. `mode` is `"character"`, `"integer"` or another mode
+/// that formats doubles.
+pub(crate) unsafe fn format_c_vector(
+    vector: Sexp,
+    mode: &str,
+    width: i32,
+    digits: i32,
+    format: &str,
+    flag: &str,
+) -> R<Sexp> {
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();
@@ -1348,7 +1362,7 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             if format == "fg" && value == 0.0 {
                 number.push('0');
             } else {
-                c_format_into(&mut number, value, &format, digits, &flag, integer);
+                c_format_into(&mut number, value, format, digits, flag, integer);
             }
             &number
         };
@@ -1552,6 +1566,10 @@ pub fn push_general(out: &mut String, value: f64, significant: usize, keep_zeros
         out.push('-');
     }
     let magnitude = value.abs();
+    if !magnitude.is_finite() {
+        out.push_str(if magnitude.is_nan() { "nan" } else { "inf" });
+        return;
+    }
     let begin = out.len();
     // The exponent of the value rounded to `significant` digits picks the notation, so the
     // scientific form is written first and kept when it wins.

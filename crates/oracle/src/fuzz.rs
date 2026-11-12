@@ -309,6 +309,37 @@ impl Generator {
                 self.rng.below(9)
             ));
         }
+        if self.rng.chance(1, 2) {
+            // Methods change between calls of one site, in the order a package and a user
+            // session change them: a global mask and its removal, a registration, a frame-local
+            // method, and a global mask over the registered method.
+            let target = ["circle", "square", "shape"][self.rng.below(3)];
+            let call = format!("area{k}(object{k})");
+            let mut steps = [
+                format!("area{k}.{target} <- function(s, ...) \"masked {target}\""),
+                format!("rm(area{k}.{target})"),
+                format!(
+                    "registerS3method(\"area{k}\", \"{target}\", function(s, ...) \"registered {target}\")"
+                ),
+                format!(
+                    "local{k} <- function(s) {{ area{k}.{target} <- function(s, ...) \"frame {target}\"; area{k}(s) }}\nprint(local{k}(object{k}))"
+                ),
+                format!("area{k}.{target} <- function(s, ...) \"global {target}\""),
+                format!("rm(area{k}.{target})"),
+            ];
+            if self.rng.chance(1, 2) {
+                steps[..3].rotate_right(1);
+            }
+            let line = self.guarded(&call);
+            text.push_str(&format!("for (i in 1:2) {line}\n"));
+            for step in steps {
+                text.push_str(&step);
+                text.push('\n');
+                let line = self.guarded(&call);
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
         text
     }
 
@@ -1035,7 +1066,8 @@ pub fn trace_back_program(seed: u64) -> String {
 
 const TRACE_PREAMBLE: &str = r#"if (!requireNamespace("rlang", quietly = TRUE)) {
     cat("rlang is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 body_only <- body(rlang:::trace_back)
 if (identical(body_only[[1]], as.name("{")) && length(body_only) == 3L &&
@@ -1262,7 +1294,8 @@ pub fn native_helpers_program(seed: u64) -> String {
 
 const NATIVE_HELPERS_PREAMBLE: &str = r#"if (!requireNamespace("withr", quietly = TRUE) || format(packageVersion("withr")) != "3.0.3") {
     cat("withr 3.0.3 is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 r_body <- function(f) {
     code <- body(f)

@@ -218,6 +218,7 @@ symbol_table! {
     na_encode = "na.encode",
     scientific = "scientific",
     decimal_mark = "decimal.mark",
+    out_dec = "OutDec",
     expr = "expr",
     width_cutoff = "width.cutoff",
     backtick = "backtick",
@@ -911,6 +912,26 @@ pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
     Ok(())
 }
 
+/// Whether two `CHARSXP`s hold the same text. The string cache interns each text once per
+/// encoding, and ASCII text always unmarked, so two distinct cached ASCII strings differ and only
+/// strings that may differ in encoding need their text compared.
+#[inline]
+pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
+    if left == right {
+        return true;
+    }
+    let na = na_string();
+    if left == na || right == na {
+        return false;
+    }
+    let interned_ascii = gp::ASCII | gp::CACHED;
+    if left.gp() & interned_ascii == interned_ascii && right.gp() & interned_ascii == interned_ascii
+    {
+        return false;
+    }
+    char_str(left) == char_str(right)
+}
+
 /// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
 /// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
 #[inline]
@@ -1420,7 +1441,8 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             list
         }
         SexpType::Closure => {
-            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
+            let body = crate::bytecode::body_to_copy(object)?;
+            let copy = triple(SexpType::Closure, object.car(), body, object.tag())?;
             // The copy captures the same frame, so a move must count it as it counts the original.
             crate::moves::created_closure(copy)?;
             copy
