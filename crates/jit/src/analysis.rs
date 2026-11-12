@@ -601,10 +601,10 @@ pub enum Intrinsic {
     Modulo(Numeric),
     /// `%/%`
     IntegerDivide(Numeric),
-    /// `Dict.len()` or `Set.len()` (when `set`), or their `is_empty` (when `empty`).
-    CollectionCount {
+    /// `Dict.is_empty()` or `Set.is_empty()` (when `set`). Their `len` has no intrinsic because it
+    /// returns a ry `I64`, which no register type holds.
+    CollectionEmpty {
         set: bool,
-        empty: bool,
     },
     /// `Dict.contains()` or `Set.contains()`.
     CollectionContains {
@@ -2394,7 +2394,7 @@ impl<'a> Builder<'a> {
             ),
             Op::CallGeneric | Op::CallRebinding => {
                 let call = self.constant(operand(2));
-                // `x <- f(x, ...)` may move a ry dictionary or set, or a plain list, into the
+                // `x <- f(x, ...)` may move a ry dictionary, set, Array or plain list into the
                 // call to update it in place, which only tier 0 does. The call is inlined only
                 // when the variable cannot hold one; a direct call checks the value instead.
                 let inlinable = inst.op == Op::CallGeneric
@@ -4217,17 +4217,9 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
     let boxed = |ty: &Ty| *ty == Ty::Boxed;
     let key = |ty: &Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Boxed);
     Some(match (name, types) {
-        ("Dict.len" | "Set.len", [collection]) if boxed(collection) => (
-            Intrinsic::CollectionCount {
-                set: name == "Set.len",
-                empty: false,
-            },
-            Ty::Int,
-        ),
         ("Dict.is_empty" | "Set.is_empty", [collection]) if boxed(collection) => (
-            Intrinsic::CollectionCount {
+            Intrinsic::CollectionEmpty {
                 set: name == "Set.is_empty",
-                empty: true,
             },
             Ty::Lgl,
         ),
@@ -4315,9 +4307,7 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
 fn has_intrinsic(name: &str) -> bool {
     matches!(
         name,
-        "Dict.len"
-            | "Set.len"
-            | "Dict.is_empty"
+        "Dict.is_empty"
             | "Set.is_empty"
             | "Dict.contains"
             | "Set.contains"

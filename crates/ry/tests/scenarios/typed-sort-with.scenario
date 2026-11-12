@@ -1,0 +1,27 @@
+# Typed code sorts with `List.sort_with` natively, with the comparator inlined into a stable merge
+# sort. A tuple's items read with a constant index, and strings order as R's `<` orders them.
+
+requires ry-runtime
+
+file sort.R
+| ranked <- function(n: I64) -> List<Tuple{Str, I64}> {
+|   counts <- Dict.empty()
+|   for (i in List.range(1, n)) {
+|     key <- if (i %% 3i64 == 0i64) "c" else if (i %% 2i64 == 0i64) "b" else "a"
+|     counts <- Dict.update(counts, key, function(found) :Ok(Result.with_default(found, 0i64) + 1i64))
+|   }
+|   List.sort_with(Dict.to_list(counts), \(a, b) {
+|     match (Num.compare(b[[2]], a[[2]])) {
+|       :EQ => if (a[[1]] < b[[1]]) :LT else :GT
+|       order => order
+|     }
+|   })
+| }
+| print(ranked(7i64))
+| print(ranked(0i64))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry sort.R
+expect exit 0
+expect stdout "[(\"a\", 3i64), (\"b\", 2i64), (\"c\", 2i64)]\n[]\n"
+expect stderr "typed: compiled for [I64] -> Vector { item: Record("

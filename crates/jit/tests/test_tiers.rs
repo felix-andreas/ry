@@ -471,6 +471,73 @@ fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
     });
 }
 
+/// `Dict.len` and `Set.len` return a ry `I64`, so compiled code must not return the count as an
+/// R integer. A short loop runs the body in tier 0 and a long one enters it in compiled code, so
+/// both paths are pinned.
+#[test]
+fn collection_lengths_keep_their_type_in_compiled_code() {
+    with_interpreter(|| unsafe {
+        let definitions = [
+            "dict_len <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.len(d) }",
+            "set_len <- function(n) { s <- Set.insert(Set.empty(), 2L); for (i in 1:n) NULL; Set.len(s) }",
+            "dict_empty <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.is_empty(d) }",
+        ];
+        for definition in definitions {
+            run(definition);
+        }
+        let calls = |mode| {
+            jit::install_mode(mode);
+            let outcomes: Vec<String> = ["dict_len", "set_len", "dict_empty"]
+                .iter()
+                .flat_map(|name| {
+                    ["3L", "100000L"].map(|n| run(&format!(".Internal(typeof({name}({n})))")))
+                })
+                .collect();
+            jit::install_mode(Mode::Off);
+            outcomes
+        };
+        let interpreted = calls(Mode::Off);
+        assert_eq!(interpreted[..4], ["\"I64\""; 4], "{interpreted:?}");
+        assert_eq!(interpreted[4], "\"logical\"", "{interpreted:?}");
+        assert_eq!(calls(Mode::On), interpreted);
+        assert_eq!(calls(Mode::Force), interpreted);
+    });
+}
+
+/// `x <- helper(x, i)` in compiled code must let tier 0 move `x` into the helper, as it does in
+/// a slot frame, so the helper updates the collection in place. A copy per step would make
+/// doubling the steps quadruple the allocated bytes.
+#[test]
+fn compiled_rebinding_calls_grow_collections_in_place() {
+    with_interpreter(|| unsafe {
+        run("add_item <- function(xs, i) List.append(xs, i)");
+        run("add_key <- function(d, i) Dict.insert(d, i, i)");
+        run("grow_list <- function(n) { xs <- list(); for (i in seq_len(n)) xs <- add_item(xs, i); List.len(xs) }");
+        run("grow_dict <- function(n) { d <- Dict.empty(); for (i in seq_len(n)) d <- add_key(d, i); Dict.len(d) }");
+        let allocated = |code: &str| {
+            let before = interp::heap().allocated_ever();
+            run(code);
+            interp::heap().allocated_ever() - before
+        };
+        let mut failures = Vec::new();
+        for mode in [Mode::On, Mode::Force] {
+            jit::install_mode(mode);
+            for grow in ["grow_list", "grow_dict"] {
+                allocated(&format!("{grow}(20000L)"));
+                let small = allocated(&format!("{grow}(20000L)"));
+                let large = allocated(&format!("{grow}(40000L)"));
+                if large as f64 > 2.6 * small as f64 {
+                    failures.push(format!(
+                        "{grow} in {mode:?}: {small} bytes for 20000 steps, {large} for 40000"
+                    ));
+                }
+            }
+            jit::install_mode(Mode::Off);
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    });
+}
+
 #[test]
 fn native_functions_agree_across_tiers() {
     // Scalar functions called with unboxed arguments run as native functions, recursion
@@ -3083,6 +3150,59 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- \"abz\"; FUNCTION(x) }",
                 "{ x <- \"b\"; FUNCTION(x) }",
             ],
+        ),
+        // A record field holds a list. Each update copies the list the old record still holds,
+        // and the copy's capacity grows from its length, past the point where doubling a shared
+        // list's capacity on every copy used to ask for gigabytes.
+        (
+            "function(n: I64) -> I64 { column <- (name = \"a\", values = [0i64])\n \
+             original <- column\n i <- 0i64\n while (i < n) { column <- (..column, values = \
+             List.append(column$values, i))\n i <- i + 1i64 }\n \
+             List.sum(column$values) + List.len(original$values) }",
+            &["{ k <- 40i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> List<List<I64>> List.append([[n], [n, n]], List.repeat(0i64, 2))",
+            &["{ k <- 7i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- [[n], [n, n]]\n total <- 0i64\n \
+             for (row in rows) total <- total + List.sum(row)\n total + List.len(rows[[2]]) }",
+            &["{ k <- 7i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> Record{name: Str, values: List<I64>} (name = \"b\", values = [n, n + 1i64])",
+            &["{ k <- 1i64; FUNCTION(k) }"],
+        ),
+        // A `return` of a comparison and a later `Bool.false` join as a logical.
+        (
+            "function(x: I64, y: I64) -> Bool { if (x < y) return(Bool.true)\n Bool.false }",
+            &[
+                "{ a <- 1i64; b <- 2i64; FUNCTION(a, b) }",
+                "{ a <- 2i64; b <- 1i64; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> I64 List.sum(List.drop_last([n], 1)) + List.sum(List.repeat(n, 0i64) * 2i64)",
+            &["{ k <- 3i64; FUNCTION(k) }"],
+        ),
+        // A merge sort with the comparator inlined: stable, so equal keys keep their order, and
+        // the strings it compares order as R's `<` does.
+        (
+            "function(n: I64) -> List<Tuple{Str, I64}> { xs <- List.map(List.range(1, n), \\(i) \
+             (if (i %% 2i64 == 0i64) \"b\" else \"a\", i %% 3i64))\n \
+             List.sort_with(xs, \\(a, b) match (Num.compare(b[[2]], a[[2]])) { \
+             :EQ => if (a[[1]] < b[[1]]) :LT else if (a[[1]] > b[[1]]) :GT else :EQ\n \
+             order => order }) }",
+            &[
+                "{ k <- 9i64; FUNCTION(k) }",
+                "{ k <- 1i64; FUNCTION(k) }",
+                "{ k <- 0i64; FUNCTION(k) }",
+            ],
+        ),
+        (
+            "function(xs: List<Str>, s: Str) -> List<Bool> xs <= s",
+            &["{ a <- List.from_r(c(\"B\", \"a\", \"b\", \"\")); b <- \"b\"; FUNCTION(a, b) }"],
         ),
     ];
     with_interpreter(|| {

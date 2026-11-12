@@ -902,22 +902,28 @@ pub unsafe extern "C" fn jit_call(
 }
 
 /// 1 when tier 0 may move the value of `target` into a rebinding call `target <- f(target, ...)`,
-/// which it does only from a frame with an environment, so compiled code makes the call through
-/// tier 0's instruction instead.
+/// from the frame's slot or its environment's binding, so compiled code makes the call through
+/// tier 0's instruction instead. Compiled code has flushed its variables, so the frame holds the
+/// value.
 pub unsafe extern "C" fn jit_rebinding_moves(activation: *mut Activation, target: *mut Header) -> i32 {
     unsafe {
         guarded(activation, 1, |activation| {
             let Some(target) = Sexp::from_raw(target) else {
                 return 1;
             };
-            let env = machine(activation).env();
-            if env == values::nil() {
-                return 0;
-            }
-            match heap().frame_cell(env, target) {
-                Some(cell) => i32::from(moves::movable_kind(cell.cdr())),
-                None => 0,
-            }
+            let machine = machine(activation);
+            let env = machine.env();
+            let value = if env == values::nil() {
+                compiled(activation)
+                    .slots
+                    .iter()
+                    .position(|&symbol| symbol == target)
+                    .and_then(|slot| frame_slot(activation, machine, slot as i64))
+                    .map(|slot| *slot)
+            } else {
+                heap().frame_cell(env, target).map(|cell| cell.cdr())
+            };
+            value.map_or(0, |value| i32::from(moves::movable_kind(value)))
         })
     }
 }
@@ -1644,7 +1650,8 @@ pub unsafe extern "C" fn jit_literal_matches(value: *mut Header, pattern: *mut H
     }
 }
 
-/// `Dict.len()` or `Set.len()`: the entry count, or -1 when tier 0 must run the call.
+/// The entry count behind `Dict.is_empty()` or `Set.is_empty()`, or -1 when tier 0 must run the
+/// call.
 pub unsafe extern "C" fn jit_collection_count(value: *mut Header, set: i32) -> i64 {
     unsafe {
         Sexp::from_raw(value)

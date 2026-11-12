@@ -1,0 +1,18 @@
+# A user checks a script's memory with `gc()`: a large vector made and dropped between two
+# collections counts toward "max used", as in GNU R, which reports 157.7 Mb for this loop.
+
+requires ry-runtime
+
+file peak.R
+| for (k in 1:30) {
+|   x <- numeric(2e7)
+|   x <- NULL
+| }
+| peak <- gc()["Vcells", 6]
+| cat("peak at least one vector:", peak >= 152.6, "\n")
+| cat("peak below two vectors:", peak < 2 * 152.6, "\n")
+
+run ry run --runtime ry peak.R
+expect exit 0
+expect stdout "peak at least one vector: TRUE"
+expect stdout "peak below two vectors: TRUE"
