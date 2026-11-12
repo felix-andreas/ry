@@ -642,7 +642,7 @@ impl Lowering<'_> {
             }
             if inst.dest.is_some_and(|dest| members.contains(&dest)) {
                 match &mut inst.op {
-                    Op::NewVector(held, _) => *held = item,
+                    Op::NewVector(held, _) | Op::EmptyList(held, _) => *held = item,
                     Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
                     _ => {}
                 }
@@ -659,11 +659,13 @@ impl Lowering<'_> {
     }
 
     /// A list literal `[a, b, ...]` (`.ry_array`), or an empty one whose storage the preflight
-    /// named (`hint`). An empty list of records or tags is pending until its item type shows.
+    /// named (`hint`), with room for `capacity` items when it comes from `List.with_capacity`.
+    /// An empty list of records or tags is pending until its item type shows.
     unsafe fn list_literal(
         &mut self,
         arguments: &Arguments,
         hint: Option<&str>,
+        capacity: Option<Local>,
     ) -> Result<Local, Refusal> {
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
         for &(ref name, item) in &arguments.items {
@@ -697,10 +699,16 @@ impl Lowering<'_> {
                 Some(_) => return Err(Refusal::new("an empty list of an unknown item type")),
             },
         };
-        let zero = self.int(0);
-        let fresh = self
-            .builder
-            .emit(Type::vector(item), Op::NewVector(item, zero));
+        let fresh = match capacity {
+            Some(capacity) => self
+                .builder
+                .emit(Type::vector(item), Op::EmptyList(item, capacity)),
+            None => {
+                let zero = self.int(0);
+                self.builder
+                    .emit(Type::vector(item), Op::NewVector(item, zero))
+            }
+        };
         let ty = Type::Vector { item, array: true };
         let mut list = self.builder.emit(ty, Op::Relabel(fresh, ty));
         if values.is_empty() && hint == Some("list") {
@@ -2678,8 +2686,26 @@ impl Lowering<'_> {
                     return Err(Refusal::new("an index of an unsupported form"));
                 };
                 let vector = self.value(vector)?;
-                let index = self.value(index)?;
                 let ty = self.builder.ty(vector);
+                if let Type::Record(shape) = ty {
+                    // A tuple's item is a field, at a position the code spells as a constant.
+                    let positional = interp::heap()
+                        .layouts
+                        .get(shapes::shape(shape).layout)
+                        .is_some_and(|layout| {
+                            layout.tag.is_none() && matches!(layout.fields, Fields::Positional(_))
+                        });
+                    let position = constant_integer(index).filter(|&position| position >= 1);
+                    return match (name, positional, position) {
+                        ("[[", true, Some(position)) => {
+                            self.field(vector, shape, position as usize - 1)
+                        }
+                        _ => Err(Refusal::new(
+                            "an index into a record, or into a tuple at a computed position",
+                        )),
+                    };
+                }
+                let index = self.value(index)?;
                 if name == "["
                     && matches!(
                         self.builder.ty(index),
@@ -2719,9 +2745,20 @@ impl Lowering<'_> {
                     && list.cdr() == rvalues::nil()
                 {
                     let hint = constant_string(hint);
-                    return self.list_literal(&Arguments { items: Vec::new() }, hint.as_deref());
+                    let empty = Arguments { items: Vec::new() };
+                    return self.list_literal(&empty, hint.as_deref(), None);
                 }
-                if self.is_library_call(list, "Dict.empty")? {
+                if self.is_library_call(list, "List.with_capacity", 1)? {
+                    let [capacity] = Arguments::of(list).exactly(1)?[..] else {
+                        return Err(Refusal::new("a malformed `List.with_capacity`"));
+                    };
+                    let capacity = self.value(capacity)?;
+                    let capacity = self.integer_count(capacity)?;
+                    let hint = constant_string(hint);
+                    let empty = Arguments { items: Vec::new() };
+                    return self.list_literal(&empty, hint.as_deref(), Some(capacity));
+                }
+                if self.is_library_call(list, "Dict.empty", 0)? {
                     let ty = constant_string(hint)
                         .as_deref()
                         .and_then(dict_type)
@@ -2730,7 +2767,7 @@ impl Lowering<'_> {
                 }
                 self.value(list)
             }
-            ".ry_array" => self.list_literal(&arguments, None),
+            ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
             "List.concat" => self.concat(&arguments),
             "List.swap" => self.swap(&arguments),
@@ -2754,6 +2791,7 @@ impl Lowering<'_> {
             "List.sublist" | "List.take_first" | "List.take_last" | "List.drop_first"
             | "List.drop_last" => self.slice(name, &arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
+            "List.sort_with" => self.sort_with(&arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
             ".ry_update" => self.update(&arguments),
             "$" => {
@@ -3107,6 +3145,194 @@ impl Lowering<'_> {
         Ok(output)
     }
 
+    /// `List.sort_with(list, compare)` as a stable bottom-up merge sort, with `compare` inlined
+    /// once into the merge step: each pass merges runs of `width` items from one buffer into the
+    /// other, and the buffers trade places after it. A right item goes first only when `compare`
+    /// of the left and the right item is `:GT`, which keeps equal items in order.
+    unsafe fn sort_with(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, function] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.sort_with`"));
+        };
+        let list = self.value(list)?;
+        let ty = self.builder.ty(list);
+        let Type::Vector { item, array: true } = ty else {
+            return Err(Refusal::new(
+                "a `List.sort_with` of something that is not a list",
+            ));
+        };
+        let callable = self.function_argument(function)?;
+        let greater =
+            shapes::intern(tag_layout("GT", 0)?, &[]).ok_or(Refusal::new("a comparison result"))?;
+        let greater = self.int(greater as i32);
+        let one = self.int(1);
+        let source = self.builder.local(ty);
+        self.builder.push(Some(source), Op::Copy(list));
+        let count = self.builder.emit(Type::Int, Op::Length(source));
+        let end = self
+            .builder
+            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, count, one));
+        let fresh = self
+            .builder
+            .emit(Type::vector(item), Op::NewVector(item, count));
+        let target = self.builder.local(ty);
+        self.builder.push(Some(target), Op::Relabel(fresh, ty));
+        let width = self.builder.local(Type::Int);
+        self.builder.push(Some(width), Op::Copy(one));
+        let (start, left, right, slot) = (
+            self.builder.local(Type::Int),
+            self.builder.local(Type::Int),
+            self.builder.local(Type::Int),
+            self.builder.local(Type::Int),
+        );
+        let (middle, stop) = (self.builder.local(Type::Int), self.builder.local(Type::Int));
+        let done = self.builder.block();
+
+        let passes = self.loop_header();
+        let more = self.int_test(Compare::Lt, width, count);
+        let pass = self.builder.block();
+        self.builder.terminate(Terminator::Branch {
+            condition: more,
+            then: pass,
+            otherwise: done,
+        });
+        self.builder.switch_to(pass);
+        self.builder.push(Some(start), Op::Copy(one));
+        let pass_end = self.builder.block();
+        let runs = self.loop_header();
+        let past = self.int_test(Compare::Gt, start, count);
+        let run = self.builder.block();
+        self.builder.terminate(Terminator::Branch {
+            condition: past,
+            then: pass_end,
+            otherwise: run,
+        });
+        self.builder.switch_to(run);
+        let after_left = self
+            .builder
+            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, start, width));
+        self.int_min(middle, after_left, end);
+        let after_right = self.builder.emit(
+            Type::Int,
+            Op::Arith(Arith::Add, Item::Int, after_left, width),
+        );
+        self.int_min(stop, after_right, end);
+        self.builder.push(Some(left), Op::Copy(start));
+        self.builder.push(Some(right), Op::Copy(middle));
+        self.builder.push(Some(slot), Op::Copy(start));
+        let run_end = self.builder.block();
+        let merges = self.loop_header();
+        let full = self.int_test(Compare::Ge, slot, stop);
+        let merge = self.builder.block();
+        self.builder.terminate(Terminator::Branch {
+            condition: full,
+            then: run_end,
+            otherwise: merge,
+        });
+        self.builder.switch_to(merge);
+        let (take_left, take_right, compare) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
+        let left_spent = self.int_test(Compare::Ge, left, middle);
+        let check_right = self.builder.block();
+        self.builder.terminate(Terminator::Branch {
+            condition: left_spent,
+            then: take_right,
+            otherwise: check_right,
+        });
+        self.builder.switch_to(check_right);
+        let right_spent = self.int_test(Compare::Ge, right, stop);
+        self.builder.terminate(Terminator::Branch {
+            condition: right_spent,
+            then: take_left,
+            otherwise: compare,
+        });
+        self.builder.switch_to(compare);
+        let a = self
+            .builder
+            .emit(Type::of_item(item), Op::Get(source, left));
+        let b = self
+            .builder
+            .emit(Type::of_item(item), Op::Get(source, right));
+        let order = self
+            .apply(callable, &[a, b])?
+            .ok_or(Refusal::new("a comparison that never completes"))?;
+        if !matches!(self.builder.ty(order), Type::Tag(_)) {
+            return Err(Refusal::new("a comparison whose answer is not a tag"));
+        }
+        let shape = self.builder.emit(Type::Int, Op::ShapeOf(order));
+        let after = self.builder.emit(Type::Bool, Op::Same(shape, greater));
+        self.builder.terminate(Terminator::Branch {
+            condition: after,
+            then: take_right,
+            otherwise: take_left,
+        });
+        let next = self.builder.block();
+        for (block, from) in [(take_left, left), (take_right, right)] {
+            self.builder.switch_to(block);
+            let value = self
+                .builder
+                .emit(Type::of_item(item), Op::Get(source, from));
+            let updated = self.builder.emit(ty, Op::Set(target, slot, value));
+            self.builder.push(Some(target), Op::Copy(updated));
+            let moved = self
+                .builder
+                .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, from, one));
+            self.builder.push(Some(from), Op::Copy(moved));
+            self.builder.terminate(Terminator::Jump(next));
+        }
+        self.builder.switch_to(next);
+        let filled = self
+            .builder
+            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, slot, one));
+        self.builder.push(Some(slot), Op::Copy(filled));
+        self.builder.terminate(Terminator::Jump(merges));
+        self.builder.switch_to(run_end);
+        self.builder.push(Some(start), Op::Copy(stop));
+        self.builder.terminate(Terminator::Jump(runs));
+        self.builder.switch_to(pass_end);
+        let merged = self.builder.emit(ty, Op::Copy(target));
+        self.builder.push(Some(target), Op::Copy(source));
+        self.builder.push(Some(source), Op::Copy(merged));
+        let doubled = self
+            .builder
+            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, width, width));
+        self.builder.push(Some(width), Op::Copy(doubled));
+        self.builder.terminate(Terminator::Jump(passes));
+        self.builder.switch_to(done);
+        Ok(source)
+    }
+
+    /// Whether `a op b` holds for two integers that are not `NA`, as a branch condition.
+    fn int_test(&mut self, op: Compare, a: Local, b: Local) -> Local {
+        let test = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(op, Item::Int, a, b));
+        self.builder.emit(Type::Bool, Op::Truth(test))
+    }
+
+    /// Assigns `destination` the smaller of two integers that are not `NA`.
+    fn int_min(&mut self, destination: Local, a: Local, b: Local) {
+        let smaller = self.int_test(Compare::Lt, a, b);
+        let (first, second, join) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
+        self.builder.terminate(Terminator::Branch {
+            condition: smaller,
+            then: first,
+            otherwise: second,
+        });
+        for (block, value) in [(first, a), (second, b)] {
+            self.builder.switch_to(block);
+            self.builder.push(Some(destination), Op::Copy(value));
+            self.builder.terminate(Terminator::Jump(join));
+        }
+        self.builder.switch_to(join);
+    }
+
     /// `List.count_if(list, predicate)` as an `I64` count, or `List.walk(list, state, f)` as the
     /// state each item's step leaves, in a loop over the items with the function inlined.
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
@@ -3145,7 +3371,7 @@ impl Lowering<'_> {
             ));
         }
         let state = match state {
-            Some(state) if self.is_library_call(state, "Dict.empty")? => {
+            Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
                 // An empty dictionary's type is the one the step function declares for its state.
                 let Callable::Inline(formals, body, _) = callable else {
                     return Err(Refusal::new("a walk from `Dict.empty()` with a named step"));
@@ -3276,13 +3502,18 @@ impl Lowering<'_> {
         }
     }
 
-    /// Whether `expression` is a call without arguments of the standard library's `name`, which
-    /// the lookup assumes keeps finding it.
-    unsafe fn is_library_call(&mut self, expression: Sexp, name: &str) -> Result<bool, Refusal> {
+    /// Whether `expression` is a call of the standard library's `name` with `arity` arguments,
+    /// which the lookup assumes keeps finding it.
+    unsafe fn is_library_call(
+        &mut self,
+        expression: Sexp,
+        name: &str,
+        arity: usize,
+    ) -> Result<bool, Refusal> {
         if expression.kind() != SexpType::Language
             || expression.car().kind() != SexpType::Symbol
             || rvalues::symbol_name(expression.car()) != name
-            || expression.cdr() != rvalues::nil()
+            || Arguments::of(expression).items.len() != arity
             || self.lookup(expression.car()).is_some()
         {
             return Ok(false);
@@ -4736,14 +4967,7 @@ impl Lowering<'_> {
             ));
         };
         let item = match (ia, ib) {
-            (Item::Str, Item::Str) => {
-                if !matches!(op, Compare::Eq | Compare::Ne) {
-                    return Err(Refusal::new(
-                        "an ordering comparison of strings, which depends on the locale",
-                    ));
-                }
-                Item::Str
-            }
+            (Item::Str, Item::Str) => Item::Str,
             (Item::Str, _) | (_, Item::Str) => {
                 return Err(Refusal::new("a comparison of a string and a number"));
             }

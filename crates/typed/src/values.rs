@@ -31,11 +31,13 @@ use {
         format::format_real_alone,
         long_double::{LongDouble, add_all},
         rmath::fround,
+        sort::collate,
     },
     smallvec::SmallVec,
     std::{
         alloc::{self, Layout},
         cell::Cell,
+        cmp,
         fmt::{self, Write},
         hash::{BuildHasher, Hasher},
         ptr::{self, null_mut},
@@ -302,6 +304,14 @@ pub unsafe extern "C" fn ry_list_new(kind: u32, length: u64) -> *mut List {
         ptr::write_bytes((*list).data, 0, length * item_size(kind));
     }
     list
+}
+
+/// An empty list of `kind` items with room for `capacity` of them.
+pub unsafe extern "C" fn ry_list_with_capacity(kind: u32, capacity: u64) -> *mut List {
+    let Some(kind) = list_kind(kind) else {
+        return null_mut();
+    };
+    list_alloc(kind, 0, capacity as usize)
 }
 
 /// `from:to` as R counts it: up by one, or down by one when `to < from`.
@@ -1132,7 +1142,7 @@ fn compare_lanes<T: PartialOrd + Copy>(
 }
 
 /// `a op b` elementwise as a logical list; `NA` or `NaN` on either side gives `NA`. Strings
-/// support only `==` and `!=`.
+/// order as [`str_order`] gives.
 pub unsafe extern "C" fn ry_compare(
     op: u32,
     kind: u32,
@@ -1639,11 +1649,20 @@ pub unsafe extern "C" fn ry_str_equal(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64
     str_equal(&Str { lo: a_lo, hi: a_hi }, &Str { lo: b_lo, hi: b_hi }) as i32
 }
 
-/// Bytewise order, -1, 0 or 1: the C locale's collation.
+/// The order of two strings, -1, 0 or 1, as [`str_order`] gives it.
 pub unsafe extern "C" fn ry_str_compare(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64) -> i32 {
-    let a = Str { lo: a_lo, hi: a_hi };
-    let b = Str { lo: b_lo, hi: b_hi };
-    a.bytes().cmp(b.bytes()) as i32
+    str_order(&Str { lo: a_lo, hi: a_hi }, &Str { lo: b_lo, hi: b_hi }) as i32
+}
+
+/// The order of two strings as R's `<` gives it in the session's locale, so a typed comparison
+/// agrees with the interpreter that reruns the same code: code point order in the `C` locale, the
+/// root collation otherwise.
+unsafe fn str_order(a: &Str, b: &Str) -> cmp::Ordering {
+    match (str::from_utf8(a.bytes()), str::from_utf8(b.bytes())) {
+        (Ok(a), Ok(b)) => collate(a, b),
+        // Typed strings are UTF-8, which the boundary and every string operation keep.
+        _ => panic!("a typed string that is not UTF-8"),
+    }
 }
 
 /// `substr(x, start, stop)` counted in characters, from 1: a start below 1 reads as 1, a stop
@@ -3095,7 +3114,7 @@ unsafe fn compare(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
         release(b);
         return null_mut();
     };
-    if !side_has(a, kind) || !side_has(b, kind) || op > GE || (kind == STR && op > NE) {
+    if !side_has(a, kind) || !side_has(b, kind) || op > GE {
         release(a);
         release(b);
         return null_mut();
@@ -3108,12 +3127,15 @@ unsafe fn compare(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
                 holds(op, x, y) as i32
             }
         }),
-        STR => {
+        STR if op <= NE => {
             let equal = op == EQ;
             binary::<Str, i32>(a, b, LGL, length, |x, y| {
                 (str_equal(&x, &y) == equal) as i32
             })
         }
+        STR => binary::<Str, i32>(a, b, LGL, length, |x, y| {
+            holds(op, str_order(&x, &y), cmp::Ordering::Equal) as i32
+        }),
         // An `I64` has no `NA`.
         I64 => binary::<i64, i32>(a, b, LGL, length, |x, y| holds(op, x, y) as i32),
         _ => binary::<i32, i32>(a, b, LGL, length, |x, y| {

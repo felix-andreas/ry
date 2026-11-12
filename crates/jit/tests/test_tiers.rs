@@ -471,6 +471,39 @@ fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
     });
 }
 
+/// `Dict.len` and `Set.len` return a ry `I64`, so compiled code must not return the count as an
+/// R integer. A short loop runs the body in tier 0 and a long one enters it in compiled code, so
+/// both paths are pinned.
+#[test]
+fn collection_lengths_keep_their_type_in_compiled_code() {
+    with_interpreter(|| unsafe {
+        let definitions = [
+            "dict_len <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.len(d) }",
+            "set_len <- function(n) { s <- Set.insert(Set.empty(), 2L); for (i in 1:n) NULL; Set.len(s) }",
+            "dict_empty <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.is_empty(d) }",
+        ];
+        for definition in definitions {
+            run(definition);
+        }
+        let calls = |mode| {
+            jit::install_mode(mode);
+            let outcomes: Vec<String> = ["dict_len", "set_len", "dict_empty"]
+                .iter()
+                .flat_map(|name| {
+                    ["3L", "100000L"].map(|n| run(&format!(".Internal(typeof({name}({n})))")))
+                })
+                .collect();
+            jit::install_mode(Mode::Off);
+            outcomes
+        };
+        let interpreted = calls(Mode::Off);
+        assert_eq!(interpreted[..4], ["\"I64\""; 4], "{interpreted:?}");
+        assert_eq!(interpreted[4], "\"logical\"", "{interpreted:?}");
+        assert_eq!(calls(Mode::On), interpreted);
+        assert_eq!(calls(Mode::Force), interpreted);
+    });
+}
+
 #[test]
 fn native_functions_agree_across_tiers() {
     // Scalar functions called with unboxed arguments run as native functions, recursion
@@ -3046,6 +3079,24 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             "function(n: I64) -> I64 List.sum(List.drop_last([n], 1)) + List.sum(List.repeat(n, 0i64) * 2i64)",
             &["{ k <- 3i64; FUNCTION(k) }"],
         ),
+        // A merge sort with the comparator inlined: stable, so equal keys keep their order, and
+        // the strings it compares order as R's `<` does.
+        (
+            "function(n: I64) -> List<Tuple{Str, I64}> { xs <- List.map(List.range(1, n), \\(i) \
+             (if (i %% 2i64 == 0i64) \"b\" else \"a\", i %% 3i64))\n \
+             List.sort_with(xs, \\(a, b) match (Num.compare(b[[2]], a[[2]])) { \
+             :EQ => if (a[[1]] < b[[1]]) :LT else if (a[[1]] > b[[1]]) :GT else :EQ\n \
+             order => order }) }",
+            &[
+                "{ k <- 9i64; FUNCTION(k) }",
+                "{ k <- 1i64; FUNCTION(k) }",
+                "{ k <- 0i64; FUNCTION(k) }",
+            ],
+        ),
+        (
+            "function(xs: List<Str>, s: Str) -> List<Bool> xs <= s",
+            &["{ a <- List.from_r(c(\"B\", \"a\", \"b\", \"\")); b <- \"b\"; FUNCTION(a, b) }"],
+        ),
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
@@ -3294,6 +3345,15 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         (
             "function(n: I64) -> I64 List.sum(.ry_items(List.map(List.range(1, n), \\(v) v * 2i64), \"I64\"))",
             &["{ x <- 3i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
+        ),
+        // `List.with_capacity` gets its item type from `.ry_items` and fails on a negative room.
+        (
+            "function(n: I64) -> I64 { xs <- .ry_items(List.with_capacity(n), \"I64\"); for (i in List.range(1, n)) xs <- List.append(xs, i); List.sum(xs) }",
+            &[
+                "{ x <- 5i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+                "{ x <- -1i64; FUNCTION(x) }",
+            ],
         ),
     ];
     with_interpreter(|| {
