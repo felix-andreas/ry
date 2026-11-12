@@ -1,3 +1,4 @@
+# oracle: library-dependent
 show <- function(o) cat(sprintf("%a", c(o$par, o$value)), o$counts, o$convergence, o$message, "\n")
 fr <- function(x) 100 * (x[2] - x[1]^2)^2 + (1 - x[1])^2
 grr <- function(x) c(-400 * x[1] * (x[2] - x[1]^2) - 2 * (1 - x[1]), 200 * (x[2] - x[1]^2))

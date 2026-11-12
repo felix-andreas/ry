@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # smooth.spline across its smoothing criteria and knot choices, its spar search path, predict
 # with derivatives, and lowess. Every printed number is a checksum of the exact bit pattern.
 bits <- function(x) {
