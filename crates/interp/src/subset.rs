@@ -586,8 +586,8 @@ unsafe fn gather_kind(
 
 /// `object[flags]` for a logical subscript as long as `object` that selects `count` elements,
 /// with NA where a flag is `NA`. A data frame subset calls this once per column with the same
-/// subscript, so the positions are resolved in runs on the stack, one pass over the flags per
-/// column without a position list on the heap.
+/// subscript, so each call reads the flags 64 at a time into two bit masks (selected, `NA`) and
+/// walks the selected bits, without a position list on the heap.
 unsafe fn gather_logical(object: Sexp, flags: &[i32], count: usize) -> R<Sexp> {
     let kind = object.kind();
     if matches!(kind, SexpType::String | SexpType::List) {
@@ -600,28 +600,26 @@ unsafe fn gather_logical(object: Sexp, flags: &[i32], count: usize) -> R<Sexp> {
         };
         let heap = crate::heap();
         let mut slot = 0;
-        selected_runs(flags, |run| {
-            for &position in run {
-                heap.set_element(
-                    result,
-                    slot,
-                    source.get(position).copied().unwrap_or(missing),
-                );
-                slot += 1;
-            }
+        for_each_selected(flags, |position| {
+            heap.set_element(
+                result,
+                slot,
+                source.get(position).copied().unwrap_or(missing),
+            );
+            slot += 1;
         });
         return Ok(result);
     }
     let result = values::alloc_uninit(kind, count)?;
     if kind == SexpType::Real {
-        gather_runs(
+        gather_selected(
             values::reals(object),
             values::reals_mut(result),
             flags,
             NA_REAL,
         );
     } else {
-        gather_runs(
+        gather_selected(
             values::ints(object),
             values::ints_mut(result),
             flags,
@@ -632,39 +630,37 @@ unsafe fn gather_logical(object: Sexp, flags: &[i32], count: usize) -> R<Sexp> {
 }
 
 /// Writes `source[flags]` into `output`, which has one slot per selected element.
-fn gather_runs<T: Copy>(source: &[T], output: &mut [T], flags: &[i32], missing: T) {
-    let mut written = 0;
-    selected_runs(flags, |run| {
-        let Some(slots) = output.get_mut(written..) else {
-            return;
-        };
-        for (slot, &position) in slots.iter_mut().zip(run) {
+fn gather_selected<T: Copy>(source: &[T], output: &mut [T], flags: &[i32], missing: T) {
+    let mut slots = output.iter_mut();
+    for_each_selected(flags, |position| {
+        if let Some(slot) = slots.next() {
             *slot = source.get(position).copied().unwrap_or(missing);
         }
-        written += run.len();
     });
 }
 
-/// Calls `emit` with the positions a logical subscript selects, in order and in runs of at most
-/// 64, giving [`NA_POSITION`] for an `NA` flag. Each run is compacted without a branch per flag:
-/// every flag writes its position and only a selecting flag advances the cursor.
-fn selected_runs(flags: &[i32], mut emit: impl FnMut(&[Position])) {
-    const RUN: usize = 64;
-    let mut run = [0; RUN];
-    for (chunk_index, chunk) in flags.chunks(RUN).enumerate() {
-        let base = chunk_index * RUN;
-        let mut selected = 0;
-        for (offset, &flag) in chunk.iter().enumerate() {
-            // The cursor never passes `offset`, so it stays inside the run; the mask lets the
-            // compiler see that.
-            run[selected % RUN] = if flag == NA_LOGICAL {
-                NA_POSITION
-            } else {
-                base + offset
-            };
-            selected += usize::from(flag != 0);
+/// Calls `visit` with each position a logical subscript selects, in order, giving
+/// [`NA_POSITION`] for an `NA` flag. Each block of 64 flags becomes a mask of the selected
+/// flags and a mask of the `NA` ones, which vectorizes, and the walk over the set bits costs
+/// per selected element, not per flag.
+fn for_each_selected(flags: &[i32], mut visit: impl FnMut(Position)) {
+    const BLOCK: usize = 64;
+    for (block_index, block) in flags.chunks(BLOCK).enumerate() {
+        let (mut selected, mut missing) = (0u64, 0u64);
+        for (bit, &flag) in block.iter().enumerate() {
+            selected |= u64::from(flag != 0) << bit;
+            missing |= u64::from(flag == NA_LOGICAL) << bit;
         }
-        emit(&run[..selected]);
+        let base = block_index * BLOCK;
+        while selected != 0 {
+            let bit = selected.trailing_zeros();
+            visit(if missing >> bit & 1 == 0 {
+                base + bit as usize
+            } else {
+                NA_POSITION
+            });
+            selected &= selected - 1;
+        }
     }
 }
 

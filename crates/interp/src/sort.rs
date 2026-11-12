@@ -842,13 +842,14 @@ pub(crate) unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     {
         let result = values::alloc_uninit(SexpType::Integer, count)?;
         let positions = values::ints_mut(result);
-        match_positions(table_keys, x_keys, positions);
-        if nomatch != 0 {
-            for position in positions.iter_mut().filter(|position| **position == 0) {
-                *position = nomatch;
+        if match_positions(table_keys, x_keys, positions) {
+            if nomatch != 0 {
+                for position in positions.iter_mut().filter(|position| **position == 0) {
+                    *position = nomatch;
+                }
             }
+            return Ok(result);
         }
-        return Ok(result);
     }
     let mut positions: FxHashMap<Key<'_>, i32> = FxHashMap::default();
     for (index, key) in element_keys(table).into_iter().enumerate() {
@@ -1050,15 +1051,15 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
     if !codes.is_empty() && !observations.is_multiple_of(codes.len()) {
         warning("data length is not a multiple of split variable")?;
     }
-    let mut counts = vec![0usize; level_count];
+    let mut counts: SmallVec<[usize; 16]> = smallvec![0; level_count];
     for &code in codes.iter().cycle().take(observations) {
         if code == NA_INTEGER {
             continue;
         }
-        if code < 1 || code as usize > level_count {
-            return Err(error("factor has bad level"));
+        match counts.get_mut(level_of(code)) {
+            Some(count) => *count += 1,
+            None => return Err(error("factor has bad level")),
         }
-        counts[code as usize - 1] += 1;
     }
     let names = values::names(x);
     let result = alloc(SexpType::List, level_count)?;
@@ -1136,12 +1137,9 @@ fn for_each_member(
     level_count: usize,
     mut visit: impl FnMut(usize, usize, usize),
 ) {
-    let mut cursors = vec![0usize; level_count];
+    let mut cursors: SmallVec<[usize; 16]> = smallvec![0; level_count];
     for (index, &code) in codes.iter().cycle().take(observations).enumerate() {
-        if code == NA_INTEGER {
-            continue;
-        }
-        let level = code as usize - 1;
+        let level = level_of(code);
         if let Some(cursor) = cursors.get_mut(level) {
             visit(level, *cursor, index);
             *cursor += 1;
@@ -1150,20 +1148,22 @@ fn for_each_member(
 }
 
 /// Moves each element of `source` into the piece of its level, for elements stored inline.
+/// Each target is exactly as long as the count of its level's codes over `source`, recycled.
 fn scatter<T: Copy>(source: &[T], codes: &[i32], targets: &mut [&mut [T]]) {
-    let mut cursors = vec![0usize; targets.len()];
-    for (&value, &code) in source.iter().zip(codes.iter().cycle()) {
-        if code == NA_INTEGER {
-            continue;
-        }
-        let level = code as usize - 1;
-        if let (Some(target), Some(cursor)) = (targets.get_mut(level), cursors.get_mut(level)) {
-            if let Some(slot) = target.get_mut(*cursor) {
+    let mut cursors: SmallVec<[std::slice::IterMut<'_, T>; 16]> =
+        targets.iter_mut().map(|target| target.iter_mut()).collect();
+    for chunk in source.chunks(codes.len().max(1)) {
+        for (&value, &code) in chunk.iter().zip(codes) {
+            if let Some(slot) = cursors.get_mut(level_of(code)).and_then(Iterator::next) {
                 *slot = value;
             }
-            *cursor += 1;
         }
     }
+}
+
+/// The 0-based level of a factor code, with `NA` mapped past every level.
+fn level_of(code: i32) -> usize {
+    (code as u32).wrapping_sub(1) as usize
 }
 
 unsafe fn do_identical(call: &Call<'_>) -> R<Sexp> {
@@ -2224,10 +2224,6 @@ enum Key<'a> {
     Raw(u8),
 }
 
-unsafe fn all_ascii(strings: Sexp) -> bool {
-    (0..length(strings)).all(|index| strings.element(index).has_gp(gp::ASCII))
-}
-
 /// The keys of an atomic vector's elements. Other types give no keys.
 unsafe fn element_keys<'a>(vector: Sexp) -> Vec<Key<'a>> {
     match vector.kind() {
@@ -2307,8 +2303,9 @@ unsafe fn duplicated_elements(
     };
     if incomparables.is_none()
         && let Some(keys) = plain_keys(x)
+        && let Some(flags) = duplicate_flags(keys, from_last)
     {
-        return Ok(duplicate_flags(keys, from_last));
+        return Ok(flags);
     }
     let mut duplicated = Bits::new(count);
     let visit: Box<dyn Iterator<Item = usize>> = if from_last {
@@ -2349,8 +2346,10 @@ unsafe fn duplicated_elements(
 }
 
 /// A vector's elements as keys that hash without conversion: integers and logicals as they are,
-/// doubles through `real_key`, and character vectors of ASCII strings as their interned string
-/// objects, since interning makes equal ASCII text one object (`NA` included).
+/// doubles through `real_key`, and strings as their interned string objects. Interning makes
+/// equal ASCII text one object (`NA` included), but equal text in two encodings is two objects,
+/// so a string table checks [`TableKey::exact`] on each distinct key and each miss rather than
+/// scanning every element first.
 #[derive(Clone, Copy)]
 enum PlainKeys<'a> {
     Integer(&'a [i32]),
@@ -2366,7 +2365,7 @@ unsafe fn plain_keys<'a>(vector: Sexp) -> Option<PlainKeys<'a>> {
     match vector.kind() {
         SexpType::Logical | SexpType::Integer => Some(PlainKeys::Integer(values::ints(vector))),
         SexpType::Real => Some(PlainKeys::Real(values::reals(vector))),
-        SexpType::String if all_ascii(vector) => Some(PlainKeys::Interned(vector.slice::<Sexp>())),
+        SexpType::String => Some(PlainKeys::Interned(vector.slice::<Sexp>())),
         _ => None,
     }
 }
@@ -2382,8 +2381,9 @@ fn plain_kinds_match(table: PlainKeys<'_>, x: PlainKeys<'_>) -> bool {
 }
 
 /// Writes to `positions`, for each element of `x`, the 1-based position of the first equal
-/// element of `table`, or 0. Both sides have the same kind ([`plain_kinds_match`]).
-unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mut [i32]) {
+/// element of `table`, or 0. Both sides have the same kind ([`plain_kinds_match`]). `false` when
+/// strings that are not ASCII make pointer equality inexact, and the general path must run.
+unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mut [i32]) -> bool {
     match (table, x) {
         (PlainKeys::Integer(table), PlainKeys::Integer(x)) => {
             if let Some(range) = DenseRange::of(table, table.len().max(x.len())) {
@@ -2394,7 +2394,7 @@ unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mu
                 for (position, &value) in positions.iter_mut().zip(x) {
                     *position = range.find(value).map_or(0, |slot| first[slot]);
                 }
-                return;
+                return true;
             }
             hashed_matches(
                 table.len(),
@@ -2415,19 +2415,20 @@ unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mu
             |index| x[index],
             positions,
         ),
-        _ => positions.fill(0),
+        _ => false,
     }
 }
 
-/// Which elements repeat an earlier one (a later one with `from_last`).
-unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Bits {
+/// Which elements repeat an earlier one (a later one with `from_last`), or `None` when strings
+/// that are not ASCII make pointer equality inexact.
+unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Option<Bits> {
     match keys {
         PlainKeys::Integer(values) => {
             if let Some(range) = DenseRange::of(values, values.len()) {
                 let mut seen = Bits::new(range.slots());
-                return visit_in_order(values.len(), from_last, |index| {
+                return Some(visit_in_order(values.len(), from_last, |index| {
                     !seen.insert(range.slot(values[index]))
-                });
+                }));
             }
             hashed_duplicates(values.len(), from_last, |index| values[index])
         }
@@ -2487,28 +2488,57 @@ impl DenseRange {
     }
 }
 
+/// `false`, with `out` partly written, when a key that is not [`TableKey::exact`] is a distinct
+/// table key or misses the table, because then equal values may differ as keys.
 fn hashed_matches<K: TableKey>(
     table_count: usize,
     table_key: impl Fn(usize) -> K,
     x_key: impl Fn(usize) -> K,
     out: &mut [i32],
-) {
-    let mut positions = PositionTable::new(table_count);
+) -> bool {
+    let mut table = PositionTable::new(table_count);
+    let mut probe = table.probe();
     for index in 0..table_count {
-        positions.find_or_insert(table_key(index), index, &table_key);
+        let key = table_key(index);
+        if probe.find_or_insert(key, index, &table_key).is_none() && !key.exact() {
+            return false;
+        }
     }
     for (index, position) in out.iter_mut().enumerate() {
-        *position = positions
-            .find(x_key(index), &table_key)
-            .map_or(0, |found| found as i32 + 1);
+        let key = x_key(index);
+        *position = match probe.find(key, &table_key) {
+            Some(found) => found as i32 + 1,
+            None if key.exact() => 0,
+            None => return false,
+        };
     }
+    true
 }
 
-fn hashed_duplicates<K: TableKey>(count: usize, from_last: bool, key: impl Fn(usize) -> K) -> Bits {
-    let mut positions = PositionTable::new(count);
-    visit_in_order(count, from_last, |index| {
-        positions.find_or_insert(key(index), index, &key).is_some()
-    })
+/// `None` when a distinct key is not [`TableKey::exact`].
+fn hashed_duplicates<K: TableKey>(
+    count: usize,
+    from_last: bool,
+    key_at: impl Fn(usize) -> K,
+) -> Option<Bits> {
+    let mut table = PositionTable::new(count);
+    let mut probe = table.probe();
+    let mut duplicated = Bits::new(count);
+    let mut visit = |index: usize| {
+        let key = key_at(index);
+        if probe.find_or_insert(key, index, &key_at).is_some() {
+            duplicated.insert(index);
+            true
+        } else {
+            key.exact()
+        }
+    };
+    let complete = if from_last {
+        (0..count).rev().all(&mut visit)
+    } else {
+        (0..count).all(&mut visit)
+    };
+    complete.then_some(duplicated)
 }
 
 /// `flag(index)` for each of `count` indices, visited first to last or, with `from_last`, last
@@ -2611,6 +2641,12 @@ impl Bits {
 /// which pick the slot.
 trait TableKey: Copy + Eq {
     fn table_hash(self) -> u64;
+
+    /// Whether equal keys are always equal values, so that a key missing from the table is a
+    /// value missing from it. Only interned strings can fail this (see [`PlainKeys`]).
+    fn exact(self) -> bool {
+        true
+    }
 }
 
 /// A multiply after folding the high half in, so that keys differing only in their high bits,
@@ -2635,12 +2671,18 @@ impl TableKey for Sexp {
     fn table_hash(self) -> u64 {
         mix(self.as_ptr() as usize as u64 >> 3)
     }
+
+    fn exact(self) -> bool {
+        // SAFETY: the key is an element of a live character vector, so a valid string object.
+        unsafe { self.has_gp(gp::ASCII) }
+    }
 }
 
 /// An open-addressing hash table from keys to the first position that holds them. Slots store
 /// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes and
 /// a table over `n` keys is at most `16 n` bytes. Probing is linear over a power-of-two array at
-/// most half full, and the slot comes from the hash's high bits.
+/// most half full, and the slot comes from the hash's high bits. A loop borrows the slots once
+/// through [`PositionTable::probe`], so each lookup indexes a plain slice.
 struct PositionTable {
     /// A small table, the usual `x %in% c("a", "b")`, stays on the stack.
     slots: SmallVec<[u32; 32]>,
@@ -2656,6 +2698,22 @@ impl PositionTable {
         }
     }
 
+    fn probe(&mut self) -> Probe<'_> {
+        Probe {
+            mask: self.slots.len() - 1,
+            slots: &mut self.slots,
+            shift: self.shift,
+        }
+    }
+}
+
+struct Probe<'a> {
+    slots: &'a mut [u32],
+    mask: usize,
+    shift: u32,
+}
+
+impl Probe<'_> {
     /// The position of the first key equal to `key`, or `None` after recording `position` for
     /// it.
     fn find_or_insert<K: TableKey>(
@@ -2664,29 +2722,31 @@ impl PositionTable {
         position: usize,
         key_at: impl Fn(usize) -> K,
     ) -> Option<usize> {
-        let mask = self.slots.len() - 1;
         let mut slot = (key.table_hash() >> self.shift) as usize;
         loop {
-            match self.slots[slot] {
-                0 => {
-                    self.slots[slot] = position as u32 + 1;
-                    return None;
-                }
-                stored if key_at(stored as usize - 1) == key => return Some(stored as usize - 1),
-                _ => slot = (slot + 1) & mask,
+            let stored = self.slots[slot & self.mask];
+            if stored == 0 {
+                self.slots[slot & self.mask] = position as u32 + 1;
+                return None;
             }
+            if key_at(stored as usize - 1) == key {
+                return Some(stored as usize - 1);
+            }
+            slot += 1;
         }
     }
 
     fn find<K: TableKey>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
-        let mask = self.slots.len() - 1;
         let mut slot = (key.table_hash() >> self.shift) as usize;
         loop {
-            match self.slots[slot] {
-                0 => return None,
-                stored if key_at(stored as usize - 1) == key => return Some(stored as usize - 1),
-                _ => slot = (slot + 1) & mask,
+            let stored = self.slots[slot & self.mask];
+            if stored == 0 {
+                return None;
             }
+            if key_at(stored as usize - 1) == key {
+                return Some(stored as usize - 1);
+            }
+            slot += 1;
         }
     }
 }
