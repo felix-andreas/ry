@@ -1552,6 +1552,10 @@ pub fn push_general(out: &mut String, value: f64, significant: usize, keep_zeros
         out.push('-');
     }
     let magnitude = value.abs();
+    if !magnitude.is_finite() {
+        out.push_str(if magnitude.is_nan() { "nan" } else { "inf" });
+        return;
+    }
     let begin = out.len();
     // The exponent of the value rounded to `significant` digits picks the notation, so the
     // scientific form is written first and kept when it wins.
