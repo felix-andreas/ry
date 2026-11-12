@@ -571,8 +571,9 @@
 |  [5] "exit_in_expr"   "exit_order"     "f_warns"        "fails"         
 |  [9] "fin"            "frame_contents" "frame_names"    "h"             
 | [13] "handlers"       "i"              "inner"          "k"             
-| [17] "log_handler"    "op"             "outer"          "r"             
-| [21] "restart_names"  "rs"             "with_exit"      "wrapper"       
+| [17] "log_handler"    "op"             "outer"          "own_function"  
+| [21] "r"              "restart_names"  "rs"             "with_exit"     
+| [25] "wrapper"       
 | 
 | [[5]]
 | [1] "enclos" "envir"  "expr"  
@@ -610,8 +611,9 @@
 |  [5] "exit_in_expr"   "exit_order"     "f_warns"        "fails"         
 |  [9] "fin"            "frame_contents" "frame_names"    "h"             
 | [13] "handlers"       "i"              "inner"          "k"             
-| [17] "log_handler"    "op"             "outer"          "r"             
-| [21] "restart_names"  "rs"             "with_exit"      "wrapper"       
+| [17] "log_handler"    "op"             "outer"          "own_function"  
+| [21] "r"              "restart_names"  "rs"             "with_exit"     
+| [25] "wrapper"       
 | 
 | [[15]]
 | [1] "..." "x"  
@@ -640,8 +642,9 @@
 |  [5] "exit_in_expr"   "exit_order"     "f_warns"        "fails"         
 |  [9] "fin"            "frame_contents" "frame_names"    "h"             
 | [13] "handlers"       "i"              "inner"          "k"             
-| [17] "log_handler"    "op"             "outer"          "r"             
-| [21] "restart_names"  "rs"             "with_exit"      "wrapper"       
+| [17] "log_handler"    "op"             "outer"          "own_function"  
+| [21] "r"              "restart_names"  "rs"             "with_exit"     
+| [25] "wrapper"       
 | 
 | [[5]]
 | [1] "enclos" "envir"  "expr"  
@@ -679,8 +682,9 @@
 |  [5] "exit_in_expr"   "exit_order"     "f_warns"        "fails"         
 |  [9] "fin"            "frame_contents" "frame_names"    "h"             
 | [13] "handlers"       "i"              "inner"          "k"             
-| [17] "log_handler"    "op"             "outer"          "r"             
-| [21] "restart_names"  "rs"             "with_exit"      "wrapper"       
+| [17] "log_handler"    "op"             "outer"          "own_function"  
+| [21] "r"              "restart_names"  "rs"             "with_exit"     
+| [25] "wrapper"       
 | 
 | [[15]]
 | [1] "..." "x"  

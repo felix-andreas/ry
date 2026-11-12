@@ -3666,6 +3666,12 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
     } else {
         heap::Collection::Minor
     };
+    // A finalizer an earlier collection queued is a root until it runs, and so is everything its
+    // environment reaches: a finalizer made in a frame keeps that frame's other bindings alive,
+    // and with them objects that are otherwise dead. Running the queue first lets this
+    // collection free them, so `gc()` finalizes every object dead when it is called, however the
+    // collections before it fell.
+    (interp().hooks.run_finalizers)();
     // As in GNU R, `verbose` alone decides whether this collection is reported, whatever
     // `gcinfo()` set for the collections that allocation triggers.
     let heap = crate::heap();
