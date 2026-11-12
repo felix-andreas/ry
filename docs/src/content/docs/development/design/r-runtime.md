@@ -652,8 +652,17 @@ GNU R installs a package's closures compiled; ry compiles them at their first ca
 otherwise at their second, binding as GNU R's installed code does. A loop the tree walker
 evaluates in the global environment compiles when it starts. A function
 defined inside compiled code compiles with it, against its compile-time frames. A closure GNU R
-never compiles, and a typed one, compiles on ry's own schedule (second call, or first with a loop)
-with a guard on every base function it inlines, so it looks each name up as it runs.
+never compiles compiles at its second call, and a typed one at its first, with a guard on every
+base function it inlines, so it looks each name up as it runs.
+
+**Closures over one body.** Every closure made from one `function` expression shares the body, and
+so do R6's copies of each method. Code compiled for one of them serves the others whose formals and
+srcref are the same, from their first call. Guarded code serves any closure that would also guard.
+Code that binds serves a closure only under GNU R's `jit_env_match`: its top environment is the
+one the code compiled under, and every name its formals and local frames bind was bound in the
+compiling closure's frames too. A closure that masks a base function in its own frames therefore
+never runs a sibling's code that bound it. It compiles its own code with guards, as GNU R marks
+such a closure never to compile.
 
 **What binds.** At compile time, a call binds to base when its head is a symbol that is not one of
 the function's locals (GNU R's `findLocals`: formals, `<-`, `=`, `for` variables, literal `assign`
@@ -744,8 +753,14 @@ fetches.
 
 ### Tiers
 
-**Tier 0 is a register-based bytecode interpreter.** R code compiles to bytecode when a closure is
-first called, unless its bytecode was built ahead of time. Each call site, variable lookup and
+**Tier 0 is a register-based bytecode interpreter.** A closure body compiles to bytecode at its
+second call, or its first if it has a loop, unless its bytecode was built ahead of time. Calls count
+per body expression, not per closure, and the compiled code belongs to the expression: every closure
+made from one `function` expression, and every copy `environment<-` makes (as R6 does for each
+object's methods), runs it from its first call when its formals and srcref are the same objects. The code is freed
+with the last closure that runs it. A
+body changed in place through the C API compiles again for new closures, as in GNU R's JIT cache.
+Each call site, variable lookup and
 arithmetic operation carries an inline cache and a small type profile: observed `SEXPTYPE`, length
 one or not, attributes or none, NA seen or not.
 

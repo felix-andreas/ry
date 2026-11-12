@@ -105,3 +105,16 @@ print(utils::head(letters, 2))
 print(tools::file_path_sans_ext("report.csv"))
 print(Reduce(function(a, b) base::`+`(a, b), 1:4))
 rm(`+`)
+
+# Closures over one body share compiled code only when they bind the same local names: one whose
+# own frame masks `+` never runs a sibling's code that bound it, in either order.
+make_summer <- function(mask) {
+  if (mask) `+` <- function(a, b) base::`-`(a, b)
+  function(n) { s <- 0; for (i in seq_len(n)) s <- s + 1; s }
+}
+plain <- make_summer(FALSE)
+masked <- make_summer(TRUE)
+print(c(plain(3), plain(3), masked(3), masked(3), plain(3)))
+masked_first <- make_summer(TRUE)
+plain_later <- make_summer(FALSE)
+print(c(masked_first(3), masked_first(3), plain_later(3), plain_later(3)))
