@@ -101,7 +101,12 @@ fn select_scenarios<T>(
 
 #[test]
 fn scenario_filter_rejects_unknown_names() {
-    let scenarios = || vec![("check-fix".to_owned(), ()), ("edit-and-rename".to_owned(), ())];
+    let scenarios = || {
+        vec![
+            ("check-fix".to_owned(), ()),
+            ("edit-and-rename".to_owned(), ()),
+        ]
+    };
     let names = |selected: Vec<(String, ())>| -> Vec<String> {
         selected.into_iter().map(|(name, ())| name).collect()
     };
@@ -119,9 +124,11 @@ fn scenario_filter_rejects_unknown_names() {
     );
     assert_eq!(
         select_scenarios(scenarios(), Some("chek-fix")).map(names),
-        Err("SCENARIO=chek-fix names no scenario; the known scenarios are: check-fix, \
+        Err(
+            "SCENARIO=chek-fix names no scenario; the known scenarios are: check-fix, \
              edit-and-rename"
-            .to_owned())
+                .to_owned()
+        )
     );
 }
 

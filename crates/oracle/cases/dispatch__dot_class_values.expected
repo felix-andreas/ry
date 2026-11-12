@@ -1,0 +1,42 @@
+[stdout]
+| NULL
+| [1] "b"
+| attr(,"previous")
+| [1] "a" "b"
+| character(0)
+| attr(,"previous")
+| [1] "b"
+| attr(,"previous")attr(,"previous")
+| [1] "a" "b"
+| [1] "b" "c"
+| character(0)
+| attr(,"previous")
+| [1] "b" "c"
+| [1] "numeric"
+| attr(,"previous")
+| [1] "double"  "numeric"
+| [1] "numeric"
+| attr(,"previous")
+| [1] "integer" "numeric"
+| [1] "numeric"
+| attr(,"previous")
+| [1] "matrix"  "array"   "double"  "numeric"
+| NULL
+| [1] "wide"
+| attr(,"previous")
+| [1] "tall" "wide"
+| [1] 99
+| [1] "unit"
+| [1] "+"
+| [1] 2
+| [1] "d"     "extra"
+| character(0)
+| attr(,"previous")
+| [1] "d"     "extra"
+| [1] "c" "d"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("c", "d")
