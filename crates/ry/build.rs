@@ -47,7 +47,10 @@ fn main() {
     if notes.is_empty() {
         println!("cargo:rustc-env=RY_VERSION={version}");
     } else {
-        println!("cargo:rustc-env=RY_VERSION={version} ({})", notes.join(", "));
+        println!(
+            "cargo:rustc-env=RY_VERSION={version} ({})",
+            notes.join(", ")
+        );
     }
     println!("cargo:rerun-if-env-changed=WINDRES");
     let target = env::var("TARGET").unwrap_or_default();

@@ -345,9 +345,14 @@ per package, the matching tests, the rate, the tests that differ or that ry neve
 tests ry passes, and both suites' run times; process wall time, which adds startup and loading
 the package, follows it, and then the time each runtime spent collecting during the suite, as
 `gc.time()` reports it, with its share of the suite time. For pause distributions, set
-`RY_GC_LOG=<file>`: ry's runtime then appends one line per collection, giving its kind (`minor`
-or `major`), its elapsed nanoseconds, the bytes of small objects and of large vectors allocated
-since the previous collection, and the old generation's bytes after it. `--json` writes every comparison, and `--keep` keeps each runtime's
+`RY_GC_LOG=<file>`: ry's runtime then appends one line per collection, giving its kind (`minor`,
+`intermediate` or `major`), its elapsed nanoseconds, the bytes of small objects and of large
+vectors allocated since the previous collection, the old generation's bytes after it, and the
+process id. Every process of a run appends to the same file, so the process id tells a test
+suite's worker processes apart. Collections are deterministic: two runs of the same program in one
+process make the same sequence. A testthat suite that runs in parallel (`Config/testthat/parallel`)
+hands files to its workers as they finish, so its collections vary from run to run; set
+`TESTTHAT_PARALLEL=false` to compare them. `--json` writes every comparison, and `--keep` keeps each runtime's
 report and stderr. Pass `--ry target/release/ry` for timings, with `libR.so` built beside it
 (`cargo build --release -p ry-lang -p libr`). `MEMORY.md` records the current rates.
 

@@ -210,7 +210,8 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// empty. An empty list built at run time from no items, such as `List.map` over an empty list, is
 /// stored as `logical`, so the preflight wraps each list expression whose item type only the
 /// checker knows (`preflight::elaborate`). The names are `"I64"`, `"F64"`, `"Str"` and
-/// `"list"`, the storage of records, tuples, tags and nested lists.
+/// `"list"`, the storage of records, tuples, tags and nested lists. A dictionary passes through
+/// unchanged: its `"Dict<K, V>"` name is for typed code, which lays the dictionary out by it.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     if !list.is_array() || length(list) != 0 {
@@ -519,6 +520,52 @@ unsafe fn copy_item(from: Sexp, source: usize, to: Sexp, target: usize) {
         SexpType::String => values::set_elt(to, target, values::string_elt(from, source)),
         _ => values::set_elt(to, target, values::list_elt(from, source)),
     }
+}
+
+/// Whether `value` is one item of the non-empty Array `array`'s item type, as a list literal
+/// accepts it: an `I64` Array also takes a plain R number that holds a whole `I64`. It allocates
+/// nothing, so an update checks every item before it changes the Array.
+pub unsafe fn holds_item(array: Sexp, value: Sexp) -> bool {
+    let kind = items(array);
+    (kind == Items::I64 && whole_literal(value).is_some())
+        || item_kind(value).is_ok_and(|item| item == kind)
+}
+
+/// Stores `value`, which [`holds_item`] accepted, at `position` of `array`.
+pub unsafe fn store_item(array: Sexp, value: Sexp, position: usize) {
+    let kind = items(array);
+    match whole_literal(value) {
+        Some(number) if kind == Items::I64 => array.slice_mut::<i64>()[position] = number,
+        _ => store_single(kind, value, array, position),
+    }
+}
+
+/// Swaps the items at `first` and `second` of `array` in its own storage.
+pub unsafe fn swap_items(array: Sexp, first: usize, second: usize) {
+    match items(array) {
+        Items::Logical | Items::Integer => values::ints_mut(array).swap(first, second),
+        Items::Double => values::reals_mut(array).swap(first, second),
+        Items::I64 => array.slice_mut::<i64>().swap(first, second),
+        Items::Character | Items::RyValues => {
+            let (left, right) = (array.element(first), array.element(second));
+            values::set_elt(array, first, right);
+            values::set_elt(array, second, left);
+        }
+    }
+}
+
+/// A plain length-one R integer or double that holds a whole `I64`, which a list of `I64`s
+/// takes as an unsuffixed literal converts. ALTREP is left to the general path, because reading
+/// it may allocate.
+unsafe fn whole_literal(value: Sexp) -> Option<i64> {
+    let plain = matches!(value.kind(), SexpType::Integer | SexpType::Real)
+        && !value.is_array()
+        && !value.is_object()
+        && !value.is_altrep();
+    if !plain {
+        return None;
+    }
+    numbers::r_source(value).ok().and_then(numbers::convert)
 }
 
 unsafe fn store_single(kind: Items, value: Sexp, to: Sexp, target: usize) {

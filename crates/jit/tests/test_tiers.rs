@@ -1641,7 +1641,7 @@ unsafe fn run(text: &str) -> String {
             Err(Unwind::Error(error)) => format!("error: {}", error.message),
             // An error no handler caught ran the default handler, which recorded the message
             // after a head that names the call.
-            Err(Unwind::Jump(jump)) if matches!(jump, Jump::TopLevel) => {
+            Err(Unwind::Jump(Jump::TopLevel)) => {
                 let text = &interp::interp().error_message;
                 // The head breaks the line when the call is long, so the break moves with the
                 // closure's name and is normalized away.
@@ -3432,7 +3432,11 @@ fn element_ops_cost_no_more_than_tier_zero() {
     ) {
         let body = ELEMENT_OPS[shape.parse::<usize>().expect("a shape index")];
         with_interpreter(|| unsafe {
-            jit::install_mode(if mode == "force" { Mode::Force } else { Mode::Off });
+            jit::install_mode(if mode == "force" {
+                Mode::Force
+            } else {
+                Mode::Off
+            });
             run(&format!(
                 "f <- function(n) {{ x <- list(a = 1, b = 2); p <- list(a = 1, bbb = 2); v <- c(1, 2, 3, 4, 5, 6); k <- 2L; for (i in 1:n) {{ {body} }}; 0 }}"
             ));
