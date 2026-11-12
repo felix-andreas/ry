@@ -586,15 +586,53 @@ pub fn typed_logging() -> bool {
     *LOGGING.get_or_init(|| std::env::var_os("RY_TYPED_LOG").is_some())
 }
 
-/// Reports, once per name, that a call of the typed closure `call` names runs in the
-/// interpreter because no native code took it. A typed function that should run natively and
-/// shows up here has fallen off the native path, which is otherwise invisible except as time.
-pub unsafe fn log_interpreted(call: Sexp) {
-    thread_local! {
-        static LOGGED: RefCell<FxHashSet<String>> = Default::default();
+thread_local! {
+    /// Why the native path declined the typed call being attempted, under `RY_TYPED_LOG`.
+    static DECLINED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Starts an attempt to run a typed call natively, forgetting why an earlier one declined.
+pub fn attempt_native() {
+    if typed_logging() {
+        DECLINED.with_borrow_mut(|declined| *declined = None);
     }
+}
+
+/// Records why the native path declines the typed call being attempted. `reason` runs only under
+/// `RY_TYPED_LOG`, so a decline on a hot path costs one test of a cached flag. The last reason
+/// recorded wins, because the attempt's own decline comes after anything the calls it ran
+/// recorded.
+pub fn decline(reason: impl FnOnce() -> String) {
+    if typed_logging() {
+        let reason = reason();
+        DECLINED.with_borrow_mut(|declined| *declined = Some(reason));
+    }
+}
+
+/// Reports, once per name and reason, that a call of the typed closure `call` names runs in the
+/// interpreter, with the reason the native path recorded. A typed function that should run
+/// natively and shows up here has fallen off the native path, which is otherwise invisible
+/// except as time.
+pub unsafe fn log_interpreted(call: Sexp) {
     if !typed_logging() {
         return;
+    }
+    let reason = DECLINED
+        .with_borrow_mut(Option::take)
+        .unwrap_or_else(|| String::from("the native path recorded no reason, which is a bug"));
+    log_fallback(call, &reason);
+}
+
+/// [`log_interpreted`] for a call whose reason the interpreter itself knows.
+pub unsafe fn log_interpreted_because(call: Sexp, reason: &str) {
+    if typed_logging() {
+        log_fallback(call, reason);
+    }
+}
+
+unsafe fn log_fallback(call: Sexp, reason: &str) {
+    thread_local! {
+        static LOGGED: RefCell<FxHashSet<String>> = Default::default();
     }
     let head = call.car();
     let name = if head.kind() == SexpType::Symbol {
@@ -602,8 +640,9 @@ pub unsafe fn log_interpreted(call: Sexp) {
     } else {
         String::from("an anonymous function")
     };
-    if LOGGED.with_borrow_mut(|logged| logged.insert(name.clone())) {
-        eprintln!("typed: `{name}` runs in the interpreter");
+    let line = format!("typed: `{name}` runs in the interpreter: {reason}");
+    if LOGGED.with_borrow_mut(|logged| logged.insert(line.clone())) {
+        eprintln!("{line}");
     }
 }
 

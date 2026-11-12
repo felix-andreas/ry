@@ -325,6 +325,8 @@ pub enum Op {
     ToI64(Local),
     /// A logical scalar as an integer.
     LglToInt(Local),
+    /// An `I64` count as an integer, failing unless it is in `0..=i32::MAX`.
+    CountOfI64(Local),
     /// A logical as a branch condition: fails on `NA`.
     Truth(Local),
     /// Whether two integers that are not `NA` are equal, as a branch condition.
@@ -399,6 +401,10 @@ pub enum Op {
     },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
+    /// A call of an R function ([`crate::lower::RCall`]) with borrowed arguments, whose result,
+    /// if the destination exists, is converted to a native value. It fails when the R function
+    /// raises an error, which the call then raises.
+    CallR(usize, SmallVec<[Local; 4]>),
     /// A new box of this shape holding the fields, which it owns, in the shape's field order.
     Construct(u32, SmallVec<[Local; 4]>),
     /// Field `index` of a box known to have this shape.
@@ -446,6 +452,7 @@ impl Op {
             | ToDbl(a)
             | ToI64(a)
             | LglToInt(a)
+            | CountOfI64(a)
             | Truth(a)
             | Length(a)
             | NewVector(_, a)
@@ -501,6 +508,7 @@ impl Op {
                 operands
             }
             CallTyped(_, arguments)
+            | CallR(_, arguments)
             | Construct(_, arguments)
             | Elementwise {
                 inputs: arguments, ..
