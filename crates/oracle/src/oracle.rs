@@ -542,10 +542,10 @@ struct CommandOutput {
 /// Runs `command` to completion, or kills it once `timeout` has passed. The pipes are drained
 /// on their own threads, because a child that fills a pipe nobody reads never exits.
 ///
-/// The child starts with SIGINT at its default. A shell starts a background job (`&`) with SIGINT
-/// ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored SIGINT instead of
-/// installing its handler, so a case that interrupts itself with `tools::pskill` would never see
-/// the interrupt under a detached run.
+/// The child starts with SIGINT and SIGQUIT at their defaults. A shell starts a background job
+/// (`&`) with both ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored
+/// SIGINT instead of installing its handler, so a case that interrupts itself with
+/// `tools::pskill` would never see the interrupt under a detached run.
 fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
     command
         .stdin(Stdio::null())
@@ -556,10 +556,12 @@ fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Resu
     // async-signal-safe.
     unsafe {
         std::os::unix::process::CommandExt::pre_exec(&mut command, || {
-            match libc::signal(libc::SIGINT, libc::SIG_DFL) == libc::SIG_ERR {
-                true => Err(std::io::Error::last_os_error()),
-                false => Ok(()),
+            for signal in [libc::SIGINT, libc::SIGQUIT] {
+                if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
+            Ok(())
         });
     }
     let mut child = command.spawn()?;
