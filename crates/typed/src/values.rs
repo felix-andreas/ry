@@ -1571,6 +1571,40 @@ pub unsafe extern "C" fn ry_str_split(
     list
 }
 
+/// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
+pub unsafe extern "C" fn ry_str_to_utf8(lo: u64, hi: u64) -> *mut List {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let list = list_alloc(I64, bytes.len(), bytes.len());
+    for (slot, &byte) in slice_mut::<i64>((*list).data, bytes.len())
+        .iter_mut()
+        .zip(bytes)
+    {
+        *slot = i64::from(byte);
+    }
+    list
+}
+
+/// `Str.from_utf8_lossy` of a borrowed list of `I64`s, written to `out`: 1, or 0 when an item is
+/// not a byte, which the interpreter reports. R strings hold no NUL byte, so it is replaced like
+/// a byte that is not UTF-8.
+pub unsafe extern "C" fn ry_list_from_utf8_lossy(list: *mut List, out: *mut Str) -> u32 {
+    let mut bytes = Vec::with_capacity((*list).length as usize);
+    for &item in items::<i64>(list) {
+        match u8::try_from(item) {
+            Ok(byte) => bytes.push(byte),
+            Err(_) => return 0,
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    *out = if text.contains('\0') {
+        str_from_bytes(text.replace('\0', "\u{FFFD}").as_bytes())
+    } else {
+        str_from_bytes(text.as_bytes())
+    };
+    1
+}
+
 // Lists.
 
 /// The string at a 0-based index, with a count of its own.

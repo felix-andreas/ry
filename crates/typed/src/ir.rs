@@ -439,6 +439,10 @@ pub enum Op {
     ShapeOf(Local),
     /// `Str.count_utf8_bytes`, as an `I64`.
     ByteCount(Local),
+    /// `Str.to_utf8`: the string's bytes, as a list of `I64`s.
+    ToUtf8(Local),
+    /// `Str.from_utf8_lossy` of a list of `I64`s, failing for an item outside 0 to 255.
+    FromUtf8Lossy(Local),
     /// `Str.repeat(string, count)`, failing for a negative count.
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
@@ -501,6 +505,8 @@ impl Op {
             | Field(a, _, _)
             | ShapeOf(a)
             | ByteCount(a)
+            | ToUtf8(a)
+            | FromUtf8Lossy(a)
             | Parse(a)
             | Parses(_, a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
@@ -576,7 +582,7 @@ impl Op {
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
             | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
             | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
-            | Swap(..) => false,
+            | Swap(..) | ToUtf8(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

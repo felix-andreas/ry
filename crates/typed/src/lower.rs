@@ -2820,7 +2820,10 @@ impl Lowering<'_> {
                 let count = self.to_i64(count)?;
                 Ok(self.builder.emit(Type::Str, Op::RepeatStr(a, count)))
             }
-            "Str.count_utf8_bytes" | "Str.with_ascii_uppercased" | "Str.with_ascii_lowercased" => {
+            "Str.count_utf8_bytes"
+            | "Str.to_utf8"
+            | "Str.with_ascii_uppercased"
+            | "Str.with_ascii_lowercased" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `Str` function"));
                 };
@@ -2832,11 +2835,34 @@ impl Lowering<'_> {
                 }
                 Ok(match name {
                     "Str.count_utf8_bytes" => self.builder.emit(Type::I64, Op::ByteCount(a)),
+                    "Str.to_utf8" => self.builder.emit(
+                        Type::Vector {
+                            item: Item::I64,
+                            array: true,
+                        },
+                        Op::ToUtf8(a),
+                    ),
                     "Str.with_ascii_uppercased" => {
                         self.builder.emit(Type::Str, Op::Text(Text::AsciiUpper, a))
                     }
                     _ => self.builder.emit(Type::Str, Op::Text(Text::AsciiLower, a)),
                 })
+            }
+            "Str.from_utf8_lossy" => {
+                let [bytes] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Str` function"));
+                };
+                let bytes = self.value(bytes)?;
+                let numbers = Type::Vector {
+                    item: Item::I64,
+                    array: true,
+                };
+                if self.builder.ty(bytes) != numbers {
+                    return Err(Refusal::new(
+                        "a `Str.from_utf8_lossy` of something other than a list of I64s",
+                    ));
+                }
+                Ok(self.builder.emit(Type::Str, Op::FromUtf8Lossy(bytes)))
             }
             "Str.starts_with" | "Str.ends_with" | "Str.split_on" | "Str.join_with" => {
                 let [a, b] = arguments.exactly(2)?[..] else {

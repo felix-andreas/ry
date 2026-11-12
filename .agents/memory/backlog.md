@@ -128,7 +128,7 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 - **Not compiled natively; the whole function runs in the interpreter:**
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity`, `List.sort_with`, `Str.to_utf8`, `Str.from_utf8_lossy`, `Dict.empty`, `Dict.insert` and `Dict.to_list` (fasta, knucleotide, pidigits, reversecomplement, mandelbrot_ascii);
+  - `List.with_capacity`, `List.sort_with`, `Dict.empty`, `Dict.insert` and `Dict.to_list` (fasta, knucleotide, reversecomplement);
   - a record with a `List` field (pidigits' `Int`; see "A record cannot hold a `List` field" above).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**

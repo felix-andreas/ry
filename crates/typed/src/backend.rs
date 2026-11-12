@@ -1333,6 +1333,29 @@ impl Emitter<'_> {
                 let short = self.builder.ins().band_imm_u(shifted, 0x7F);
                 SmallVec::from_slice(&[self.builder.ins().select(inline, short, x[1])])
             }
+            Op::ToUtf8(a) => {
+                let x = self.get(*a)?;
+                let list = self.call_words(address!(values::ry_str_to_utf8), I64, &[x[0], x[1]]);
+                SmallVec::from_slice(&[list])
+            }
+            Op::FromUtf8Lossy(a) => {
+                let list = self.one(*a)?;
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let decoded = self.call(
+                    address!(values::ry_list_from_utf8_lossy),
+                    &[I64; 2],
+                    &[I32],
+                    &[list, out],
+                )[0];
+                let bad = self.builder.ins().icmp_imm_s(IntCC::Equal, decoded, 0);
+                self.fail_if(bad, &inst.fail_drops)?;
+                self.load_item(out, Item::Str)
+            }
             Op::RepeatStr(a, count) => {
                 let x = self.get(*a)?;
                 let count = self.one(*count)?;
