@@ -130,6 +130,10 @@ impl Dll {
     pub fn dynamic_lookup(&self) -> bool {
         self.use_dynamic_symbols
     }
+
+    pub fn forces_symbols(&self) -> bool {
+        self.force_symbols
+    }
 }
 
 /// `dyn.load`: opens the library, runs its initialization routine, and returns its record. A
@@ -575,7 +579,16 @@ pub unsafe fn find_routine(
         Some(package) => error(format!(
             "\"{name}\" not available for {interface}() for package \"{package}\""
         )),
-        None => error(format!("C symbol name \"{name}\" not in load table")),
+        None => {
+            let language = if kind == RoutineKind::Fortran {
+                "Fortran"
+            } else {
+                "C"
+            };
+            error(format!(
+                "{language} symbol name \"{name}\" not in load table"
+            ))
+        }
     })
 }
 
