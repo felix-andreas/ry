@@ -150,6 +150,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | --- | --- |
 | `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME[>=VERSION]` | Skip the scenario unless GNU R is installed with its shared library (`--enable-R-shlib`), `libR.so` is built beside `ry` and ry's base R is built (`just base-r`), or the package loads, at `VERSION` or later (`packageVersion`), in every runtime the scenario requires: ry's runtime for `ry-runtime`, and for `gnu-r` the GNU R that `--runtime gnu-r` picks. The skip names the runtime and, for an old package, the installed version. A misspelled requirement fails the scenario. |
 | `hide gnu-r` | Run every later `ry` with no GNU R: `R` and `Rscript` vanish from `PATH` while everything beside them (such as `sh` in `/usr/bin`) stays, and `R_HOME` is unset. |
+| `ignore SIGINT` | Start every later `run` with SIGINT ignored, as a background job of a non-interactive shell starts. |
 | `client pull` / `client utf8` / `client cold` | Start the editor as a pull-diagnostics or UTF-8 client, or one whose first steps arrive before the startup warm-up has run. Must come before the first editor step. |
 | `file PATH` + body | Write a file; a running editor sees a watcher event. `$ROOT` in the body is the scenario's workspace. |
 | `env NAME VALUE` | Set a variable for every later `run`; `$ROOT` in the value is the scenario's workspace. |
