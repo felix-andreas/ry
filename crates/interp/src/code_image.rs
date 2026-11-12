@@ -583,7 +583,34 @@ unsafe fn decode_pending(pending: &Pending, body: Sexp) -> Result<Sexp, String> 
     if input.position != pending.end as usize || bytecode::source_of(code) != body {
         return Err("a code object does not match its closure".to_owned());
     }
+    if !slots_fit(code, body, pending.formals) {
+        return Err("a code object keeps slots its closure cannot bind".to_owned());
+    }
     Ok(code)
+}
+
+/// Whether the slot table of `code` names the formals first, in order, and then only symbols the
+/// body can bind. The verifier sees the code alone and cannot check this, and a frame built from a
+/// table that breaks it binds names the closure never assigns.
+unsafe fn slots_fit(code: Sexp, body: Sexp, formals: Sexp) -> bool {
+    let slots = code.cdr().element(bytecode::SLOTS);
+    if slots == nil() {
+        return true;
+    }
+    let Some(locals) = bytecode::local_symbols(body, formals) else {
+        return false;
+    };
+    let names = slots.element(1);
+    let mut formal = formals;
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        if index >= length(names) || names.element(index) != formal.tag() {
+            return false;
+        }
+        index += 1;
+        formal = formal.cdr();
+    }
+    (index..length(names)).all(|index| locals.contains(&names.element(index)))
 }
 
 /// Opens the image of `database`. `None` when there is none, `RY_CODE_IMAGE=0` turns images off,
