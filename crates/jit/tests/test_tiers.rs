@@ -1024,6 +1024,61 @@ fn inline_variable_loads_agree_with_tier_zero() {
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
+/// Compiled code calls an active binding at every read, as tier 0 does. The first compiled run
+/// that meets the binding hands its activation to tier 0 once, after the load, and the body
+/// compiled again loads the variable at each read, so calls after the first neither compile nor
+/// deoptimize. The binding returns a new value at each call, so a reused value shows in the sum.
+#[test]
+fn active_bindings_are_called_at_every_compiled_read() {
+    let mut calls = Vec::new();
+    with_interpreter(|| unsafe {
+        use heap::activity::{self, Counter};
+        jit::install_mode(Mode::Force);
+        run("reads <- 0L");
+        let bound = run(
+            ".Internal(makeActiveBinding(quote(counted), function() { reads <<- reads + 1L; reads }, .Internal(environment(NULL))))",
+        );
+        assert!(!bound.starts_with("error"), "{bound}");
+        run("active <- function(n) { s <- counted\nfor (i in 1:n) s <- s + counted\ns }");
+        let integer = |text: String| -> i64 {
+            text.trim_end_matches('L')
+                .parse()
+                .unwrap_or_else(|_| panic!("{text} is not an integer"))
+        };
+        activity::set_enabled(true);
+        for _ in 0..5 {
+            let compiles = activity::counter(Counter::JitCompiles);
+            let deoptimizations = activity::counter(Counter::JitDeoptimizations);
+            let before = integer(run("reads"));
+            let value = integer(run("active(50L)"));
+            let after = integer(run("reads"));
+            calls.push((
+                before,
+                after,
+                value,
+                activity::counter(Counter::JitCompiles) - compiles,
+                activity::counter(Counter::JitDeoptimizations) - deoptimizations,
+            ));
+        }
+        activity::set_enabled(false);
+        jit::install_mode(Mode::Off);
+    });
+    for (call, &(before, after, value, _, _)) in calls.iter().enumerate() {
+        assert_eq!(after - before, 51, "call {call} read the binding {} times", after - before);
+        assert_eq!(value, (before + 1..=after).sum::<i64>(), "call {call}");
+    }
+    let compiles: u64 = calls.iter().map(|call| call.3).sum();
+    let deoptimizations: u64 = calls.iter().map(|call| call.4).sum();
+    assert!(compiles >= 1, "active never compiled");
+    assert!(
+        deoptimizations <= 1,
+        "{deoptimizations} deoptimizations over five calls: {calls:?}"
+    );
+    for (call, row) in calls.iter().enumerate().skip(1) {
+        assert_eq!((row.3, row.4), (0, 0), "call {call} compiled or deoptimized: {calls:?}");
+    }
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.

@@ -598,14 +598,6 @@ pub unsafe extern "C" fn R_ShowMessage(message: *const c_char) {
     crate::boundary::write_console(&text, true);
 }
 
-impl crate::boundary::Handout for Option<Sexp> {
-    fn hand_out(self, runtime: &mut crate::Runtime) {
-        if let Some(value) = self {
-            value.hand_out(runtime);
-        }
-    }
-}
-
 // The builtins the interpreter calls native code through.
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[

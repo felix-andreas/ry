@@ -496,6 +496,10 @@ pub struct Interp {
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// How many times an active binding's function has run to read its value. Compiled code
+    /// compares it around a variable load to learn that the load called a binding, which it
+    /// must then call again at every later read rather than reuse the value.
+    pub active_binding_reads: u64,
     /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
     /// which [`crate::base_fast_paths::finish`] answers by clearing it.
     pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
@@ -753,6 +757,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     state.interp = Some(Interp {
         frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        active_binding_reads: 0,
         prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),

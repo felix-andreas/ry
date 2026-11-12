@@ -414,7 +414,7 @@ Run R on ry's own runtime and use what GNU R cannot parse: inline type annotatio
 | `ry run script.R` | a script on ry's runtime; arguments after it reach `commandArgs(TRUE)` |
 | `ry run` | a console on ry's runtime |
 | `ry R script.R`, `ry R` | the same on GNU R, with inline annotations erased |
-| `ry test` | the package's testthat tests; `--filter NAME`, `--watch` |
+| `ry test` | the package's testthat tests; `--filter NAME`, `--jobs N`, `--watch` |
 | `ry document` | roxygen2, writing the same `man/*.Rd` and `NAMESPACE` byte for byte |
 | `ry load -e EXPR` | loads the package, evaluates `EXPR`, exits |
 

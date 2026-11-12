@@ -200,6 +200,7 @@ fn declared_ty(declared: Declared) -> Ty {
 
 /// The type tier 0's feedback bits speculate on.
 pub fn from_feedback(bits: u32) -> Ty {
+    let bits = bits & !feedback::ACTIVE_BINDING;
     let within = |mask: u32| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
@@ -528,7 +529,7 @@ impl Live<'_> {
     }
 }
 
-fn bit(words: &[u64], index: usize) -> bool {
+pub(crate) fn bit(words: &[u64], index: usize) -> bool {
     words
         .get(index / 64)
         .is_some_and(|word| word & (1 << (index % 64)) != 0)
@@ -817,11 +818,14 @@ pub enum Action<'a> {
     },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
     /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
+    /// `volatile` marks a variable whose reads have called an active binding: the load leaves
+    /// the slot unloaded, so the next read calls the binding again.
     GetVar {
         dst: usize,
         slot: usize,
         load: Option<Ty>,
         forcing: bool,
+        volatile: bool,
     },
     SetVar {
         slot: usize,
@@ -1094,6 +1098,9 @@ pub struct Plan<'a> {
     /// The blocks entered only by falling through from the block before them, by bit, so
     /// compiled code reaches their first instruction only from that block's last.
     continuations: List<'a, u64>,
+    /// By slot, a bitset of the variables loaded at every read because a read called an
+    /// active binding.
+    pub volatile: List<'a, u64>,
 }
 
 /// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
@@ -1458,6 +1465,7 @@ pub unsafe fn plan<'a>(
         speculations: List::new_in(arena),
         registers,
         defaulted: defaulted_formals(formals, arena),
+        volatile: List::new_in(arena),
         locals,
         hints: List::new_in(arena),
         modified: List::new_in(arena),
@@ -1542,6 +1550,7 @@ pub unsafe fn plan<'a>(
         states: builder.states,
         loop_headers,
         continuations,
+        volatile: builder.volatile,
     })
 }
 
@@ -1713,6 +1722,10 @@ struct Builder<'a> {
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
     defaulted: Map<'a, Sexp, ()>,
+    /// By slot, whether a read of the variable has called an active binding. Such a variable is
+    /// loaded at every read, since each read must call the binding again, and the load runs R
+    /// code that may read and assign the body's variables.
+    volatile: List<'a, u64>,
     /// The formals and every symbol the body binds. A call through one of them may find a local
     /// function first, so its head cannot be speculated from the enclosure.
     locals: FxHashSet<Sexp>,
@@ -1768,13 +1781,23 @@ impl<'a> Builder<'a> {
                 if matches!(inst.op, Op::SubAssign | Op::SubAssignMatrix | Op::Replace) {
                     self.modified[self.slot_of[&symbol]] = true;
                 }
+                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
+                if inst.op == Op::GetVar && bits & feedback::ACTIVE_BINDING != 0 {
+                    let slot = self.slot_of[&symbol];
+                    let words = (slot + 1).div_ceil(64);
+                    if self.volatile.len() < words {
+                        self.volatile.resize(words, 0);
+                    }
+                    set_bit(&mut self.volatile, slot, true);
+                }
             }
         }
         // A second pass, because a load that comes before the body's first assignment into the
         // variable must already see it as modified.
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
-            let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
+            let bits =
+                self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32) & !feedback::ACTIVE_BINDING;
             if inst.op == Op::GetVar && bits != 0 {
                 let slot = self.slot_of[&self.constant(inst.operand(1))];
                 self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
@@ -1864,7 +1887,7 @@ impl<'a> Builder<'a> {
         // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
         // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
         // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u32);
+        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u32) & !feedback::ACTIVE_BINDING;
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
@@ -2136,7 +2159,10 @@ impl<'a> Builder<'a> {
             Op::GetVar => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
-                let load = if current.may_be(status::NOT_LOADED) {
+                let volatile = bit(&self.volatile, slot);
+                let load = if volatile && current.may_be(status::NOT_LOADED) {
+                    Some(Ty::Boxed)
+                } else if current.may_be(status::NOT_LOADED) {
                     let ty = if current.may_be(status::LOADED) {
                         // `inds <- 1:n` stores a sequence that a later `inds <- which(...)` on
                         // another path replaces with a plain vector, so where the feedback has
@@ -2160,13 +2186,23 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                let forcing = load.is_some() && self.defaulted.contains_key(&self.slots[slot]);
+                let forcing = load.is_some()
+                    && (volatile || self.defaulted.contains_key(&self.slots[slot]));
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
-                    let loaded = Slot {
-                        status: status_bits,
-                        ty,
+                    // A binding's value is not kept: the next read calls it again. Code
+                    // generation leaves the runtime status unloaded to match.
+                    let loaded = if volatile {
+                        Slot {
+                            status: (current.status & status::LOADED) | status::NOT_LOADED,
+                            ty: current.ty.join(Ty::Boxed),
+                        }
+                    } else {
+                        Slot {
+                            status: status_bits,
+                            ty,
+                        }
                     };
                     // Code generation writes the variables back before the load and forgets them
                     // after it, but only when the load reaches the runtime: a load the inline
@@ -2189,6 +2225,7 @@ impl<'a> Builder<'a> {
                     slot,
                     load,
                     forcing,
+                    volatile,
                 }
             }
             Op::SetVar => {
@@ -3524,6 +3561,7 @@ impl<'a> Builder<'a> {
                         slot,
                         load: None,
                         forcing: false,
+                        volatile: false,
                     },
                 );
                 lowering.state.registers[dst] = ty;

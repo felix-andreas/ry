@@ -1347,6 +1347,9 @@ pub mod feedback {
     pub const BRANCH_TAKEN: u32 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u32 = 1 << 12;
+    /// A `GetVar` read an active binding, so every read there must call the binding again.
+    /// Compiled code records it, and the bit says nothing about the value's type.
+    pub const ACTIVE_BINDING: u32 = 1 << 13;
     /// An attribute-free compact integer sequence.
     pub const INTEGER_SEQUENCE: u32 = 1 << 15;
     /// An attribute-free compact double sequence, such as `as.double(1:n)`.
@@ -6011,6 +6014,13 @@ pub unsafe fn lookup_hints(code: Sexp) -> *mut u32 {
 /// Records `value`'s kind as type feedback for the instruction at `pc`.
 pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
     record_feedback(code.cdr(), pc, value);
+}
+
+/// Marks the `GetVar` at `pc` as one that called an active binding.
+pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
+    if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
+        *bits |= feedback::ACTIVE_BINDING as i32;
+    }
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.

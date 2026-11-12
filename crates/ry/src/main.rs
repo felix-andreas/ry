@@ -15,6 +15,7 @@ use {
         env,
         ffi::c_int,
         fs,
+        num::NonZero,
         path::{Path, PathBuf},
         process::ExitCode,
         sync::{Mutex, OnceLock, PoisonError},
@@ -201,21 +202,41 @@ fn main() -> ExitCode {
         ..
     } = &cli.command
     {
-        return run_load(path, "", expressions, file.as_deref(), *runtime);
+        return run_load(
+            path,
+            "",
+            |_| expressions.clone(),
+            file.as_deref(),
+            *runtime,
+        );
     }
 
     if let Command::Test {
         path,
         filter,
+        jobs,
         reporter,
         watch,
         runtime,
-        ..
+        profile_summary,
     } = &cli.command
     {
+        // The summary describes one process, and a worker would overwrite it with its own.
+        let jobs = match (jobs, profile_summary) {
+            (Some(2..), Some(_)) => {
+                cli::error(
+                    "--profile-summary measures one process, so it cannot be combined with \
+                     more than one job",
+                );
+                return ExitCode::from(2);
+            }
+            (_, Some(_)) => Some(1),
+            (jobs, None) => *jobs,
+        };
         return run_test(
             path,
             filter.as_deref(),
+            jobs,
             reporter.as_deref(),
             *watch,
             *runtime,
@@ -585,9 +606,12 @@ fn run_debug_adapter() -> ExitCode {
 }
 
 /// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
+/// `jobs` is the number of worker processes the user asked for, and without it the package's
+/// own testthat configuration decides whether there are any.
 fn run_test(
     path: &Path,
     filter: Option<&str>,
+    jobs: Option<u32>,
     reporter: Option<&str>,
     watch: bool,
     runtime: Option<Runtime>,
@@ -600,15 +624,21 @@ fn run_test(
         }
     };
     let argument = |value: Option<&str>| value.map_or_else(|| "NULL".to_owned(), load::r_string);
-    let run = format!(
-        "if (!({driver})({root}, {filter}, {reporter}, {watch})) quit(status = 1L)",
-        driver = include_str!("test.R").trim_end(),
-        root = load::r_string(&root.to_string_lossy()),
-        filter = argument(filter),
-        reporter = argument(reporter),
-        watch = if watch { "TRUE" } else { "FALSE" },
-    );
-    run_load(path, "", &[run], None, runtime)
+    let cores = thread::available_parallelism().map_or(1, NonZero::get);
+    let run = |flags: repl::RuntimeFlags| {
+        vec![format!(
+            "if (!({driver})({root}, {filter}, {reporter}, {watch}, {jobs}, {cores}L, \
+             {switches}L)) quit(status = 1L)",
+            driver = include_str!("test.R").trim_end(),
+            root = load::r_string(&root.to_string_lossy()),
+            filter = argument(filter),
+            reporter = argument(reporter),
+            watch = if watch { "TRUE" } else { "FALSE" },
+            jobs = jobs.map_or_else(|| "NULL".to_owned(), |jobs| format!("{jobs}L")),
+            switches = flags.bits(),
+        )]
+    };
+    run_load(path, "", run, None, runtime)
 }
 
 /// `ry load` with the code that runs roxygen2 against the lazily loaded namespace.
@@ -639,7 +669,13 @@ fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> Ex
         root = load::r_string(&root.to_string_lossy()),
     );
     // roxygen2 reads R6 methods' source references, so the load keeps source, as pkgload's does.
-    run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
+    run_load(
+        path,
+        "options(keep.source = TRUE)",
+        |_| vec![run],
+        None,
+        runtime,
+    )
 }
 
 /// `ry build`: writes the package's source tarball to `output`, or beside the package.
@@ -789,11 +825,12 @@ fn build_tarball(
 }
 
 /// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then
-/// `file` against it, and exits with the session's status.
+/// `file` against it, and exits with the session's status. `expressions` gets the switches the
+/// project's configuration sets for the session.
 fn run_load(
     path: &Path,
     prelude: &str,
-    expressions: &[String],
+    expressions: impl FnOnce(repl::RuntimeFlags) -> Vec<String>,
     file: Option<&Path>,
     runtime: Option<Runtime>,
 ) -> ExitCode {
@@ -804,15 +841,15 @@ fn run_load(
             return ExitCode::from(2);
         }
     };
-    // A new session has nothing loaded, so its first load is always a full one.
-    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
-    for expression in expressions {
-        input.push('\n');
-        input.push_str(expression);
-    }
     let Some(preflight) = Preflight::discover(&root, root.clone()) else {
         return ExitCode::from(2);
     };
+    // A new session has nothing loaded, so its first load is always a full one.
+    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
+    for expression in expressions(runtime_flags(preflight.config())) {
+        input.push('\n');
+        input.push_str(&expression);
+    }
     let runtime_variable = env::var("RY_RUNTIME").ok();
     match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
         Runtime::Ry => {

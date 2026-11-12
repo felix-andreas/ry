@@ -493,10 +493,11 @@ impl<'p> Translator<'p> {
                 slot,
                 load,
                 forcing,
+                volatile,
             } => {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
+                    self.load_slot(position, &before, slot, ty, forcing, volatile, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.in_variables() {
@@ -558,7 +559,7 @@ impl<'p> Translator<'p> {
             }
             Action::GetFunSlot { dst, slot, load } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, false, None)?;
+                    self.load_slot(position, &before, slot, ty, false, false, None)?;
                 }
                 let value = self.load_slot_cell(slot);
                 self.store_register(dst, value);
@@ -3397,6 +3398,7 @@ impl<'p> Translator<'p> {
         slot: usize,
         ty: Ty,
         forcing: bool,
+        volatile: bool,
         dst: Option<usize>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -3512,12 +3514,16 @@ impl<'p> Translator<'p> {
         // The slot holds a copy the frame does not bind, so it reads as an outer variable: an
         // element assignment copies it again and writes the result back, rather than changing
         // the copy in place where the frame never sees it.
-        let status = match copied {
-            Some(copied) => {
-                let outer = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
-                self.builder.ins().select(copied, outer, merged_status)
+        let status = if volatile {
+            self.builder.ins().iconst(I32, 0)
+        } else {
+            match copied {
+                Some(copied) => {
+                    let outer = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
+                    self.builder.ins().select(copied, outer, merged_status)
+                }
+                None => merged_status,
             }
-            None => merged_status,
         };
         self.set_status(slot, status);
         match ty {
