@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 629 92" width="629" height="92" role="img" aria-labelledby="title desc">
+<title id="title">ry check reports a type error that it inferred from plain R</title>
+<desc id="desc">  × expected a numeric value (`integer` or `double`), found `character`
+ 2 │ apply_discount(100, "0.2")
+   │                     ^^^^^</desc>
+<style>
+.bg { fill: #f6f8fa; stroke: #d0d7de; }
+text { fill: #1f2328; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; white-space: pre; }
+.red { fill: #cf222e; } .green { fill: #116329; } .yellow { fill: #9a6700; } .blue { fill: #0969da; }
+.magenta { fill: #8250df; } .cyan { fill: #1b7c83; } .dim { fill: #6e7781; }
+@media (prefers-color-scheme: dark) {
+.bg { fill: #151b23; stroke: #3d444d; }
+text { fill: #e6edf3; }
+.red { fill: #ff7b72; } .green { fill: #3fb950; } .yellow { fill: #d29922; } .blue { fill: #79c0ff; }
+.magenta { fill: #d2a8ff; } .cyan { fill: #56d4dd; } .dim { fill: #8b949e; }
+}
+</style>
+<rect class="bg" x="0.5" y="0.5" width="628" height="91" rx="6"/>
+<text y="30.5"><tspan x="16.0">  </tspan><tspan x="32.8" class="red">×</tspan><tspan x="41.2"> expected a numeric value (`integer` or `double`), found `character`</tspan></text>
+<text y="50.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">2</tspan><tspan x="32.8"> │ apply_discount(100, "0.2")</tspan></text>
+<text y="70.5"><tspan x="16.0">   │ </tspan><tspan x="58.0" class="magenta" font-weight="bold">                    ^^^^^</tspan></text>
+</svg>
