@@ -487,8 +487,9 @@ Compare peak RSS between two builds only from the same page-cache state. A fresh
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
 build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
 `python3 tools/bench/evict.py RY...` evicts every file each build reads at run time, recursively:
-the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory and
-the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
+the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory, the
+homes `R_HOME` lists (a path list, so one call covers a separate home per build) and the `R_LIBS`
+libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
 
