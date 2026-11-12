@@ -70,6 +70,14 @@ What Roc, Bend, goose and Vx do best in memory management, compilation, typing a
 which of their ideas the R runtime adopts or rejects given that R's C API must keep working. It is
 written as an Open Knowledge Format v0.2 concept document, with sources in its frontmatter.
 
+### [The big levers](/development/design/big-levers/)
+
+An independent review of the plan against published results of other language implementations and
+fresh measurements: five ranked levers (declared types that pay on whole programs, the edit-to-result
+loop, native kernels for base R's data-frame layer, an optimizing tier judged by the calls it removes,
+and all cores for ry-owned kernels), what to stop, and the measurement that would kill each lever. It
+argues that the 10x target for untyped R has no precedent and should move to typed code and tooling.
+
 ### [Packages and R versions in the runtime](/development/design/packaging/)
 
 How packages install into ry's runtime (prebuilt GNU R 4.6 binaries load unchanged through the
