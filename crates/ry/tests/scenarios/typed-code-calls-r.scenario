@@ -1,0 +1,32 @@
+# Typed code calls an R function on native code when it uses the call as a statement or converts
+# its value with `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`. The first call runs
+# in the interpreter, which loads `stats` and records the type `List.from_r` gives, and the calls
+# after it run natively with the same results, R's random number generator included.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+| strict = true
+
+file paths.R
+| walk <- function(n: I64, seed: I64) -> F64 {
+|   set.seed(Num.to_r(seed))
+|   shocks <- List.from_r(stats::rnorm(Num.to_r(n)))
+|   label <- Str.from_r(format(Num.to_r(n)))
+|   cat("sum of", label, "\n")
+|   List.sum(shocks)
+| }
+| print(walk(5, 1))
+| print(walk(5, 1))
+| print(walk(5, 2))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry paths.R
+expect exit 0
+expect stdout "sum of 5 \n[1] 0.6463495"
+expect stdout "sum of 5 \n[1] 0.6463495"
+expect stdout "sum of 5 \n[1] -0.3348475"
+expect stderr "typed: `walk` runs in the interpreter: no code for [I64, I64]: it waits on the interpreter to run `"
+expect stderr "typed: compiled for [I64, I64] -> Dbl"

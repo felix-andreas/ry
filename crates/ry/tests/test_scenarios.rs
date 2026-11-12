@@ -74,16 +74,14 @@ fn scenarios_hold() {
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
 /// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 2] = [
-    (
-        "sales",
-        "a `DataFrame` parameter, which the table engine runs",
-    ),
-    (
-        "vasicek",
-        "R's random number generator (`set.seed`, `stats::rnorm`)",
-    ),
-];
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 1] = [(
+    "sales",
+    "a `DataFrame` parameter, which the table engine runs",
+)];
+
+/// How a refusal that waits on the interpreter starts, as `typed::lower::AWAITING`
+/// spells it.
+const AWAITING: &str = "it waits on the interpreter to run `";
 
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
@@ -91,7 +89,8 @@ const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 /// A typed benchmark program that compiles natively has to stay native: a refusal that sends
 /// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
 /// time (500 times as much for `array_dot`). Each program runs once with
-/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
+/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter, and
+/// why.
 #[test]
 fn typed_benchmarks_run_natively() {
     if let Some(reason) =
@@ -153,28 +152,24 @@ fn typed_benchmarks_run_natively() {
             failures.push(format!("{name} failed:\n{stderr}"));
             continue;
         }
-        let interpreted: Vec<&str> = stderr
+        // Each fallback line names the function and gives the reason the native path declined.
+        // The first call of a function that converts what R returns, or calls `pkg::name` before
+        // the namespace is loaded, runs in the interpreter, which records the type or loads it.
+        let fallbacks: Vec<&str> = stderr
             .lines()
-            .filter_map(|line| {
-                line.strip_prefix("typed: `")?
-                    .strip_suffix("` runs in the interpreter")
+            .filter(|line| {
+                line.strip_prefix("typed: `")
+                    .and_then(|rest| rest.split_once("` runs in the interpreter: "))
+                    .is_some_and(|(function, reason)| {
+                        !TYPED_HARNESS_INTERPRETED.contains(&function)
+                            && !reason
+                                .split_once(": ")
+                                .is_some_and(|(_, why)| why.starts_with(AWAITING))
+                    })
             })
-            .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
             .collect();
-        if !interpreted.is_empty() {
-            let mut refusals: Vec<&str> = stderr
-                .lines()
-                .filter(|line| {
-                    line.starts_with("typed: no code") || line.starts_with("typed: refusing")
-                })
-                .collect();
-            refusals.sort_unstable();
-            refusals.dedup();
-            failures.push(format!(
-                "{name}: {} ran in the interpreter\n{}",
-                interpreted.join(", "),
-                refusals.join("\n")
-            ));
+        if !fallbacks.is_empty() {
+            failures.push(format!("{name}:\n{}", fallbacks.join("\n")));
         }
     }
     for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
