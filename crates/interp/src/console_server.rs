@@ -1087,7 +1087,16 @@ mod platform {
     /// Reloads the packages the console loaded, so their functions get the source references a
     /// breakpoint needs. The loader keeps them only while a debugger is attached.
     unsafe fn reload_packages() {
-        let code = "if (exists(\".ry_packages\")) for (root in ls(.ry_packages, all.names = TRUE)) \
+        // A console that never loaded a package has no `.ry_packages`. The binding is looked up
+        // here rather than with R's `exists()`, which a console without base R lacks and a
+        // global `exists` would mask.
+        let loaded = crate::heap()
+            .find_symbol(b".ry_packages")
+            .and_then(|symbol| crate::eval::find_cell(symbol, crate::values::global_env()));
+        if loaded.is_none() {
+            return;
+        }
+        let code = "for (root in ls(.ry_packages, all.names = TRUE)) \
                     .ry_load(root, .ry_packages[[root]]$export_all, attach = TRUE, full = TRUE, \
                     quiet = TRUE, report_noop = FALSE)";
         let mark = crate::heap().handle_mark();

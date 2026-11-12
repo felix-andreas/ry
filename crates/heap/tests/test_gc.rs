@@ -689,6 +689,27 @@ fn released_old_vectors_leave_the_peak_at_one_vector() {
     }
 }
 
+/// GNU R raises "max used" when it allocates, so a large vector made and dropped before any
+/// collection runs still counts toward the peak.
+#[test]
+fn a_large_vector_dropped_before_a_collection_counts_toward_the_peak() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.collect(Collection::Major);
+        heap.reset_max_usage();
+        let baseline = heap.stats().max_vector_cells;
+        let mark = heap.handle_mark();
+        big_vector(&mut heap, 1.0);
+        heap.release_handles(mark);
+        assert_eq!(heap.stats().minor_collections, 0);
+        let peak = heap.stats().max_vector_cells - baseline;
+        assert!(
+            peak >= BIG as u64,
+            "max used grew by {peak} cells, below the {BIG} cells of the vector"
+        );
+    }
+}
+
 #[test]
 fn a_dead_list_gives_up_its_large_elements() {
     let mut heap = Heap::new();

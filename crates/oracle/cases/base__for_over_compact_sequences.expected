@@ -1,0 +1,17 @@
+[stdout]
+| 1 integer 2 integer 3 integer 
+| 3 2 1 
+| 1.5 numeric 2.5 numeric 3.5 numeric 
+| NULL
+| [1] 4.500002e+12
+| [1] 3000000
+| [1] 150  50
+| 1 2 3 4 
+| [1] 0 0 0 0
+| [1] 4
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 4L

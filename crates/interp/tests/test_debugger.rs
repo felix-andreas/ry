@@ -12,7 +12,7 @@ use {
         envir::env_symbols,
         heap, interp,
         testing::with_interpreter,
-        values::global_env,
+        values::{global_env, symbol_name},
         viewer,
     },
     serde_json::{Value, json},
@@ -212,7 +212,7 @@ test_that(\"second\", {
         true => queue.pop_front(),
         false => None,
     };
-    let transcript = render(&run(&path, Box::new(script)));
+    let transcript = render(&run(&path, Box::new(script)).log);
     assert_eq!(
         transcript,
         "\
@@ -308,20 +308,18 @@ fn evaluate_reports_errors_without_unwinding_the_program() {
 
 #[test]
 fn disconnecting_while_stopped_ends_the_program() {
-    let transcript = scripted(
+    let session = session(
         "a <- 1\nb <- 2\nc <- 3\n",
         &[2],
+        false,
         vec![request("disconnect", json!({}))],
     );
-    assert_eq!(transcript, "stopped breakpoint\nexited 0\n");
-    with_interpreter(|| unsafe {
-        let global = interp::values::global_env();
-        let symbol = interp::values::install("c").expect("a symbol installs");
-        assert!(
-            interp::heap().frame_cell(global, symbol).is_none(),
-            "the statement after the stop ran"
-        );
-    });
+    assert_eq!(render(&session.log), "stopped breakpoint\nexited 0\n");
+    assert_eq!(
+        session.globals,
+        BTreeSet::from(["a".to_string()]),
+        "only the statement before the stop ran"
+    );
 }
 
 #[test]
@@ -336,7 +334,8 @@ fn requests_that_need_a_stopped_program_fail_while_it_runs() {
             request("stackTrace", json!({ "threadId": 1 })),
             request("bogus", json!({})),
         ],
-    );
+    )
+    .log;
     let failures: Vec<&str> = log
         .iter()
         .filter(|message| message["type"] == "response" && message["success"] == false)
@@ -500,7 +499,8 @@ exited 0
             request("variables", json!({ "variablesReference": 3 })),
             request("continue", json!({ "threadId": 1 })),
         ],
-    );
+    )
+    .log;
     let names: Vec<&str> = log
         .iter()
         .filter(|message| message["command"] == "variables")
@@ -539,7 +539,8 @@ fn a_page_sorted_by_a_huge_column_is_refused() {
             ),
             request("continue", json!({ "threadId": 1 })),
         ],
-    );
+    )
+    .log;
     let page = log
         .iter()
         .find(|message| message["type"] == "response" && message["command"] == "ryTable")
@@ -646,7 +647,7 @@ fn simulate(seed: u64) -> Result<Vec<Value>, String> {
         sent: 0,
         pauses: 0,
     };
-    let log = run(&path, Box::new(client));
+    let log = run(&path, Box::new(client)).log;
     check_protocol(&log)?;
     check_views(&log)?;
     Ok(log)
@@ -1063,10 +1064,10 @@ fn scripted(program: &str, lines: &[u32], stops: Vec<Value>) -> String {
 }
 
 fn scripted_with(program: &str, lines: &[u32], stop_on_entry: bool, stops: Vec<Value>) -> String {
-    render(&session(program, lines, stop_on_entry, stops))
+    render(&session(program, lines, stop_on_entry, stops).log)
 }
 
-fn session(program: &str, lines: &[u32], stop_on_entry: bool, stops: Vec<Value>) -> Vec<Value> {
+fn session(program: &str, lines: &[u32], stop_on_entry: bool, stops: Vec<Value>) -> Session {
     let path = program_file(program);
     let breakpoints: Vec<Value> = lines.iter().map(|line| json!({ "line": line })).collect();
     let mut queue: VecDeque<Value> = VecDeque::from([
@@ -1131,15 +1132,25 @@ impl Transport for Recorder {
     }
 }
 
-/// Every message of a session with `client`, requests included.
-fn run(path: &std::path::Path, client: Box<dyn Client>) -> Vec<Value> {
+/// What a session leaves for a test to check.
+struct Session {
+    /// Every message, requests included.
+    log: Vec<Value>,
+    /// The names bound in the global scope when the session ended. They are read before the
+    /// interpreter's lock is released, because the next test to take the shared interpreter
+    /// may bind the same names.
+    globals: BTreeSet<String>,
+}
+
+/// A session with `client`.
+fn run(path: &std::path::Path, client: Box<dyn Client>) -> Session {
     let log = Rc::new(RefCell::new(Vec::new()));
     let recorder = Recorder {
         client,
         log: log.clone(),
         seq: 0,
     };
-    with_interpreter(|| unsafe {
+    let globals = with_interpreter(|| unsafe {
         // The interpreter is shared by every test in this binary, and the client sees the global
         // scope, so globals another test left behind would make a seed replay depend on which
         // test took the interpreter in between.
@@ -1157,8 +1168,15 @@ fn run(path: &std::path::Path, client: Box<dyn Client>) -> Vec<Value> {
         }
         assert!(interp().frames.is_empty(), "the program left frames behind");
         assert!(interp().debugger.is_none(), "the adapter stayed attached");
+        env_symbols(global_env(), true, false)
+            .into_iter()
+            .map(|symbol| symbol_name(symbol).into_owned())
+            .collect()
     });
-    log.take()
+    Session {
+        log: log.take(),
+        globals,
+    }
 }
 
 fn request(command: &str, arguments: Value) -> Value {
