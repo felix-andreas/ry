@@ -18,14 +18,14 @@ read <- function(name, factors = TRUE) DataFrame.read_csv(file.path(dir, name), 
 
 checksum <- function(answer) {
   if (!is.DataFrame(answer)) return(sum(as.numeric(answer)))
-  # One numeric column at a time, chosen from the schema: `as.list` would convert the whole
-  # answer to R vectors at once, which for q10's 1e8 groups doubles the memory the answer holds.
-  total <- 0
+  # The engine sums the numeric columns and hands back one row. Converting each column to an R
+  # vector first would copy it, and `as.numeric` would copy an integer column again, which at 1e8
+  # rows is more memory than the answer itself.
   schema <- DataFrame.schema(answer)
-  for (name in names(schema)[schema %in% c("integer[]", "double[]")]) {
-    total <- total + sum(as.numeric(answer[[name]]), na.rm = TRUE)
-  }
-  total
+  numeric <- names(schema)[schema %in% c("integer[]", "double[]")]
+  sums <- lapply(numeric, function(name) Expr.col(name) |> Expr.sum())
+  sums <- do.call(DataFrame.select, c(list(answer), sums))
+  sum(as.numeric(unlist(as.list(sums))))
 }
 
 report <- function(question, run, seconds, answer) {
