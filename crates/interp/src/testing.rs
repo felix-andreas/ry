@@ -252,7 +252,7 @@ pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
                 back_edge_threshold: bytecode::NEVER,
                 baseline: |_| {},
                 baseline_threshold: bytecode::NEVER,
-                call: |_, _| None,
+                call: |_| None,
             }));
             let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
             run(&reset);
@@ -735,10 +735,9 @@ fn code_image_round_trip(body: &str, a: &str, b: &str, mutations: &[(usize, u8)]
             let global = values::global_env();
             let compiled = (|| -> Result<Option<(Sexp, Sexp, Sexp)>, Unwind> {
                 let function = eval::find_var(values::install("f")?, global)?;
-                let code = bytecode::compiled_body(function)?;
-                if code.kind() != SexpType::Bytecode {
+                let Ok(code) = bytecode::compiled_body(function)? else {
                     return Ok(None);
-                }
+                };
                 Ok(Some((function, code, bytecode::source_body(function))))
             })();
             let Ok(Some((function, code, source))) = compiled else {

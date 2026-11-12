@@ -37,7 +37,8 @@ use {
         records::{Fields, slot_kind},
     },
     interp::{
-        annotations, bytecode,
+        annotations,
+        bytecode::{self, TypedCall},
         eval::{
             PROMISE_SEEN, PendingName, is_reference, peek_variable, pending_name,
             reference_variable, settle_unforced,
@@ -47,8 +48,8 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Block, Builder, CallConv, FloatCC, FuncRef, Ieee64, IntCC, MemFlagsData,
-        Signature, StackSlotData, StackSlotKind, Type, Value, Variable,
+        AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncRef, Ieee64, IntCC,
+        MemFlagsData, Signature, StackSlotData, StackSlotKind, Type, Value, Variable,
         types::{F64, I8, I32, I64},
     },
     std::{
@@ -444,7 +445,7 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         });
     }
     let started = std::time::Instant::now();
-    let (address, size) = ssa::with_module(|module| -> Result<_, Refusal> {
+    let (address, size) = ssa::with_module(Allocator::Backtracking, |module| -> Result<_, Refusal> {
         let own_signature = signature(params, guess, CallConv::Host);
         let id = module.declare(&own_signature)?;
         let mut builder = Builder::new(own_signature.clone());
@@ -3061,8 +3062,8 @@ impl Emitter {
 /// frame, no promises and no annotation checks. `None` lets the caller make the call as usual,
 /// which is also what happens when the native function fails, since it has done nothing anyone
 /// can see by then.
-pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
-    with_released_roots(|| call_typed(function, args))
+pub unsafe fn call(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
+    with_released_roots(|| call_typed(typed))
 }
 
 /// Runs a native call attempt, then drops the roots it pushed. [`gather`] roots each argument
@@ -3078,12 +3079,13 @@ pub(crate) unsafe fn with_released_roots(
     outcome
 }
 
-unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
+unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
     annotations::attempt_native();
-    let (arguments, read, lazy) = gather(function, args)?;
+    let function = typed.function;
+    let (arguments, read, lazy) = gather(function, typed.args)?;
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
-    if let Some(value) = typed::call(function, &arguments, lazy) {
+    if let Some(value) = typed::call(typed, &arguments, lazy) {
         return Some(value.and_then(|value| force_read(&read).map(|()| value)));
     }
     let (types, words) = argument_words(&arguments)?;
@@ -3623,7 +3625,7 @@ unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
     if let Some(found) = TRAMPOLINES.with_borrow(|trampolines| trampolines.get(&key).copied()) {
         return Some(found);
     }
-    let compiled = ssa::with_module(|module| -> Result<usize, Refusal> {
+    let compiled = ssa::with_module(Allocator::Backtracking, |module| -> Result<usize, Refusal> {
         let mut outer = Signature::new(CallConv::Host);
         outer.params.extend([AbiParam::new(I64); 4]);
         outer.returns.push(AbiParam::new(I64));

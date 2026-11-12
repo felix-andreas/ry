@@ -479,6 +479,43 @@ pub unsafe extern "C" fn ry_list_push(
     target
 }
 
+/// `List.swap`: the items at 1-based positions `first` and `second` exchanged, in place when the
+/// list is owned and unique. An out-of-range position leaves the list unchanged, as in the
+/// library.
+pub unsafe extern "C" fn ry_list_swap(
+    list: *mut List,
+    owned: u32,
+    first: i64,
+    second: i64,
+) -> *mut List {
+    let length = (*list).length as usize;
+    let position = |index: i64| {
+        usize::try_from(index)
+            .ok()
+            .filter(|index| (1..=length).contains(index))
+            .map(|index| index - 1)
+    };
+    let (Some(left), Some(right)) = (position(first), position(second)) else {
+        return pass_through(list, owned);
+    };
+    let target = if owned != 0 && is_unique(list) {
+        list
+    } else {
+        let copy = list_copy(list, length);
+        consume(list, owned);
+        copy
+    };
+    if left != right {
+        let width = item_size((*target).kind);
+        ptr::swap_nonoverlapping(
+            (*target).data.add(left * width),
+            (*target).data.add(right * width),
+            width,
+        );
+    }
+    target
+}
+
 /// `as.double`, `as.integer` of a logical, or `as.character` of a number or logical. Null for
 /// any other pair, and for `as.character` of an `NA`, since `Str` has no `NA`.
 pub unsafe extern "C" fn ry_list_coerce(list: *mut List, owned: u32, kind: u32) -> *mut List {
@@ -1532,6 +1569,40 @@ pub unsafe extern "C" fn ry_str_split(
         *slot = str_from_bytes(piece.as_bytes());
     }
     list
+}
+
+/// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
+pub unsafe extern "C" fn ry_str_to_utf8(lo: u64, hi: u64) -> *mut List {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let list = list_alloc(I64, bytes.len(), bytes.len());
+    for (slot, &byte) in slice_mut::<i64>((*list).data, bytes.len())
+        .iter_mut()
+        .zip(bytes)
+    {
+        *slot = i64::from(byte);
+    }
+    list
+}
+
+/// `Str.from_utf8_lossy` of a borrowed list of `I64`s, written to `out`: 1, or 0 when an item is
+/// not a byte, which the interpreter reports. R strings hold no NUL byte, so it is replaced like
+/// a byte that is not UTF-8.
+pub unsafe extern "C" fn ry_list_from_utf8_lossy(list: *mut List, out: *mut Str) -> u32 {
+    let mut bytes = Vec::with_capacity((*list).length as usize);
+    for &item in items::<i64>(list) {
+        match u8::try_from(item) {
+            Ok(byte) => bytes.push(byte),
+            Err(_) => return 0,
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    *out = if text.contains('\0') {
+        str_from_bytes(text.replace('\0', "\u{FFFD}").as_bytes())
+    } else {
+        str_from_bytes(text.as_bytes())
+    };
+    1
 }
 
 // Lists.

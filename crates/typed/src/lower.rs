@@ -16,8 +16,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, BlockId, Builder, Compare, Constant, Item, Local, Math, Op, Reduce, Terminator,
-            Text, Type,
+            Arith, Bits, BlockId, Builder, Compare, Constant, Item, Local, Math, Op, Reduce,
+            Terminator, Text, Type,
         },
         shapes, values,
     },
@@ -70,14 +70,16 @@ pub struct RCall {
     /// current.
     pub function: Sexp,
     pub call: Sexp,
-    /// The environment the function is called from: the typed closure's, since compiled code
-    /// has no frame of its own.
+    /// The typed closure's environment, which the conversions run in.
     pub env: Sexp,
     pub arguments: SmallVec<[RArgument; 4]>,
     /// The `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r` call the result goes
     /// through and the type it gives, or `None` when the call is a statement whose value is
     /// unused.
     pub result: Option<(Conversion, Type)>,
+    /// Whether the call is `stop()`, which raises an error and never returns, so it cannot
+    /// change a variable a lazy argument reads before R would force it.
+    pub diverges: bool,
 }
 
 /// An argument of an [`RCall`]: a native value of `ty`, passed through `conversion` when the
@@ -186,6 +188,7 @@ pub unsafe fn lower(
         r_calls: Vec::new(),
         r_use: None,
         converted: None,
+        pending: Vec::new(),
     };
     let mut assigned = Vec::new();
     assigned_symbols(body, &mut assigned);
@@ -214,19 +217,17 @@ pub unsafe fn lower(
         } else {
             value
         };
-        // The result is every tag the body ends with or returns early.
-        let result = match (lowering.builder.ty(value), lowering.returned) {
-            (Type::Tag(found), Some(returned)) => Type::Tag(shapes::join(found, returned)),
-            (_, Some(_)) => return Err(Refusal::new("a `return` of another type")),
-            (ty, None) => ty,
+        let ty = lowering.builder.ty(value);
+        let result = match lowering.returned {
+            Some(returned) => {
+                joined(returned, ty).ok_or(Refusal::new("a `return` of another type"))?
+            }
+            None => ty,
         };
         lowering.builder.function.result = result;
         lowering.builder.terminate(Terminator::Return(value));
     } else {
-        lowering.builder.function.result = match lowering.returned {
-            Some(returned) => Type::Tag(returned),
-            None => guess,
-        };
+        lowering.builder.function.result = lowering.returned.unwrap_or(guess);
     }
     Ok(Lowered {
         function: lowering.builder.function,
@@ -274,7 +275,7 @@ struct Checkpoint {
     nesting: usize,
     control: usize,
     unusable: usize,
-    returned: Option<u32>,
+    returned: Option<Type>,
     constructed: usize,
     r_calls: usize,
     blocks: usize,
@@ -300,8 +301,9 @@ struct Lowering<'c> {
     unusable: SmallVec<[Local; 4]>,
     /// The earliest [`shapes::epoch`] a `match` over any tag relied on.
     epoch: Option<u64>,
-    /// The union of the tags an early `return` of the function itself gives.
-    returned: Option<u32>,
+    /// The type an early `return` of the function itself gives, the union of the tags when it
+    /// returns tags.
+    returned: Option<Type>,
     /// The tag shapes the code constructs, which a `match` over any tag also tests for.
     constructed: SmallVec<[u32; 4]>,
     r_calls: Vec<RCall>,
@@ -311,14 +313,20 @@ struct Lowering<'c> {
     /// The destination of the last converted R call, which tells the conversion that its
     /// argument was one.
     converted: Option<Local>,
+    /// Each empty list literal of records or tags whose item type the code has not shown yet,
+    /// with the locals that hold it. The preflight names only the storage of such a list, so it
+    /// starts as a list of any tag and takes the item type of the first item appended to it or
+    /// list assigned over it ([`Lowering::settle`]).
+    pending: Vec<SmallVec<[Local; 4]>>,
 }
 
-/// Where typed code may call an R function: where the value is unused, or where a conversion
-/// gives it a ry type.
+/// Where typed code may call an R function: where the value is unused, where a conversion
+/// gives it a ry type, or as `stop()`, which never returns.
 #[derive(Clone, Copy)]
 enum RUse {
     Unused,
     Converted(Conversion),
+    Diverges,
 }
 
 /// An argument of a call, by name or position.
@@ -533,9 +541,10 @@ impl Lowering<'_> {
     }
 
     unsafe fn assign(&mut self, symbol: Sexp, value: Local) -> Result<Local, Refusal> {
-        let ty = self.builder.ty(value);
         match self.lookup_assignable(symbol) {
             Some(variable) => {
+                self.unify_pending(variable, value)?;
+                let ty = self.builder.ty(value);
                 let fits = match (self.builder.ty(variable), ty) {
                     (Type::Tag(held), Type::Tag(found)) => shapes::within(found, held),
                     (held, found) => held == found,
@@ -559,11 +568,305 @@ impl Lowering<'_> {
                 {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
-                let variable = self.builder.emit(ty, Op::Copy(value));
+                let variable = self.builder.emit(self.builder.ty(value), Op::Copy(value));
+                if let Some(family) = self.pending_family(value) {
+                    self.pending[family].push(variable);
+                }
                 self.bind(symbol, Binding::Value(variable));
                 Ok(variable)
             }
         }
+    }
+
+    /// The index of the pending empty list `local` holds, if it holds one.
+    fn pending_family(&self, local: Local) -> Option<usize> {
+        self.pending
+            .iter()
+            .position(|family| family.contains(&local))
+    }
+
+    /// Refuses to read the items of a pending empty list, whose item type is a placeholder.
+    fn known_items(&self, list: Local) -> Result<(), Refusal> {
+        match self.pending_family(list) {
+            Some(_) => Err(Refusal::new(
+                "an empty list read before anything shows its item type",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Gives a pending empty list the item type of the list it meets in an assignment, or joins
+    /// two pending ones.
+    fn unify_pending(&mut self, a: Local, b: Local) -> Result<(), Refusal> {
+        match (self.pending_family(a), self.pending_family(b)) {
+            (Some(first), Some(second)) if first != second => {
+                let merged = self.pending.swap_remove(first.max(second));
+                self.pending[first.min(second)].extend(merged);
+                Ok(())
+            }
+            (Some(_), Some(_)) | (None, None) => Ok(()),
+            (Some(_), None) => match self.builder.ty(b) {
+                Type::Vector { item, array: true } => self.settle(a, item),
+                _ => Ok(()),
+            },
+            (None, Some(_)) => match self.builder.ty(a) {
+                Type::Vector { item, array: true } => self.settle(b, item),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Makes the pending empty list `list` holds a list of `item`, retyping every local that
+    /// holds it and the instruction that allocated it. Only copies and lengths may have read it
+    /// before, since any other operation chose its code by the placeholder item type.
+    fn settle(&mut self, list: Local, item: Item) -> Result<(), Refusal> {
+        let Some(family) = self.pending_family(list) else {
+            return Ok(());
+        };
+        let members = self.pending.swap_remove(family);
+        let function = &mut self.builder.function;
+        for inst in function
+            .blocks
+            .iter_mut()
+            .flat_map(|block| &mut block.insts)
+        {
+            let reads = inst
+                .op
+                .operands()
+                .iter()
+                .any(|operand| members.contains(operand));
+            if reads && !matches!(inst.op, Op::Copy(_) | Op::Length(_) | Op::Relabel(..)) {
+                return Err(Refusal::new(
+                    "an empty list read before anything shows its item type",
+                ));
+            }
+            if inst.dest.is_some_and(|dest| members.contains(&dest)) {
+                match &mut inst.op {
+                    Op::NewVector(held, _) => *held = item,
+                    Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
+                    _ => {}
+                }
+            }
+        }
+        for member in members {
+            if let Some(Type::Vector { item: held, .. }) =
+                function.locals.get_mut(member.0 as usize)
+            {
+                *held = item;
+            }
+        }
+        Ok(())
+    }
+
+    /// A list literal `[a, b, ...]` (`.ry_array`), or an empty one whose storage the preflight
+    /// named (`hint`). An empty list of records or tags is pending until its item type shows.
+    unsafe fn list_literal(
+        &mut self,
+        arguments: &Arguments,
+        hint: Option<&str>,
+    ) -> Result<Local, Refusal> {
+        let mut values: SmallVec<[Local; 4]> = SmallVec::new();
+        for &(ref name, item) in &arguments.items {
+            if name.is_some() {
+                return Err(Refusal::new("a list literal with a named item"));
+            }
+            let value = self.value(item)?;
+            self.usable(value)?;
+            values.push(value);
+        }
+        let item = match values.first() {
+            Some(&first) => {
+                let ty = self.builder.ty(first);
+                let item = ty.item().ok_or(Refusal::new(
+                    "a list literal of something a list cannot hold",
+                ))?;
+                if values
+                    .iter()
+                    .any(|&value| self.builder.ty(value).item() != Some(item))
+                {
+                    return Err(Refusal::new("a list literal whose items differ in type"));
+                }
+                item
+            }
+            None => match hint {
+                None => Item::Lgl,
+                Some("I64") => Item::I64,
+                Some("F64") => Item::Dbl,
+                Some("Str") => Item::Str,
+                Some("list") => Item::Tag(shapes::ANY),
+                Some(_) => return Err(Refusal::new("an empty list of an unknown item type")),
+            },
+        };
+        let zero = self.int(0);
+        let fresh = self
+            .builder
+            .emit(Type::vector(item), Op::NewVector(item, zero));
+        let ty = Type::Vector { item, array: true };
+        let mut list = self.builder.emit(ty, Op::Relabel(fresh, ty));
+        if values.is_empty() && hint == Some("list") {
+            self.pending.push(SmallVec::from_slice(&[fresh, list]));
+        }
+        for value in values {
+            list = self.builder.emit(ty, Op::Push(list, value));
+        }
+        Ok(list)
+    }
+
+    /// `List.append(list, item)`, which grows a uniquely held list in place.
+    unsafe fn append(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, item] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.append`"));
+        };
+        let list = self.value(list)?;
+        let value = self.value(item)?;
+        self.usable(list)?;
+        self.usable(value)?;
+        let item = self
+            .builder
+            .ty(value)
+            .item()
+            .ok_or(Refusal::new("an append of something a list cannot hold"))?;
+        self.settle(list, item)?;
+        let ty = self.builder.ty(list);
+        let fits = match (ty, item) {
+            (
+                Type::Vector {
+                    item: Item::Tag(held),
+                    array: true,
+                },
+                Item::Tag(found),
+            ) => shapes::within(found, held),
+            (
+                Type::Vector {
+                    item: held,
+                    array: true,
+                },
+                found,
+            ) => held == found,
+            _ => return Err(Refusal::new("an append to something other than a ry list")),
+        };
+        if !fits {
+            return Err(Refusal::new("an append of an item of another type"));
+        }
+        Ok(self.builder.emit(ty, Op::Push(list, value)))
+    }
+
+    /// A ry list argument whose item type is known, for a list function that reads or moves its
+    /// items.
+    unsafe fn known_list(&mut self, list: Sexp, function: &str) -> Result<(Local, Type), Refusal> {
+        let list = self.value(list)?;
+        self.usable(list)?;
+        let ty = self.builder.ty(list);
+        if !matches!(ty, Type::Vector { array: true, .. }) {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{function}` of something other than a ry list"
+            ))));
+        }
+        self.known_items(list)?;
+        Ok((list, ty))
+    }
+
+    /// `List.concat(first, second)`. An empty list on either side takes the other's item type.
+    unsafe fn concat(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [first, second] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.concat`"));
+        };
+        let first = self.value(first)?;
+        let second = self.value(second)?;
+        self.usable(first)?;
+        self.usable(second)?;
+        let item = |ty: Type| match ty {
+            Type::Vector { item, array: true } => Some(item),
+            _ => None,
+        };
+        let (Some(first_item), Some(second_item)) =
+            (item(self.builder.ty(first)), item(self.builder.ty(second)))
+        else {
+            return Err(Refusal::new(
+                "a `List.concat` of something other than ry lists",
+            ));
+        };
+        match (self.pending_family(first), self.pending_family(second)) {
+            (Some(_), None) => self.settle(first, second_item)?,
+            (None, Some(_)) => self.settle(second, first_item)?,
+            _ => {}
+        }
+        self.known_items(first)?;
+        self.known_items(second)?;
+        let ty = self.builder.ty(first);
+        if ty != self.builder.ty(second) {
+            return Err(Refusal::new(
+                "a `List.concat` of lists of different item types",
+            ));
+        }
+        Ok(self.builder.emit(ty, Op::Extend(first, second)))
+    }
+
+    /// `List.swap(list, first, second)`.
+    unsafe fn swap(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, first, second] = arguments.exactly(3)?[..] else {
+            return Err(Refusal::new("a malformed `List.swap`"));
+        };
+        let (list, ty) = self.known_list(list, "List.swap")?;
+        let first = self.value(first)?;
+        let first = self.to_i64(first)?;
+        let second = self.value(second)?;
+        let second = self.to_i64(second)?;
+        Ok(self.builder.emit(ty, Op::Swap(list, first, second)))
+    }
+
+    /// `List.sublist`, `List.take_first`, `List.take_last`, `List.drop_first` and
+    /// `List.drop_last` as one slice. Counts clamp to the list; a negative count, or a start
+    /// before 1, leaves the call to the interpreter, which raises the library's error.
+    unsafe fn slice(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let sublist = name == "List.sublist";
+        let parameters = arguments.exactly(if sublist { 3 } else { 2 })?;
+        let (list, ty) = self.known_list(parameters[0], name)?;
+        let mut numbers: SmallVec<[Local; 2]> = SmallVec::new();
+        for &parameter in &parameters[1..] {
+            let value = self.value(parameter)?;
+            numbers.push(self.to_i64(value)?);
+        }
+        let total = self.builder.emit(Type::I64, Op::Length(list));
+        let constant = |lower: &mut Self, value: i64| {
+            lower
+                .builder
+                .emit(Type::I64, Op::Const(Constant::I64(value)))
+        };
+        let arith = |lower: &mut Self, op: Arith, a: Local, b: Local| {
+            lower
+                .builder
+                .emit(Type::I64, Op::Arith(op, Item::I64, a, b))
+        };
+        let zero = constant(self, 0);
+        // A negative count stays negative through `Min`, and the slice then fails.
+        let (start, count) = if sublist {
+            let one = constant(self, 1);
+            let before = self.builder.emit(
+                Type::Lgl,
+                Op::Compare(Compare::Lt, Item::I64, numbers[0], one),
+            );
+            self.fail_if(before);
+            let start = arith(self, Arith::Sub, numbers[0], one);
+            let start = arith(self, Arith::Min, start, total);
+            let rest = arith(self, Arith::Sub, total, start);
+            (start, arith(self, Arith::Min, numbers[1], rest))
+        } else {
+            let negative = self.builder.emit(
+                Type::Lgl,
+                Op::Compare(Compare::Lt, Item::I64, numbers[0], zero),
+            );
+            self.fail_if(negative);
+            let clamped = arith(self, Arith::Min, numbers[0], total);
+            let rest = arith(self, Arith::Sub, total, clamped);
+            match name {
+                "List.take_first" => (zero, clamped),
+                "List.take_last" => (rest, clamped),
+                "List.drop_first" => (clamped, rest),
+                _ => (zero, rest),
+            }
+        };
+        Ok(self.builder.emit(ty, Op::Slice(list, start, count)))
     }
 
     /// The variable an assignment in the current scope writes, if it exists there.
@@ -631,8 +934,27 @@ impl Lowering<'_> {
             "function" => return Err(Refusal::new("a function literal that escapes")),
             "<<-" => return Err(Refusal::new("a superassignment")),
             "stop" => {
-                // The interpreter raises the error, with its message and call.
-                self.builder.terminate(Terminator::Fail);
+                // R raises the error, with its message and the typed function's call, so code
+                // that has called R, and cannot run again, reports it as the interpreter would.
+                // A message typed code cannot pass to R gives up instead, and the interpreter
+                // raises it.
+                let raise = self.builder.block();
+                self.builder.terminate(Terminator::Jump(raise));
+                self.builder.switch_to(raise);
+                let checkpoint = self.checkpoint();
+                let raised = match resolve_function(head, self.env) {
+                    Some(speculation) => {
+                        let function = speculation.function;
+                        self.speculations.push(speculation);
+                        self.r_call(call, function, RUse::Diverges)
+                    }
+                    None => Err(Refusal::new("`stop` is not a function")),
+                };
+                if raised.is_ok() {
+                    self.builder.terminate(Terminator::Fail);
+                } else if !self.rewind(checkpoint, raise) {
+                    return raised.map(|_| None);
+                }
                 let unreachable = self.builder.block();
                 self.builder.switch_to(unreachable);
                 return Ok(None);
@@ -681,9 +1003,10 @@ impl Lowering<'_> {
     unsafe fn r_call(&mut self, call: Sexp, function: Sexp, r_use: RUse) -> Result<Local, Refusal> {
         let name = || interp::deparse::deparse_first_line(call.car());
         let result = match r_use {
-            RUse::Unused => None,
+            RUse::Unused | RUse::Diverges => None,
             RUse::Converted(conversion) => Some((conversion, conversion_type(conversion)?)),
         };
+        let diverges = matches!(r_use, RUse::Diverges);
         let calls = self.r_calls.len();
         let mut arguments: SmallVec<[RArgument; 4]> = SmallVec::new();
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
@@ -701,8 +1024,16 @@ impl Lowering<'_> {
             let ty = self.builder.ty(value);
             let passes = match (conversion.is_some(), ty) {
                 (_, Type::Set(_) | Type::Dict { .. }) => false,
-                (false, Type::I64 | Type::Vector { item: Item::I64, .. }) => false,
-                (true, ty) => matches!(ty, Type::I64 | Type::Dbl | Type::Vector { array: true, .. }),
+                (
+                    false,
+                    Type::I64
+                    | Type::Vector {
+                        item: Item::I64, ..
+                    },
+                ) => false,
+                (true, ty) => {
+                    matches!(ty, Type::I64 | Type::Dbl | Type::Vector { array: true, .. })
+                }
                 (false, _) => true,
             };
             if !passes {
@@ -735,6 +1066,7 @@ impl Lowering<'_> {
             env: self.env,
             arguments,
             result,
+            diverges,
         });
         let site = self.r_calls.len() - 1;
         Ok(match result {
@@ -825,27 +1157,22 @@ impl Lowering<'_> {
                 self.builder.terminate(Terminator::Jump(exit));
             }
             None => {
-                let value = if self.guess == Type::I64
-                    && interp::annotations::returns_i64(self.closure)
+                let value = if interp::annotations::returns_i64(self.closure)
                     && matches!(self.builder.ty(value), Type::Int | Type::Dbl)
                 {
                     self.to_i64(value)?
                 } else {
                     value
                 };
-                match (self.builder.ty(value), self.guess) {
-                    // The result is every tag returned, which the guess must include.
-                    (Type::Tag(found), Type::Tag(guess)) if shapes::within(found, guess) => {
-                        self.returned = Some(match self.returned {
-                            Some(returned) => shapes::join(returned, found),
-                            None => found,
-                        });
+                // A recursive call assumes the guess, and the driver lowers again until the
+                // result, which includes every early `return`, matches it.
+                let ty = self.builder.ty(value);
+                self.returned = Some(match self.returned {
+                    Some(returned) => {
+                        joined(returned, ty).ok_or(Refusal::new("a `return` of another type"))?
                     }
-                    (ty, guess) if ty != guess && guess != Type::Null => {
-                        return Err(Refusal::new("a `return` of another type"));
-                    }
-                    _ => {}
-                }
+                    None => ty,
+                });
                 self.builder.terminate(Terminator::Return(value));
             }
         }
@@ -1106,6 +1433,7 @@ impl Lowering<'_> {
             Some((start, end, step)) => (start, end, step, None),
             None => {
                 let vector = self.value(sequence)?;
+                self.known_items(vector)?;
                 let ty = self.builder.ty(vector);
                 ty.items()
                     .ok_or(Refusal::new("a `for` over something that is not a vector"))?;
@@ -1805,6 +2133,96 @@ impl Lowering<'_> {
                 let maximum = name == "Num.max";
                 self.extreme(maximum, a, b)
             }
+            "Num.abs" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.abs`"));
+                };
+                let a = self.value(a)?;
+                match self.builder.ty(a) {
+                    Type::I64 => Ok(self
+                        .builder
+                        .emit(Type::I64, Op::Math(Math::Abs, Item::I64, a))),
+                    Type::Dbl => {
+                        // The library refuses `NaN` and `NA`.
+                        self.fail_if_nan(a);
+                        Ok(self
+                            .builder
+                            .emit(Type::Dbl, Op::Math(Math::Abs, Item::Dbl, a)))
+                    }
+                    _ => Err(Refusal::new(
+                        "a `Num.abs` of something other than an I64 or F64",
+                    )),
+                }
+            }
+            "Num.pow_int" => {
+                let [base, exponent] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.pow_int`"));
+                };
+                let base = self.value(base)?;
+                let exponent = self.value(exponent)?;
+                if self.builder.ty(base) != Type::I64 && self.builder.ty(exponent) != Type::I64 {
+                    return Err(Refusal::new("a `Num.pow_int` of R numbers"));
+                }
+                self.arith(Arith::Pow, base, exponent)
+            }
+            "Num.bitwise_and"
+            | "Num.bitwise_or"
+            | "Num.bitwise_xor"
+            | "Num.shift_left_by"
+            | "Num.shift_right_by"
+            | "Num.shift_right_zf_by" => {
+                let [a, b] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed bit operation"));
+                };
+                let a = self.value(a)?;
+                let b = self.value(b)?;
+                // On R numbers the library works on 32 bits, which the typed core does not.
+                if self.builder.ty(a) != Type::I64 && self.builder.ty(b) != Type::I64 {
+                    return Err(Refusal::new("a bit operation on R numbers"));
+                }
+                let a = self.to_i64(a)?;
+                let b = self.to_i64(b)?;
+                let op = match &*name {
+                    "Num.bitwise_and" => Bits::And,
+                    "Num.bitwise_or" => Bits::Or,
+                    "Num.bitwise_xor" => Bits::Xor,
+                    "Num.shift_left_by" => Bits::ShiftLeft,
+                    "Num.shift_right_by" => Bits::ShiftRight,
+                    _ => Bits::ShiftRightZf,
+                };
+                Ok(self.builder.emit(Type::I64, Op::Bits(op, a, b)))
+            }
+            "Num.bitwise_not" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.bitwise_not`"));
+                };
+                let a = self.value(a)?;
+                if self.builder.ty(a) != Type::I64 {
+                    return Err(Refusal::new("a bit operation on R numbers"));
+                }
+                let ones = self.builder.emit(Type::I64, Op::Const(Constant::I64(-1)));
+                Ok(self.builder.emit(Type::I64, Op::Bits(Bits::Xor, a, ones)))
+            }
+            "Num.compare" => {
+                let [a, b] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.compare`"));
+                };
+                let a = self.value(a)?;
+                let b = self.value(b)?;
+                self.compare_numbers(a, b)
+            }
+            "Num.is_nan" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.is_nan`"));
+                };
+                let a = self.value(a)?;
+                if self.builder.ty(a) != Type::Dbl {
+                    return Err(Refusal::new(
+                        "a `Num.is_nan` of something other than an F64",
+                    ));
+                }
+                Ok(self.builder.emit(Type::Bool, Op::IsNan(a)))
+            }
             "Num.sqrt" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `Num.sqrt`"));
@@ -1922,18 +2340,10 @@ impl Lowering<'_> {
                     .ok_or(Refusal::new("a `rep` of a vector"))?;
                 let value = self.convert_scalar(value, item)?;
                 // `List.repeat` builds an Array, as the standard library does, except of R
-                // integers, which no Array holds, and an empty one, whose items are logical
-                // whatever the value: the interpreter builds those.
+                // integers, which no Array holds.
                 let ty = match (name, item) {
                     ("List.repeat", Item::Int) => Type::List(item),
-                    ("List.repeat", _) => {
-                        let zero = self.int(0);
-                        let empty = self
-                            .builder
-                            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::Int, times, zero));
-                        self.fail_if(empty);
-                        Type::Vector { item, array: true }
-                    }
+                    ("List.repeat", _) => Type::Vector { item, array: true },
                     _ => Type::vector(item),
                 };
                 Ok(self.builder.emit(ty, Op::Repeat(value, times)))
@@ -2281,6 +2691,7 @@ impl Lowering<'_> {
                         )),
                     };
                 }
+                self.known_items(vector)?;
                 let index = self.integer_index(index)?;
                 let item = ty
                     .items()
@@ -2294,13 +2705,45 @@ impl Lowering<'_> {
             }
             // A typed list carries its item type, so the runtime's empty-list storage fix is moot.
             ".ry_items" => {
-                let [list, _] = arguments.exactly(2)?[..] else {
+                let [list, hint] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `.ry_items`"));
                 };
+                if list.kind() == SexpType::Language
+                    && list.car().kind() == SexpType::Symbol
+                    && rvalues::symbol_name(list.car()) == ".ry_array"
+                    && list.cdr() == rvalues::nil()
+                {
+                    let hint = constant_string(hint);
+                    return self.list_literal(&Arguments { items: Vec::new() }, hint.as_deref());
+                }
                 self.value(list)
             }
+            ".ry_array" => self.list_literal(&arguments, None),
+            "List.append" => self.append(&arguments),
+            "List.concat" => self.concat(&arguments),
+            "List.swap" => self.swap(&arguments),
+            "List.is_empty" => {
+                let [list] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `List.is_empty`"));
+                };
+                let list = self.value(list)?;
+                if !matches!(self.builder.ty(list), Type::Vector { array: true, .. }) {
+                    return Err(Refusal::new(
+                        "a `List.is_empty` of something other than a ry list",
+                    ));
+                }
+                let length = self.builder.emit(Type::I64, Op::Length(list));
+                let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                let empty = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, length, zero));
+                Ok(self.builder.emit(Type::Bool, Op::Truth(empty)))
+            }
+            "List.sublist" | "List.take_first" | "List.take_last" | "List.drop_first"
+            | "List.drop_last" => self.slice(&name, &arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
+            ".ry_update" => self.update(&arguments),
             "$" => {
                 let [object, field] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `$`"));
@@ -2377,7 +2820,10 @@ impl Lowering<'_> {
                 let count = self.to_i64(count)?;
                 Ok(self.builder.emit(Type::Str, Op::RepeatStr(a, count)))
             }
-            "Str.count_utf8_bytes" | "Str.with_ascii_uppercased" | "Str.with_ascii_lowercased" => {
+            "Str.count_utf8_bytes"
+            | "Str.to_utf8"
+            | "Str.with_ascii_uppercased"
+            | "Str.with_ascii_lowercased" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `Str` function"));
                 };
@@ -2389,11 +2835,34 @@ impl Lowering<'_> {
                 }
                 Ok(match name {
                     "Str.count_utf8_bytes" => self.builder.emit(Type::I64, Op::ByteCount(a)),
+                    "Str.to_utf8" => self.builder.emit(
+                        Type::Vector {
+                            item: Item::I64,
+                            array: true,
+                        },
+                        Op::ToUtf8(a),
+                    ),
                     "Str.with_ascii_uppercased" => {
                         self.builder.emit(Type::Str, Op::Text(Text::AsciiUpper, a))
                     }
                     _ => self.builder.emit(Type::Str, Op::Text(Text::AsciiLower, a)),
                 })
+            }
+            "Str.from_utf8_lossy" => {
+                let [bytes] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Str` function"));
+                };
+                let bytes = self.value(bytes)?;
+                let numbers = Type::Vector {
+                    item: Item::I64,
+                    array: true,
+                };
+                if self.builder.ty(bytes) != numbers {
+                    return Err(Refusal::new(
+                        "a `Str.from_utf8_lossy` of something other than a list of I64s",
+                    ));
+                }
+                Ok(self.builder.emit(Type::Str, Op::FromUtf8Lossy(bytes)))
             }
             "Str.starts_with" | "Str.ends_with" | "Str.split_on" | "Str.join_with" => {
                 let [a, b] = arguments.exactly(2)?[..] else {
@@ -2466,9 +2935,11 @@ impl Lowering<'_> {
                 ))))
             }
             // A standard library function's module is capitalized, as in `Num.to_r`.
-            _ if name.starts_with(|first: char| first.is_ascii_uppercase()) => Err(Refusal(
-                Cow::Owned(format!("it calls `{name}`, which the typed core does not compile yet")),
-            )),
+            _ if name.starts_with(|first: char| first.is_ascii_uppercase()) => {
+                Err(Refusal(Cow::Owned(format!(
+                    "it calls `{name}`, which the typed core does not compile yet"
+                ))))
+            }
             _ => match r_use {
                 Some(r_use) => self.r_call(call, function, r_use),
                 None => Err(r_value_refusal(call.car())),
@@ -2787,6 +3258,49 @@ impl Lowering<'_> {
         self.boxed(layout, tag.is_some(), &fields)
     }
 
+    /// `(..record, name = value, ...)`: a new record with the base's fields, the named ones
+    /// replaced. A later value for the same name wins, as in the interpreter.
+    unsafe fn update(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let Some(((None, base), fields)) = arguments.items.split_first() else {
+            return Err(Refusal::new("a malformed record update"));
+        };
+        let base = self.value(*base)?;
+        let Type::Record(shape) = self.builder.ty(base) else {
+            return Err(Refusal::new("an update of something other than a record"));
+        };
+        let layout = shapes::shape(shape).layout;
+        let names: SmallVec<[Sexp; 4]> = interp::heap()
+            .layouts
+            .get(layout)
+            .map(|layout| layout.names().iter().copied().collect())
+            .ok_or(Refusal::new("a record without a layout"))?;
+        let mut replaced: SmallVec<[Option<Local>; 4]> = SmallVec::from_elem(None, names.len());
+        for (name, value) in fields {
+            let name = name
+                .as_deref()
+                .ok_or(Refusal::new("a record update field without a name"))?;
+            let symbol = rvalues::install(name).map_err(|_| Refusal::new("a field name"))?;
+            let index = names
+                .iter()
+                .position(|&field| field == symbol)
+                .ok_or(Refusal::new(
+                    "an update of a field the record does not have",
+                ))?;
+            let value = self.value(*value)?;
+            if let Some(slot) = replaced.get_mut(index) {
+                *slot = Some(value);
+            }
+        }
+        let mut values: SmallVec<[Local; 4]> = SmallVec::new();
+        for (index, replacement) in replaced.into_iter().enumerate() {
+            values.push(match replacement {
+                Some(value) => value,
+                None => self.field(base, shape, index)?,
+            });
+        }
+        self.boxed(layout, false, &values)
+    }
+
     /// A new box of `layout` holding `fields` in slot order, a tag when `tagged`.
     unsafe fn boxed(
         &mut self,
@@ -2922,19 +3436,7 @@ impl Lowering<'_> {
             // A shape only confirmed somewhere, which the code may never see, whose arm does not
             // lower (a field of another type than the annotation says, say) gives up for that
             // shape alone rather than for the whole function.
-            let checkpoint = (!exhaustive && case.is_some()).then(|| Checkpoint {
-                scopes: self.scopes.clone(),
-                loops: self.loops.len(),
-                inlined: self.inlined.clone(),
-                speculations: self.speculations.len(),
-                nesting: self.nesting,
-                control: self.control,
-                unusable: self.unusable.len(),
-                returned: self.returned,
-                constructed: self.constructed.len(),
-                r_calls: self.r_calls.len(),
-                blocks: self.builder.function.blocks.len(),
-            });
+            let checkpoint = (!exhaustive && case.is_some()).then(|| self.checkpoint());
             let completed = match (arm(self, case), checkpoint) {
                 (Err(refusal), Some(checkpoint)) => {
                     if !self.rewind(checkpoint, body) {
@@ -2987,6 +3489,22 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Fail);
         }
         Ok(result)
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            scopes: self.scopes.clone(),
+            loops: self.loops.len(),
+            inlined: self.inlined.clone(),
+            speculations: self.speculations.len(),
+            nesting: self.nesting,
+            control: self.control,
+            unusable: self.unusable.len(),
+            returned: self.returned,
+            constructed: self.constructed.len(),
+            r_calls: self.r_calls.len(),
+            blocks: self.builder.function.blocks.len(),
+        }
     }
 
     /// Forgets everything lowered since `checkpoint`, which an arm starting at block `body` took,
@@ -3541,7 +4059,7 @@ impl Lowering<'_> {
         let ty = self.builder.ty(value);
         let keeps_integers = matches!(op, Math::Neg | Math::Abs);
         match ty {
-            Type::I64 if op == Math::Neg => {
+            Type::I64 if keeps_integers => {
                 Ok(self.builder.emit(Type::I64, Op::Math(op, Item::I64, value)))
             }
             Type::Int if keeps_integers => {
@@ -3580,6 +4098,65 @@ impl Lowering<'_> {
     /// `Num.min(a, b)` or `Num.max(a, b)`. With an `I64` both are `I64`s; two R integers stay
     /// integers, and otherwise both are doubles. The first wins a tie, and `NA` or `NaN` is an
     /// error the interpreter raises.
+    /// `Num.compare(a, b)`: `:LT`, `:EQ` or `:GT`. Two `I64`s, or an `I64` and an R number that
+    /// converts exactly, compare as integers, and two R numbers as doubles; the library refuses
+    /// `NaN` and `NA`.
+    unsafe fn compare_numbers(&mut self, a: Local, b: Local) -> Result<Local, Refusal> {
+        let item = match (self.builder.ty(a), self.builder.ty(b)) {
+            (Type::I64, _) | (_, Type::I64) => Item::I64,
+            (Type::Int | Type::Dbl, Type::Int | Type::Dbl) => Item::Dbl,
+            _ => {
+                return Err(Refusal::new(
+                    "a `Num.compare` of something other than numbers",
+                ));
+            }
+        };
+        let (a, b) = if item == Item::I64 {
+            (self.to_i64(a)?, self.to_i64(b)?)
+        } else {
+            let (a, b) = (self.as_double(a)?, self.as_double(b)?);
+            self.fail_if_nan(a);
+            self.fail_if_nan(b);
+            (a, b)
+        };
+        let less = self.tag("LT", &[])?;
+        let equal = self.tag("EQ", &[])?;
+        let greater = self.tag("GT", &[])?;
+        let union = [less, equal, greater]
+            .iter()
+            .try_fold(None, |union: Option<Type>, &tag| {
+                let ty = self.builder.ty(tag);
+                match union {
+                    None => Some(Some(ty)),
+                    Some(union) => joined(union, ty).map(Some),
+                }
+            })
+            .flatten()
+            .ok_or(Refusal::new("a comparison result"))?;
+        let result = self.builder.local(union);
+        let join = self.builder.block();
+        for (condition, tag) in [(Compare::Lt, less), (Compare::Gt, greater)] {
+            let test = self
+                .builder
+                .emit(Type::Lgl, Op::Compare(condition, item, a, b));
+            let test = self.builder.emit(Type::Bool, Op::Truth(test));
+            let (taken, next) = (self.builder.block(), self.builder.block());
+            self.builder.terminate(Terminator::Branch {
+                condition: test,
+                then: taken,
+                otherwise: next,
+            });
+            self.builder.switch_to(taken);
+            self.builder.push(Some(result), Op::Copy(tag));
+            self.builder.terminate(Terminator::Jump(join));
+            self.builder.switch_to(next);
+        }
+        self.builder.push(Some(result), Op::Copy(equal));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        Ok(result)
+    }
+
     unsafe fn extreme(&mut self, maximum: bool, a: Local, b: Local) -> Result<Local, Refusal> {
         let op = if maximum { Arith::Max } else { Arith::Min };
         match (self.builder.ty(a), self.builder.ty(b)) {

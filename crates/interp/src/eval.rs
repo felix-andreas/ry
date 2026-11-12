@@ -1176,11 +1176,16 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             let args = evaluate_args(arguments, env, definition.keep_missing, call)?;
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {
                 return Ok(value);
             }
-            call_builtin(definition, call, function, &args, env)
+            let reusable = if definition.reuses_first_argument {
+                temporary_argument(arguments, &args, env)?
+            } else {
+                None
+            };
+            call_builtin_reusing(definition, call, function, &args, env, reusable)
         }
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
@@ -1216,6 +1221,57 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
+}
+
+/// The argument of a builtin call that only the call holds, which the builtin may then write
+/// its result into, as compiled code does with `Op::Arithmetic`'s reuse bits: the fresh result
+/// of a binary element-wise operator call (in `x * 2 + 1`, the value of `x * 2`) that no
+/// counted reference holds. The operator must be the base builtin, since a closure bound to
+/// `*` may return a value something uncounted holds, and it must take two arguments, since
+/// unary `+` returns its operand. Of two candidates the wider type wins, as the result's type
+/// is the wider operand's.
+unsafe fn temporary_argument(arguments: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    let width = |value: Sexp| match value.kind() {
+        SexpType::Complex => 2,
+        SexpType::Real => 1,
+        _ => 0,
+    };
+    let mut best: Option<Sexp> = None;
+    let mut list = arguments;
+    for arg in args {
+        if list.kind() != SexpType::Pairlist {
+            return Ok(None);
+        }
+        let expression = list.car();
+        list = list.cdr();
+        if expression == symbols().dots {
+            return Ok(None);
+        }
+        let value = arg.value;
+        if value.refcount() != 0
+            || !matches!(
+                value.kind(),
+                SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+            )
+            || value.length() <= 1
+            || expression.kind() != SexpType::Language
+            || expression.car().kind() != SexpType::Symbol
+            || expression.cdr().kind() != SexpType::Pairlist
+            || expression.cdr().cdr().kind() != SexpType::Pairlist
+            || expression.cdr().cdr().cdr() != nil()
+            || best.is_some_and(|best| width(best) >= width(value))
+        {
+            continue;
+        }
+        let operator = find_fun(expression.car(), env)?;
+        if operator.kind() == SexpType::Builtin && builtin_def(operator)?.reuses_first_argument {
+            best = Some(value);
+        }
+    }
+    if list != nil() || args.iter().filter(|arg| Some(arg.value) == best).count() > 1 {
+        return Ok(None);
+    }
+    Ok(best)
 }
 
 /// A pairlist's items as arguments, unevaluated, as a special receives them.
@@ -1873,7 +1929,7 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
             }
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &forced, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &forced, env)?
             {
                 return Ok(value);
             }
@@ -1926,7 +1982,7 @@ pub unsafe fn apply_closure(
         return Ok(value);
     }
     if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, supplied)? {
+        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
             return value;
         }
     }
@@ -1952,6 +2008,7 @@ unsafe fn try_native_typed(
     call: Sexp,
     function: Sexp,
     args: &[Arg],
+    sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Option<R<Sexp>>> {
     if supplied.is_some() {
@@ -1966,7 +2023,12 @@ unsafe fn try_native_typed(
         crate::annotations::log_interpreted_because(call, "no native tier is loaded");
         return Ok(None);
     };
-    let value = (tier.call)(function, args);
+    let value = (tier.call)(&bytecode::TypedCall {
+        call,
+        function,
+        args,
+        sys_parent,
+    });
     if value.is_none() {
         crate::annotations::log_interpreted(call);
     }
@@ -2031,7 +2093,7 @@ pub unsafe fn apply_closure_owning(
         return Ok(value);
     }
     if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, supplied)? {
+        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
             return value;
         }
     }
@@ -2619,6 +2681,16 @@ pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
     frame_env(index, cause)
 }
 
+/// The environment that stands for the slot frame whose header register is `header` while it
+/// has none: the pending one its closures hold, or `nil` when it made none.
+pub unsafe fn pending_env_of(header: usize) -> Sexp {
+    let frames = &interp().frames;
+    frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+        .map_or(nil(), |index| frames[index].pending)
+}
+
 /// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
 /// first and with their missing flags, exactly as [`bind_arguments`] and the assignments since
 /// would have bound them. The environment is the frame's from then on, so the slots give up
@@ -3012,6 +3084,34 @@ pub unsafe fn enter(
             depth: 0,
         }),
     }
+}
+
+/// Runs `body` in a frame for the call `typed` describes, with a new environment enclosed by the
+/// closure's. Compiled typed code has no frame of its own and runs each R call it makes this
+/// way, so `stop()`, `sys.call()` and `parent.frame()` there see the call the interpreter makes.
+pub unsafe fn run_in_frame(
+    typed: &bytecode::TypedCall<'_>,
+    body: impl FnOnce(Sexp) -> R<()>,
+) -> R<()> {
+    let env = values::new_env(typed.function.tag())?;
+    let caller = if typed.sys_parent == nil() {
+        interp().slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    let (depth, sampled) = push_frame(
+        typed.call,
+        typed.function,
+        env,
+        typed.sys_parent,
+        typed.args,
+        &[],
+        crate::NO_SLOTS,
+        0,
+        caller,
+    );
+    let result = sampled.and_then(|()| body(env)).map(|()| nil());
+    leave(depth, result).map(|_| ())
 }
 
 /// Finishes the call [`enter`] pushed at `depth` once its body has ended with `result`: it
@@ -5021,7 +5121,7 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     };
     if definition.generic != Generic::None
         && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?, None)?
+            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
     {
         return Ok(value);
     }
@@ -5210,8 +5310,7 @@ pub unsafe fn call_with_values(call: Sexp, function: Sexp, values: &[Sexp], env:
     let definition = builtin_def(function)?;
     args.extend(values.iter().map(|&value| Arg { tag: nil(), value }));
     if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
     {
         return Ok(value);
     }
@@ -5274,7 +5373,7 @@ pub unsafe fn force_and_call_with(
                     return apply_call(call, function, arguments, env);
                 }
                 return match dispatch::dispatch_evaluated_subject(
-                    definition, call, function, arguments, value, env, &mut args, None,
+                    definition, call, function, arguments, value, env, &mut args,
                 )? {
                     Some(value) => Ok(value),
                     None => call_builtin(definition, call, function, &args, env),
@@ -5293,7 +5392,7 @@ pub unsafe fn force_and_call_with(
             )?;
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {
                 return Ok(value);
             }
@@ -5763,8 +5862,7 @@ unsafe fn reuse_first_argument(
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
     if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
     {
         return Ok(value);
     }

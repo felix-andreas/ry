@@ -19,7 +19,7 @@ use {
         annotations::{self, Entry},
         arith,
         builtins::Arg,
-        bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
+        bytecode::{self, LoopState, Machine, PROFILE, TIER1, TypedCall, profile},
         eval, heap,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
@@ -105,9 +105,23 @@ pub mod outcome {
     pub const FUSED: i32 = 3;
     /// A fused pass computed its expression, and a promise it forced invalidated the code.
     pub const FUSED_INVALIDATED: i32 = 5;
+    /// The instruction returned from the activation, leaving the value in its destination
+    /// register: a finished [`interp::bytecode::Op::Prologue`].
+    pub const RETURNED: i32 = 6;
     /// Load results: the slot's new status, or one of these.
     pub const LOAD_FAILED: i32 = 0;
     pub const LOAD_INVALIDATED: i32 = 4;
+}
+
+/// What [`jit_quiet_step`] did with an element read or store.
+pub mod quiet {
+    /// The generic handler ran the instruction, which may have rebound a store's variable.
+    pub const STEPPED: i32 = 0;
+    /// Nothing ran: the generic handler might run R code, so compiled code steps the
+    /// instruction with the frame written back.
+    pub const DECLINED: i32 = 1;
+    /// The generic handler raised an error, which is parked.
+    pub const FAILED: i32 = 2;
 }
 
 /// A compiled body. Owned by an external pointer in the code's `TIER1` constant, which keeps
@@ -134,6 +148,9 @@ pub struct Compiled {
     /// Tier 0's register count; the slot root cells follow.
     pub registers: usize,
     pub slots: Vec<Sexp>,
+    /// Each slot's position in the code's slot table, which numbers a slot frame's variables,
+    /// or `None` for a symbol the table does not number.
+    pub frame: Box<[Option<usize>]>,
     pub loops: usize,
     pub speculations: Vec<Speculation>,
     /// The binding epoch the speculations were last checked against.
@@ -333,6 +350,12 @@ pub const SIZE_WAITED: i32 = 1 << 17;
 /// in four bits from here, so each attempt can wait twice as long as the one before.
 pub const RARE_REFUSAL: i32 = 1 << 18;
 
+/// A tier state flag: the body's code, compiled for one enclosure, met another, as the
+/// functions one `function` expression makes on each call of its parent do. Its compiles then
+/// speculate only on lookups every such enclosure resolves the same way, so that one portable
+/// compilation serves them all instead of one per enclosure.
+pub const SHARED: i32 = 1 << 22;
+
 pub fn rare_refusals(state: i32) -> i32 {
     (state / RARE_REFUSAL) & 0xf
 }
@@ -445,6 +468,14 @@ unsafe fn checked<T>(
     }
 }
 
+/// The frame slot that holds `slot`'s variable, while the activation runs in a slot frame
+/// without an environment.
+unsafe fn frame_slot(activation: &Activation, machine: &Machine<'_>, slot: i64) -> Option<*mut Sexp> {
+    unsafe {
+        compiled(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
+    }
+}
+
 unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     unsafe {
         activation
@@ -458,16 +489,44 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
-            let epoch = heap().binding_epoch();
-            match scoped(|| bytecode::step_one(machine, pc as usize)) {
+            let heap = heap();
+            let epoch = if validate != 0 { heap.binding_epoch() } else { 0 };
+            let mark = heap.handle_mark();
+            let stepped = bytecode::step_one(machine, pc as usize);
+            heap.release_handles(mark);
+            match stepped {
                 Err(unwind) => {
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
+                Ok(Some(_)) => outcome::RETURNED,
+                Ok(None) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
                     outcome::INVALIDATED
                 }
-                Ok(()) => outcome::OK,
+                Ok(None) => outcome::OK,
+            }
+        })
+    }
+}
+
+/// Runs the element read or store at `pc` through tier 0's fast handler for it
+/// ([`bytecode::fast_step`]), which runs no R code: nonzero when the handler applied.
+pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> i32 {
+    unsafe { i32::from(bytecode::fast_step(machine(&*activation), pc as usize)) }
+}
+
+/// Runs the element read or store at `pc` through its generic handler where that runs no R
+/// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
+pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
+    unsafe {
+        checked(activation, quiet::FAILED, |activation| {
+            match bytecode::quiet_step(machine(activation), pc as usize) {
+                None => quiet::DECLINED,
+                Some(Ok(())) => quiet::STEPPED,
+                Some(Err(unwind)) => {
+                    park(activation, unwind);
+                    quiet::FAILED
+                }
             }
         })
     }
@@ -521,6 +580,60 @@ pub unsafe extern "C" fn jit_record(activation: *mut Activation, pc: i64, value:
     }
 }
 
+/// Finds a variable as compiled code's inline probe would when the activation's frame is
+/// reified or the variable is free in the body: in the activation's own environment, else in its
+/// enclosure when that is a function's frame, through the lookup slot's hint. Only a plain value
+/// or an evaluated promise counts, since that case runs no code and changes nothing; the result
+/// is the value with its low bit set when the enclosure bound it, or 0 when tier 0's lookup must
+/// run. The probe lives out of line because inlining both frame walks at every variable load
+/// made a large body's code grow by about a hundred instructions per load.
+pub unsafe extern "C" fn jit_probe(
+    activation: *const Activation,
+    symbol: *mut Header,
+    lookup: i64,
+) -> u64 {
+    unsafe {
+        let activation = &*activation;
+        let Some(symbol) = Sexp::from_raw(symbol) else {
+            return 0;
+        };
+        let heap = heap();
+        let hint = &mut *activation.hints.add(lookup as usize);
+        let env = *activation.header;
+        let (local, enclosure) = if env == values::nil() {
+            (None, activation.enclosure)
+        } else {
+            (heap.frame_cell_hinted(env, symbol, hint), env.enclosure())
+        };
+        let (cell, tag) = match local {
+            Some(cell) => (cell, 0),
+            None if enclosure.has_gp(gp::FUNCTION_FRAME) => {
+                match heap.frame_cell_hinted(enclosure, symbol, hint) {
+                    Some(cell) => (cell, 1),
+                    None => return 0,
+                }
+            }
+            None => return 0,
+        };
+        if cell.has_gp(gp::ACTIVE_BINDING) {
+            return 0;
+        }
+        let value = cell.cdr();
+        if value == values::missing_arg() || value == values::unbound() {
+            return 0;
+        }
+        let value = if value.kind() == SexpType::Promise {
+            match value.car() {
+                forced if forced == values::unbound() => return 0,
+                forced => forced,
+            }
+        } else {
+            value
+        };
+        value.as_ptr() as u64 | tag
+    }
+}
+
 /// Loads a slot's variable for an element assignment, which has no inline cache.
 pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {
@@ -530,7 +643,7 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
             let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
                 if machine.env() == values::nil() {
-                    return match machine.slot_of(symbol).map(|slot| *slot) {
+                    return match frame_slot(activation, machine, slot).map(|slot| *slot) {
                         Some(value) if value.kind() == SexpType::Promise => {
                             let forced = if value.car() == values::unbound() {
                                 let forced = eval::force_promise(value)?;
@@ -602,7 +715,7 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
             let mut env = machine.env();
             let mut local = true;
             if env == values::nil() {
-                if let Some(frame_slot) = machine.slot_of(symbol) {
+                if let Some(frame_slot) = frame_slot(activation, machine, slot) {
                     let mut value = *frame_slot;
                     if value.kind() == SexpType::Promise {
                         value = value.car();
@@ -659,9 +772,16 @@ pub unsafe extern "C" fn jit_closure_matches(
             ) else {
                 return 0;
             };
+            let machine = machine(activation);
+            // A closure a slot frame makes holds the frame's pending environment, which becomes
+            // the frame's environment, as the same object, once something reads it.
+            let env = match machine.env() {
+                env if env == values::nil() => eval::pending_env_of(machine.header),
+                env => env,
+            };
             let matches = value.kind() == SexpType::Closure
                 && value.car() == formals
-                && value.tag() == machine(activation).env()
+                && value.tag() == env
                 && bytecode::closure_body(value) == body;
             matches as i32
         })
@@ -711,7 +831,13 @@ pub unsafe extern "C" fn jit_call(
                     });
                 }
                 if annotations::is_typed(function) {
-                    if let Some(value) = crate::native::call(function, &args) {
+                    let typed = TypedCall {
+                        call,
+                        function,
+                        args: &args,
+                        sys_parent: machine.env(),
+                    };
+                    if let Some(value) = crate::native::call(&typed) {
                         return value;
                     }
                     annotations::log_interpreted(call);
@@ -848,6 +974,21 @@ pub unsafe extern "C" fn jit_flush(
             let machine = machine(activation);
             let symbol = compiled(activation).slots[slot as usize];
             let cell = slot_cell(activation, slot);
+            let frame = frame_slot(activation, machine, slot);
+            // A boxed value into a slot frame allocates nothing, so it needs no handle scope.
+            if kind == representation::BOXED && frame.is_some() {
+                let value = *cell;
+                return match machine.assign(frame, symbol, value) {
+                    Ok(()) => {
+                        value.decrement_refcount();
+                        1
+                    }
+                    Err(unwind) => {
+                        park(activation, unwind);
+                        0
+                    }
+                };
+            }
             let element = match kind {
                 representation::INTEGER => Some((SexpType::Integer, f64::from(bits as i32))),
                 representation::LOGICAL => Some((SexpType::Logical, f64::from(bits as i32))),
@@ -857,7 +998,7 @@ pub unsafe extern "C" fn jit_flush(
             // A loop writes the same variables back on every iteration, so reusing the box the
             // variable holds saves an allocation each time.
             if let Some((kind, element)) = element
-                && let Some(value) = machine.overwrite(symbol, kind, element)
+                && let Some(value) = machine.overwrite(frame, symbol, kind, element)
             {
                 *cell = value;
                 return 1;
@@ -870,7 +1011,7 @@ pub unsafe extern "C" fn jit_flush(
                     _ => *cell,
                 };
                 *cell = value;
-                machine.assign(symbol, value)?;
+                machine.assign(frame, symbol, value)?;
                 if kind == representation::BOXED {
                     value.decrement_refcount();
                 }

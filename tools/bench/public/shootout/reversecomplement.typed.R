@@ -36,7 +36,8 @@ local({
   output <- capture.output({
     f <- file("../fasta/fasta80000.txt", "r")
     lines <- readLines(f, warn = FALSE)
-    cat(List.to_r(execute(List.from_r(lines))), sep = "")
+    items <- List.from_r(lines)
+    cat(List.to_r(execute(items)), sep = "")
     value <- close(f)
   })
   seconds <- proc.time()[[3]] - started
