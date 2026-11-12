@@ -1503,7 +1503,9 @@ pub enum Op {
     JumpUnless,
     /// `operator dst left right call function reuse`. Bit 0 of `reuse` marks `left` and bit 1
     /// `right` as a temporary that only this instruction reads, so a plain vector there with no
-    /// counted reference may hold the result (`arithmetic_destination`).
+    /// counted reference may hold the result (`arithmetic_destination`). Bit 2 marks the
+    /// instruction as the whole value of `x <- left op right`, whose `SetVar` follows it, so a
+    /// scalar result may overwrite the value `x` holds alone (`assign_in_place`).
     Arithmetic,
     /// `src`
     Return,
@@ -4864,7 +4866,10 @@ impl Compiler {
                 let left_temporary = self.temporary == Some((left, self.here()));
                 self.expression(args[1].1, right)?;
                 let right_temporary = self.temporary == Some((right, self.here()));
-                let reuse = u32::from(left_temporary) | u32::from(right_temporary) << 1;
+                let assigned = self.assigning == Some(call);
+                let reuse = u32::from(left_temporary)
+                    | u32::from(right_temporary) << 1
+                    | u32::from(assigned) << 2;
                 let call_constant = self.constant(call);
                 let function = self.constant(primitive);
                 self.emit(
@@ -6019,6 +6024,12 @@ pub struct LoopState {
     pub step: f64,
     /// The next cell, for a pairlist sequence.
     cell: Option<Sexp>,
+    /// The loop variable's binding cell in an environment frame, valid while the variable's
+    /// lookup stamp is `stamp`: removing the binding moves the stamp, so a stale cell is never
+    /// read. Holding it saves the frame's hash probe on every step, as GNU R's `STEPFOR` keeps
+    /// the binding cell `STARTFOR` found.
+    binding: Option<Sexp>,
+    stamp: u64,
 }
 
 impl LoopState {
@@ -6031,6 +6042,8 @@ impl LoopState {
             first,
             step,
             cell: None,
+            binding: None,
+            stamp: 0,
         }
     }
 }
@@ -7055,20 +7068,31 @@ unsafe fn pool_constant(state: &Activation<'_, '_>, index: usize) -> Sexp {
 #[inline(always)]
 unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let known = (*state.heap).known();
-    if *state.header != known.nil {
-        return None;
-    }
+    let header = *state.header;
     let code = state.code;
     let cache_slot = *code.add(at + 3) as usize;
-    let slot = *state.slot_map.add(cache_slot);
+    let slot = if header == known.nil {
+        *state.slot_map.add(cache_slot)
+    } else if header == known.global_env {
+        -1
+    } else {
+        return None;
+    };
     let mut value = if slot >= 0 {
         *state.header.add(1 + slot as usize)
     } else {
+        // A slot frame's free variables are cached from the closure's environment, and the
+        // global environment's from itself (see `lookup_variable`).
+        let start = if header == known.nil {
+            state.machine.function.tag()
+        } else {
+            header
+        };
         let heap = &*state.heap;
         let cache = state.cache;
         let symbol = pool_constant(state, *code.add(at + 2) as usize);
         if *cache.epochs.add(cache_slot) != heap.lookup_stamp(symbol)
-            || *cache.slots.add(cache_slot * 2) != state.machine.function.tag()
+            || *cache.slots.add(cache_slot * 2) != start
         {
             return None;
         }
@@ -7101,19 +7125,28 @@ unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
 unsafe fn get_fun_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let heap = &*state.heap;
     let known = heap.known();
-    if *state.header != known.nil {
-        return None;
-    }
+    let header = *state.header;
     let code = state.code;
     let cache_slot = *code.add(at + 3) as usize;
-    let slot = *state.slot_map.add(cache_slot);
+    let slot = if header == known.nil {
+        *state.slot_map.add(cache_slot)
+    } else if header == known.global_env {
+        -1
+    } else {
+        return None;
+    };
     let mut value = if slot >= 0 {
         *state.header.add(1 + slot as usize)
     } else {
+        let start = if header == known.nil {
+            state.machine.function.tag()
+        } else {
+            header
+        };
         let cache = state.cache;
         let symbol = pool_constant(state, *code.add(at + 2) as usize);
         if *cache.epochs.add(cache_slot) != heap.lookup_stamp(symbol)
-            || *cache.slots.add(cache_slot * 2) != state.machine.function.tag()
+            || *cache.slots.add(cache_slot * 2) != start
         {
             return None;
         }
@@ -7132,10 +7165,37 @@ unsafe fn get_fun_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
 /// `SetVar` of a local in a slot frame, when giving up the old value needs no bookkeeping.
 #[inline(always)]
 unsafe fn set_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
-    if *state.header != (*state.heap).known().nil {
+    let header = *state.header;
+    let code = state.code;
+    if header == (*state.heap).known().global_env {
+        // The site caches the global environment's own binding once `op_set_var` has found it
+        // there, and the stamp moves when that binding goes away.
+        let cache_slot = *code.add(at + 3) as usize;
+        let symbol = pool_constant(state, *code.add(at + 1) as usize);
+        let cache = state.cache;
+        if *cache.epochs.add(cache_slot) != (*state.heap).lookup_stamp(symbol)
+            || *cache.slots.add(cache_slot * 2) != header
+        {
+            return None;
+        }
+        let cell = *cache.slots.add(cache_slot * 2 + 1);
+        if cell.has_gp(
+            gp::ACTIVE_BINDING
+                | gp::BINDING_LOCKED
+                | gp::WATCHED
+                | gp::BINDING_MISSING
+                | gp::BINDING_ABSENT,
+        ) {
+            return None;
+        }
+        let value = *state.registers.add(*code.add(at + 2) as usize);
+        (*state.heap).set_binding_value(cell, value).ok()?;
+        (*state.interp).visible = false;
+        return Some(at + 1 + operand_count(Op::SetVar));
+    }
+    if header != (*state.heap).known().nil {
         return None;
     }
-    let code = state.code;
     let slot = *state.slot_map.add(*code.add(at + 3) as usize);
     if slot < 0 {
         return None;
@@ -7156,15 +7216,22 @@ unsafe fn set_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
 /// promise, is the whole check, with no stamp or cache to read (see `gp::BOUND_ELSEWHERE` and
 /// `gp::DETACHED`). Otherwise the cached cell holding the expected function answers; a cache key
 /// is never a function frame, so a hit also means the enclosure is not one.
+///
+/// In the global environment, whose code may bind any name, the lookup starts at the global
+/// environment itself, as [`lookup_variable`] fills it: a binding there sets `gp::BOUND_ELSEWHERE` like any
+/// other, and one appearing or going away moves the stamp.
 #[inline(always)]
 unsafe fn guard_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
-    if *code.add(at + 4) != 0 {
-        return None;
-    }
     let heap = &*state.heap;
+    let known = heap.known();
     let env = *state.header;
-    let enclosure = if env != heap.known().nil {
+    let enclosure = if *code.add(at + 4) != 0 {
+        if env != known.global_env {
+            return None;
+        }
+        env
+    } else if env != known.nil {
         env.enclosure()
     } else {
         state.machine.function.tag()
@@ -7569,42 +7636,63 @@ unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at
         };
         let (a, b) = (as_real(left), as_real(right));
         let nan = a.is_nan() || b.is_nan();
-        let mut number = |value: f64| heap.try_alloc_scalar(SexpType::Real, [value.to_bits(), 0]);
-        match operator {
-            Arith::Add => (number(crate::arith::add(a, b)), feedback::DOUBLE_SCALAR),
-            Arith::Subtract => (number(a - b), feedback::DOUBLE_SCALAR),
-            Arith::Multiply => (
-                number(crate::arith::multiply(a, b)),
-                feedback::DOUBLE_SCALAR,
-            ),
-            Arith::Divide => (number(a / b), feedback::DOUBLE_SCALAR),
-            Arith::Equal => (logical((!nan).then_some(a == b)), feedback::LOGICAL_SCALAR),
-            Arith::NotEqual => (logical((!nan).then_some(a != b)), feedback::LOGICAL_SCALAR),
-            Arith::Less => (logical((!nan).then_some(a < b)), feedback::LOGICAL_SCALAR),
-            Arith::Greater => (logical((!nan).then_some(a > b)), feedback::LOGICAL_SCALAR),
-            Arith::LessEqual => (logical((!nan).then_some(a <= b)), feedback::LOGICAL_SCALAR),
-            _ => (logical((!nan).then_some(a >= b)), feedback::LOGICAL_SCALAR),
+        let number = match operator {
+            Arith::Add => Some(crate::arith::add(a, b)),
+            Arith::Subtract => Some(a - b),
+            Arith::Multiply => Some(crate::arith::multiply(a, b)),
+            Arith::Divide => Some(a / b),
+            _ => None,
+        };
+        if let Some(number) = number {
+            let bits = number.to_bits();
+            if let Some(next) = assign_in_place(state, at, SexpType::Real, bits) {
+                state.record_kind(at, feedback::DOUBLE_SCALAR);
+                dispatch!(state, next);
+            }
+            let value = (*state.heap).try_alloc_scalar(SexpType::Real, [bits, 0]);
+            (value, feedback::DOUBLE_SCALAR)
+        } else {
+            match operator {
+                Arith::Equal => (logical((!nan).then_some(a == b)), feedback::LOGICAL_SCALAR),
+                Arith::NotEqual => (logical((!nan).then_some(a != b)), feedback::LOGICAL_SCALAR),
+                Arith::Less => (logical((!nan).then_some(a < b)), feedback::LOGICAL_SCALAR),
+                Arith::Greater => (logical((!nan).then_some(a > b)), feedback::LOGICAL_SCALAR),
+                Arith::LessEqual => (logical((!nan).then_some(a <= b)), feedback::LOGICAL_SCALAR),
+                _ => (logical((!nan).then_some(a >= b)), feedback::LOGICAL_SCALAR),
+            }
         }
     } else {
         let a = *left.data().cast::<i32>();
         let b = *right.data().cast::<i32>();
         let na = a == NA_INTEGER || b == NA_INTEGER;
-        let mut integer = |result: Option<i32>| match result {
-            Some(value) if !na && value != NA_INTEGER => {
-                heap.try_alloc_scalar(SexpType::Integer, [value as u32 as u64, 0])
-            }
+        let integer = match operator {
+            Arith::Add => Some(a.checked_add(b)),
+            Arith::Subtract => Some(a.checked_sub(b)),
+            Arith::Multiply => Some(a.checked_mul(b)),
             _ => None,
         };
-        match operator {
-            Arith::Add => (integer(a.checked_add(b)), feedback::INTEGER_SCALAR),
-            Arith::Subtract => (integer(a.checked_sub(b)), feedback::INTEGER_SCALAR),
-            Arith::Multiply => (integer(a.checked_mul(b)), feedback::INTEGER_SCALAR),
-            Arith::Equal => (logical((!na).then_some(a == b)), feedback::LOGICAL_SCALAR),
-            Arith::NotEqual => (logical((!na).then_some(a != b)), feedback::LOGICAL_SCALAR),
-            Arith::Less => (logical((!na).then_some(a < b)), feedback::LOGICAL_SCALAR),
-            Arith::Greater => (logical((!na).then_some(a > b)), feedback::LOGICAL_SCALAR),
-            Arith::LessEqual => (logical((!na).then_some(a <= b)), feedback::LOGICAL_SCALAR),
-            _ => (logical((!na).then_some(a >= b)), feedback::LOGICAL_SCALAR),
+        if let Some(integer) = integer {
+            let value = match integer {
+                Some(value) if !na && value != NA_INTEGER => {
+                    let bits = value as u32 as u64;
+                    if let Some(next) = assign_in_place(state, at, SexpType::Integer, bits) {
+                        state.record_kind(at, feedback::INTEGER_SCALAR);
+                        dispatch!(state, next);
+                    }
+                    (*state.heap).try_alloc_scalar(SexpType::Integer, [bits, 0])
+                }
+                _ => None,
+            };
+            (value, feedback::INTEGER_SCALAR)
+        } else {
+            match operator {
+                Arith::Equal => (logical((!na).then_some(a == b)), feedback::LOGICAL_SCALAR),
+                Arith::NotEqual => (logical((!na).then_some(a != b)), feedback::LOGICAL_SCALAR),
+                Arith::Less => (logical((!na).then_some(a < b)), feedback::LOGICAL_SCALAR),
+                Arith::Greater => (logical((!na).then_some(a > b)), feedback::LOGICAL_SCALAR),
+                Arith::LessEqual => (logical((!na).then_some(a <= b)), feedback::LOGICAL_SCALAR),
+                _ => (logical((!na).then_some(a >= b)), feedback::LOGICAL_SCALAR),
+            }
         }
     };
     let Some(value) = value else {
@@ -7632,6 +7720,74 @@ unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at
         }
     }
     dispatch!(state, next);
+}
+
+/// For the `Arithmetic` at `at` that computes the whole value of `x <- left op right`, stores
+/// the scalar result `bits` of `kind` into the value `x` holds and answers the pc after the
+/// assignment's `SetVar`, which has nothing left to do. That value may change only when the
+/// binding holds the sole reference to it, the rule every update in place follows: the
+/// compiler keeps this frame's registers from holding `x` uncounted across the assignment
+/// (`assigns_fusible`), and a compiled frame further out that evaluates code here may still
+/// hold it, so its registers are searched. A capture such as `t <- x`, `list(x)` or a closure's
+/// forced promise counts a reference and keeps the value.
+#[inline(always)]
+unsafe fn assign_in_place(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    kind: SexpType,
+    bits: u64,
+) -> Option<usize> {
+    let code = state.code;
+    if *code.add(at + 7) & 4 == 0 {
+        return None;
+    }
+    let assignment = at + 1 + operand_count(Op::Arithmetic);
+    if *code.add(assignment) != op_word(Op::SetVar) as i32
+        || *code.add(assignment + 2) != *code.add(at + 2)
+    {
+        return None;
+    }
+    let cache = *code.add(assignment + 3) as usize;
+    let target = if state.in_slots() {
+        let value = *state.slot(cache)?;
+        if !slot_owns(state, value) {
+            return None;
+        }
+        value
+    } else {
+        let env = *state.header;
+        if env != (*state.heap).known().global_env {
+            return None;
+        }
+        let symbol = state.constants.element(*code.add(assignment + 1) as usize);
+        let cell = cached_cell(symbol, env, state.cache, cache)?;
+        if cell.has_gp(
+            gp::ACTIVE_BINDING
+                | gp::BINDING_LOCKED
+                | gp::WATCHED
+                | gp::BINDING_MISSING
+                | gp::BINDING_ABSENT,
+        ) {
+            return None;
+        }
+        let value = cell.cdr();
+        let registers = &interp().bytecode.registers;
+        let header = state.header.offset_from(registers.as_ptr()) as usize;
+        if value.refcount() != 1 || registers.get(..header)?.contains(&value) {
+            return None;
+        }
+        value
+    };
+    if !target.is_plain_scalar(kind, (*state.heap).known().nil) {
+        return None;
+    }
+    match kind {
+        SexpType::Real => *target.data().cast::<u64>() = bits,
+        _ => *target.data().cast::<u32>() = bits as u32,
+    }
+    *state.registers.add(*code.add(at + 2) as usize) = target;
+    (*state.interp).visible = false;
+    Some(assignment + 1 + operand_count(Op::SetVar))
 }
 
 /// A specialized form whose operands are no longer of its kinds: the site goes back to the
@@ -7714,8 +7870,15 @@ unsafe fn op_set_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
         return Ok(Flow::Next);
     }
     let env = state.env(Reify::Site("assignment"))?;
-    let hint = &mut *state.cache.hints.add(instruction.operand(2));
+    let slot = instruction.operand(2);
+    let hint = &mut *state.cache.hints.add(slot);
     let cell = (*state.heap).frame_cell_hinted(env, symbol, hint);
+    if env == (*state.heap).known().global_env
+        && let Some(cell) = cell
+        && !cell.has_gp(gp::ACTIVE_BINDING)
+    {
+        fill_cache(symbol, env, cell, state.cache, slot);
+    }
     eval::assign_local(symbol, value, env, cell)?;
     (*state.interp).visible = false;
     Ok(Flow::Next)
@@ -10684,6 +10847,8 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
         first,
         step,
         cell: Some(sequence),
+        binding: None,
+        stamp: 0,
     };
     Ok(Flow::Next)
 }
@@ -10732,10 +10897,23 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     loop_state.index += 1;
     let current = match slot {
         Some(slot) => Some(*slot),
-        None => crate::heap()
-            .frame_cell(env, variable)
-            .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))
-            .map(|cell| cell.cdr()),
+        None => {
+            let heap = crate::heap();
+            let stamp = heap.lookup_stamp(variable);
+            let cell = match loop_state.binding {
+                Some(cell) if loop_state.stamp == stamp => Some(cell),
+                _ => {
+                    let found = heap.frame_cell(env, variable);
+                    loop_state.binding = found;
+                    loop_state.stamp = stamp;
+                    found
+                }
+            };
+            // `lockBinding` and `makeActiveBinding` change the cell's flags without moving the
+            // stamp, so the flags are read on every step.
+            cell.filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))
+                .map(|cell| cell.cdr())
+        }
     };
     let number = first + step * index as f64;
     let overwritten = current.is_some_and(|value| match step == 0.0 {
@@ -11743,6 +11921,12 @@ unsafe fn lookup_variable(
     held: Range<usize>,
 ) -> R<Sexp> {
     let heap = crate::heap();
+    // The global environment is a lookup's own start, cached under the symbol's stamp, which
+    // moves when a global binding appears or goes away. Top-level code runs in it with every
+    // variable global, so this saves probing its frame before each cached lookup.
+    if env == heap.known().global_env {
+        return lookup_outside(symbol, env, LexicalFrame::Env(env), cache, slot, held);
+    }
     let hint = &mut *cache.hints.add(slot);
     if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
         let value = cell.cdr();
@@ -11893,6 +12077,9 @@ unsafe fn lookup_function(
     call: Sexp,
 ) -> R<Sexp> {
     let heap = crate::heap();
+    if env == heap.known().global_env {
+        return lookup_function_outside(symbol, env, env, cache, slot, call);
+    }
     let hint = &mut *cache.hints.add(slot);
     if heap.frame_cell_hinted(env, symbol, hint).is_some() {
         return eval::find_called_fun(symbol, env, call);
