@@ -8,7 +8,7 @@
 //! `FUZZ_ITERS` raises the budget.
 
 use {
-    heap::{Heap, object::Sexp},
+    heap::{GcStress, Heap, object::Sexp},
     interp::{
         deparse, eval, lower,
         unwind::{Jump, Unwind},
@@ -3352,5 +3352,26 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             assert_ne!(before, after, "a shadowing binding of Num.e was ignored");
             assert!(after.contains("10"), "shadowed Num.e gave {after}");
         }
+    });
+}
+
+#[test]
+fn a_parked_return_value_survives_its_exit() {
+    // Forcing `x` runs `return(...)` for `h`, which compiled `g` parks in its activation until
+    // the deoptimization exit hands it to tier 0. The exit writes `i` back first, which
+    // allocates, and the returned list exists nowhere but in the parked unwind.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("g <- function(n, x) { i <- n + 1L; x; i }");
+        run("h <- function(n) g(n, return(list(n, n * 2L)))");
+        for n in 1..=3 {
+            assert_eq!(run(&format!("h({n}L)")), format!("list({n}L, {}L)", 2 * n));
+        }
+        let heap = interp::heap();
+        heap.update_policy(|policy| policy.stress = GcStress::EveryAllocation);
+        let outcome = run("h(5L)");
+        heap.update_policy(|policy| policy.stress = GcStress::Off);
+        jit::install_mode(Mode::Off);
+        assert_eq!(outcome, "list(5L, 10L)");
     });
 }
