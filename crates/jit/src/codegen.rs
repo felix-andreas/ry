@@ -398,6 +398,39 @@ impl<'p> Translator<'p> {
                 self.def_register(register, ty, unboxed);
             }
         }
+        // The header's code reads a variable loaded on every path into it without checking its
+        // status, so the entry loads it, without forcing anything, or declines.
+        for (slot, current) in entry.slots.iter().enumerate() {
+            if current.may_be(status::NOT_LOADED) || !current.may_be(status::LOADED) {
+                continue;
+            }
+            if current.ty == Ty::Bottom {
+                return Err(Refusal("a loaded variable without a type"));
+            }
+            let slot_constant = iconst(&mut self.builder, slot);
+            let result = self
+                .call(
+                    runtime::jit_peek_slot as *const () as usize,
+                    &[I64, I64],
+                    Some(I32),
+                    &[self.activation, slot_constant],
+                )
+                .ok_or(Refusal("a helper without a result"))?;
+            let failed =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
+            let peeked = self.builder.create_block();
+            self.builder.ins().brif(failed, declined, &[], peeked, &[]);
+            self.builder.switch_to_block(peeked);
+            let value = self.load_slot_cell(slot);
+            let fits = self.check(value, current.ty);
+            let next = self.builder.create_block();
+            self.builder.ins().brif(fits, next, &[], declined, &[]);
+            self.builder.switch_to_block(next);
+            self.set_status(slot, result);
+            self.unbox_slot(slot, current.ty, value);
+        }
         self.builder.ins().jump(label, &[]);
         Ok(())
     }
@@ -3392,22 +3425,7 @@ impl<'p> Translator<'p> {
             }
         }
         self.set_status(slot, merged_status);
-        match ty {
-            Ty::Int | Ty::Lgl => {
-                let unboxed = self.unbox(value, ty);
-                self.builder.def_var(self.slot_integers[slot], unboxed);
-            }
-            Ty::Dbl => {
-                let unboxed = self.unbox(value, ty);
-                self.builder.def_var(self.slot_doubles[slot], unboxed);
-            }
-            Ty::Num => {
-                let (unboxed, flag) = self.unbox_num(value);
-                self.builder.def_var(self.slot_doubles[slot], unboxed);
-                self.builder.def_var(self.slot_integers[slot], flag);
-            }
-            _ => {}
-        }
+        self.unbox_slot(slot, ty, value);
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
         Ok(())
@@ -3563,6 +3581,14 @@ impl<'p> Translator<'p> {
         let fits = self.check(value, ty);
         self.guard(fits, mismatch);
         self.set_status(slot, result);
+        self.unbox_slot(slot, ty, value);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
+        Ok(())
+    }
+
+    /// Defines `slot`'s variables from `value`, a loaded object of type `ty`.
+    unsafe fn unbox_slot(&mut self, slot: usize, ty: Ty, value: Value) {
         match ty {
             Ty::Int | Ty::Lgl => {
                 let unboxed = self.unbox(value, ty);
@@ -3579,9 +3605,6 @@ impl<'p> Translator<'p> {
             }
             _ => {}
         }
-        self.builder.ins().jump(done, &[]);
-        self.builder.switch_to_block(done);
-        Ok(())
     }
 
     /// Makes `slot` dirty with `value`: unboxed for an unboxed `ty`, else an object the slot

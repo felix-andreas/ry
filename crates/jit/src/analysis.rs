@@ -474,8 +474,10 @@ impl<'a> States<'a> {
     }
 
     /// Prepares an edge's state for joining into the block it enters: registers dead there are
-    /// dropped, and at a loop header every variable may also be unloaded, since on-stack
-    /// replacement enters there with the environment as the truth.
+    /// dropped, and at a loop header every loaded variable may also be clean, since on-stack
+    /// replacement enters there with the environment as the truth. The entry loads each
+    /// variable the header has loaded on every path, declining when it cannot, so a loop whose
+    /// variables were loaded before it reads them without checking their status.
     fn adapt_edge(&mut self, id: StateId, live: &[u64], loop_header: bool) {
         let row = id as usize;
         for register in 0..self.registers {
@@ -485,7 +487,15 @@ impl<'a> States<'a> {
         }
         if loop_header {
             for slot in &mut self.slot_rows[row * self.slots..(row + 1) * self.slots] {
-                *slot = slot.join(Slot::UNLOADED);
+                let entered = Slot {
+                    status: if slot.may_be(status::LOADED) {
+                        status::LOCAL | status::ENCLOSING
+                    } else {
+                        status::NOT_LOADED
+                    },
+                    ty: slot.ty,
+                };
+                *slot = slot.join(entered);
             }
         }
     }

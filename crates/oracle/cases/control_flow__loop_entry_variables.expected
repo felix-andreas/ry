@@ -1,0 +1,19 @@
+[stdout]
+| [1] 19.0  2.5
+| [1] 5251.5    2.5
+| [1] 4498.5    1.0
+| [1] 4002
+| [1] 4002
+| [1] "never forced"
+| [1] "forced late"
+| [1] "zero iterations"
+| [1] "no iteration read it"
+| [1] "object 'undefined_variable' not found"
+| [1] 182280
+| [1] 21
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 21
