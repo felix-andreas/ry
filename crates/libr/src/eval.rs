@@ -1390,11 +1390,12 @@ const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
 };
 
 /// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
-/// session the slow way in this process's environment and saves it. Returns 0 once written, and
-/// 1 after reporting why it was not. The base tree's build calls this through
-/// `ry-rcmd write-start-image`; nothing else writes an image.
+/// session the slow way in this process's environment and saves it. `layout`, when not null,
+/// names the directory of the touch profile that lays the image out (`interp::image::write`).
+/// Returns 0 once written, and 1 after reporting why it was not. The base tree's build calls
+/// this through `ry-rcmd write-start-image`; nothing else writes an image.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_write_start_image(path: *const c_char) -> c_int {
+pub unsafe extern "C" fn ry_write_start_image(path: *const c_char, layout: *const c_char) -> c_int {
     runtime();
     if report_missing_r_home() {
         return 1;
@@ -1404,7 +1405,14 @@ pub unsafe extern "C" fn ry_write_start_image(path: *const c_char) -> c_int {
             .to_string_lossy()
             .into_owned(),
     );
-    let written = interp::session::write_start_image(IMAGE_HOST, &path);
+    let layout = (!layout.is_null()).then(|| {
+        std::path::PathBuf::from(
+            std::ffi::CStr::from_ptr(layout)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    });
+    let written = interp::session::write_start_image(IMAGE_HOST, &path, layout.as_deref());
     interp::system::remove_session_temp_dir();
     match written {
         Ok(()) => 0,

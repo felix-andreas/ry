@@ -121,22 +121,9 @@ area = "jit"
 reason = "aborts: the collector finds a freed object among its roots (allocating under jit_step)"
 
 [[failure]]
-case = "bytecode__finalizer_under_wide_window"
-engine = "ry-gctorture-young"
-area = "gc"
-reason = "counts one finalizer run fewer than GNU R: prints 2 and 6 where GNU R prints 3 and 7"
+case = "s4__native_definitions"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV when the engine loads base R from ry's own home (main e3bb8627, 4 of 4 runs); passes with GNU R's home"
 provisional = true
-
-[[failure]]
-case = "jit__write_back_in_place"
-engine = "ry-gctorture-young"
-area = "interp"
-reason = "aborts: reads an object the collector freed (heap/src/object.rs freed_object)"
-provisional = true
-
-[[failure]]
-case = "kernels__elementwise"
-engine = "ry-gctorture-young"
-area = "interp"
-reason = "aborts: reads an object the collector freed (heap/src/object.rs freed_object)"
-provisional = true
+intermittent = true

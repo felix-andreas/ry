@@ -1,7 +1,8 @@
 //! The tier-0 bytecode interpreter.
 //!
 //! A closure body compiles to bytecode on its second call, or takes its code from its package's
-//! code image then. The code replaces the body as a
+//! code image then; the closures of the namespaces the start-up image holds arrive compiled. The
+//! code replaces the body as a
 //! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
 //! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
 //! goes through [`closure_body`], which returns the expression.
@@ -480,6 +481,59 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
         }
         None => Ok(body),
     }
+}
+
+/// Compiles every closure bound in a loaded namespace afresh, for the start-up image, and returns
+/// the new code objects in the order they were compiled. Code that start-up ran carries this
+/// process's caches, feedback and profile, so the image keeps only these fresh objects, which no
+/// call has touched yet, and stores any other code as its source. A start from the image then
+/// runs base R's functions compiled from their first call.
+pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
+    let heap = crate::heap();
+    let registry = heap.known().namespace_registry;
+    let mut namespaces = vec![heap.known().base_namespace];
+    for symbol in crate::envir::env_symbols(registry, true, false) {
+        if let Some(cell) = heap.frame_cell(registry, symbol)
+            && cell.cdr().kind() == SexpType::Environment
+            && !namespaces.contains(&cell.cdr())
+        {
+            namespaces.push(cell.cdr());
+        }
+    }
+    let mut closures: Vec<Sexp> = Vec::new();
+    for namespace in namespaces {
+        for symbol in crate::envir::env_symbols(namespace, true, false) {
+            let Some(cell) = heap.frame_cell(namespace, symbol) else {
+                continue;
+            };
+            if cell.has_gp(gp::ACTIVE_BINDING) {
+                continue;
+            }
+            // A lazy-load promise start-up never forced stays unforced, and its closure
+            // compiles when a session first calls it.
+            let function = forced_value(cell.cdr());
+            if function.kind() != SexpType::Closure {
+                continue;
+            }
+            closures.push(function);
+        }
+    }
+    closures.sort_unstable_by_key(|function| function.as_ptr() as usize);
+    closures.dedup();
+    let mut fresh = Vec::new();
+    for function in closures {
+        let body = closure_body(function);
+        if !worth_compiling(body) {
+            continue;
+        }
+        // An error is the compiler's way of rejecting a body (a `break` outside a loop, say), so
+        // such a body keeps running on the AST evaluator, as in `run_body`.
+        if let Ok(Some(code)) = compile(body, function) {
+            heap.set_cdr(function, code);
+            fresh.push(code);
+        }
+    }
+    Ok(fresh)
 }
 
 /// Compiles, ahead of their first call, the functions `code` defines with `function(...)`

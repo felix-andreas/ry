@@ -108,14 +108,21 @@ left, in order of expected gain:
 - **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. `log_rank`, `sales` and `vasicek` pay it.
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises, and base arithmetic and `c()` over them), so `f(c(1, 2))` from untyped code takes the native path but `evaluate(build(14, 8))` runs `evaluate` in the interpreter. A typed call is never read ahead: it may not finish, and R never runs an argument the callee does not force. A call from typed code forces its arguments first (typed ry is strict), so this is only about calls from R code, which must stay lazy; `expr_tree.typed.R`'s untyped `measure` lambda binds the tree to a variable first.
-- **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
 - **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
 - **Compiled closures stay rooted for the session.** Up to `MAX_COMPILED` closures are kept alive by their code; dropping the code with the closure needs a finalizer hook in the heap.
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
-## Open: two Renviron readers
+## Open: ahead-of-time compilation of typed ry (mid priority)
+
+Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). This extends the install-time compiler that writes machine code for a package's numeric functions into `R/<package>.ryc` (`crates/jit/src/ahead.rs`, CLI reference "build and install"); the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
+
+- **Precondition.** The typed benchmark programs run natively. `vasicek` (R calls per step) and `sales` (a `DataFrame` parameter) do not yet ("Open: the typed core", `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`).
+- **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image's native section, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
+- **Step 2: a whole-program build of a typed script** (`ry build --exe` in `typed-runtime.md`), which compiles the script with the typed standard library and the packages it uses into one executable; untyped R in it stays on the JIT.
+- **The slow path.** Install-time code and the typed core both fall back to the interpreter on a failed entry test. Bun instead runs a compiled slow second version of the function; decide which one ry uses here, by measurement.
+
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
 
@@ -318,9 +325,10 @@ Smaller gaps:
   - strict mode can still report inside a statement that failed to parse.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.
-- The Zed extension downloads the newest pre-release's archive (`editors/zed/src/lib.rs`), and
-  0.4.0-beta has only the Linux one, so on macOS and Windows the download fails until a release
-  ships every platform. The install page tells users there to put `ry` on `PATH`.
+- The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
+  (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
+  no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
+  archive or the download fails on the missing ones.
 
 ## Open: what `ry check` still reports on the GNU R corpus
 
@@ -1016,6 +1024,14 @@ overhead, not allocation.
   counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
   which only an `f` that reads `parent.frame()` can observe.
 
+- Two public programs run slower than GNU R (`tools/bench/public/results.json`); neither regressed
+  since the public record before it (same-machine A/B). Profiles from `ry run --profile-summary`:
+  - fannkuchredux (0.88x): 51% JIT code, 21% builtins, 15% closure call setup. Each flip calls
+    the `rev.default` closure, and `[` (3.6M calls) and `:` (3.3M) run as builtins that allocate
+    a vector, where the JIT could reverse a prefix in place and index a range without making it.
+  - binarytrees_naive (0.92x): 66% tier-0 instructions, 16% call setup, `c` 8% and `[[` 5%. The
+    recursive `tree` and `check` closures, defined inside `execute`, never leave tier 0.
+
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench applications` (`tools/bench/applications/`, results in
 `benchmarks.mdx`) reproduces the gap on production-shaped workloads. `ry run --profile-summary
@@ -1100,6 +1116,13 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 ### Tier-0 call entry and dispatch
 
 - On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. That is after the raw pool reads and the out-of-line tier schedule (`decisions.md`, "Tier-0 call entry"). `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine` for the handler. The register clear is about 16 of `grow_registers`' 57 and must stay. What remains needs superinstructions (a fused guard plus `GetFun`, a fused `GetVar` plus `Element`), together with a per-site epoch stamp that re-proves `effects::resolve` and a test that rebinds a base function between two calls at one site, or a thinner call path (the AOT track's call plans).
+
+### Queued with measured ceilings
+
+Shares are of each application's instructions (profiling build, one process); a ceiling is the item's whole inclusive cost, so a realistic gain is about half.
+
+- **S3 method resolution by a dense per-generic index.** `dispatch::resolve_s3` is 2.50% of testthat (62,000 calls at 1,659 instructions) and 2.47% of validation (270,000 calls at 870). The plan keys methods by interned class-symbol id per generic, which drops building `generic.class` names (`method_name`) and walking scopes (`lookup_in_scope`) on every dispatch. A whole `UseMethod` round trip already costs 15,700 instructions against GNU R's 36,500. Unowned.
+- **Widen `direct_c` to the shapes that reach `do_c`.** In validation `combine::do_c` is 3.04% (126,000 calls at 2,292 instructions), against about 900 per call through `direct_c`; testthat spends 0.09% there. ry is at GNU R's cost already (`c(a = 0.6, b = 0.4)` 4,100 against 3,500; three strings 2,100 against 2,200), so this is a validation-only win of about 1.5 to 2%.
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
@@ -2467,9 +2490,11 @@ tagging fences `r` for Zed if that proves distant.
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
   Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
-- **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
-  rather than the newest build, and the installation page names the tag in each URL. Promoting a
-  release would let the docs recommend `latest` instead.
+- **After 0.4.4 publishes, rewrite installation.md line ~25 to use `releases/latest`.** Every
+  release before 0.4.4 is a pre-release, so `releases/latest/` resolves to the old `0.1.1` tag and
+  the installation page names the tag in each URL. 0.4.4 is the first full release, and nightlies
+  are pre-releases with `--latest=false`, so from then on `releases/latest` is the newest full
+  release.
 - **The README's diagnostics are not checked.** `docs/` samples are tests (`test_docs`), but the
   two diagnostics in `README.md` and `editors/code/README.md` are pasted text that goes stale when
   a message or blame range changes; re-capture them after such a change.
@@ -2742,9 +2767,16 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
-- **The base packages have no code image.** GNU R's build makes `stats`, `utils` and the other
-  base packages' lazy-load databases without `R CMD INSTALL`, so their closures compile at first
-  call; the recommended packages, which `tools/base-r/build.sh` installs, do get images.
+- **Symbols are not compacted with the start image.** Symbols keep their addresses because frame
+  filters, slot indexes, hash tables and record layout tags hash them (decisions.md, "The start
+  image is compacted in touch order at write time"). Moving them too needs every such table rebuilt
+  after the move; an empty start still touches 821 image pages where perfect packing would touch
+  about 480.
+- **Unforced base bindings still compile at run time.** The start image holds compiled code for
+  every closure bound in a loaded namespace, but lazy-load bindings that start-up never forces
+  (most of stats and utils) are fetched and compiled when a session first calls them. Forcing them
+  all at image write would move that cost to the build, at the price of a larger image; measure
+  the image size and a full collection's page touches before doing it.
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
   because the pending check is dropped at exit. A function without parameters whose body is a
