@@ -37,10 +37,12 @@ A start-up image and a package's code image load only into the build of ry that 
 build that cannot load them starts the slow way, which costs up to a sixth more instructions and
 several MB more memory. Builds that share a base R tree each keep their own images there
 (crates/rcmd/src/images.rs), and a build writes its images the first time it starts. Before the
-first suite, bench.py starts each ry build once, so no timed process pays for writing them. Every
-ry process runs with `RY_IMAGE_LOG=1`, and one that reports an unused image fails, so a run never
-compares a fast start with a slow one. A build whose runtime predates `RY_IMAGE_LOG` cannot report
-one, so bench.py refuses it.
+first suite, bench.py starts each ry build once, so no timed process pays for writing them, and
+stops when a package in the corpus library or `R_LIBS` has only another build's code image, naming
+the packages to reinstall (`refuse_foreign_images`). Every ry process runs with `RY_IMAGE_LOG=1`,
+and one that reports an unused image or writes images fails, so a run never compares a fast start
+with a slow one. A build whose runtime predates `RY_IMAGE_LOG` cannot report one, so bench.py
+refuses it.
 
 `--samples FILE` keeps every round's raw samples in FILE as it goes, and a later run with the same
 FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
@@ -114,8 +116,7 @@ def main():
                      "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
     for binary in filter(None, [args.ry, args.baseline]):
         refuse_unreleased(binary)
-    for binary in dict.fromkeys(filter(None, [args.ry, args.baseline])):
-        start_once(binary)
+    refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
     manifests = {suite: load_suite(suite) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
@@ -167,27 +168,61 @@ def engines(args, suite):
     return table
 
 
-def start_once(binary):
-    """Starts the ry build `binary` once, so it writes its images into the base R tree it finds if
-    they are missing, and exits when it reports an image it cannot use or cannot report one. The
-    probe loads a function from stats, so it opens a code image as well as the start-up image."""
-    runtime = runtime_of(binary)
-    if runtime is not None and b"RY_IMAGE_LOG" not in runtime.read_bytes():
-        sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot report "
-                 "a start-up or code image it does not use, and its timings may measure a slow start; "
-                 "compare a build that has it")
-    with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
-        script = pathlib.Path(work) / "probe.R"
-        script.write_text("invisible(stats::median(c(3, 1, 2)))\n")
-        env = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1")
-        status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], env, cwd=work,
-                                       check_images=False)
-    if status != 0:
-        sys.exit(f"error: {binary} cannot run a one-line R script: {failure_reason(out, err)}")
-    unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
-    if unused:
-        sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would time "
-                 "a slow start:\n" + "\n".join(f"  {line}" for line in unused))
+def refuse_foreign_images(binaries):
+    """Exits unless every ry build in `binaries` would load only images it wrote itself.
+
+    An image loads only into the build whose identity its file name carries
+    (crates/rcmd/src/images.rs), and any other build starts the slow way or runs the package without
+    its compiled code. Each build starts once first, which writes its images into the base R tree
+    it finds if they are missing; the probe loads a function from stats, so it opens a code image as
+    well as the start-up image, and it must report no unused image. A package library gets code
+    images only when a package is installed, so a package there that has only another build's code
+    image stops the run with the list of packages to reinstall.
+    """
+    for binary in dict.fromkeys(binaries):
+        runtime = runtime_of(binary)
+        if runtime is not None and b"RY_IMAGE_LOG" not in runtime.read_bytes():
+            sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot "
+                     "report a start-up or code image it does not use, and its timings may measure a "
+                     "slow start; compare a build that has it")
+        with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
+            script = pathlib.Path(work) / "probe.R"
+            script.write_text("invisible(stats::median(c(3, 1, 2)))\n")
+            env = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1")
+            status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], env, cwd=work,
+                                           check_images=False)
+        if status != 0:
+            sys.exit(f"error: {binary} cannot run a one-line R script: {failure_reason(out, err)}")
+        unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
+        if unused:
+            sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would "
+                     "time a slow start:\n" + "\n".join(f"  {line}" for line in unused))
+        identity = runtime_identity(runtime) if runtime is not None else None
+        if identity is None:
+            # A release carries its runtime inside itself, so its identity cannot be read here.
+            continue
+        libraries = [corpus.corpus / "library"]
+        libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
+                      for part in os.environ.get(variable, "").split(os.pathsep) if part]
+        stale = sorted({package.name for library in libraries if library.is_dir()
+                        for package in library.iterdir() if foreign_code_image(package, identity)})
+        if stale:
+            sys.exit(f"error: {binary} (runtime {identity}) would run these packages without their "
+                     "compiled code, because another build of ry installed them; reinstall them with "
+                     "this build: " + ", ".join(stale))
+
+
+def foreign_code_image(package, identity):
+    """Whether the installed `package` has a code image of its lazy-load database, but none of the
+    runtime build `identity`: `R/<name>.<build>.ryc`, or `R/<name>.ryc` from a ry that predates
+    build-keyed names."""
+    code = package / "R"
+    images = list(code.glob(f"{glob_escape(package.name)}.*ryc"))
+    return bool(images) and not (code / f"{package.name}.{identity}.ryc").is_file()
+
+
+def glob_escape(text):
+    return re.sub(r"([*?\[])", r"[\1]", text)
 
 
 def runtime_of(binary):
@@ -720,6 +755,14 @@ def refuse_unreleased(binary):
     if re.search(r"\b[\w.-]+ build\b", version):
         sys.exit(f"error: {binary} is not a release build ({version}); benchmarks time release builds "
                  "only, so build it with `cargo build --release -p ry-lang -p libr`")
+
+
+def runtime_identity(library):
+    """The identity of the runtime library `library`, which names every image it writes."""
+    import ctypes
+    function = ctypes.CDLL(str(library), mode=os.RTLD_LOCAL).ry_runtime_id
+    function.restype = ctypes.c_char_p
+    return function().decode()
 
 
 def metadata(args):

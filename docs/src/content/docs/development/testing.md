@@ -495,10 +495,13 @@ leaves the `.ryc` images cached.
 Two builds can share `target/base-r` in a comparison, because each loads only images its own
 name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
 [the architecture page](/development/architecture#the-start-up-image)). A build's first start
-writes its images, so `tools/bench/bench.py` starts each build once before timing anything.
-`RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was written by another build of the
-runtime` (or why else it skipped an image) on standard error, and `bench.py` sets it on every timed
-process and fails one that prints it, because that process timed a slow start. It refuses a runtime
+writes its images into the base R tree, so `tools/bench/bench.py` starts each build once before
+timing anything. A package library gets code images only when a package is installed, so bench.py
+stops when a package in the corpus library or `R_LIBS` has only another build's code image, and
+names the packages to reinstall. `RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was
+written by another build of the runtime` (or why else it skipped an image) on standard error, and
+`ry: image written: ...` when it writes a build's images. `bench.py` sets it on every timed process
+and fails one that prints either, because that process timed a slow start. It refuses a runtime
 that predates the flag. `two_builds_alternate_starts_without_displacing_each_others_images` in
 `crates/ry/tests/test_perf.rs` pins both halves.
 
