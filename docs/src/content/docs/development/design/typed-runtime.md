@@ -491,7 +491,7 @@ the argument types it sees, which covers scalars, vectors and Arrays of numbers,
 strings, lists of scalars, records, tuples and tags, `match` over them, dictionaries, results,
 local functions (inlined), typed closures passed by name (called), `lapply`, `vapply` and the
 `List` functions over either, and the `Str` builtins of the benchmark programs. It differs from
-this draft in five ways:
+this draft in these ways:
 
 - The IR is lowered at run time from the closure's R syntax, not from a serialized summary the
   analysis computes, and its global calls are guarded by the bindings they resolved to.
@@ -504,8 +504,15 @@ this draft in five ways:
   `match` over any tag (a tag from R, or a tag field) tests the shapes the process has confirmed,
   and the code compiles again once another shape is confirmed (`decisions.md`, "Typed boxes have
   shapes, and a tag type is a union of them").
-- Code lives in memory for the process. Code files, `ry install` compilation, `ry build --exe`,
-  value tracking, pools and the background workers are not built.
+- `ry install` compiles a package's typed functions for the types they declare and writes the
+  code into the native section of the package's code image, where a new session's first call
+  finds it (CLI reference, "build and install"; `decisions.md`, "Typed closures compile at
+  install into the code image"). It covers functions over numbers, `Bool`, `Str` and lists, with
+  direct calls between them. A function that calls R, or that builds or takes a record, a tuple
+  or a tag, compiles at its first call, and so does everything `ry run` and `ry load` compile:
+  that code lives in memory for the process. The image carries no stamps of the namespaces it
+  calls into. It checks each name it resolved when a session first uses the code instead.
+- `ry build --exe`, value tracking, pools and the background workers are not built.
 
 A call whose arguments are unforced promises, a default argument or a construct the lowering does
 not know runs on the native path in `crates/jit/src/native.rs` instead.

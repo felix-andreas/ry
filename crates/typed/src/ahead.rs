@@ -561,10 +561,10 @@ thread_local! {
 /// can be adopted. The closure is kept alive, because its address names it from here on.
 pub unsafe fn identify(closure: Sexp, identity: Identity) {
     IDENTITIES.with_borrow_mut(|identities| {
-        if !identities.contains_key(&closure) {
+        identities.entry(closure).or_insert_with(|| {
             interp::heap().preserve(closure);
-            identities.insert(closure, identity);
-        }
+            identity
+        });
     });
 }
 
@@ -572,10 +572,10 @@ pub unsafe fn identify(closure: Sexp, identity: Identity) {
 /// adopts. A closure is offered code once.
 pub unsafe fn offer(closure: Sexp, offers: Vec<Offer>) {
     OFFERS.with_borrow_mut(|offered| {
-        if !offered.contains_key(&closure) {
+        offered.entry(closure).or_insert_with(|| {
             interp::heap().preserve(closure);
-            offered.insert(closure, offers);
-        }
+            offers
+        });
     });
 }
 

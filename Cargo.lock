@@ -4936,6 +4936,7 @@ dependencies = [
  "smallvec",
  "ssa",
  "stacker",
+ "syntax",
 ]
 
 [[package]]

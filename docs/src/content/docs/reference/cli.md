@@ -390,10 +390,24 @@ runs, and checked again after any binding is unlocked (`unlockBinding`, `assignI
 replaced function is always the one that runs. Machine code is written for x86-64 Linux, and
 other systems ignore it.
 
-`--explain` (`R CMD INSTALL --ry-explain`) prints what the install compiled. The functions left
-in the interpreter come first, largest first, each with what kept it there; then every
-specialization of a native function with its argument types, which it tests when called, and the
-names it looks up once (excerpt):
+A typed function, one whose parameters all declare their types, is compiled as typed code for
+exactly the types it declares: `I64`, `F64`, `Bool`, `Str`, `List<T>`, and R's `double`,
+`integer`, `logical`, `character` and `T[]`. Nothing runs at install, because the types come from
+the annotations. In a new session the first call with arguments of the declared types runs that
+code, and the session compiles nothing for it. A call with other types that the annotations allow,
+such as an integer for a `double` parameter, compiles in the session at that call, as it does
+without an image. A typed function that calls a typed sibling calls it directly in the machine
+code, and it compiles again in the session once the sibling is replaced. Three kinds of typed
+function wait for their first call instead: one that calls an R function, one that builds or takes
+a record, a tuple or a tag, and one with a parameter whose declared type is not in the list above.
+The typed standard library (`List`, `Str`, `Num`, `Dict` and the rest) is part of the `ry` binary,
+so it is machine code before any package is installed.
+
+`--explain` (`R CMD INSTALL --ry-explain`) prints what the install compiled. The functions
+without machine code come first, largest first, each with what kept it out: `interpreter` for an
+untyped function and `first call` for a typed one. Then comes each `typed` function with the types
+it runs for, and every specialization of a `native` function with its argument types, which it
+tests when called. Both name what they look up once (excerpts from two packages):
 
 ```text
 machine code: 4 of 5 functions, by size (calls and operators in the body)
@@ -403,6 +417,20 @@ machine code: 4 of 5 functions, by size (calls and operators in the body)
   ...
   native          4  hypot(double, double) -> double: tests 2 arguments on entry; looks up sqrt, +, square, * once
 ```
+
+```text
+machine code: 10 of 12 functions, by size (calls and operators in the body)
+  first call      6  point_sum: a record, tuple or tag, whose shape a session numbers as it meets it, so install-time code cannot hold one yet
+  first call      5  checked: a call of an R function, such as `stop`, which install-time code cannot make yet
+  typed           9  mean_of(List<F64>) -> F64: runs for arguments of exactly these types; looks up +, /, Num.to_f64, List.len once
+  typed           9  total(I64, F64) -> F64: runs for arguments of exactly these types; looks up +, *, List.range, grow, Num.to_f64 once
+  ...
+  typed           2  grow(F64, F64) -> F64: runs for arguments of exactly these types; looks up +, * once
+```
+
+With `RY_TYPED_LOG=1`, a session prints a line when a call runs a typed function's install-time
+code for the first time, such as `typed: adopted install-time code for [I64, Dbl] -> Dbl`, and
+`typed: compiled for ...` when it compiles one itself.
 
 An argument that is a call, such as `f(-1)` or `f(c(1, 2))`, reaches the function unevaluated, and
 such a call runs in the interpreter; an argument that is a constant or a variable does not.

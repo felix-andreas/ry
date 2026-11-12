@@ -364,14 +364,14 @@ pub fn image_symbol(name: &str) -> Option<usize> {
 /// The bytes a string constant's symbol names: valid UTF-8 too long to store inline, since an
 /// inline string needs no symbol and its first word is not a buffer's address.
 fn string_of_hex(hex: &str) -> Option<Vec<u8>> {
-    let digits = hex.as_bytes();
-    if digits.len() % 2 != 0 {
+    let (pairs, rest) = hex.as_bytes().as_chunks::<2>();
+    if !rest.is_empty() {
         return None;
     }
     let digit = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
-    let bytes = digits
-        .chunks_exact(2)
-        .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
+    let bytes = pairs
+        .iter()
+        .map(|&[high, low]| Some(digit(high)? << 4 | digit(low)?))
         .collect::<Option<Vec<u8>>>()?;
     (bytes.len() > values::INLINE_CAPACITY && std::str::from_utf8(&bytes).is_ok()).then_some(bytes)
 }

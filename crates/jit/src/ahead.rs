@@ -630,19 +630,18 @@ fn report(outcomes: &[Outcome]) {
                 );
                 continue;
             }
-            Some(Err(why)) => {
-                println!("  first call  {:>5}  {}: {why}", outcome.size, outcome.name)
+            Some(Err(why)) if outcome.compiled.is_empty() => {
+                println!("  first call  {:>5}  {}: {why}", outcome.size, outcome.name);
+                continue;
             }
-            None => {}
-        }
-        if outcome.compiled.is_empty() {
-            if outcome.typed.is_none() {
+            None if outcome.compiled.is_empty() => {
                 println!(
                     "  interpreter {:>5}  {}: {}",
                     outcome.size, outcome.name, outcome.refusal
                 );
+                continue;
             }
-            continue;
+            Some(Err(_)) | None => {}
         }
         for specialization in &outcome.compiled {
             let types: Vec<&str> = specialization

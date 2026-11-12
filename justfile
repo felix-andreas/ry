@@ -173,6 +173,12 @@ bench-stdlib filter="" n="1e6" *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/bench/internal/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
 
+# Measures install-time typed code against first-call compilation: first calls, memory and failed entries of two generated
+# packages, with and without the code image, e.g. `just bench-install-code --runs 31`.
+bench-install-code *args:
+    cargo build --release -p ry-lang -p libr -p rcmd
+    python3 -I tools/bench/internal/install_time_code.py --ry target/release/ry {{ args }}
+
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
 # `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
 # (`--joins-only` runs the join questions alone).

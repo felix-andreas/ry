@@ -12,7 +12,7 @@ file pkg/DESCRIPTION
 | Description: Typed functions that an install compiles to machine code.
 | License: MIT
 file pkg/NAMESPACE
-| export(grow, total, label, shout, mean_of, squares, is_even, checked, circle, point_sum)
+| export(grow, total, label, shout, mean_of, squares, is_even, checked, circle, point_sum, half)
 file pkg/R/typed.R
 | grow <- function(x: F64, rate: F64) -> F64 x + rate * x
 | total <- function(n: I64, rate: F64) -> F64 {
@@ -42,10 +42,11 @@ file pkg/R/typed.R
 |   p <- (x = x, y = y)
 |   p$x + p$y
 | }
+| half <- function(x: double) -> double x / 2
 
 run ry install pkg -l library --explain
 expect exit 0
-expect stdout "machine code: 8 of 10 functions"
+expect stdout "machine code: 9 of 11 functions"
 expect stdout "total(I64, F64) -> F64: runs for arguments of exactly these types; looks up +, *, List.range, grow, Num.to_f64 once"
 expect stdout "mean_of(List<F64>) -> F64: runs for arguments of exactly these types"
 expect stdout "squares(I64) -> List<I64>: runs for arguments of exactly these types"
@@ -136,3 +137,17 @@ expect exit 0
 expect stderr "typed: install-time code for [I64, Dbl] is not used: `grow` is no longer what it was compiled against"
 expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
 expect stdout "[1] 4.5"
+
+# Install-time code runs for the declared types only. An integer is a legal argument for a
+# `double` parameter, so the session compiles a second version for it at that call.
+file other-types.R
+| library(typedcode, lib.loc = "library")
+| print(half(3))
+| print(half(5L))
+
+run ry run --runtime ry other-types.R
+expect exit 0
+expect stderr "typed: adopted install-time code for [Dbl] -> Dbl"
+expect stderr "typed: compiled for [Int] -> Dbl"
+expect stdout "[1] 1.5"
+expect stdout "[1] 2.5"

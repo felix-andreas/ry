@@ -700,6 +700,21 @@ the trained profile below, and the native code it reserves room for.
   interpreter. Two gaps remain. The checker's inferred types are not used yet, so the types are
   guesses. And arguments are read only when they are values, constants or variables, as for the
   JIT's native entry, so `f(-1)` runs in the interpreter.
+- **Typed code.** A strict typed closure goes through the typed core instead
+  (`crates/typed/src/ahead.rs`), into the same object and section. Its argument types are the
+  ones it declares, read from the annotation texts, so nothing is guessed. The typed backend has
+  two linkages: code for the running process holds absolute addresses, and code for an image names
+  everything outside it as a link-table symbol (`typed.<runtime function>`, `typed.interrupt`,
+  `typed.str.<hex bytes>` for a string constant too long to hold inline) and calls a typed sibling
+  directly inside the object. The manifest lists each typed function with its types, the exported
+  names of the function and its entry stub, and the names it resolved: a base or `package:ry`
+  function, a standard-library constant such as `Num.pi`, or a sibling. The typed core adopts the
+  code at the first call it has no code for (`typed::ahead::adopt`): it resolves each name again
+  from the closure's environment and rebuilds the guards the typed core checks on every call, so a
+  name that no longer resolves as it did leaves the function to compile at that call. A closure
+  with typed code gets no native function, which would run first and without those guards. Shape
+  numbers of records, tuples and tags are numbered per process, and an R call site holds a
+  process address, so a function with either compiles at its first call.
 
 The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
 against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it

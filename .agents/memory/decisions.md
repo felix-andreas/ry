@@ -9352,3 +9352,44 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** The registry stays the one source of truth in memory. The stream carries a copy: the writer (`libr::serialize`) gives a typed closure one extra first attribute, `annotations::STREAM_ATTRIBUTE`, holding the masks, texts and names, and the reader (`interp::serialize`) takes it off and registers it (`annotations::restore_signature`), so a closure in memory never has the attribute. Another R reads such a stream as a closure with one unknown attribute.
 - **A typed function may call a sibling that is not loaded yet.** `typed::lower::resolve_function` forces a lazy-load promise of any package (recognized by `serialize::lazy_record_header`), not only base's, because such a promise only reads the function from the package database. Before, a typed function whose first call found a sibling still unloaded was refused for good.
 - **Impact.** Installed typed packages check, convert and compile as the same code does in a script, which install-time compilation of typed closures needs: it reads the declared types. Pinned by the scenario `install-typed-package`.
+
+## Typed closures compile at install into the code image
+
+- **Previous shape.** The typed core (`crates/typed`) lowered and compiled a strict typed closure at its first call, for the argument types of that call. Its backend wrote process values into the code: the addresses of about a hundred runtime functions and of the interrupt flag, pointers to long string constants and static boxes, shape numbers, R call sites and callee addresses. Install-time code (`crates/jit/src/ahead.rs`) came from the scalar native tier only, which also compiled typed closures, for guessed types.
+- **Target shape.** One emitter, two linkages (`typed::backend::compile` and `compile_into`). Code for the process keeps absolute addresses. Code for an image names what lies outside it as link-table symbols that `ssa::section::load` fills: `typed.<runtime function>` from one const table (`RUNTIME`, searched at compile time by `address!`, so a function missing from it is a compile error), `typed.interrupt`, and `typed.str.<hex bytes>` for a string constant too long to hold inline, whose slot is the address of a leaked static buffer (the length stays an immediate). A typed sibling is a direct call inside the object (`Target::Function`).
+- **Types come from the annotations.** `typed::ahead::declared_params` reads the declared types (`I64`, `F64`/`double`, `integer`, `Bool`/`logical`, `Str`/`character`, `T[]`, `List<T>`, `Set<T>`, `Dict<K, V>`) without running anything, and a function is compiled once, for exactly those types. The runtime resolves no aliases, so a parameter declared through one is refused, as is a record, tuple or tag parameter.
+- **Adoption is lazy and re-resolves every name.** The manifest lists each typed function with its entry and ordinal, types, exported names and the names it resolved (a base or `package:ry` function, a standard-library constant, a sibling). `jit::ahead::attach` hands the code to the typed core as an offer per closure. The first `compiled_or_refusal` miss for the declared types takes it (`typed::ahead::adopt`): each name is resolved again from the closure's environment, which forces a sibling's lazy-load promise, and the speculations are rebuilt from what was found, so the check every typed call already makes (`still_resolves`) guards install-time code and session code alike. A name that resolves to something else leaves the function to compile at that call. A standard-library constant is identified by the object bound, not by the cell, because the attached library binds the same object in another cell.
+- **A closure with typed code gets no scalar native function.** Native entries run before the typed core and without its guards, so both for one closure would let the unguarded one win.
+- **What stays out, with a reason in `--explain`.** A function with an R call site (the site is a process address), one that constructs or holds a record, tuple or tag (shape numbers are per process), a `match` over any tag (its code depends on the shapes a session has confirmed), a callee outside the package or with another environment, and `...`.
+- **The typed standard library needs no second mechanism.** `List`, `Str`, `Num`, `Dict` and the rest are Rust builtins and lowerer intrinsics, so ry's own build compiles them ahead of time. There is no typed-R library source to compile.
+- **Impact.** Measured by `tools/bench/internal/install_time_code.py` on a generated package of 50 typed functions (ten shapes over numbers, strings and lists, five variants each), each called once in a fresh process; medians of 31 runs of an `iterate` build (release optimization, no LTO) on a loaded 4-core machine:
+
+  | Fresh process calling 50 functions once | Image | No image |
+  | --- | ---: | ---: |
+  | The 50 first calls | 1.0 ms | 40.1 ms |
+  | Process CPU time | 54 ms | 94 ms |
+  | Anonymous memory the calls add | 0.5 MiB | 1.5 MiB |
+  | File-backed resident memory the calls add | 1.4 MiB | 4.3 MiB |
+  | Peak resident memory the calls add | 1.8 MiB | 5.9 MiB |
+  | 10,000 further calls | 23.3 ms | 24.1 ms |
+
+  "The calls add" is the difference to the same script with the calls not run. The totals of the two modes do not compare: `RY_CODE_IMAGE=0` also turns off the base packages' images, which are 4 MiB of mapped file pages, so both peak at 49.9 MiB. Without an image the file-backed growth is the compiler's own code paged in from the binary. The further calls cost the same, so reading addresses through the link table costs nothing measurable. Pinned by the scenarios `install-typed-machine-code` and `install-typed-package`, and by the manifest and type-encoding fuzz tests in `crates/jit/src/ahead.rs` and `crates/typed/src/ahead.rs`.
+
+## A failed entry of install-time code falls back to the session, with no slow second version
+
+- **Question.** When a call's arguments are not the types install-time code was compiled for, Bun runs a compiled slow second version of the function. ry could compile one at install, or keep falling back to what a session does without an image.
+- **What a failed entry costs, measured.** `tools/bench/internal/install_time_code.py` installs a package of typed and untyped functions, five per shape, and times their first calls and 100,000 calls after them; medians of 31 fresh processes of an `iterate` build on a loaded 4-core machine:
+
+  | Call | First call, per function | Each later call |
+  | --- | --- | --- |
+  | Typed, declared types (`double`), from the image | 0.06 ms | 0.44 µs |
+  | Typed, declared types, no image | 0.49 ms | 0.49 µs |
+  | Typed, an integer for a `double` parameter: the session compiles a version for integers | 0.51 ms | 0.49 µs |
+  | Typed loop, declared types (`double`, `integer`), from the image | 0.06 ms | 0.45 µs |
+  | Typed loop, a double for an `integer` count: the annotation rejects it, the interpreter runs it | 2.3 ms | 1.64 µs |
+  | Untyped, double scalars, from the image | 0.05 ms | 0.54 µs (0.73 µs without an image) |
+  | Untyped, a logical argument: the entry tests fail, the interpreter runs it | 0.06 ms | 1.01 µs (0.77 µs without an image) |
+
+- **Decision.** ry compiles no slow second version at install. A failed entry falls back to the session: the typed core compiles a version for the types that arrived when the annotations allow them, and the interpreter and JIT run the call otherwise.
+- **Why.** For a typed function, the types that arrive get their own specialized code after one first-call compile of about 0.5 ms, and from then on a call costs what a call with the declared types costs. A generic slow version would be slower than that on every call. The calls that do end in the interpreter are the ones the annotations reject. With ry's own types such a call is an error, so it has no slow path at all. With R types it costs about 1.2 µs more per call here, which is the most a slow version could win back, in exchange for a second copy of every function in the image.
+- **Impact.** The image holds one version per typed function, for the declared types. The untyped row shows a cost this decision does not remove: a closure with install-time native code whose calls fail the entry tests runs slower than the same closure without an image (`backlog.md`, "ahead-of-time compilation of typed ry"). Pinned by the scenario `install-typed-machine-code`, whose last run calls a `double` function with an integer.
