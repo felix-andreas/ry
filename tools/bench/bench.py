@@ -28,9 +28,17 @@ under 0.1 s (a program whose GNU R time is that short is also left out of the ge
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
 typed program, with the refusal that `RY_TYPED_LOG` printed.
 
+The published numbers measure the official release archive itself, so `--write` takes
+`--release ARCHIVE`, the Linux x86_64 archive of a tagged release (`ry-x86_64-unknown-linux-gnu.tar.gz`).
+The runner unpacks it into a private directory with its own cache directory, where the archive's
+`ry` extracts the runtime and base R it embeds, and results.json records the release tag and the
+archive's sha256. A nightly archive runs too, but `--write` refuses it. Without `--release`, `--ry`
+names the build under test.
+
 Before anything runs, every ry under test must load only start-up and code images its own runtime
 build wrote, and two binaries must not share a base R tree; otherwise the run stops and names the
-stale files (`refuse_foreign_images`).
+stale files (`refuse_foreign_images`). For a release that means the images it shipped in its base R,
+and no package library may hold an image another build wrote.
 
 Every suite checks before it runs that the corpus library holds each package its programs load, at
 the version lock.tsv pins (for the packages suite, every locked package), and stops with the list of
@@ -41,12 +49,12 @@ the missing packages, and `--write` refuses such a run.
 FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
-Usage: tools/bench/bench.py SUITE... | all [--ry PATH] [--rscript PATH] [--rounds N] [--seed N]
+Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial]
 """
-import argparse, json, math, os, pathlib, platform, random, shlex, statistics, subprocess, sys
-import re, tempfile, threading, time, tomllib
+import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, shlex, shutil, statistics
+import re, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -73,7 +81,10 @@ STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("suites", nargs="+", metavar="SUITE", help=f"{', '.join(SUITES)} or all")
-    parser.add_argument("--ry", default=str(root / "target/release/ry"))
+    build = parser.add_mutually_exclusive_group()
+    build.add_argument("--ry", default=str(root / "target/release/ry"), help="the ry build under test")
+    build.add_argument("--release", metavar="ARCHIVE", type=pathlib.Path,
+                       help="the release archive under test, which --write requires")
     parser.add_argument("--rscript", default=os.environ.get("ORACLE_R_RSCRIPT", "Rscript"),
                         help="GNU R's Rscript")
     parser.add_argument("--rounds", type=int, default=PUBLISHED_ROUNDS)
@@ -92,17 +103,25 @@ def main():
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
+    release = None
+    if args.release:
+        args.ry, release = unpack_release(args.release)
     if args.write:
+        if release is None:
+            sys.exit("error: --write records the official release archive; pass --release ARCHIVE, "
+                     "the ry-x86_64-unknown-linux-gnu.tar.gz of the tagged release")
+        if release["nightly"]:
+            sys.exit(f"error: --write records a tagged release, and {release['tag']} is a nightly build")
         if args.rounds < PUBLISHED_ROUNDS:
             sys.exit(f"error: --write needs at least {PUBLISHED_ROUNDS} rounds")
         if args.filter or args.baseline or args.jit_off:
             sys.exit("error: --write records every program on the published engines only")
         if args.partial:
             sys.exit("error: --write records complete runs only, so it does not take --partial")
-        changes = sorted({line for tree in {checkout_of(args.ry), str(root)} for line in changed_paths(tree)})
+        changes = changed_paths(str(root))
         if changes:
-            sys.exit("error: --write records a clean commit, but the working tree has changes; commit or "
-                     "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
+            sys.exit("error: --write records a clean commit of the benchmark programs, but the working "
+                     "tree has changes; commit or remove them:\n" + "\n".join(f"  {line}" for line in changes))
     for binary in filter(None, [args.ry, args.baseline]):
         refuse_unreleased(binary)
     refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
@@ -112,9 +131,10 @@ def main():
         sys.exit("error: the corpus library lacks packages the suites load; run "
                  "`just bench-packages install`, or pass --partial to run without them:\n"
                  + "\n".join(f"  {suite}: {', '.join(names)}" for suite, names in missing.items() if names))
-    meta = metadata(args)
+    meta = metadata(args, release)
     print(f"Machine: {meta['machine']['cpu']}, {meta['machine']['cores']} cores, {meta['machine']['kernel']}")
-    print(f"GNU R: {meta['gnu_r']['version']}, BLAS {meta['gnu_r']['blas']}; ry {meta['ry_commit']}\n")
+    measured = f"release {release['tag']} (sha256 {release['sha256']})" if release else meta["ry_commit"]
+    print(f"GNU R: {meta['gnu_r']['version']}, BLAS {meta['gnu_r']['blas']}; ry {measured}\n")
     failed = False
     for suite in suites:
         failed |= run_suite(suite, manifests[suite], missing[suite], args, meta)
@@ -693,44 +713,97 @@ def refuse_unreleased(binary):
                  "only, so build it with `cargo build --release -p ry-lang -p libr`")
 
 
+def unpack_release(archive):
+    """Unpacks a release archive into a private directory and returns its `ry` with what results.json
+    records about it: the tag, the archive's file name and sha256, and whether it is a nightly.
+
+    The cache directory moves into that private directory too (XDG_CACHE_HOME), so the archive's
+    `ry` extracts the runtime and base R it embeds afresh and reads no other build's from the user's
+    cache, and RY_LIBR, RY_BASE_R and R_HOME are cleared so they cannot point it at another build.
+    """
+    try:
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    except OSError as error:
+        sys.exit(f"error: cannot read the release archive {archive}: {error}")
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-release-"))
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    try:
+        with tarfile.open(archive) as tar:
+            tar.extractall(scratch / "archive", filter="data")
+    except (OSError, tarfile.TarError) as error:
+        sys.exit(f"error: cannot unpack the release archive {archive}: {error}")
+    ry = scratch / "archive" / "ry"
+    if not ry.is_file():
+        sys.exit(f"error: {archive} holds no `ry` at its top level, so it is not a Linux or macOS release archive")
+    os.environ["XDG_CACHE_HOME"] = str(scratch / "cache")
+    for variable in ("RY_LIBR", "RY_BASE_R", "R_HOME"):
+        os.environ.pop(variable, None)
+    try:
+        version = subprocess.run([ry, "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"error: cannot run the release archive's ry: {error}")
+    tag, nightly = release_tag(version)
+    if tag is None:
+        sys.exit(f"error: the release archive's ry names no release (`ry --version` printed {version!r})")
+    return str(ry), {"tag": tag, "nightly": nightly, "archive": archive.name, "sha256": digest}
+
+
+def release_tag(version):
+    """The tag `ry --version` names and whether it is a nightly: `ry 0.4.4-beta` is release tag
+    `0.4.4-beta`, and `ry 0.4.3-beta (nightly.20261110.1955.a15ce0)` is the nightly of that name.
+    A local build names its profile instead (`(iterate build)`), which is no tag."""
+    match = re.fullmatch(r"ry (\S+)(?: \((nightly\.[\w.]+)\))?", version)
+    if match is None:
+        return None, False
+    return (match[2] or match[1]), match[2] is not None
+
+
 def refuse_foreign_images(binaries):
     """Exits when a ry under test would load a start-up or code image another build wrote, or when
     two of them share one base R tree.
 
     An image loads only into the runtime build that wrote it, and every other build ignores it, so
     the packages it covers run without their compiled code and start-up takes the slow path, and a
-    comparison would credit that time to the code under test. Each binary runs once first, because a start rewrites a stale start-up image and the base
-    packages' images; the recommended packages' images are rewritten only by `just base-r`, and a
-    package library's only by reinstalling the package.
+    comparison would credit that time to the code under test. Each binary runs once first, because a
+    start rewrites a stale start-up image and the base packages' images, and because a release
+    extracts its runtime and base R on its first start. The recommended packages' images are
+    rewritten only by `just base-r`, and a package library's only by reinstalling the package.
     """
     homes = {}
     for binary in binaries:
-        identity = runtime_identity(binary)
-        home = base_tree(binary)
+        with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
+            script.write("cat(R.home())\n")
+            script.flush()
+            started = subprocess.run([binary, "run", "--runtime", "ry", script.name],
+                                     capture_output=True, text=True, timeout=600)
+        if started.returncode != 0:
+            sys.exit(f"error: {binary} does not start: {started.stderr.strip()}")
+        identity, home = runtime_identity(binary), base_tree(binary)
         if identity is None or home is None:
-            # A release embeds its runtime and base R, whose images it wrote itself.
-            continue
+            identity, home = embedded_runtime(binary, pathlib.Path(started.stdout.strip()))
         if home in homes:
             sys.exit(f"error: {homes[home]} and {binary} share the base R tree {home}, so each start "
                      "of one rewrites the start-up image the other loads; give each build its own "
                      "copy with `ry-rcmd start-image BASE --libr LIBR` and point RY_BASE_R at it")
         homes[home] = binary
-        with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
-            script.write("invisible(NULL)\n")
-            script.flush()
-            subprocess.run([binary, "run", "--runtime", "ry", script.name], capture_output=True, timeout=600)
-        libraries = [home / "library", corpus.corpus / "library"]
-        libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
-                      for part in os.environ.get(variable, "").split(os.pathsep) if part]
-        images = [home / "library/base/R/ry-start.image"]
-        images += sorted({image for library in libraries if library.is_dir()
-                          for image in library.glob("*/R/*.ryc")})
-        stale = [image for image in images if image_writer(image) != identity]
+        stale = foreign_images(identity, home)
         if stale:
             sys.exit(f"error: {binary} (runtime {identity}) would ignore these images, which another "
                      "build wrote, and run that code without them; run `just base-r` for base R's "
                      "packages and reinstall any other package with this build:\n"
                      + "\n".join(f"  {image} ({image_writer(image) or 'unreadable'})" for image in stale))
+
+
+def foreign_images(identity, home):
+    """The start-up and code images that a runtime of `identity` with base R tree `home` would load
+    but did not write: base R's, and those of the corpus library and of `R_LIBS` and `R_LIBS_USER`."""
+    libraries = [home / "library", corpus.corpus / "library"]
+    libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
+                  for part in os.environ.get(variable, "").split(os.pathsep) if part]
+    images = [home / "library/base/R/ry-start.image"]
+    images += sorted({image for library in libraries if library.is_dir()
+                      for image in library.glob("*/R/*.ryc")})
+    return [image for image in images if image_writer(image) != identity]
 
 
 def runtime_identity(binary):
@@ -739,8 +812,20 @@ def runtime_identity(binary):
     directory = pathlib.Path(binary).resolve().parent
     library = next((directory / name for name in ("libR.so", "libR.dylib", "R.dll")
                     if (directory / name).is_file()), None)
-    if library is None:
-        return None
+    return None if library is None else library_identity(library)
+
+
+def embedded_runtime(binary, home):
+    """The identity and R home of a ry that embeds its runtime, read from the R home it extracted:
+    the home's `.libr` names the runtime library on its first line."""
+    try:
+        library = pathlib.Path((home / ".libr").read_text().splitlines()[0])
+    except (OSError, IndexError) as error:
+        sys.exit(f"error: {binary} reported the R home {home}, which names no runtime library: {error}")
+    return library_identity(library), home.resolve()
+
+
+def library_identity(library):
     import ctypes
     function = ctypes.CDLL(str(library), mode=os.RTLD_LOCAL).ry_runtime_id
     function.restype = ctypes.c_char_p
@@ -782,7 +867,7 @@ def image_writer(path):
     return header[offset + 8:offset + 8 + length].decode(errors="replace")
 
 
-def metadata(args):
+def metadata(args, release):
     cpu = platform.processor() or platform.machine()
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
@@ -797,12 +882,20 @@ def metadata(args):
     version, lapack, blas = (probe + ["", "", ""])[:3]
     return {
         "date": time.strftime("%Y-%m-%d"),
-        "ry_commit": commit(args.ry),
+        "ry_commit": release_commit(release["tag"]) if release else commit(args.ry),
+        "release": None if release is None else {key: release[key] for key in ("tag", "archive", "sha256")},
         "too_short_seconds": SHORT,
         "gnu_r": {"version": version.strip(), "blas": (blas or lapack).strip()},
         "machine": {"cpu": cpu, "cores": os.cpu_count(), "kernel": f"{platform.system()} {platform.release()}"},
         "command": "tools/bench/bench.py " + " ".join(shlex.quote(argument) for argument in sys.argv[1:]),
     }
+
+
+def release_commit(tag):
+    """The commit a release tag names in this checkout, or None when the tag is not fetched."""
+    found = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
+                           capture_output=True, text=True)
+    return found.stdout.strip() or None
 
 
 def commit(ry):
