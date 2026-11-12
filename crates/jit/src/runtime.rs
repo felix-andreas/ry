@@ -1711,6 +1711,27 @@ pub unsafe extern "C" fn jit_dict_get(
     }
 }
 
+/// `from:to` when it makes integers, or `NULL` for tier 0 to make anything else: doubles,
+/// the error for a missing bound, or, after parking it, an exhausted heap's error.
+pub unsafe extern "C" fn jit_colon(activation: *mut Activation, from: f64, to: f64) -> *mut Header {
+    unsafe {
+        checked(activation, std::ptr::null_mut(), |activation| {
+            let range = -f64::from(i32::MAX)..=f64::from(i32::MAX);
+            if !range.contains(&from) || !range.contains(&to) || from != from.floor() {
+                return std::ptr::null_mut();
+            }
+            match scoped(|| arith::colon(from, to)) {
+                Ok(sequence) if sequence.kind() == SexpType::Integer => sequence.as_ptr(),
+                Ok(_) => std::ptr::null_mut(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
+        })
+    }
+}
+
 /// Whether a calling handler is established, so a warning would run R code.
 pub extern "C" fn jit_handlers_present() -> i32 {
     interp::interp().handlers.is_some() as i32

@@ -2301,7 +2301,8 @@ impl<'p> Translator<'p> {
                 let vector = self.load_register(args[0]);
                 let sequence = matches!(types[0], Ty::IntSeq | Ty::DblSeq);
                 let (length, first, step) = if sequence {
-                    let (length, first, step) = self.sequence_of(position, args[0], vector, types[0]);
+                    let (length, first, step) =
+                        self.sequence_of(position, args[0], vector, types[0]);
                     (Length::Double(length), Some(first), Some(step))
                 } else {
                     let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
@@ -2675,6 +2676,21 @@ impl<'p> Translator<'p> {
                     )
                     .ok_or(Refusal("a helper without a result"))?;
                 self.store_register(dst, value);
+            }
+            Intrinsic::Colon => {
+                let from = self.as_double(args[0], types[0]);
+                let to = self.as_double(args[1], types[1]);
+                let sequence = self
+                    .call(
+                        runtime::jit_colon as *const () as usize,
+                        &[I64, F64, F64],
+                        Some(I64),
+                        &[self.activation, from, to],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let made = self.builder.ins().icmp_imm_s(IntCC::NotEqual, sequence, 0);
+                self.hand_off_unless(position, before, made);
+                self.store_register(dst, sequence);
             }
             Intrinsic::Field { layout, index } => {
                 let record = self.load_register(args[0]);

@@ -632,6 +632,9 @@ pub enum Intrinsic {
         layout: u32,
         index: u32,
     },
+    /// `a:b` on numeric scalars when it makes integers, which compiled code builds without the
+    /// builtin call; any other result is tier 0's to make.
+    Colon,
 }
 
 /// Where a directly called closure's argument comes from.
@@ -3944,7 +3947,15 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
-        if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
+        // A site that has made doubles, as `0.5:n` does, keeps the builtin call, since the
+        // compiled `a:b` only makes integers and would hand every call to tier 0.
+        let doubles = name == ":"
+            && !self.never_ran(inst.pc)
+            && !matches!(self.feedback_at(inst.pc), Ty::Int | Ty::IntSeq | Ty::IntVec);
+        if untagged
+            && !doubles
+            && let Some((intrinsic, mut result)) = intrinsic_for(name, &types)
+        {
             // A list element is boxed, so its type comes from what the site has read so far,
             // which the compiled read checks before it unboxes the element.
             let feedback = self.feedback_at(inst.pc);
@@ -4221,6 +4232,9 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
                 },
             )
         }
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => {
+            (Intrinsic::Colon, integer_sequence())
+        }
         ("%/%", [a, b]) if a.is_numeric_scalar() && b.is_numeric_scalar() => {
             let numeric = if *a == Ty::Dbl || *b == Ty::Dbl {
                 Numeric::Dbl
@@ -4238,6 +4252,17 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         }
         _ => return None,
     })
+}
+
+/// The type of an integer `a:b`, `seq_len()` or `seq_along()` result. These make compact
+/// sequences from two elements on, the common case to guess, wherever the runtime has
+/// registered the classes; an interpreter without them makes plain vectors.
+fn integer_sequence() -> Ty {
+    if interp::interp().compact_sequence_classes[0] != values::nil() {
+        Ty::IntSeq
+    } else {
+        Ty::IntVec
+    }
 }
 
 /// Whether [`intrinsic_for`] has an intrinsic for builtin `name` given some argument types. It
@@ -4267,6 +4292,7 @@ fn has_intrinsic(name: &str) -> bool {
             | "ceiling"
             | "%%"
             | "%/%"
+            | ":"
     )
 }
 
@@ -4286,14 +4312,7 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
             Ty::Dbl
         }
     };
-    // These make compact sequences from two elements on, the common case to guess, wherever
-    // the runtime has registered the classes; an interpreter without them makes plain vectors.
-    // SAFETY: the interpreter is initialized before anything compiles.
-    let sequence = if interp::interp().compact_sequence_classes[0] != values::nil() {
-        Ty::IntSeq
-    } else {
-        Ty::IntVec
-    };
+    let sequence = integer_sequence();
     Some(match (name, types) {
         ("seq_len", [length]) if length.is_numeric_scalar() => sequence,
         ("seq_along", [along]) if along.is_plain() => sequence,
