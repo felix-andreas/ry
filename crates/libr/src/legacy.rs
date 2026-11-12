@@ -317,7 +317,7 @@ pub unsafe extern "C" fn SET_RDEBUG(object: Sexp, value: c_int) {
     } else {
         object.gp() & !gp::CLOSURE_DEBUG
     };
-    interp::code_image::set_flags_from_c(object, bits);
+    object.set_gp(bits);
 }
 
 #[unsafe(no_mangle)]
@@ -332,7 +332,7 @@ pub unsafe extern "C" fn SET_RSTEP(object: Sexp, value: c_int) {
     } else {
         object.gp() & !gp::CLOSURE_STEP
     };
-    interp::code_image::set_flags_from_c(object, bits);
+    object.set_gp(bits);
 }
 
 /// `ENVFLAGS(env)`: an environment's general-purpose bits, where GNU R keeps its locked flag.
@@ -343,7 +343,7 @@ pub unsafe extern "C" fn ENVFLAGS(env: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_ENVFLAGS(env: Sexp, flags: c_int) {
-    interp::code_image::set_flags_from_c(env, flags as u16);
+    env.set_gp(flags as u16);
 }
 
 #[unsafe(no_mangle)]
@@ -545,7 +545,7 @@ pub unsafe extern "C" fn SET_RTRACE(object: Sexp, value: c_int) {
     } else {
         object.gp() & !gp::CLOSURE_TRACE
     };
-    interp::code_image::set_flags_from_c(object, bits);
+    object.set_gp(bits);
 }
 
 /// Unchecked data access: GNU R's `*0` accessors skip the type check, which ry keeps.

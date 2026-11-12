@@ -8,6 +8,7 @@ pub mod lints;
 pub mod load_index;
 pub mod metadata;
 pub mod naming;
+pub mod native;
 pub mod session;
 pub mod sorted;
 pub mod stubs;
@@ -3625,6 +3626,7 @@ mod tests {
             editor: None,
             errors: ThinVec::new(),
             strict_origins: ThinVec::new(),
+            native_blockers: ThinVec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             masked_reads: Default::default(),
             column_misses: Default::default(),

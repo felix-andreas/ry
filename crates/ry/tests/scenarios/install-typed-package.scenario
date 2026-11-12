@@ -1,0 +1,64 @@
+# A package's typed functions keep their declared types once the package is installed: a new
+# session checks their arguments, converts a whole number to the `I64` a parameter declares, and
+# compiles them for the declared types, with the code image and without it.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: typedpkg
+| Version: 1.0.0
+| Title: Typed
+| Description: Typed functions that an install must keep typed.
+| License: MIT
+file pkg/NAMESPACE
+| export(grow, total, label)
+file pkg/R/typed.R
+| grow <- function(x: F64, rate: F64) -> F64 x + rate * x
+| total <- function(n: I64, rate: F64) -> F64 {
+|   sum <- 0.0
+|   for (i in List.range(1, n)) {
+|     sum <- grow(sum, rate) + Num.to_f64(i)
+|   }
+|   sum
+| }
+| label <- function(name: Str, n: I64) -> Str Str.concat(name, Num.to_str(n))
+
+run ry install pkg -l library
+expect exit 0
+
+file use.R
+| library(typedpkg, lib.loc = "library")
+| print(total(1000, 0.001))
+| print(label("a", 3))
+| print(tryCatch(grow("a", 1), error = conditionMessage))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"a3\""
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+expect stderr "typed: compiled for [Str, I64] -> Str"
+
+env RY_CODE_IMAGE 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+
+# A saved typed function reads back typed too.
+file save.R
+| half <- function(x: F64) -> F64 x / 2
+| saveRDS(half, "half.rds")
+| again <- readRDS("half.rds")
+| print(again(3))
+| print(tryCatch(again("a"), error = conditionMessage))
+| print(names(attributes(again)))
+
+run ry run --runtime ry save.R
+expect exit 0
+expect stdout "[1] 1.5"
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stdout "NULL"

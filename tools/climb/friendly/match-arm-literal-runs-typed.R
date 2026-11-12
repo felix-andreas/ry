@@ -1,8 +1,8 @@
 # expect: ok
 # A literal arm result runs as the declared I64, not as an R double.
-first_or_zero <- function(xs: List<I64>) -> I64 match (List.first(xs)) {
+parsed_or_zero <- function(text: Str) -> I64 match (Str.to_i64(text)) {
   :Ok(x) => x,
-  :Err(:ListWasEmpty) => 0
+  :Err(_) => 0
 }
-print(first_or_zero(List.drop_first([5], 1)))
+print(parsed_or_zero("five"))
 #> 0i64
