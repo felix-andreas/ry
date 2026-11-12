@@ -4698,14 +4698,6 @@ unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
         return Ok(value);
     }
     loop {
-        // All of the loop's state is in `env`, so the compiled loop starts over at the condition
-        // exactly where the tree walker stands between two iterations.
-        if iterations == bytecode::LOOP_COMPILE_ITERATIONS
-            && let Some(value) = bytecode::run_loop(call.call, None, env)?
-        {
-            return Ok(value);
-        }
-        iterations += 1;
         let condition = scope(|| eval(call.arg(0), env))?;
         if !as_condition(condition, call.call)? {
             break;
