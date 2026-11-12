@@ -23,7 +23,7 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
-        native::{Judged, NativeBlocker, native_blockers},
+        native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
         stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
@@ -1082,8 +1082,11 @@ fn check_item_in<'db>(
             if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
                 return None;
             }
-            match annotation.declared.as_ref()?.body.kind(db) {
-                TyKind::Function(function) => Some((function.clone(), annotation.inline_signature)),
+            let declared = annotation.declared.as_ref()?;
+            match declared.body.kind(db) {
+                TyKind::Function(function) if !has_r_bound(declared) => {
+                    Some((function.clone(), annotation.inline_signature))
+                }
                 _ => None,
             }
         };

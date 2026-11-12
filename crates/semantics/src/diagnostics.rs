@@ -24,6 +24,7 @@ use {
             native_symbol,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
+        native::{NativeBlockerKind, Uncompiled},
         parse, prelude_enabled, project_type_definitions, statement_annotations,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
@@ -2707,6 +2708,14 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         for blocker in &check.native_blockers {
+            // With inline annotations turned off no signature can be written inline, and the
+            // warning about the setting already says so. The setting is read here, not in the
+            // item check, so changing it rechecks no item.
+            if blocker.kind == NativeBlockerKind::Uncompiled(Uncompiled::DetachedSignature)
+                && !inline_annotations_enabled(db)
+            {
+                continue;
+            }
             let range = blocker.range + offset;
             let source = file
                 .text(db)

@@ -4405,8 +4405,11 @@ type: `double`, `integer`, `character`, `logical`, R vectors such as `double[]`,
 annotated with a ry type, the declared result is a ry type, `NULL` or left out, and at least one of
 them is a ry type. A signature written in a `#:` comment, or on the name the function is assigned
 to, is judged by the same rules. The runtime compiles a function only from the types written on its
-parameters and its result, so such a function also gets an `interpreted` warning that asks for the
-inline form.
+parameters, so a function whose parameter types are written apart from it also gets an
+`interpreted` warning that asks for the inline form. The warning is left out while
+`[check] inline-annotations = false`, because the inline form is not available then.
+
+A type parameter bounded by an R type, as in `<T: numeric>`, counts as an R type.
 
 A function with an R type anywhere in its signature is a *boundary function*. It is where R values
 and ry values meet, it runs in the interpreter when it has to, and it is not judged. So an R type in
@@ -4576,7 +4579,7 @@ interpreted
 | a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
 | a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
 | a standard library function without native code, such as `List.reverse` | a loop or another standard library function |
-| a signature in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters and the result |
+| parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
 | a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
 | a standard library function called with a `ry::` prefix | the name without the prefix |
 | an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |

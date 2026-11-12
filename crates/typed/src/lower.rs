@@ -5621,10 +5621,10 @@ unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
         ".ry_match" => {
             tails.push(expression);
             for &(_, arm) in args.iter().skip(1) {
-                if arm.kind() == SexpType::Language {
-                    if let Some(&(_, body)) = rvalues::pairlist_items(arm.cdr()).last() {
-                        tail_matches(body, tails);
-                    }
+                if arm.kind() == SexpType::Language
+                    && let Some(&(_, body)) = rvalues::pairlist_items(arm.cdr()).last()
+                {
+                    tail_matches(body, tails);
                 }
             }
         }

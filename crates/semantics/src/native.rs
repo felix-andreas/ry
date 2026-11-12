@@ -22,8 +22,8 @@ use {
         naming::{BindingKind, ItemNaming},
         stubs::{is_native_function, is_ry_type},
         types::{
-            Atomic, FrameKind, FunctionType, Name, NativeScalar, Ty, TyKind, array_element,
-            dict_entries,
+            Atomic, Constraint, FrameKind, FunctionType, Name, NativeScalar, Ty, TyKind,
+            TypeScheme, array_element, dict_entries,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -652,6 +652,17 @@ fn side<'db>(
         }
         _ => Side::R,
     }
+}
+
+/// Whether a declared signature has a type parameter that stands for R values, such as
+/// `<T: numeric>`. Such a signature names an R type, so its function is a boundary function.
+pub fn has_r_bound(scheme: &TypeScheme<'_>) -> bool {
+    scheme.binders.iter().any(|(_, constraint)| {
+        matches!(
+            constraint,
+            Constraint::Numeric | Constraint::ScalarNumeric | Constraint::AtomicElement
+        )
+    })
 }
 
 /// Whether a declared signature is written entirely in ry types: every one of `formals`
@@ -1875,6 +1886,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.judged
                 .globals
                 .and_then(|globals| globals.scheme(name, true))
+                .filter(|scheme| !has_r_bound(scheme))
                 .map(|scheme| scheme.body)
         });
         match ty.map(|ty| ty.kind(db)) {
