@@ -483,30 +483,30 @@ fn declared(mask: Mask) -> Option<Declared> {
     })
 }
 
-/// Whether a call that binds plain values of storage types `arguments` to the formals of the
+/// Whether a call that binds values of storage types `arguments` to the formals of the
 /// definition `formals`/`body`, one each in order, and returns a value of storage type `result`
-/// passes all of that definition's checks. A compiler that inlines the call decides this before
-/// the call runs, and leaves a call that would fail to the interpreter, which reports it.
-/// `None` is a type the compiler does not know.
+/// passes all of that definition's checks. `true` beside a type marks an `Array`. A compiler that
+/// inlines the call decides this before the call runs, and leaves a call that would fail to the
+/// interpreter, which reports it. `None` is a type the compiler does not know.
 pub unsafe fn admits_inline(
     formals: Sexp,
     body: Sexp,
-    arguments: &[Option<SexpType>],
-    result: Option<SexpType>,
+    arguments: &[Option<(SexpType, bool)>],
+    result: Option<(SexpType, bool)>,
 ) -> bool {
     let Some(signature) = signature_for(formals, body) else {
         return true;
     };
     let masks = values::ints(signature.element(MASKS));
-    let admitted = |mask: i32, kind: Option<SexpType>| {
-        mask == 0 || kind.is_some_and(|kind| plain_admits(mask as Mask, kind))
+    let admitted = |mask: i32, storage: Option<(SexpType, bool)>| {
+        mask == 0 || storage.is_some_and(|(kind, array)| storage_admits(mask as Mask, kind, array))
     };
     let formal_masks = masks.get(FIRST_FORMAL_SLOT..).unwrap_or(&[]);
     formal_masks.len() == arguments.len()
         && formal_masks
             .iter()
             .zip(arguments)
-            .all(|(&mask, &kind)| admitted(mask, kind))
+            .all(|(&mask, &storage)| admitted(mask, storage))
         && admitted(masks.get(RETURN_SLOT).copied().unwrap_or(0), result)
 }
 

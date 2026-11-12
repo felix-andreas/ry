@@ -56,6 +56,8 @@ import packages as corpus  # noqa: E402
 from evict import evict  # noqa: E402
 
 SUITES = ["public", "packages", "kernels", "applications"]
+# The suites whose programs may have a typed version, which the `ry typed` engine runs.
+TYPED_SUITES = ("public", "kernels", "applications")
 SCHEMA = 1
 # The fewest rounds a published run may have: fewer cannot separate a 10% change from noise on a
 # shared cloud machine, where one fixed C loop varies by about 25% between processes.
@@ -140,7 +142,7 @@ def engines(args, suite):
     ry = [args.ry, "run", "--runtime", "ry"]
     table = [Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base),
              Engine("ry", "ry", ry, base)]
-    typed = suite in ("kernels", "applications")
+    typed = suite in TYPED_SUITES
     if typed:
         table.append(Engine("ry_typed", "ry typed", ry, base, typed=True))
     if args.jit_off:
@@ -159,7 +161,7 @@ def load_suite(suite):
         source = root / program["source"] if "source" in program else None
         if source is not None and not source.exists():
             sys.exit(f"error: {suite}/suite.toml names {program['source']}, which does not exist")
-        if suite in ("kernels", "applications"):
+        if suite in TYPED_SUITES:
             typed = source.with_name(f"{program['id']}.typed.R")
             if typed.exists() != ("typed_source" in program):
                 sys.exit(f"error: {suite}/suite.toml and the files disagree on whether {program['id']} has a typed version")
@@ -402,14 +404,22 @@ class WorkloadRunner:
 
 class PublicRunner:
     """Public programs: one run per process from the program's own directory, which prints
-    `<name> <checksum> <seconds>`; the time includes byte compilation and tier-up."""
+    `<name> <checksum> <seconds>`; the time includes byte compilation and tier-up. The typed
+    version runs from a copy in a strict-mode project, still from the program's own directory,
+    because some programs read sibling files by relative path."""
 
     def __init__(self, suite, args):
         self.network = []
+        self.work = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-public-"))
+        (self.work / "ry.toml").write_text(STRICT_CONFIG)
 
     def run(self, program, engine):
         source = root / program["source"]
-        status, out, err, _, peak = spawn(engine.command + [source.name], engine.env, cwd=source.parent)
+        script = source.name
+        if engine.typed:
+            script = self.work / f"{program['id']}.R"
+            script.write_text((root / program["typed_source"]).read_text())
+        status, out, err, _, peak = spawn(engine.command + [str(script)], engine.env, cwd=source.parent)
         stem = source.name.removesuffix(".R")
         lines = [line for line in out.splitlines() if line.startswith(stem + " ")]
         if status != 0 or not lines:
@@ -417,8 +427,24 @@ class PublicRunner:
         _, checksum, seconds = lines[-1].split()
         return {"seconds": float(seconds), "checksum": checksum, "peak_mib": round(peak, 1)}
 
+    def typed_refusal(self, program, engine):
+        """The refusals `RY_TYPED_LOG` reports for the typed program, or None. Measured once,
+        outside the timed rounds, since logging costs time."""
+        source = root / program["source"]
+        script = self.work / f"{program['id']}.R"
+        script.write_text((root / program["typed_source"]).read_text())
+        status, out, err, _, _ = spawn(engine.command + [str(script)], dict(engine.env, RY_TYPED_LOG="1"),
+                                       cwd=source.parent)
+        if status != 0:
+            sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
+        lines = [line.removeprefix("typed: ") for line in err.splitlines()
+                 if line.startswith("typed: ") and "compiled for" not in line]
+        return "; ".join(dict.fromkeys(lines)) or None
+
     def close(self):
-        pass
+        for path in sorted(self.work.rglob("*"), reverse=True):
+            path.rmdir() if path.is_dir() else path.unlink()
+        self.work.rmdir()
 
 
 class PackageRunner:
@@ -612,7 +638,7 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                 row["flags"].append({"kind": "wide_interval", "engine": engine.key})
             if not short:
                 included[engine.key].append(ratios)
-        if suite in ("kernels", "applications") and "typed_source" in program and not failures:
+        if suite in TYPED_SUITES and "typed_source" in program and not failures:
             typed = next(engine for engine in table if engine.typed)
             reason = runner.typed_refusal(program, typed)
             if reason:

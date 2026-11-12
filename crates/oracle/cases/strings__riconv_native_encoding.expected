@@ -1,0 +1,30 @@
+[stdout]
+| [1] 0
+| [1] c3 a9
+| [1] c3 a9
+| C.UTF-8 
+| [1] c3 a9
+| [1] c3 a9
+| [1] "failed"
+| [1] 61 62 63
+| C 
+| [1] "invalid input"
+| [1] "invalid input"
+| [1] "invalid input"
+| [1] 61 62 63
+| en_US.ISO-8859-1 
+| [1] c3 a9
+| [1] c3 83 c2 a9
+| [1] c3 a9
+| [1] 61 62 63
+| C.UTF-8 
+| [1] c3 a9
+| [1] c3 a9
+| [1] "failed"
+| [1] 61 62 63
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

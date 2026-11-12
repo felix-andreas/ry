@@ -1070,6 +1070,44 @@ exceptions are the functions the runtime lets them through: those that understan
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
+### Records from R
+
+R data enters a typed function only through its parameters, one vector or scalar each, converted
+where the call is written (see [Lists and R vectors](#lists-and-r-vectors)). An R list is never a
+record, tuple or tag, so passing one where a record is expected is a `type-mismatch`:
+
+```r
+alias Trial = Record{time: List<I64>, treated: List<Bool>}
+trial_size <- function(trial: Trial) -> I64 List.len(trial$time)
+trial <- list(time = c(5L, 3L), treated = c(TRUE, FALSE))
+trial_size(trial)
+```
+
+```text ry run runtime=ry strict
+type-mismatch
+
+  x expected `Record{time: List<I64>, treated: List<Bool>}`, found `list{time: integer[], treated: logical[]}`
+   --[main.R:4:12]
+ 3 | trial <- list(time = c(5L, 3L), treated = c(TRUE, FALSE))
+ 4 | trial_size(trial)
+   |            ^^^^^
+
+  x strict mode found 1 error, so this code does not run
+```
+
+Pass the fields as parameters instead, and build any record inside the typed function:
+
+```r ry run runtime=ry strict
+trial_size <- function(time: List<I64>, treated: List<Bool>) -> I64 List.len(time)
+time <- List.from_r(c(5L, 3L))
+treated <- List.from_r(c(TRUE, FALSE))
+trial_size(time, treated)
+#> 2i64
+```
+
+A record that R code converts with `as.record()` passes the type check, but compiled typed code
+takes records only from typed code, so a call that passes one runs in the interpreter.
+
 ## Numbers, `Bool` and `Str`
 
 ry has its own scalar types, none of which holds `NA`. They are the types typed ry is written in,
