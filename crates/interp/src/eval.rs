@@ -727,7 +727,10 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
 pub const NO_REFERENCE_SLOT: u32 = u32::MAX;
 
 /// Returns the argument references made since `mark` to the pool once the call they were made
-/// for has returned, dropping the values they were forced to.
+/// for has returned, dropping the values they were forced to and the expressions they named.
+/// A pooled reference is a root until a later call reuses it, so a field left set keeps its
+/// object alive: a call built by native code holds argument values inline as its expressions,
+/// and a connection passed that way would never be closed by the collector.
 pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
@@ -742,6 +745,9 @@ pub unsafe fn release_references(mark: u32) {
     {
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
+        }
+        if reference.cdr() != nil() {
+            heap.set_cdr(reference, nil());
         }
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
