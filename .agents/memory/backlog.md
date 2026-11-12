@@ -128,7 +128,7 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 - **Not compiled natively; the whole function runs in the interpreter:**
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity` (fasta), and in knucleotide `List.sort_with`, `Dict.update` and `Dict.get` (both take or return a `Result`), a tuple index `entry[[2]]` and `<` on `Str`;
+  - `List.with_capacity` (fasta);
   - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
