@@ -129,7 +129,10 @@ unsafe fn paste(
     } else {
         return Err(error("invalid 'collapse' argument"));
     };
-    let mut columns: Columns = SmallVec::with_capacity(length(list));
+    // The converted columns go into a separate list rather than back into `list`, as GNU R's
+    // `do_paste` does, because `list` can be the caller's own: `.Internal(paste(args, ...))`
+    // would see its non-character elements replaced.
+    let mut columns: SmallVec<[(Sexp, usize); 8]> = SmallVec::with_capacity(length(list));
     let mut count = 0;
     let mut any_empty = false;
     for index in 0..length(list) {
@@ -147,16 +150,8 @@ unsafe fn paste(
         let result = alloc(SexpType::String, count)?;
         with_byte_buffer(|bytes| {
             for row in 0..count {
-                // As in GNU R, each result decides its encoding from all of its pieces before
-                // joining any, so a bytes piece keeps every other piece untranslated.
-                let mut encoding = Encoding::Native;
-                row_pieces(&columns, separator, row, |charsxp| {
-                    encoding = piece_encoding(encoding, charsxp);
-                });
                 bytes.clear();
-                row_pieces(&columns, separator, row, |charsxp| {
-                    join_piece(bytes, charsxp, encoding);
-                });
+                let encoding = join_row(bytes, &columns, separator, row);
                 values::set_mkchar_bytes(result, row, bytes, encoding)?;
             }
             Ok(())
@@ -171,11 +166,7 @@ unsafe fn paste(
     let mut estimate = 0;
     for row in 0..count {
         row_pieces(&columns, separator, row, |charsxp| {
-            estimate += if charsxp == na_string() {
-                2
-            } else {
-                charsxp.bytes().len()
-            };
+            estimate += charsxp.bytes().len();
         });
     }
     let collapse_bytes = collapse.bytes();
@@ -199,15 +190,8 @@ unsafe fn paste(
                 }
                 bytes.extend_from_slice(collapse_bytes);
             }
-            let mut row_encoding = Encoding::Native;
-            row_pieces(&columns, separator, row, |charsxp| {
-                row_encoding = piece_encoding(row_encoding, charsxp);
-            });
             let start = bytes.len();
-            row_pieces(&columns, separator, row, |charsxp| {
-                join_piece(bytes, charsxp, row_encoding);
-            });
-            match row_encoding {
+            match join_row(bytes, &columns, separator, row) {
                 Encoding::Bytes => encoding = Encoding::Bytes,
                 Encoding::Utf8 if encoding == Encoding::Native && !bytes[start..].is_ascii() => {
                     encoding = Encoding::Utf8;
@@ -232,11 +216,30 @@ unsafe fn paste(
     Ok(collapsed)
 }
 
-/// `paste`'s converted columns, each with its length.
-type Columns = SmallVec<[(Sexp, usize); 8]>;
+/// Appends one row of `paste` and returns its encoding, decided from all pieces before any is
+/// joined, as in GNU R: a bytes piece keeps latin1 pieces untranslated. `NA` needs no case of its
+/// own, because `NA_STRING` holds the bytes "NA" and no encoding mark.
+unsafe fn join_row(
+    bytes: &mut Vec<u8>,
+    columns: &[(Sexp, usize)],
+    separator: Option<Sexp>,
+    row: usize,
+) -> Encoding {
+    let mut encoding = Encoding::Native;
+    row_pieces(columns, separator, row, |charsxp| {
+        encoding = piece_encoding(encoding, charsxp)
+    });
+    row_pieces(columns, separator, row, |charsxp| {
+        if charsxp.has_gp(gp::LATIN1) && encoding != Encoding::Bytes {
+            bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
+        } else {
+            bytes.extend_from_slice(charsxp.bytes());
+        }
+    });
+    encoding
+}
 
-/// Visits one row's pieces in order, with the separator between columns. Rows visit their
-/// pieces in place rather than collecting them, so a row of scalars costs no list building.
+/// Visits one row's pieces in order, with the separator between columns, without collecting them.
 unsafe fn row_pieces(
     columns: &[(Sexp, usize)],
     separator: Option<Sexp>,
@@ -260,26 +263,11 @@ unsafe fn row_pieces(
 /// The encoding a `paste` result has so far, after one more piece: bytes wins over everything,
 /// and UTF-8 or latin1 makes the result UTF-8.
 unsafe fn piece_encoding(encoding: Encoding, charsxp: Sexp) -> Encoding {
-    if encoding == Encoding::Bytes || charsxp == na_string() {
-        encoding
-    } else if charsxp.has_gp(gp::BYTES) {
-        Encoding::Bytes
-    } else if charsxp.has_gp(gp::LATIN1) || charsxp.has_gp(gp::UTF8) {
-        Encoding::Utf8
-    } else {
-        encoding
-    }
-}
-
-/// Appends one `paste` piece, translating latin1 unless the result is bytes.
-#[inline(always)]
-unsafe fn join_piece(bytes: &mut Vec<u8>, charsxp: Sexp, encoding: Encoding) {
-    if charsxp == na_string() {
-        bytes.extend_from_slice(b"NA");
-    } else if charsxp.has_gp(gp::LATIN1) && encoding != Encoding::Bytes {
-        bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
-    } else {
-        bytes.extend_from_slice(charsxp.bytes());
+    match encoding {
+        Encoding::Bytes => encoding,
+        _ if charsxp.has_gp(gp::BYTES) => Encoding::Bytes,
+        _ if charsxp.has_gp(gp::LATIN1 | gp::UTF8) => Encoding::Utf8,
+        _ => encoding,
     }
 }
 
