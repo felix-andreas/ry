@@ -3164,11 +3164,45 @@ unsafe fn altrep_summary(call: &Call<'_>, function: Summary) -> R<Option<Sexp>> 
     (interp().hooks.altrep_summary)(x, which, remove_na)
 }
 
+/// How a summary reads a compact sequence. GNU R's `sum`, `min`, `max` and `prod` read one by
+/// region, which leaves it compact, while `range` combines its arguments with `c()` first,
+/// which expands it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SequenceRead {
+    /// Only the two ends matter, as for `min` and `max`.
+    Ends,
+    /// Every element, read into a fresh vector.
+    Contents,
+    /// Every element, through the sequence's own expansion.
+    Expand,
+}
+
 /// The values a summary function reduces, and whether `na.rm` was set.
-unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
+unsafe fn summary_args(call: &Call<'_>, read: SequenceRead) -> R<(SmallVec<[Sexp; 4]>, bool)> {
     let mut items = SmallVec::new();
     for value in summary_values(call) {
-        items.push(values::materialize(value)?);
+        let item = match values::compact_sequence(value) {
+            _ if read == SequenceRead::Expand => values::materialize(value)?,
+            Some((count, first, increment)) if count > 0 && read == SequenceRead::Ends => {
+                let ends = values::alloc_uninit(value.kind(), 2)?;
+                let last = first + increment * (count - 1) as f64;
+                if value.kind() == SexpType::Integer {
+                    ends.slice_mut::<i32>()
+                        .copy_from_slice(&[first as i32, last as i32]);
+                } else {
+                    ends.slice_mut::<f64>().copy_from_slice(&[first, last]);
+                }
+                crate::heap().root(ends);
+                ends
+            }
+            Some(_) => {
+                let contents = values::read_contents(value)?;
+                crate::heap().root(contents);
+                contents
+            }
+            None => values::materialize(value)?,
+        };
+        items.push(item);
     }
     Ok((items, summary_na_rm(call)))
 }
@@ -3194,7 +3228,13 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
     if let Some(answer) = altrep_summary(call, function)? {
         return Ok(answer);
     }
-    let (items, na_rm) = summary_args(call)?;
+    let (items, na_rm) = summary_args(
+        call,
+        match function {
+            Summary::Min | Summary::Max => SequenceRead::Ends,
+            Summary::Sum | Summary::Product => SequenceRead::Contents,
+        },
+    )?;
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String
@@ -3577,7 +3617,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
         frame: call.frame,
         reusable: None,
     };
-    let (items, na_rm) = summary_args(&inner)?;
+    let (items, na_rm) = summary_args(&inner, SequenceRead::Expand)?;
     let numeric = items.iter().all(|item| {
         *item == nil()
             || matches!(
@@ -3604,7 +3644,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
-    let (items, na_rm) = summary_args(call)?;
+    let (items, na_rm) = summary_args(call, SequenceRead::Contents)?;
     let mut saw_na = false;
     for item in items {
         // GNU R skips an empty list as it skips `NULL`.
@@ -3665,7 +3705,8 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
 }
 
 unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
-    let operand = values::materialize(call.arg(0))?;
+    // GNU R's mean reads a compact sequence by region, leaving it compact.
+    let operand = values::read_contents(call.arg(0))?;
     let count = length(operand);
     match operand.kind() {
         SexpType::Logical | SexpType::Integer => {

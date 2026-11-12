@@ -30,3 +30,16 @@ d <- as.double(1:5)
 for (v in d) total <- total + v
 total
 state(d)
+# Summaries and mean() read a sequence by region and leave it compact, while range() combines
+# its arguments with c() first, which expands it.
+m <- 3:12
+c(min(m), max(m), sum(m), prod(1:5), mean(m))
+max(m, 20L)
+min(m, -1)
+state(m)
+r <- as.double(10:1)
+c(min(r), max(r), mean(r), sum(r, 0.5))
+state(r)
+g <- 4:9
+range(g)
+state(g)
