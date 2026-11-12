@@ -730,7 +730,7 @@ impl<'p> Translator<'p> {
                 self.fill_edges()?;
                 return Ok(true);
             }
-            Action::BranchUnlessPrimitive { function, expected } => {
+            Action::BranchUnlessSame { function, expected } => {
                 let value = self.load_register(function);
                 let same =
                     self.builder
@@ -2509,7 +2509,7 @@ impl<'p> Translator<'p> {
                     .ok_or(Refusal("a helper without a result"))?;
                 self.builder.def_var(self.doubles[dst], result);
             }
-            Intrinsic::CollectionCount { set, empty } => {
+            Intrinsic::CollectionEmpty { set } => {
                 let collection = self.load_register(args[0]);
                 let set = self.builder.ins().iconst(I32, i64::from(set));
                 let count = self
@@ -2525,19 +2525,9 @@ impl<'p> Translator<'p> {
                     self.builder
                         .ins()
                         .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, count, 0);
-                let fits = self.builder.ins().icmp_imm_s(
-                    IntCC::SignedLessThanOrEqual,
-                    count,
-                    i32::MAX as i64,
-                );
-                let usable = self.builder.ins().band(counted, fits);
-                self.hand_off_unless(position, before, usable);
-                let value = if empty {
-                    let none = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 0);
-                    self.builder.ins().uextend(I32, none)
-                } else {
-                    self.builder.ins().ireduce(I32, count)
-                };
+                self.hand_off_unless(position, before, counted);
+                let none = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 0);
+                let value = self.builder.ins().uextend(I32, none);
                 self.builder.def_var(self.integers[dst], value);
             }
             Intrinsic::CollectionContains { set } => {

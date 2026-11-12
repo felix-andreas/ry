@@ -537,6 +537,18 @@ unsafe fn pending_owner(pending: Sexp) -> usize {
     owner
 }
 
+/// What the live slot frame at `owner` binds `symbol` to, read from its slots without giving the
+/// frame an environment, or `None` when the slots leave the name to the enclosure.
+pub unsafe fn frame_slot(owner: usize, symbol: Sexp) -> Option<Sexp> {
+    let frame = &interp().frames[owner];
+    slot_content(frame.function, frame.slots as usize, symbol)
+}
+
+/// [`frame_slot`] for the slot frame whose pending environment is `env`.
+pub unsafe fn pending_slot(env: Sexp, symbol: Sexp) -> Option<Sexp> {
+    frame_slot(pending_owner(env), symbol)
+}
+
 /// The content of the slot of `function`'s frame at register `header` that binds `symbol`, or
 /// `None` when the slots leave the name to the enclosure: no slot has that name, or it is unbound.
 unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Sexp> {
@@ -727,7 +739,10 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
 pub const NO_REFERENCE_SLOT: u32 = u32::MAX;
 
 /// Returns the argument references made since `mark` to the pool once the call they were made
-/// for has returned, dropping the values they were forced to.
+/// for has returned, dropping the values they were forced to and the expressions they named.
+/// A pooled reference is a root until a later call reuses it, so a field left set keeps its
+/// object alive: a call built by native code holds argument values inline as its expressions,
+/// and a connection passed that way would never be closed by the collector.
 pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
@@ -736,6 +751,9 @@ pub unsafe fn release_references(mark: u32) {
         let reference = state.references[index];
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
+        }
+        if reference.cdr() != nil() {
+            heap.set_cdr(reference, nil());
         }
         // Only an environment or code reference changes the other fields, and forcing one
         // clears its tag again, so the attribute is compared with the target on its own.
@@ -2700,7 +2718,9 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
             Reify::Builtin(op) => builtin_def(op)?.name,
             Reify::Site(name) => name,
         };
-        interp().frames[index].reified_by = activity::label(name);
+        let reason = activity::label(name);
+        activity::count_reification(reason);
+        interp().frames[index].reified_by = reason;
     }
     materialize_references(index)?;
     let frame = &interp().frames[index];
@@ -5010,7 +5030,7 @@ pub(crate) unsafe fn switch_alternative(
         ));
     }
     for (position, arg) in alternatives.iter().enumerate() {
-        if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
+        if arg.tag.kind() == SexpType::Symbol && switch_name_matches(arg.tag.car(), text) {
             // Fall through empty alternatives to the next non-empty one, and to an invisible
             // NULL when every later one is empty.
             return Ok(alternatives[position..]
@@ -5074,6 +5094,16 @@ pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSele
     };
     warnings.report()?;
     Ok(SwitchSelector::Position(position))
+}
+
+/// Whether the alternative named `name` is the one the string selector `text` picks. GNU R
+/// compares the texts as `pmatch` does, translated to UTF-8 and with `NA` spelled "NA", so a
+/// latin1 selector picks its UTF-8 name and `NA_character_` picks an alternative named `NA`.
+pub(crate) unsafe fn switch_name_matches(name: Sexp, text: Sexp) -> bool {
+    if text == values::na_string() {
+        return name.bytes() == b"NA";
+    }
+    values::same_string(name, text)
 }
 
 unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
@@ -5840,6 +5870,11 @@ unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
 /// the closure runs, and shared, as in GNU R, otherwise.
 pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
     match function.kind() {
+        SexpType::Builtin
+            if target.kind() == SexpType::Symbol && builtin_def(function)?.name == ".ry_update" =>
+        {
+            rebind_update(call, function, target, env)
+        }
         SexpType::Builtin if builtin_def(function)?.reuses_first_argument => {
             reuse_first_argument(target, call, function, env, false)
         }
@@ -5851,6 +5886,83 @@ pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         }
         _ => apply_call(call, function, call.cdr(), env),
     }
+}
+
+/// `target <- (..target, name = value, ...)`, the update `call` of the record `target` holds.
+/// When the binding holds a plain record alone, the update writes the new field values into that
+/// record instead of a copy, and a field value of the form `f(target$name, ...)` is computed as
+/// the right-hand side of `target$name <- f(target$name, ...)` would be ([`rebind`]), so
+/// `List.append(target$name, x)` grows the field's list in place. The field values after that
+/// one must be constants: code there could read the field the call has already updated.
+unsafe fn rebind_update(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
+    let Some(cell) = crate::heap().frame_cell(env, target) else {
+        return apply_call(call, function, call.cdr(), env);
+    };
+    let record = cell.cdr();
+    let mut fields: SmallVec<[(usize, Sexp); 4]> = SmallVec::new();
+    let mut updating = None;
+    let mut item = call.cdr().cdr();
+    while item.kind() == SexpType::Pairlist {
+        let expression = item.car();
+        let Some(index) = crate::records::plain_field(record, item.tag()) else {
+            return apply_call(call, function, call.cdr(), env);
+        };
+        if updating.is_some()
+            && matches!(
+                expression.kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            )
+        {
+            return apply_call(call, function, call.cdr(), env);
+        }
+        if updating.is_none() && updates_own_field(expression, item.tag(), target) {
+            updating = Some(fields.len());
+        }
+        fields.push((index, expression));
+        item = item.cdr();
+    }
+    if record.refcount() != 1
+        || cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        || !reuse_permitted(env, record)
+    {
+        return apply_call(call, function, call.cdr(), env);
+    }
+    let heap = crate::heap();
+    heap.root(record);
+    for position in 0..fields.len() {
+        let (index, expression) = fields[position];
+        let value = if updating == Some(position) {
+            rebind(expression.cdr().car(), expression, env)?
+        } else {
+            eval(expression, env)?
+        };
+        heap.root(value);
+        fields[position] = (index, value);
+    }
+    // The field values may have rebound `target` or shared the record, which then stays as it
+    // is.
+    if cell.cdr() != record || record.refcount() != 1 || !reuse_permitted(env, record) {
+        return crate::records::with_slots(record, &fields);
+    }
+    for &(index, value) in &fields {
+        heap.set_record_slot(record, index, value);
+    }
+    Ok(record)
+}
+
+/// Whether `expression`, the value given to the field `name` in an update of the record bound to
+/// `target`, is a call `g(target$name, ...)`, which [`rebind_update`] lets update the field's
+/// value in place.
+pub unsafe fn updates_own_field(expression: Sexp, name: Sexp, target: Sexp) -> bool {
+    if expression.kind() != SexpType::Language || expression.cdr().kind() != SexpType::Pairlist {
+        return false;
+    }
+    let first = expression.cdr().car();
+    first.kind() == SexpType::Language
+        && first.car() == symbols().dollar
+        && first.cdr().car() == target
+        && first.cdr().cdr().car() == name
+        && first.cdr().cdr().cdr() == nil()
 }
 
 /// Calls the builtin `function` for `call`, the last call of a closure body that passes the
@@ -5916,7 +6028,7 @@ unsafe fn solely_held(target: Sexp, subject: Sexp, env: Sexp) -> bool {
             let Some(container) = held_container(target, env) else {
                 return false;
             };
-            container.0.element(container.1) == subject && reuse_permitted(env, subject)
+            held_element(container.0, container.1) == subject && reuse_permitted(env, subject)
         }
         _ => false,
     }
@@ -5961,10 +6073,24 @@ unsafe fn held_container(target: Sexp, env: Sexp) -> Option<(Sexp, usize)> {
         }
         SexpType::Language => {
             let (outer, position) = held_container(inner, env)?;
-            outer.element(position)
+            held_element(outer, position)
         }
         _ => return None,
     };
+    let index = arguments.cdr().car();
+    if container.kind() == SexpType::Record {
+        // A plain record's field, which only `rebind_update` assigns back in place.
+        if head != symbols.dollar
+            || index.kind() != SexpType::Symbol
+            || container.refcount() != 1
+            || !reuse_permitted(env, container)
+        {
+            return None;
+        }
+        let position = crate::records::plain_field(container, index)?;
+        let element = container.record_handle(position)?;
+        return (element.refcount() == 1).then_some((container, position));
+    }
     if container.kind() != SexpType::List
         || container.is_object()
         || container.is_altrep()
@@ -5973,7 +6099,6 @@ unsafe fn held_container(target: Sexp, env: Sexp) -> Option<(Sexp, usize)> {
     {
         return None;
     }
-    let index = arguments.cdr().car();
     let position = match index.kind() {
         SexpType::Symbol if head == symbols.dollar => {
             named_position(container, &symbol_name(index))?
@@ -5995,6 +6120,16 @@ unsafe fn held_container(target: Sexp, env: Sexp) -> Option<(Sexp, usize)> {
     };
     let element = container.element(position);
     (element.refcount() == 1).then_some((container, position))
+}
+
+/// The element at `position` of `container`, a list or a plain record that [`held_container`]
+/// found.
+unsafe fn held_element(container: Sexp, position: usize) -> Sexp {
+    if container.kind() == SexpType::Record {
+        container.record_handle(position).unwrap_or(nil())
+    } else {
+        container.element(position)
+    }
 }
 
 /// The position of the element named exactly `name`, the one `$<-` and `[[<-` replace.

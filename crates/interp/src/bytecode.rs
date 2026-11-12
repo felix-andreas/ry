@@ -1048,8 +1048,10 @@ pub enum Op {
     /// source references; `statement` is 1 when a statement starts there, which an attached
     /// debugger may stop on, and 0 when a block's end restores the outer srcref.
     SetSrcref,
-    /// `function expected target`: jumps unless the function is the primitive `expected`.
-    BranchUnlessPrimitive,
+    /// `src expected target`: jumps unless the value in `src` is the constant `expected` itself,
+    /// compared by identity. A call of a base function tests that the name still finds the
+    /// primitive `expected`, and a compiled `switch` tests the arm [`Op::SwitchArm`] chose.
+    BranchUnlessSame,
     /// `src target`: jumps when the value in `src` is an object (it has a class).
     BranchIfObject,
     /// `dst function call subject`: calls a dispatch-or-eval special such as `[` whose first
@@ -1105,7 +1107,8 @@ pub enum Op {
     MatchCondition,
     /// `dst src table`: the arm of a compiled `switch` that the selector in `src` chooses, as
     /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
-    /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
+    /// [`switch_table`]). The arms follow as a chain of [`Op::BranchUnlessSame`] tests, which
+    /// compare that scalar by identity, so choosing an arm costs one pointer compare per arm.
     SwitchArm,
     /// `dst variable row column value call`: `variable[row, column] <- value` or
     /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
@@ -1191,7 +1194,7 @@ pub const OPS: [Op; 52] = [
     Op::Closure,
     Op::SubAssign,
     Op::SetSrcref,
-    Op::BranchUnlessPrimitive,
+    Op::BranchUnlessSame,
     Op::BranchIfObject,
     Op::DispatchSubject,
     Op::EndStatement,
@@ -1818,10 +1821,14 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(text) => {
             let names = table.element(SWITCH_NAMES);
-            let matched = (0..length(names)).find(|&index| {
-                let name = names.element(index);
-                name == text || name.bytes() == text.bytes()
-            });
+            let count = length(names);
+            // Names and selectors are interned, so identity finds the name in the common case,
+            // and only a missing selector or one in another encoding needs its text compared.
+            let matched = (0..count)
+                .find(|&index| names.element(index) == text)
+                .or_else(|| {
+                    (0..count).find(|&index| eval::switch_name_matches(names.element(index), text))
+                });
             match matched {
                 Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
                 None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
@@ -4168,7 +4175,7 @@ impl Compiler {
                 let mut done = Vec::with_capacity(arms.len());
                 for (index, body) in arms.iter().enumerate() {
                     let number = self.constant(numbers.element(index + 1));
-                    let skip = self.emit_patchable(Op::MatchLiteral, &[dst, number, 0]);
+                    let skip = self.emit_patchable(Op::BranchUnlessSame, &[dst, number, 0]);
                     self.expression(*body, dst)?;
                     done.push(self.emit_patchable(Op::Jump, &[0]));
                     self.patch(skip);
@@ -4421,11 +4428,8 @@ impl Compiler {
         self.emit(Op::Invisible, &[]);
     }
 
-    /// Whether a call of `primitive` with `args` can evaluate its subject first and, when the
-    /// subject is not an object, its other arguments as values, which is what a dispatch-or-eval
-    /// special such as `[` does. A formal among the other arguments may be missing, which the
-    /// special passes on as an empty argument but a register cannot hold, so it takes the
-    /// generic path.
+    /// Whether a call of `primitive` with `args` can evaluate its subject first, which is what a
+    /// dispatch-or-eval special such as `[` does.
     unsafe fn eager_subject(&self, primitive: Sexp, args: &[(Sexp, Sexp)]) -> R<bool> {
         if primitive.kind() != SexpType::Special
             || !eval::builtin_def(primitive)?.is_dispatch_or_eval()
@@ -4440,7 +4444,7 @@ impl Compiler {
                 && !may_modify_in_place(value)
                 && (value.kind() != SexpType::Symbol
                     || value == missing_arg()
-                    || (!self.formals.contains(&value) && eval::dot_dot_index(value).is_none()))
+                    || eval::dot_dot_index(value).is_none())
         };
         Ok(*subject != missing_arg()
             && *subject != symbols().dots
@@ -4450,6 +4454,11 @@ impl Compiler {
     /// A dispatch-or-eval special call: the subject evaluates first, an object dispatches with
     /// the other arguments as promises, and any other subject calls the special on values, the
     /// path the optimizing tier compiles.
+    ///
+    /// A formal among the other arguments may be missing, deeply so when it holds the caller's
+    /// promise of a missing argument, and the special then passes on an empty argument, which a
+    /// register cannot hold. Such a call evaluates only its subject here and leaves the rest to
+    /// [`Op::DispatchSubject`] for every subject, which reads the formal's slot.
     unsafe fn subject_call(
         &mut self,
         call: Sexp,
@@ -4466,7 +4475,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let base = self.next_register;
         for _ in args {
             self.allocate();
@@ -4484,6 +4493,21 @@ impl Compiler {
         } else {
             None
         };
+        let formal = args[1..]
+            .iter()
+            .any(|(_, value)| self.formals.contains(value));
+        if formal {
+            self.emit(Op::DispatchSubject, &[dst, function, call_constant, base]);
+            let dispatched = self.emit_patchable(Op::Jump, &[0]);
+            self.patch(generic);
+            self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+            self.patch(dispatched);
+            if let Some(read) = read {
+                self.patch(read);
+            }
+            self.release_to(mark);
+            return Ok(());
+        }
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
             if *value == missing_arg() {
@@ -4714,7 +4738,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let object = self.allocate();
         self.expression(subject, object)?;
         self.emit(
@@ -4759,7 +4783,16 @@ impl Compiler {
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
         // argument that modifies a variable in place would change an earlier argument's value.
-        let simple = args.iter().all(|(_, value)| *value != symbols().dots)
+        // A record update that gives a field a call on the field's own value must not evaluate
+        // that call before `eval::rebind_update` has taken the value out of the record.
+        let updates_field = rebinding.is_some()
+            && symbol_name(head).as_ref() == ".ry_update"
+            && args
+                .iter()
+                .skip(1)
+                .any(|&(name, value)| eval::updates_own_field(value, name, call.cdr().car()));
+        let simple = !updates_field
+            && args.iter().all(|(_, value)| *value != symbols().dots)
             && !args
                 .iter()
                 .skip(1)
@@ -4864,7 +4897,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Replace => 8,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
-        Op::BranchUnlessPrimitive => 3,
+        Op::BranchUnlessSame => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
@@ -5092,7 +5125,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
-        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::BranchUnlessSame => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
         Op::Internal => &[Register, Call, Constant, Base, Count],
@@ -6434,7 +6467,7 @@ handlers! {
     run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
     run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
     run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_unless_same, step_branch_unless_same: BranchUnlessSame, false, op_branch_unless_same;
     run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
     run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
     run_ast, step_ast: Ast, true, op_ast;
@@ -6588,7 +6621,7 @@ fast_paths! {
     fast_jump: Jump, jump_fast;
     fast_constant: Constant, constant_fast;
     fast_end_statement: EndStatement, end_statement_fast;
-    fast_branch_unless_primitive: BranchUnlessPrimitive, branch_unless_primitive_fast;
+    fast_branch_unless_same: BranchUnlessSame, branch_unless_same_fast;
     fast_branch_if_object: BranchIfObject, branch_if_object_fast;
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
@@ -6815,14 +6848,14 @@ unsafe fn end_statement_fast(state: &mut Activation<'_, '_>, at: usize) -> Optio
 }
 
 #[inline(always)]
-unsafe fn branch_unless_primitive_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn branch_unless_same_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
     if *state.registers.add(*code.add(at + 1) as usize)
         != pool_constant(state, *code.add(at + 2) as usize)
     {
         return Some(*code.add(at + 3) as usize);
     }
-    Some(at + 1 + operand_count(Op::BranchUnlessPrimitive))
+    Some(at + 1 + operand_count(Op::BranchUnlessSame))
 }
 
 #[inline(always)]
@@ -7479,21 +7512,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let value = if function.kind() == SexpType::Closure {
-        let mut compiled = state.constants.element(instruction.operand(2) + 1);
-        if compiled == unbound() {
-            compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
-            // Promise code forced in a frame that has an environment runs for no function, so
-            // it has no slot table to compile against; the site stays undecided until it runs on
-            // a slot frame.
-            if state.machine.function != nil() {
-                (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
-            }
-        }
-        let arguments = if compiled == nil() {
-            call.cdr()
-        } else {
-            compiled
-        };
+        let arguments = closure_arguments(state, instruction, call)?;
         if function.has_gp(gp::NATIVE_ENTRY)
             && let Some(value) = if state.in_slots() {
                 crate::base_fast_paths::native_entry_by_value(
@@ -7601,6 +7620,30 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// The arguments of the closure call `call` at `instruction`, each compiled to run as a promise
+/// on the frame's slots where the compiler can, which the site compiles on its first call.
+unsafe fn closure_arguments(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+) -> R<Sexp> {
+    let mut compiled = state.constants.element(instruction.operand(2) + 1);
+    if compiled == unbound() {
+        compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
+        // Promise code forced in a frame that has an environment runs for no function, so it
+        // has no slot table to compile against; the site stays undecided until it runs on a
+        // slot frame.
+        if state.machine.function != nil() {
+            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+        }
+    }
+    Ok(if compiled == nil() {
+        call.cdr()
+    } else {
+        compiled
+    })
 }
 
 /// How many times a call site may fail to plan, by meeting a closure with other formals or
@@ -9237,6 +9280,18 @@ unsafe fn rebinding_reusable(
     if !bound {
         return Ok(None);
     }
+    Ok((!expression_registers_hold(state, subject, arguments, dst)).then_some(subject))
+}
+
+/// Whether a register of the activation's expressions holds `subject` uncounted, besides its
+/// `arguments` registers and its result register `dst`, which a previous run of the same
+/// assignment may have left holding it.
+unsafe fn expression_registers_hold(
+    state: &Activation<'_, '_>,
+    subject: Sexp,
+    arguments: Range<usize>,
+    dst: usize,
+) -> bool {
     let registers = &interp().bytecode.registers;
     let start = state.header.offset_from(registers.as_ptr()) as usize
         + 1
@@ -9247,15 +9302,14 @@ unsafe fn rebinding_reusable(
     // cached copy of the subject is never read again.
     let end = base + values::ints(state.constants.element(REGISTERS))[0] as usize;
     let arguments = base + arguments.start..base + arguments.end;
-    let held = registers
+    registers
         .get(start..end.min(registers.len()))
         .unwrap_or_default()
         .iter()
         .zip(start..)
         .any(|(&value, index)| {
             value == subject && !arguments.contains(&index) && index != base + dst
-        });
-    Ok((!held).then_some(subject))
+        })
 }
 
 #[inline(always)]
@@ -9264,13 +9318,16 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
     let call = state.constant(instruction, 2);
     let target = state.constant(instruction, 3);
     // A slot frame keeps its slots: a builtin may update the slot's value in place, and a
-    // closure is called as any other (moving the value needs the binding's cell).
+    // closure may take the slot's value as a move ([`moves::call_moving_from`]).
     if state.in_slots()
         && let Some(slot) = slot_named(state, target)
     {
-        if function.kind() == SexpType::Builtin
-            && let Some(value) = slot_builtin_call(state, call, function, Some(slot))?
-        {
+        let value = match function.kind() {
+            SexpType::Builtin => slot_builtin_call(state, call, function, Some(slot))?,
+            SexpType::Closure => slot_call_moving(state, instruction, function, target, slot)?,
+            _ => None,
+        };
+        if let Some(value) = value {
             state.record(instruction.at, value);
             instruction.output(0, value);
             return Ok(Flow::Next);
@@ -9288,6 +9345,46 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// `target <- function(target, ...)` for the closure `function` from a slot frame, whose `slot`
+/// binds `target`, moving the slot's value into the closure's parameter as a call from an
+/// environment would. `None` when the move does not apply, and the caller makes the ordinary
+/// call.
+unsafe fn slot_call_moving(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    function: Sexp,
+    target: Sexp,
+    slot: *mut Sexp,
+) -> R<Option<Sexp>> {
+    let call = state.constant(instruction, 2);
+    let value = *slot;
+    // Unlike the environment path, which scans every register, scanning this activation's own
+    // expression registers is enough. A value that reaches the slot through a promise is counted
+    // by that promise too, so it reads as shared and never moves, and tier 1 keeps its boxed
+    // registers in this window, so the scan sees compiled code's copies as well.
+    if expression_registers_hold(state, value, 0..0, instruction.operand(0)) {
+        return Ok(None);
+    }
+    let registers = interp().bytecode.registers.as_ptr();
+    let caller = moves::Caller {
+        binding: moves::Binding::Slot {
+            header: state.header.offset_from(registers) as usize,
+            position: slot.offset_from(state.header) as usize - 1,
+        },
+        heads: moves::Heads::Frame((*state.interp).slot_owner as usize),
+        sys_parent: nil(),
+    };
+    moves::call_moving_from(call, function, target, value, caller, |args| {
+        let arguments = closure_arguments(state, instruction, call)?;
+        let mut others = eval::Args::new();
+        if !slot_promises_into(state, arguments.cdr(), false, false, &mut others)? {
+            return Ok(false);
+        }
+        args.extend(others);
+        Ok(true)
+    })
 }
 
 #[inline(always)]
@@ -9438,7 +9535,7 @@ unsafe fn op_match_condition(state: &mut Activation<'_, '_>, instruction: Instru
 }
 
 #[inline(always)]
-unsafe fn op_branch_unless_primitive(
+unsafe fn op_branch_unless_same(
     state: &mut Activation<'_, '_>,
     instruction: Instruction,
 ) -> R<Flow> {
@@ -9464,22 +9561,148 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let definition = eval::builtin_def(function)?;
-    let mut args = eval::Args::new();
-    let value = match dispatch::dispatch_evaluated_subject(
-        definition,
-        call,
-        function,
-        call.cdr(),
-        instruction.input(3),
-        state.env(Reify::Site("dispatch subject"))?,
-        &mut args,
-    )? {
+    let subject = instruction.input(3);
+    let value = match slot_subject_call(state, definition, call, function, subject)? {
         Some(value) => value,
-        None => call_builtin(definition, call, function, &args, *state.header)?,
+        None => {
+            let mut args = eval::Args::new();
+            match dispatch::dispatch_evaluated_subject(
+                definition,
+                call,
+                function,
+                call.cdr(),
+                subject,
+                state.env(Reify::Site("dispatch subject"))?,
+                &mut args,
+            )? {
+                Some(value) => value,
+                None => eval::call_builtin(definition, call, function, &args, *state.header)?,
+            }
+        }
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// A dispatch-or-eval special called from a slot frame once its subject evaluated to
+/// `subject`, when the slots answer every other argument: an empty argument, a constant, or a
+/// local holding a value or a promise. The order is GNU R's `DispatchOrEval`: an object subject
+/// looks for its method first, and only without one do the other arguments evaluate, a missing
+/// one passing on as an empty argument (`i` in `g <- function(i) f(x, i); g()`). The method
+/// lookup starts at the enclosure, which answers as the frame would because no local is named
+/// like a method of the generic, so the frame gets an environment only for a method to run in.
+///
+/// Dispatch is decided once the lookup finds no method, so the primitive runs without the second
+/// lookup [`call_builtin`] would make, as GNU R's subset primitives call their default code.
+///
+/// `None` sends the call to the environment's path: an argument the slots do not answer, an S4
+/// or frame subject, a local that could bind a method or make the frame a top environment, and
+/// forcing an argument that gave the frame its environment (the promises it forced stay forced,
+/// so nothing runs twice).
+unsafe fn slot_subject_call(
+    state: &Activation<'_, '_>,
+    definition: &'static BuiltinDef,
+    call: Sexp,
+    function: Sexp,
+    subject: Sexp,
+) -> R<Option<Sexp>> {
+    if !state.in_slots() {
+        return Ok(None);
+    }
+    let missing = missing_arg();
+    let arguments = call.cdr();
+    let mut cell = arguments.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        let fits = match expression.kind() {
+            _ if expression == missing => true,
+            SexpType::Symbol => {
+                expression != symbols().dots
+                    && eval::dot_dot_index(expression).is_none()
+                    && slot_named(state, expression).is_some_and(|slot| *slot != unbound())
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+            _ => true,
+        };
+        if !fits {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    if subject.is_object() {
+        if subject.has_gp(gp::S4_OBJECT)
+            || (definition.name == "[" && crate::frame::is_frame(subject))
+        {
+            return Ok(None);
+        }
+        let generic = definition.name.as_bytes();
+        let names = state.constants.element(SLOTS).element(1);
+        let shadows = names.slice::<Sexp>().iter().any(|&name| {
+            let name = name.car().bytes();
+            name == b".packageName"
+                || (name.len() > generic.len()
+                    && name.starts_with(generic)
+                    && name[generic.len()] == b'.')
+        });
+        if shadows {
+            return Ok(None);
+        }
+        if let Some(method) =
+            dispatch::subject_method(definition, subject, state.machine.enclosure())?
+        {
+            let env = state.env(Reify::Site("dispatch subject: method"))?;
+            return dispatch::apply_subject_method(call, method, subject, env).map(Some);
+        }
+    }
+    let heap = crate::heap();
+    let mut args = eval::Args::new();
+    heap.root(subject);
+    subject.increment_refcount();
+    args.push(Arg {
+        tag: arguments.tag(),
+        value: subject,
+    });
+    let mut collect = |args: &mut eval::Args| -> R<bool> {
+        let mut cell = arguments.cdr();
+        while cell.kind() == SexpType::Pairlist {
+            let expression = cell.car();
+            let value = if expression == missing {
+                missing
+            } else if expression.kind() == SexpType::Symbol {
+                let Some(slot) = slot_named(state, expression) else {
+                    panic!("a slot frame lost a slot it was checked to have");
+                };
+                let content = *slot;
+                if eval::value_is_missing(content)? {
+                    missing
+                } else {
+                    eval::value_of(content)?
+                }
+            } else {
+                expression
+            };
+            heap.root(value);
+            value.increment_refcount();
+            args.push(Arg {
+                tag: cell.tag(),
+                value,
+            });
+            if !state.in_slots() {
+                return Ok(false);
+            }
+            cell = cell.cdr();
+        }
+        Ok(true)
+    };
+    let collected = collect(&mut args);
+    for arg in &args {
+        arg.value.decrement_refcount();
+    }
+    if !collected? {
+        return Ok(None);
+    }
+    eval::call_builtin(definition, call, function, &args, nil()).map(Some)
 }
 
 #[inline(always)]

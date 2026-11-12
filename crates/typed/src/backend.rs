@@ -69,7 +69,8 @@ pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
         | Type::Set(_)
         | Type::Dict { .. }
         | Type::Record(_)
-        | Type::Tag(_) => SmallVec::from_slice(&[I64]),
+        | Type::Tag(_)
+        | Type::Table => SmallVec::from_slice(&[I64]),
     }
 }
 
@@ -882,6 +883,22 @@ impl Emitter<'_> {
                 let kind = self.iconst(kind(*item));
                 let count = self.wide(count);
                 let list = self.call_words(address!(values::ry_list_new), I64, &[kind, count]);
+                SmallVec::from_slice(&[list])
+            }
+            Op::EmptyList(item, capacity) => {
+                let capacity = self.one(*capacity)?;
+                let negative = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::SignedLessThan, capacity, 0);
+                self.fail_if(negative, &inst.fail_drops)?;
+                let kind = self.iconst(kind(*item));
+                let capacity = self.wide(capacity);
+                let list = self.call_words(
+                    address!(values::ry_list_with_capacity),
+                    I64,
+                    &[kind, capacity],
+                );
                 SmallVec::from_slice(&[list])
             }
             Op::SeqLen(count) => {

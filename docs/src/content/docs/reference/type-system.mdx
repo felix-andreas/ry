@@ -3699,6 +3699,45 @@ reported once, at its first step that names a column: a later step is not report
 step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
 hides a report.
 
+#### Tables in typed code
+
+A typed function holds a `DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy` or `Expr` as one opaque
+value. It cannot look inside one, but it passes it to the [DataFrame API](/reference/dataframes),
+and those calls compile to native code like the rest of the function:
+
+```r ry run runtime=ry strict
+revenue_by_region <- function(sales: DataFrame{region: character[], units: integer[], price: double[]}) -> List<F64> {
+  totals <- sales |>
+    DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
+    DataFrame.group_by("region") |>
+    GroupBy.agg(total = Expr.sum(Expr.col("revenue"))) |>
+    DataFrame.sort("region")
+  List.from_r(totals$total)
+}
+sales <- DataFrame(region = c("north", "south", "north"), units = c(1L, 2L, 3L), price = c(10, 10, 10))
+print(revenue_by_region(sales))
+#> [40, 20]
+```
+
+Three rules cover what such a function may write:
+
+- **Table calls nest.** A call of the DataFrame API that gives a table value may stand anywhere,
+  including inside another call's arguments, and an operator with an `Expr` operand
+  (`Expr.col("units") * Expr.col("price")`) is such a call. An ordinary R call inside another R
+  call's arguments does not compile natively, because R's lazy arguments decide the order they
+  run in, and a table call changes nothing that order could show.
+- **A column is an R vector.** `totals$total` and `totals[["total"]]` stand only where an R call's
+  value may: inside `List.from_r`, `Num.from_r`, `Str.from_r` or `Bool.from_r`, which give the
+  column a ry type. `totals[...]` is not available; select rows and columns with the verbs.
+- **Numbers cross as for any R call.** An `I64` reaches a table function through `Num.to_r`, so
+  `Expr.col("units") >= least` with an `I64` is a `type-mismatch`, and
+  `Expr.col("units") >= Num.to_r(least)` is the way to write it.
+
+The functions that read a property of a table instead of giving one (`DataFrame.height`,
+`DataFrame.width`, `DataFrame.columns`, `DataFrame.schema`, `DataFrame.key`, `LazyFrame.explain`)
+and the ones that write (`DataFrame.set_key`, `DataFrame.write_csv`, `DataFrame.write_parquet`)
+are ordinary R calls.
+
 #### data.table queries
 
 DataFrames also accept data.table's bracket syntax for compatibility, and the checker types it on
@@ -4143,7 +4182,8 @@ other hand, needs the argument's class at the call site, and inside an unannotat
 Strict mode is an opt-in check, switched on with `[check] strict` and off by default. It changes
 nothing about inference and adds no typing rules. It reports the places where the checker could not
 determine a type, together with the [parameters nothing constrains](#untyped-parameters), and it
-escalates unresolved references to errors.
+escalates unresolved references to errors. It also holds each function written in ry types to
+[running natively](#native-functions).
 
 A value typed `Any` by an annotation or a single declaration is an intentional opt-out and never
 produces a strict finding. A call that falls back to an overload set's `Any` candidate is the
@@ -4326,11 +4366,262 @@ anything inside that value: `#: double[]` above `x <- as.numeric(df$age)` covers
 literal or a braced block inside the value keeps its own origins, because its statements can be
 annotated where they are.
 
+### Native functions
+
+In strict mode, a function whose signature is written entirely in ry types is a *native function*.
+It is compiled to machine code, and its body may hold only ry values. `ry check` reports each
+construct that would send it to the interpreter instead, under one of two codes:
+
+| Code | Severity | What it marks |
+| --- | --- | --- |
+| `native` | error | an R value used outside a conversion, which breaks the rule |
+| `interpreted` | warning | legitimate ry that the native compiler does not compile yet |
+
+A native function with neither finding runs natively. This is a `native` error:
+
+```r
+label_width <- function(label: Str) -> I64 {
+  width <- nchar(label)
+  Num.from_r(width)
+}
+print(label_width("native"))
+```
+
+```text ry check typing strict
+native
+
+  x `nchar` is an R function, and a native function holds only ry values, so its result cannot be
+    used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+```
+
+**Which types are ry types.** The ry types are `I64`, `F64`, `Bool` and `Str`, `List<T>`, `Set<T>`
+and `Dict<K, V>`, records, tuples, tags and tag unions, nominal types over those, type parameters,
+function types whose parameters and result are ry types, and the table types `DataFrame`,
+`LazyFrame`, `GroupBy`, `LazyGroupBy` and `Expr`. `NULL` alone is neither. Every other type is an R
+type: `double`, `integer`, `character`, `logical`, R vectors such as `double[]`, R lists,
+`data.frame`, classes, `Any` and `Unknown`.
+
+**Which functions are judged.** A function literal is a native function when every parameter is
+annotated with a ry type, the declared result is a ry type, `NULL` or left out, and at least one of
+them is a ry type. A signature written in a `#:` comment, or on the name the function is assigned
+to, is judged by the same rules. The runtime compiles a function only from the types written on its
+parameters, so a function whose parameter types are written apart from it also gets an
+`interpreted` warning that asks for the inline form. The warning is left out while
+`[check] inline-annotations = false`, because the inline form is not available then.
+
+A type parameter bounded by an R type, as in `<T: numeric>`, counts as an R type.
+
+A function with an R type anywhere in its signature is a *boundary function*. It is where R values
+and ry values meet, it runs in the interpreter when it has to, and it is not judged. So an R type in
+the signature is how a function opts out: `function(path: character) -> F64` may read a file with
+any R code and hand a ry value back. A function with an unannotated parameter is not judged either.
+A function literal without annotations is judged as part of the native function whose body holds
+it, and not at all anywhere else.
+
+**What a native function may do with R.** An *R function* is any function that is not a ry
+[standard library](/reference/standard-library) function, a
+[table function](/reference/dataframes) that gives a table, a group or an expression, another
+native function of the project, or a local function. A boundary function and an unannotated
+project function count as R functions when a native function calls them. A native function calls
+an R function only in these positions:
+
+1. directly as the argument of `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`, which
+   turns the result into a ry value;
+2. as a statement whose value nothing reads, which is not the last expression of the function;
+3. as `stop(...)`, whose arguments may hold anything.
+
+Each argument of such a call is a ry value that shares R's representation (an `F64`, `Bool` or
+`Str`, or a list of them), an R literal such as `42L`, or `Num.to_r(x)` or `List.to_r(x)` written
+directly as the argument. The arguments of a table function follow the same rule, and so do the
+operands of an operator that builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)`; they
+may also be table values and nested table calls
+([Tables in typed code](#tables-in-typed-code)). This function is native:
+
+```r
+simulate <- function(draws: I64, label: Str) -> F64 {
+  set.seed(42L)
+  noise <- List.from_r(stats::rnorm(Num.to_r(draws)))
+  if (List.is_empty(noise)) stop("no draws for ", toupper(label))
+  cat(label, List.sum(noise), "\n")
+  List.sum(noise) / Num.to_f64(draws)
+}
+print(simulate(4, "noise"))
+```
+
+```text ry check typing strict exact
+1 file checked, no problems
+```
+
+An operator applied to ry values is native. So is an operator with an `Expr` operand, which builds
+a bigger expression, and its other operand may be an R literal: `Expr.col("units") > 3L`.
+
+#### What is reported
+
+Each function is judged on its own body, so a function that calls a blocked native function gets no
+finding for the call. An R value is reported once, where it first appears, and not again at each
+expression it flows into.
+
+**An R call whose value is used.** The first example shows it. The fix names the conversion that
+fits the R function's result type, when the checker knows it.
+
+**An R call inside the arguments of another R call.** R evaluates an argument only when the function
+reads it, so native code cannot run the two calls in a fixed order. A conversion around the inner
+call does not change that, and neither does a table function on the outside, so
+`cat(Str.from_r(format(amount)))` is reported the same way:
+
+```r
+report <- function(label: Str, amount: F64) -> NULL {
+  cat(label, format(amount, nsmall = 2), "\n")
+  NULL
+}
+report("total", 12.5)
+```
+
+```text ry check typing strict
+native
+
+  x this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the
+    function reads it, so native code cannot run the two in a fixed order. Compute the inner call
+    into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+```
+
+**A variable that holds an R value.** A native function reads its own parameters and variables. A
+global that holds an R value is converted once, outside, and passed in:
+
+```r
+#: character
+unit <- Sys.getenv("UNIT")
+report <- function(amount: F64) -> NULL {
+  cat(amount, unit, "\n")
+  NULL
+}
+report(2.5)
+```
+
+```text ry check typing strict
+native
+
+  x `unit` comes from outside the function and holds an R value, and a native function holds only ry
+    values. Convert it once where it is made, as in `Str.from_r(...)`, and pass the ry value in as a
+    parameter
+```
+
+**A boundary function called for its value.** It may return any R value its body builds, so its
+result converts like an R call's:
+
+```r
+read_rate <- function(path: character) -> F64 {
+  Num.from_r(as.numeric(readLines(path)))
+}
+taxed <- function(amount: F64) -> F64 amount * (1 + read_rate("rate.txt"))
+print(taxed(100))
+```
+
+```text ry check typing strict
+native
+
+  x `read_rate` has an R type in its signature, so here it counts as an R function, and a native
+    function holds only ry values, so its result cannot be used here. Convert the result where it
+    returns: `Num.from_r(read_rate("rate.txt"))`
+```
+
+**A column read.** `table$column` and `table[["column"]]` give an R vector, so they stand directly
+inside a conversion. The table functions that give an R value do too: `DataFrame.height`,
+`DataFrame.width`, `DataFrame.columns`, `DataFrame.schema`, `DataFrame.key`, `DataFrame.set_key`,
+`DataFrame.write_csv`, `DataFrame.write_parquet` and `LazyFrame.explain`.
+
+```r
+total <- function(sales: DataFrame{units: integer[], price: double[]}) -> F64 {
+  units <- sales$units
+  List.sum(List.from_r(sales$price))
+}
+```
+
+```text ry check typing strict
+native
+
+  x reading a column gives an R vector, and a native function holds only ry values. Convert it where
+    it is read: `List.from_r(sales$units)`
+```
+
+**An R value written as a literal or an operator.** `a:b` builds an R vector, and `NA` and complex
+literals have no ry type, so each is a `native` error. Write `List.range(a, b)`, and use a `Result`
+or a tag for a missing value. `Num.to_r` and `List.to_r` give an R value too, so they stand directly
+inside the arguments of an R call.
+
+**A construct that is not compiled natively yet.** The program is legitimate ry and runs with the
+same results, but the function that holds the construct runs in the interpreter. The finding is an
+`interpreted` warning, and each message gives the way to write the step that compiles:
+
+```r
+count_up <- function(limit: I64) -> I64 {
+  total <- 0
+  step <- function(amount: I64) -> NULL {
+    total <<- total + amount
+    NULL
+  }
+  step(limit)
+  total
+}
+print(count_up(2))
+```
+
+```text ry check typing strict
+interpreted
+
+  ! this function runs in the interpreter, because `<<-` is not compiled natively yet: a native
+    function changes only its own variables. Return the new value and assign it in the caller
+```
+
+| Construct | What to write instead |
+| --- | --- |
+| a function with `...` | name each parameter, or take one `List` |
+| a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
+| a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
+| a standard library function without native code, such as `List.reverse` | a loop or another standard library function |
+| parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
+| a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
+| a standard library function called with a `ry::` prefix | the name without the prefix |
+| an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |
+| `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |
+| a local function defined inside a branch or a loop, and `return` inside a local function | define it once at the top, and end it with its value |
+| a name first set inside a branch or a loop and read after it | set it before the branch |
+| a variable, a parameter or a loop variable that holds values of different types, branches that set a name to different types, and a variable that holds a tag and is assigned again | a new name for each value |
+| the value of an `if` without `else` | an `else` branch that gives a value of the same type |
+| `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
+| a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
+| a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
+| an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
+| a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
+| `try` | `match` on the result, and return the `:Err` from its arm |
+| a `match` on a list or a scalar (so every list pattern), a nested pattern, and an arm with an `if` guard | match a tag, a record or a tuple, and test inside the arm |
+| a read of a global that holds a ry value, or of a variable of an enclosing boundary function | pass the value in as a parameter |
+| a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
+
+The rule covers the function's body. How R code calls a native function is not checked, so these
+calls from the interpreter run in the interpreter with no finding:
+
+- a call that passes a record, a tuple, a list literal, a function, or any argument that is neither
+  a constant nor a variable;
+- a call that passes a variable to a native function that calls R, because that R code could change
+  the variable before R would read the argument;
+- the first call of a native function that calls an R function R has not loaded yet, such as
+  `stats::rnorm`, or that converts a value whose type the code does not tell, such as
+  `List.from_r(kept$price)`: the interpreter runs that call once, which loads the function or
+  gives the type, and later calls run natively;
+- a call of a function that returns a `Dict` or a `Set`.
+
+A native function called from another native function has none of these limits.
+`RY_TYPED_LOG=1` prints each such call with its reason.
+
 ### Diagnostics
 
 Strict diagnostics carry the code `strict`, so they can be filtered separately from type errors. Each
 origin is reported once, at the exact range of the originating expression. A binding and a bare
 expression are worded differently, because a binding can be annotated and a bare expression cannot.
+An R value in a [native function](#native-functions) carries the code `native`. All three are
+errors, and `ry run` refuses to start a program that has one. A construct that sends a native
+function to the interpreter carries the code `interpreted` and is a warning, so the program runs.
 
 ## Syntax errors
 

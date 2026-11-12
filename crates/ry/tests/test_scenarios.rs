@@ -7,7 +7,7 @@
 //! the scenario's workspace. When a journey ends, its editor session is held against a server
 //! started from scratch on the same disk and buffers.
 //!
-//! `SCENARIO=<name>` runs one scenario.
+//! `SCENARIO=<name>` runs one scenario, and a name that matches none is an error.
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -17,6 +17,7 @@ use {
         ClientOptions, Notification, Outgoing, RequestKind, Simulation, position_of,
         verify_against_fresh_start,
     },
+    semantics::native::COMPILED_STD,
     serde_json::{Value, json},
     std::{
         collections::{BTreeMap, VecDeque},
@@ -50,18 +51,22 @@ fn scenarios_hold() {
         "no scenarios found in {}",
         directory.display()
     );
+    let scenarios: Vec<(String, PathBuf)> = paths
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("scenario names are UTF-8")
+                .to_owned();
+            (name, path)
+        })
+        .collect();
+    let scenarios = select_scenarios(scenarios, std::env::var("SCENARIO").ok().as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
     corpus_library();
-    let only = std::env::var("SCENARIO").ok();
     let mut failures = Vec::new();
-    for path in paths {
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .expect("scenario names are UTF-8")
-            .to_owned();
-        if only.as_ref().is_some_and(|only| only != &name) {
-            continue;
-        }
+    for (name, path) in scenarios {
         let text = fs::read_to_string(&path).expect("a scenario reads");
         match run_scenario(&name, &text) {
             Ok(Outcome::Passed(steps)) => eprintln!("scenario {name}: {steps} steps passed"),
@@ -72,13 +77,61 @@ fn scenarios_hold() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// The typed benchmark programs whose kernels do not run on native code yet, with what the
-/// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
-/// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 1] = [(
-    "sales",
-    "a `DataFrame` parameter, which the table engine runs",
-)];
+/// The scenarios `SCENARIO` selects. Unset or empty (`just scenarios` with no name) selects them
+/// all; a name that matches none is an error listing the known names, so a misspelled name
+/// cannot pass by running nothing.
+fn select_scenarios<T>(
+    scenarios: Vec<(String, T)>,
+    only: Option<&str>,
+) -> Result<Vec<(String, T)>, String> {
+    let Some(only) = only.filter(|only| !only.is_empty()) else {
+        return Ok(scenarios);
+    };
+    let known: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+    if !known.contains(&only) {
+        return Err(format!(
+            "SCENARIO={only} names no scenario; the known scenarios are: {}",
+            known.join(", ")
+        ));
+    }
+    Ok(scenarios
+        .into_iter()
+        .filter(|(name, _)| name == only)
+        .collect())
+}
+
+#[test]
+fn scenario_filter_rejects_unknown_names() {
+    let scenarios = || {
+        vec![
+            ("check-fix".to_owned(), ()),
+            ("edit-and-rename".to_owned(), ()),
+        ]
+    };
+    let names = |selected: Vec<(String, ())>| -> Vec<String> {
+        selected.into_iter().map(|(name, ())| name).collect()
+    };
+    assert_eq!(
+        select_scenarios(scenarios(), None).map(names),
+        Ok(vec!["check-fix".to_owned(), "edit-and-rename".to_owned()])
+    );
+    assert_eq!(
+        select_scenarios(scenarios(), Some("")).map(names),
+        Ok(vec!["check-fix".to_owned(), "edit-and-rename".to_owned()])
+    );
+    assert_eq!(
+        select_scenarios(scenarios(), Some("check-fix")).map(names),
+        Ok(vec!["check-fix".to_owned()])
+    );
+    assert_eq!(
+        select_scenarios(scenarios(), Some("chek-fix")).map(names),
+        Err(
+            "SCENARIO=chek-fix names no scenario; the known scenarios are: check-fix, \
+             edit-and-rename"
+                .to_owned()
+        )
+    );
+}
 
 /// How a refusal that waits on the interpreter starts, as `typed::lower::AWAITING`
 /// spells it.
@@ -87,11 +140,11 @@ const AWAITING: &str = "it waits on the interpreter to run `";
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 
-/// A typed benchmark program that compiles natively has to stay native: a refusal that sends
-/// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
-/// time (500 times as much for `array_dot`). Each program runs once with
-/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter, and
-/// why.
+/// Every `<name>.typed.R` in `tools/bench/kernels` and `tools/bench/applications` runs natively,
+/// and has to stay native: a refusal that sends the warm calls of a strict typed closure to the
+/// interpreter fails nothing and shows only as time (500 times as much for `array_dot`). Each
+/// program runs once with `RY_TYPED_LOG`, which names every typed function a call of falls back
+/// to the interpreter, and why.
 #[test]
 fn typed_benchmarks_run_natively() {
     if let Some(reason) =
@@ -128,12 +181,6 @@ fn typed_benchmarks_run_natively() {
     .expect("write ry.toml");
     let mut failures = Vec::new();
     for (name, path) in &programs {
-        if TYPED_BENCHMARKS_NOT_NATIVE
-            .iter()
-            .any(|(listed, _)| listed == name)
-        {
-            continue;
-        }
         let program = fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let script = directory.path().join(format!("{name}.R"));
@@ -153,30 +200,360 @@ fn typed_benchmarks_run_natively() {
             failures.push(format!("{name} failed:\n{stderr}"));
             continue;
         }
-        // Each fallback line names the function and gives the reason the native path declined.
-        // The first call of a function that converts what R returns, or calls `pkg::name` before
-        // the namespace is loaded, runs in the interpreter, which records the type or loads it.
-        let fallbacks: Vec<&str> = stderr
-            .lines()
-            .filter(|line| {
-                line.strip_prefix("typed: `")
-                    .and_then(|rest| rest.split_once("` runs in the interpreter: "))
-                    .is_some_and(|(function, reason)| {
-                        !TYPED_HARNESS_INTERPRETED.contains(&function)
-                            && !reason
-                                .split_once(": ")
-                                .is_some_and(|(_, why)| why.starts_with(AWAITING))
-                    })
-            })
+        let fallbacks: Vec<String> = typed_fallbacks(&stderr)
+            .into_iter()
+            .filter(|(function, _)| !TYPED_HARNESS_INTERPRETED.contains(function))
+            .map(|(function, reason)| format!("`{function}`: {reason}"))
             .collect();
         if !fallbacks.is_empty() {
             failures.push(format!("{name}:\n{}", fallbacks.join("\n")));
         }
     }
-    for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
-        if !programs.iter().any(|(name, _)| name == listed) {
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The typed functions `RY_TYPED_LOG` says ran in the interpreter, each with the reason the
+/// native path declined. The first call of a function that converts what R returns, or calls
+/// `pkg::name` before the namespace is loaded, runs in the interpreter, which records the type
+/// or loads it, so those lines are left out.
+fn typed_fallbacks(stderr: &str) -> Vec<(&str, &str)> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("typed: `")?
+                .split_once("` runs in the interpreter: ")
+        })
+        .filter(|(_, reason)| {
+            !reason
+                .split_once(": ")
+                .is_some_and(|(_, why)| why.starts_with(AWAITING))
+        })
+        .collect()
+}
+
+/// Functions `ry check` passes as native that the typed core still runs in the interpreter: the
+/// program, the top-level function, and a part of the typed core's reason. Each is a gap in the
+/// typed core, because the `native` rule accepts what the function does. An entry that stops
+/// falling back fails the test, so the list only shrinks.
+const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 6] = [
+    (
+        "pinned-r-statement-tails",
+        "loop_tail",
+        "it uses the value of R's `cat` directly",
+    ),
+    (
+        "pinned-r-statement-tails",
+        "loop_statement",
+        "it uses the value of R's `cat` directly",
+    ),
+    (
+        "pinned-r-statement-tails",
+        "while_tail",
+        "it uses the value of R's `cat` directly",
+    ),
+    (
+        "pinned-r-statement-tails",
+        "branch_statement",
+        "it uses the value of R's `cat` directly",
+    ),
+    (
+        "pinned-r-statement-tails",
+        "both_branches",
+        "it uses the value of R's `cat` directly",
+    ),
+    (
+        "pinned-r-statement-tails",
+        "match_arms",
+        "it uses the value of R's `cat` directly",
+    ),
+];
+
+/// How the typed core says that a function it calls is the one it could not compile.
+const CALLEE_REFUSED: &str = "a typed function it calls does not compile";
+
+/// One strict typed program of the corpus `native_diagnostics_agree_with_the_typed_core` runs.
+struct NativeProgram {
+    name: String,
+    source: String,
+    /// Files the program reads from its working directory when it runs.
+    siblings: Vec<PathBuf>,
+    /// Whether the program is written for strict mode, so it must report no error but the
+    /// `native` and `interpreted` findings of the functions its `# blocked:` header names. A program that is not
+    /// is left out when strict mode finds another error in it.
+    stated: bool,
+}
+
+/// `ry check` and the typed core must agree on which functions run natively. In strict mode a
+/// function whose signature is written in ry types gets a finding for whatever keeps it off
+/// native code: a `native` error for an R value, an `interpreted` warning for ry the typed core
+/// does not compile yet. A function without one must not fall back to the interpreter. Each
+/// program is checked in strict mode and run with `RY_TYPED_LOG`, and every fallback has to
+/// belong to a function that has such a finding, that the program declares a boundary
+/// function, or that `NATIVE_CHECK_EXCEPTIONS` pins.
+///
+/// A program under `tests/native` states what it shows in its header: `# blocked: f, g` names
+/// the top-level functions that must get a finding, and `# boundary: h` the ones with
+/// an R type in their signature, which the interpreter runs. It runs without strict mode,
+/// because strict mode refuses to run a program with an error and the typed core compiles the
+/// same either way.
+#[test]
+fn native_diagnostics_agree_with_the_typed_core() {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
+        eprintln!("native diagnostics: skipped, {reason}");
+        return;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let files = |directory: PathBuf, suffix: &str| -> Vec<(String, PathBuf)> {
+        let mut found: Vec<(String, PathBuf)> = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter_map(|path| {
+                let name = path.file_name()?.to_str()?.strip_suffix(suffix)?.to_owned();
+                Some((name, path))
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let read = |path: &Path| {
+        fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    };
+    let mut programs = Vec::new();
+    let bench = root.join("tools/bench");
+    let harness = read(&bench.join("harness.typed.R"));
+    for suite in ["kernels", "applications"] {
+        for (name, path) in files(bench.join(suite), ".typed.R") {
+            programs.push(NativeProgram {
+                name,
+                source: format!("# boundary: measure\n{harness}\n{}", read(&path)),
+                siblings: Vec::new(),
+                stated: true,
+            });
+        }
+    }
+    for suite in ["awfy", "rcp", "shootout"] {
+        let directory = bench.join("public").join(suite);
+        for (name, path) in files(directory.clone(), ".typed.R") {
+            let source = read(&path);
+            // A program that reads another benchmark's output runs that benchmark first.
+            let siblings = source
+                .split("sys.source(\"")
+                .skip(1)
+                .filter_map(|rest| Some(directory.join(rest.split_once('"')?.0)))
+                .collect();
+            programs.push(NativeProgram {
+                name: format!("{suite}-{name}"),
+                source,
+                siblings,
+                stated: true,
+            });
+        }
+    }
+    for (name, path) in files(root.join("tools/climb/friendly"), ".R") {
+        let source = read(&path);
+        if source.starts_with("# expect: ok") {
+            programs.push(NativeProgram {
+                name: format!("friendly-{name}"),
+                source,
+                siblings: Vec::new(),
+                stated: false,
+            });
+        }
+    }
+    for (name, path) in files(root.join("crates/ry/tests/native"), ".R") {
+        programs.push(NativeProgram {
+            name,
+            source: read(&path),
+            siblings: Vec::new(),
+            stated: true,
+        });
+    }
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut failures = Vec::new();
+    let mut pinned = vec![false; NATIVE_CHECK_EXCEPTIONS.len()];
+    // The standard library functions a function of the corpus calls and then runs natively.
+    let mut exercised = vec![false; COMPILED_STD.len()];
+    for program in &programs {
+        let name = &program.name;
+        let project = |strict: bool| {
+            let project = directory
+                .path()
+                .join(if strict { "check" } else { "run" })
+                .join(name);
+            fs::create_dir_all(&project).expect("create the project");
+            fs::write(
+                project.join("ry.toml"),
+                format!("[check]\ntyping = true\nstrict = {strict}\n"),
+            )
+            .expect("write ry.toml");
+            fs::write(project.join("main.R"), &program.source).expect("write the program");
+            project
+        };
+        let lines: Vec<&str> = program.source.lines().collect();
+        // A definition at the start of a line owns the lines up to the next top-level statement.
+        let mut owner = None;
+        let owners: Vec<Option<&str>> = lines
+            .iter()
+            .map(|line| {
+                if line.starts_with(|first: char| first.is_alphabetic() || first == '.') {
+                    owner = line
+                        .split_once(" <- function")
+                        .map(|(defined, _)| defined)
+                        .filter(|defined| !defined.contains(' '));
+                }
+                owner
+            })
+            .collect();
+        let listed = |header: &str| -> Vec<&str> {
+            lines
+                .iter()
+                .filter_map(|line| line.strip_prefix(header))
+                .flat_map(|names| names.split(',').map(str::trim))
+                .collect()
+        };
+        let boundary = listed("# boundary:");
+        let stated_blocked = listed("# blocked:");
+
+        let check = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["check", "--output", "json", "main.R"])
+            .current_dir(project(true))
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry check");
+        let mut blocked: Vec<&str> = Vec::new();
+        let mut other_errors = Vec::new();
+        for line in String::from_utf8_lossy(&check.stdout).lines() {
+            let finding: Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("{name}: `{line}` is not a finding: {error}"));
+            let code = finding["code"].as_str().unwrap_or_default();
+            if code != "native" && code != "interpreted" {
+                if finding["severity"] == "error" {
+                    other_errors.push(format!(
+                        "{name}: an error other than `native`, [{code}] {}",
+                        finding["message"]
+                    ));
+                }
+                continue;
+            }
+            let line = finding["line"].as_u64().unwrap_or_default() as usize;
+            let function = line
+                .checked_sub(1)
+                .and_then(|index| owners.get(index).copied().flatten())
+                .unwrap_or("the top level");
+            if !blocked.contains(&function) {
+                blocked.push(function);
+            }
+        }
+        if !other_errors.is_empty() {
+            if program.stated {
+                failures.append(&mut other_errors);
+            }
+            continue;
+        }
+        if program.stated {
+            for function in &stated_blocked {
+                if !blocked.contains(function) {
+                    failures.push(format!(
+                        "{name}: `{function}` is stated as blocked and has no `native` finding"
+                    ));
+                }
+            }
+            for function in &blocked {
+                if !stated_blocked.contains(function) {
+                    failures.push(format!(
+                        "{name}: `{function}` has a `native` finding the program does not state"
+                    ));
+                }
+            }
+        }
+
+        let run_project = project(false);
+        for sibling in &program.siblings {
+            let file_name = sibling.file_name().expect("a sibling file name");
+            fs::copy(sibling, run_project.join(file_name)).expect("copy the sibling");
+        }
+        let run = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry", "main.R"])
+            .current_dir(run_project)
+            .env("RY_TYPED_LOG", "1")
+            .env("RY_BENCH_REPEAT", "1")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if !run.status.success() {
+            failures.push(format!("{name} failed:\n{stderr}"));
+            continue;
+        }
+        // Every fallback of a function with no finding fails below, so a call in such a
+        // function ran natively.
+        for (line, owner) in lines.iter().zip(&owners) {
+            let Some(owner) = owner else { continue };
+            if boundary.contains(owner) || blocked.contains(owner) {
+                continue;
+            }
+            for (function, exercised) in COMPILED_STD.iter().zip(&mut exercised) {
+                *exercised |= line.match_indices(function).any(|(at, _)| {
+                    line[at + function.len()..].starts_with('(')
+                        && !line[..at].ends_with(|before: char| {
+                            before.is_alphanumeric() || before == '_' || before == '.'
+                        })
+                });
+            }
+        }
+        for (function, reason) in typed_fallbacks(&stderr) {
+            // A fallback names the function that ran, which may be a local one.
+            let function = lines
+                .iter()
+                .zip(&owners)
+                .find(|(line, _)| {
+                    line.trim_start()
+                        .strip_prefix(function)
+                        .is_some_and(|rest| rest.starts_with(" <- "))
+                })
+                .and_then(|(_, owner)| *owner)
+                .unwrap_or(function);
+            // A function falls back with its callee, which is the one that has the finding.
+            let calls_blocked = reason.contains(CALLEE_REFUSED)
+                && lines.iter().zip(&owners).any(|(line, owner)| {
+                    *owner == Some(function)
+                        && blocked.iter().any(|callee| {
+                            *callee != function && line.contains(&format!("{callee}("))
+                        })
+                });
+            if boundary.contains(&function) || blocked.contains(&function) || calls_blocked {
+                continue;
+            }
+            let exception = NATIVE_CHECK_EXCEPTIONS
+                .iter()
+                .position(|(listed, pinned, why)| {
+                    listed == name && *pinned == function && reason.contains(why)
+                });
+            match exception {
+                Some(exception) => pinned[exception] = true,
+                None => failures.push(format!(
+                    "{name}: `ry check` reports nothing that keeps `{function}` off native code, \
+                     and it runs in the interpreter: {reason}"
+                )),
+            }
+        }
+    }
+    for ((program, function, _), pinned) in NATIVE_CHECK_EXCEPTIONS.iter().zip(pinned) {
+        if !pinned {
             failures.push(format!(
-                "{listed} is listed as not native but is not a benchmark"
+                "{program}: `{function}` is pinned as an exception and no longer falls back; \
+                 remove it from `NATIVE_CHECK_EXCEPTIONS`"
+            ));
+        }
+    }
+    for (function, exercised) in COMPILED_STD.iter().zip(exercised) {
+        if !exercised {
+            failures.push(format!(
+                "`{function}` is listed in `semantics::native::COMPILED_STD`, and no function of \
+                 the corpus that runs natively calls it; add a program under `tests/native`"
             ));
         }
     }

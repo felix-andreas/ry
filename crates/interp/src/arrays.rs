@@ -228,6 +228,14 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     if list.kind() == storage {
         return Ok(list);
     }
+    // `List.with_capacity` set room aside, which the list in its storage keeps.
+    if crate::heap().is_resizable(list) {
+        return Ok(finish(crate::standard_library::resizable(
+            storage,
+            0,
+            list.capacity() as usize,
+        )?));
+    }
     Ok(finish(alloc(storage, 0)?))
 }
 

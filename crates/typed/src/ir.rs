@@ -72,6 +72,11 @@ pub enum Type {
     Record(u32),
     /// A boxed tag whose shape is one of a union's ([`crate::shapes::ANY`] for any shape).
     Tag(u32),
+    /// A value of ry's table API: a `DataFrame`, a `LazyFrame`, a `GroupBy` or an expression.
+    /// Typed code holds the R object itself and never looks inside it, so only the API's own
+    /// functions make one or take one apart. The collector owns the object, which the call that
+    /// entered typed code keeps alive, so it is not counted.
+    Table,
 }
 
 impl Type {
@@ -387,6 +392,9 @@ pub enum Op {
     Slice(Local, Local, Local),
     /// A new vector of this many default items (`numeric(n)`, `character(n)`).
     NewVector(Item, Local),
+    /// An empty ry list with room for this many items (`List.with_capacity(n)`), failing for a
+    /// negative count.
+    EmptyList(Item, Local),
     /// `seq_len(n)`, failing for a negative `n`.
     SeqLen(Local),
     /// `from:to` of integers.
@@ -518,6 +526,7 @@ impl Op {
             | Truth(a)
             | Length(a)
             | NewVector(_, a)
+            | EmptyList(_, a)
             | SeqLen(a)
             | VectorNot(a)
             | VectorMath(_, _, a)

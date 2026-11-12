@@ -306,6 +306,14 @@ pub unsafe extern "C" fn ry_list_new(kind: u32, length: u64) -> *mut List {
     list
 }
 
+/// An empty list of `kind` items with room for `capacity` of them.
+pub unsafe extern "C" fn ry_list_with_capacity(kind: u32, capacity: u64) -> *mut List {
+    let Some(kind) = list_kind(kind) else {
+        return null_mut();
+    };
+    list_alloc(kind, 0, capacity as usize)
+}
+
 /// `from:to` as R counts it: up by one, or down by one when `to < from`.
 /// `seq_len(count)`: the integers from 1 to `count`, which is not negative.
 pub unsafe extern "C" fn ry_list_seq_len(count: u64) -> *mut List {
@@ -2762,7 +2770,8 @@ fn list_kind(kind: u32) -> Option<u8> {
     }
 }
 
-fn item_size(kind: u8) -> usize {
+/// The bytes one item of a list of `kind` takes.
+pub fn item_size(kind: u8) -> usize {
     match kind {
         DBL | I64 | OBJECT => 8,
         STR => 16,

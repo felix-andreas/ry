@@ -8,7 +8,7 @@ elt_only, length 6
   R_altrep_inherits: 1
   INTEGER: error: cannot access data pointer for this ALTVEC object [class: elt_only, pkg: altreptest]
   SET_INTEGER_ELT: error: cannot access data pointer for this ALTVEC object [class: elt_only, pkg: altreptest]
-  ALTINTEGER_SUM: NULL
+  sum: 30
   altrep: no
   as double: [0,2,4,6,8,10]
   altrep: deferred_string/base character, class handle raw
@@ -22,6 +22,7 @@ pointer, length 5
   sorted: 1, no_na: 1
   sum 12.5, min 0.5, max 4.5
   after SET_REAL_ELT: 9
+  sum 12.5, min 0.5, max 4.5
   REAL_GET_REGION(3, 3): 2 [3.5,4.5]
   altrep: no
   copy: [0.5,9,2.5,3.5,4.5]
@@ -48,7 +49,7 @@ logical, length 5
   altrep: logical/altreptest logical, class handle raw
   LOGICAL_ELT: [1,0,1,0,1]
   LOGICAL_GET_REGION(2, 4): 3 [1,0,1]
-  sorted: 0, no_na: 1
+  no_na: 1
   sum: 3
   altrep: no
   as integer: [1,0,1,0,1]
@@ -94,7 +95,7 @@ wrapper
   copy: [3,1,2]
   after SET_INTEGER_ELT: 77
   source after the write: [3,77,2]
-  R_tryWrap(list) is the list: yes
+  R_tryWrap(list) is the list: no
   altrep: wrap_string/base character, class handle raw
 deferred string
   altrep: deferred_string/base character, class handle raw
