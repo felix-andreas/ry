@@ -11,7 +11,9 @@
 # BLAS build. Record with the reference BLAS, whose sequential sums ry follows bit for bit in
 # lbfgsb and the trust-region optif9 cases; OpenBLAS differs there by a few ulps. On Debian or
 # Ubuntu with OpenBLAS selected, run Rscript with
-# LD_PRELOAD=/usr/lib/x86_64-linux-gnu/blas/libblas.so.3.
+# LD_PRELOAD=/usr/lib/x86_64-linux-gnu/blas/libblas.so.3. The trust-region optif9 cases also
+# follow the C library's hypot, which the "hypot" case fingerprints; record on an x86-64
+# baseline glibc, not one built for x86-64-v3, so the recording matches the common platform.
 args <- commandArgs(trailingOnly = TRUE)
 dyn.load(args[[1]])
 lines <- character()
