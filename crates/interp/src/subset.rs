@@ -465,7 +465,7 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
                 return Ok(None);
             }
             let position_of = |position: &f64| {
-                if position.is_nan() {
+                if !position.is_finite() {
                     NA_POSITION
                 } else {
                     position.trunc() as usize - 1
@@ -513,8 +513,9 @@ fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<KeptMa
     }
     let mut any_negative = false;
     for value in excluded {
-        // A subscript between -1 and 1 truncates to zero, which selects nothing.
-        if value.is_nan() || value <= -1.0 {
+        // A subscript between -1 and 1 truncates to zero, which selects nothing. An infinite
+        // one counts as NA, which the general rules handle.
+        if !value.is_finite() || value <= -1.0 {
             return None;
         }
         let position = value.trunc();
