@@ -508,6 +508,14 @@ size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic,
 grow only by about what the change adds. Resident text is checked on the shipped layout
 (`tools/layout/optimize.sh`) when a release is cut.
 
+A change that allocates less can still raise anonymous peak RSS, because fewer collections change which heap pages fill before the next one. Such a rise is exempt only when all three of these hold, and the change's description shows each:
+
+- `RY_GC_LOG` gives the same peak old-generation bytes (the last column) on both builds;
+- `valgrind --tool=massif` gives the same malloc peak, and with `--pages-as-heap=yes` the same mapped size;
+- a control that puts the missing allocations back, such as one throwaway `c(1, 2)` per loop iteration, closes the gap.
+
+`formatC()`'s direct kernel call met all three: report's VmHWM rose by about 1 MB, all of it in one GC arena, and the control closed it to about 0.1 MB.
+
 Layout moves single-program wall time too, and with it callgrind's simulated branch mispredictions
 and cache misses. Only the instruction count (`Ir`) holds still. So judge a regression on one
 program by `Ir` from `valgrind --tool=callgrind --cache-sim=yes --branch-sim=yes` on both builds:
