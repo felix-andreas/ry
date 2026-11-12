@@ -679,13 +679,15 @@ enum Amount {
     Argument(u32),
 }
 
-enum FormatPiece<'a> {
-    Text(&'a str),
-    Conversion(Conversion<'a>),
+/// A conversion and the literal text before it. A `%%`, and the text after a format's last
+/// conversion, end a piece with no conversion, so a format with three conversions fits the inline
+/// pieces.
+struct FormatPiece<'a> {
+    literal: &'a str,
+    conversion: Option<Conversion<'a>>,
 }
 
-/// The pieces of every format string of a call, one format after another, so the usual handful
-/// stays on the stack.
+/// The pieces of every format string of a call, one format after another.
 type FormatPieces<'a> = SmallVec<[FormatPiece<'a>; 4]>;
 
 /// An argument of `sprintf` and the conversions it needs, computed once per call.
@@ -750,7 +752,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     // `%s` converts a classed argument with its `as.character` method first, and the result's
     // length is what recycles, so a condition formats as one string.
     for piece in &pieces {
-        if let FormatPiece::Conversion(conversion) = piece
+        if let Some(conversion) = &piece.conversion
             && conversion.kind == 's'
         {
             let argument = &mut arguments[conversion.argument as usize];
@@ -782,11 +784,11 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
             let format = row % format_count;
             let start = if format == 0 { 0 } else { ends[format - 1] };
             for piece in &pieces[start..ends[format]] {
-                match piece {
-                    FormatPiece::Text(literal) => text.push_str(literal),
-                    FormatPiece::Conversion(conversion) => {
-                        format_conversion(conversion, &mut arguments, row, call.env()?, text)?;
-                    }
+                if !piece.literal.is_empty() {
+                    text.push_str(piece.literal);
+                }
+                if let Some(conversion) = &piece.conversion {
+                    format_conversion(conversion, &mut arguments, row, call.env()?, text)?;
                 }
             }
             values::set_mkchar(result, row, text)?;
@@ -814,8 +816,8 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
 /// The conversion letters `sprintf` accepts.
 const CONVERSIONS: &[u8] = b"dioxXfeEgGaAs";
 
-/// Splits a format string into literal text and conversions, resolving which argument each
-/// conversion (and each `*`) reads. `used` gets a bit set for each argument read.
+/// Splits a format string into pieces, resolving which argument each conversion (and each `*`)
+/// reads. `used` gets a bit set for each argument read.
 fn parse_format<'a>(
     format: &'a str,
     arguments: &[FormatArgument],
@@ -856,7 +858,10 @@ fn parse_format<'a>(
         }
         if bytes.get(index + 1) == Some(&b'%') {
             // The literal runs through the first `%`, and the second is skipped.
-            pieces.push(FormatPiece::Text(&format[literal_start..=index]));
+            pieces.push(FormatPiece {
+                literal: &format[literal_start..=index],
+                conversion: None,
+            });
             index += 2;
             literal_start = index;
             continue;
@@ -941,15 +946,18 @@ fn parse_format<'a>(
             return Err(error("too few arguments"));
         }
         conversion.argument = take(explicit, used)?;
-        if literal_start < start {
-            pieces.push(FormatPiece::Text(&format[literal_start..start]));
-        }
-        pieces.push(FormatPiece::Conversion(conversion));
+        pieces.push(FormatPiece {
+            literal: &format[literal_start..start],
+            conversion: Some(conversion),
+        });
         index += 1;
         literal_start = index;
     }
     if literal_start < bytes.len() {
-        pieces.push(FormatPiece::Text(&format[literal_start..]));
+        pieces.push(FormatPiece {
+            literal: &format[literal_start..],
+            conversion: None,
+        });
     }
     Ok(())
 }

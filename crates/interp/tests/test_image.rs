@@ -39,6 +39,13 @@ fn an_image_of_an_older_format_is_stale() {
         &image_prefix(b"RYSTART\x05", identity),
     );
     assert!(!is_current(&older, identity));
+    // The format before a symbol's lookup stamp share and its S3 method row shared one word.
+    let before_method_rows = write(
+        &directory,
+        "before-method-rows.image",
+        &image_prefix(b"RYSTART\x06", identity),
+    );
+    assert!(!is_current(&before_method_rows, identity));
     let foreign = write(
         &directory,
         "foreign.image",

@@ -31,7 +31,9 @@ use {
         records::NativeKind,
         strings::Encoding,
     },
-    interp::{annotations::decline, builtins::Arg, unwind::Unwind, values as rvalues},
+    interp::{
+        annotations::decline, builtins::Arg, bytecode::TypedCall, unwind::Unwind, values as rvalues,
+    },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     std::{
@@ -87,6 +89,21 @@ thread_local! {
     /// The error an R call from compiled code raised, which [`call`] raises once the code has
     /// given up.
     static PARKED: RefCell<Option<Unwind>> = const { RefCell::new(None) };
+    /// The interpreter's call whose compiled code is running, which an R call the code makes
+    /// runs in a frame of. A typed callee that compiled code calls directly has no call of its
+    /// own, so its R calls see its caller's.
+    static RUNNING: Cell<Option<Running>> = const { Cell::new(None) };
+}
+
+/// A [`TypedCall`] without its lifetime, for [`RUNNING`], which holds it only while the call
+/// runs.
+#[derive(Clone, Copy)]
+struct Running {
+    call: Sexp,
+    function: Sexp,
+    args: *const Arg,
+    count: usize,
+    sys_parent: Sexp,
 }
 
 /// How many closures a session compiles at most, since each keeps its closure alive.
@@ -109,13 +126,18 @@ const GUESSES: [Type; 5] = [
 /// How often a recursive closure's lowering may revise its result type.
 const MAX_REVISIONS: usize = 3;
 
-/// Calls the typed closure `function` with argument values `values`, one per formal in order,
+/// Calls the typed closure of `typed` with argument values `values`, one per formal in order,
 /// through its compiled code. `None` when the closure does not compile for these values or the
 /// code gives up, and the caller then makes the call in the interpreter.
 ///
 /// `lazy` says that an argument is a promise read ahead without forcing it whose value depends on
 /// variables, which code that calls R could change before the interpreter would have forced it.
-pub unsafe fn call(function: Sexp, values: &[Sexp], lazy: bool) -> Option<Result<Sexp, Unwind>> {
+pub unsafe fn call(
+    typed: &TypedCall<'_>,
+    values: &[Sexp],
+    lazy: bool,
+) -> Option<Result<Sexp, Unwind>> {
+    let function = typed.function;
     if !interp::annotations::is_typed(function) {
         return None;
     }
@@ -192,7 +214,15 @@ pub unsafe fn call(function: Sexp, values: &[Sexp], lazy: bool) -> Option<Result
     let mut out = [0u64; 2];
     let trampoline: Trampoline = std::mem::transmute(compiled.code.trampoline);
     let r_calls = R_CALLS.get();
+    let outer = RUNNING.replace(Some(Running {
+        call: typed.call,
+        function,
+        args: typed.args.as_ptr(),
+        count: typed.args.len(),
+        sys_parent: typed.sys_parent,
+    }));
     let status = trampoline(depth_budget(), arguments.words.as_ptr(), out.as_mut_ptr());
+    RUNNING.set(outer);
     if status != 0 {
         arguments.release();
         heap.release_handles(mark);
@@ -241,7 +271,9 @@ unsafe fn compiled_or_refusal(
         AWAITING.with_borrow_mut(|awaiting| awaiting.remove(&key));
         COMPILED.with_borrow_mut(|compiled| compiled.remove(&key));
     }
-    match COMPILED.with_borrow(|compiled| compiled.get(&key).map(|entry| entry.as_ref().ok().copied())) {
+    match COMPILED
+        .with_borrow(|compiled| compiled.get(&key).map(|entry| entry.as_ref().ok().copied()))
+    {
         // A function the code calls was rebound since it compiled, or a `match` over any tag
         // misses shapes confirmed since: compile it again.
         Some(Some(compiled))
@@ -262,11 +294,15 @@ unsafe fn compiled_or_refusal(
         >= MAX_COMPILED
     {
         decline(|| format!("the session compiled its limit of {MAX_COMPILED} typed functions"));
-        return Err(Refusal::new("the session compiled its limit of typed functions"));
+        return Err(Refusal::new(
+            "the session compiled its limit of typed functions",
+        ));
     }
     if !COMPILING.with_borrow_mut(|compiling| compiling.insert(key.clone())) {
         decline(|| String::from("it is called while its own code is being compiled"));
-        return Err(Refusal::new("it is called while its own code is being compiled"));
+        return Err(Refusal::new(
+            "it is called while its own code is being compiled",
+        ));
     }
     let result = compile(function, params);
     COMPILING.with_borrow_mut(|compiling| compiling.remove(&key));
@@ -384,14 +420,18 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         .map(|site| site as *const RCall as usize)
         .collect();
     let code = backend::compile(&ir, &linker.callees, &sites)?;
-    let calls_r = linker.calls_r || !lowered.r_calls.is_empty();
+    let calls_r = linker.calls_r || lowered.r_calls.iter().any(|site| !site.diverges);
     // The code calls each function and conversion it was compiled against, and keeps every site
     // for as long as it lives, which is the whole session.
     let heap = interp::heap();
     for site in &lowered.r_calls {
         heap.add_global_root(site.function);
         heap.add_global_root(site.call);
-        for conversion in site.arguments.iter().filter_map(|argument| argument.conversion) {
+        for conversion in site
+            .arguments
+            .iter()
+            .filter_map(|argument| argument.conversion)
+        {
             heap.add_global_root(conversion.function);
         }
         if let Some((conversion, _)) = site.result {
@@ -448,7 +488,10 @@ impl Callees for Linker {
             if lower::awaits_interpreter(&refusal) {
                 refusal
             } else {
-                Refusal::new("a typed function it calls does not compile")
+                Refusal(Cow::Owned(format!(
+                    "a typed function it calls does not compile: {}",
+                    refusal.0
+                )))
             }
         })?;
         self.calls_r |= compiled.calls_r;
@@ -964,7 +1007,18 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     R_CALLS.set(R_CALLS.get() + 1);
     let heap = interp::heap();
     let mark = heap.handle_mark();
-    let outcome = call_r(&*site, words, out);
+    let outcome = match RUNNING.get() {
+        Some(running) => {
+            let typed = TypedCall {
+                call: running.call,
+                function: running.function,
+                args: std::slice::from_raw_parts(running.args, running.count),
+                sys_parent: running.sys_parent,
+            };
+            interp::eval::run_in_frame(&typed, |env| call_r(&*site, words, out, env))
+        }
+        None => call_r(&*site, words, out, (*site).env),
+    };
     interp::heap().release_handles(mark);
     match outcome {
         Ok(()) => 0,
@@ -975,7 +1029,12 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     }
 }
 
-unsafe fn call_r(site: &RCall, mut words: *const u64, out: *mut u64) -> Result<(), Unwind> {
+unsafe fn call_r(
+    site: &RCall,
+    mut words: *const u64,
+    out: *mut u64,
+    env: Sexp,
+) -> Result<(), Unwind> {
     let heap = interp::heap();
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     for argument in &site.arguments {
@@ -997,7 +1056,7 @@ unsafe fn call_r(site: &RCall, mut words: *const u64, out: *mut u64) -> Result<(
             value: promise,
         });
     }
-    let value = interp::eval::apply(site.call, site.function, &args, site.env)?;
+    let value = interp::eval::apply(site.call, site.function, &args, env)?;
     let Some((conversion, ty)) = site.result else {
         return Ok(());
     };
@@ -1009,7 +1068,12 @@ unsafe fn call_r(site: &RCall, mut words: *const u64, out: *mut u64) -> Result<(
 
 /// Applies the conversion `conversion` to `value`, the value of the code `code`, as the
 /// interpreter applies it.
-unsafe fn convert(conversion: lower::Conversion, code: Sexp, value: Sexp, env: Sexp) -> Result<Sexp, Unwind> {
+unsafe fn convert(
+    conversion: lower::Conversion,
+    code: Sexp,
+    value: Sexp,
+    env: Sexp,
+) -> Result<Sexp, Unwind> {
     let promise = interp::eval::forced_promise(code, value)?;
     interp::heap().root(promise);
     let argument = Arg {
@@ -1028,7 +1092,9 @@ unsafe fn write_converted(
     out: *mut u64,
 ) -> Result<(), Unwind> {
     let expected = storage(ty).map(|(kind, _)| kind);
-    if expected != Some(value.kind()) || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. }) {
+    if expected != Some(value.kind())
+        || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
+    {
         return Err(interp::unwind::error(format!(
             "`{}` gave a value of type `{}`, and the typed function was compiled for the type it \
              gave before, {ty:?}: convert the value to one type in R first",
@@ -1064,7 +1130,11 @@ unsafe fn write_converted(
                 Item::Int | Item::Lgl => 4,
                 _ => 8,
             };
-            std::ptr::copy_nonoverlapping(value.data() as *const u8, (*list).data as *mut u8, size * length);
+            std::ptr::copy_nonoverlapping(
+                value.data() as *const u8,
+                (*list).data as *mut u8,
+                size * length,
+            );
             *out = list as u64;
         }
         _ => {

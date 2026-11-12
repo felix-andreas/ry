@@ -863,14 +863,8 @@ fn libr_path() -> Result<&'static PathBuf, String> {
         let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
             .parent()
             .ok_or("the ry binary has no directory")?;
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-q", "-p", "libr"]);
-        if profile_directory
-            .file_name()
-            .is_some_and(|name| name == "release")
-        {
-            build.arg("--release");
-        }
+        let mut build = syntax::testing::cargo_build(profile_directory);
+        build.args(["-p", "libr"]);
         let status = build
             .status()
             .map_err(|error| format!("building libr: {error}"))?;
