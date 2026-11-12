@@ -35,7 +35,7 @@ use {
     crate::{
         backend::{Callee, Code, Trampoline},
         ir::{Item, Type},
-        lower::{Callees, RCall, Speculation},
+        lower::{Callees, RCall, RResult, Speculation},
         values::{Boxed, List, Str},
     },
     heap::{
@@ -433,7 +433,11 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         .map(|site| site as *const RCall as usize)
         .collect();
     let code = backend::compile(&ir, &linker.callees, &sites)?;
-    let calls_r = linker.calls_r || lowered.r_calls.iter().any(|site| !site.diverges);
+    let calls_r = linker.calls_r
+        || lowered
+            .r_calls
+            .iter()
+            .any(|site| !site.diverges && !matches!(site.result, RResult::Table));
     // The code calls each function and conversion it was compiled against, and keeps every site
     // for as long as it lives, which is the whole session.
     let heap = interp::heap();
@@ -447,7 +451,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         {
             heap.add_global_root(conversion.function);
         }
-        if let Some((conversion, _)) = site.result {
+        if let RResult::Converted(conversion, _) = site.result {
             heap.add_global_root(conversion.function);
         }
     }
@@ -547,6 +551,7 @@ fn storage(ty: Type) -> Option<(SexpType, bool)> {
         Type::Vector { item, array } => (item_storage(item), array),
         Type::List(_) => (SexpType::List, false),
         Type::Record(_) | Type::Tag(_) => (SexpType::Record, false),
+        Type::Table => (SexpType::ExternalPtr, false),
         Type::Set(_) | Type::Dict { .. } => return None,
     })
 }
@@ -576,9 +581,13 @@ fn item_kind(item: Item) -> u32 {
 
 /// The typed core's type for an R value, or `None` when it has none: a length-one plain vector
 /// is a scalar, a longer or empty one a vector, an `Array` an array, a plain list of length-one
-/// strings, numbers or logicals of one storage type a list of them, and a plain tag any tag.
+/// strings, numbers or logicals of one storage type a list of them, a plain tag any tag, and a
+/// value of the table API a table.
 /// A record or tuple has none, because a typed closure takes one only from typed code.
 unsafe fn type_of(value: Sexp) -> Option<Type> {
+    if interp::dataframe::is_table_value(value) {
+        return Some(Type::Table);
+    }
     if value.is_altrep() || value.attrib() != rvalues::nil() {
         return None;
     }
@@ -744,6 +753,8 @@ impl Arguments {
                 self.lists.push(boxed as *mut List);
                 self.words.push(boxed);
             }
+            // The caller keeps its argument alive for the call.
+            Type::Table => self.words.push(value.as_ptr() as u64),
             Type::Bool | Type::Null | Type::Set(_) | Type::Dict { .. } | Type::Record(_) => {
                 return false;
             }
@@ -955,6 +966,8 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
             hi: out[1],
         }),
         Type::Record(_) | Type::Tag(_) => from_box(word),
+        Type::Table => Sexp::from_raw(word as *mut _)
+            .ok_or_else(|| interp::unwind::error("a typed function read a table it never set")),
         Type::Vector { item, array } => {
             let list = word as *mut List;
             let length = (*list).length as usize;
@@ -1032,7 +1045,13 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 /// `site` is a site the code was compiled with, `words` holds the words of its arguments, and
 /// `out` has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
-    R_CALLS.set(R_CALLS.get() + 1);
+    // A table function changes nothing a second run would see unless it warns, so only then
+    // does it count as a call the code cannot make again.
+    let table = matches!((*site).result, RResult::Table);
+    let warnings = interp::conditions::warnings_raised();
+    if !table {
+        R_CALLS.set(R_CALLS.get() + 1);
+    }
     let heap = interp::heap();
     let mark = heap.handle_mark();
     let outcome = match RUNNING.get() {
@@ -1047,7 +1066,19 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
         }
         None => call_r(&*site, words, out, (*site).env),
     };
-    interp::heap().release_handles(mark);
+    heap.release_handles(mark);
+    if table {
+        if interp::conditions::warnings_raised() != warnings {
+            R_CALLS.set(R_CALLS.get() + 1);
+        }
+        // Compiled code holds the table as a bare word, which the collector does not see, so the
+        // table stays rooted until the call that entered typed code releases its handles.
+        if outcome.is_ok()
+            && let Some(value) = Sexp::from_raw(*out as *mut _)
+        {
+            heap.root(value);
+        }
+    }
     match outcome {
         Ok(()) => 0,
         Err(unwind) => {
@@ -1085,8 +1116,21 @@ unsafe fn call_r(
         });
     }
     let value = interp::eval::apply(site.call, site.function, &args, env)?;
-    let Some((conversion, ty)) = site.result else {
-        return Ok(());
+    let (conversion, ty) = match site.result {
+        RResult::Unused => return Ok(()),
+        RResult::Converted(conversion, ty) => (conversion, ty),
+        RResult::Table => {
+            if !interp::dataframe::is_table_value(value) {
+                return Err(interp::unwind::error(format!(
+                    "`{}` gave a value of type `{}` where the typed function was compiled for a \
+                     table value",
+                    interp::deparse::deparse_first_line(site.call.car()),
+                    value.kind().name()
+                )));
+            }
+            *out = value.as_ptr() as u64;
+            return Ok(());
+        }
     };
     heap.root(value);
     let converted = convert(conversion, site.call, value, site.env)?;
