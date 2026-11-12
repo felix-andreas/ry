@@ -72,6 +72,11 @@ pub enum Type {
     Record(u32),
     /// A boxed tag whose shape is one of a union's ([`crate::shapes::ANY`] for any shape).
     Tag(u32),
+    /// A value of ry's table API: a `DataFrame`, a `LazyFrame`, a `GroupBy` or an expression.
+    /// Typed code holds the R object itself and never looks inside it, so only the API's own
+    /// functions make one or take one apart. The collector owns the object, which the call that
+    /// entered typed code keeps alive, so it is not counted.
+    Table,
 }
 
 impl Type {

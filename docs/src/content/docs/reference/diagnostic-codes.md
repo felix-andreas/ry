@@ -268,6 +268,25 @@ x strict mode: this calls `cat`, which is not declared pure, so it runs every ti
 
 It also raises `unresolved` from a warning to an error, so a gate on `--min-severity error` counts it.
 
+**`native`** (error), with `[check] strict = true` or `# typing: strict`: an R value in a
+[native function](/reference/type-system#native-functions). A native function is one whose signature
+is written entirely in ry types, and its body may hold only ry values, so the finding marks an R
+value used outside a conversion or an R call nested in another R call's arguments. Each message says
+what to write instead. A function with an R type in its signature is not judged.
+
+```text
+x `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+```
+
+**`interpreted`** (warning), in strict mode: a construct that sends a
+[native function](/reference/type-system#native-functions) to the interpreter because the native
+compiler does not compile it yet. The program is legitimate ry and gives the same results. The
+message names the construct and the way to write the step that compiles.
+
+```text
+! this function runs in the interpreter, because `List.reverse` is not compiled natively yet. Write the step with a loop or another standard library function
+```
+
 **`maybe-undefined`** (warning), with `[check] maybe-undefined = true`: a read that some path reaches
 before any write, which R reports as `object 'v' not found` on that path. It is off because it treats
 conditions that always agree as independent, so `if (ok) v <- 1` followed by `if (ok) print(v)` is
