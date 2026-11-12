@@ -155,6 +155,12 @@ struct Translator<'p> {
     /// [`runtime::LOOP_WORDS`]; an increment of 0 reads the sequence's storage.
     loop_firsts: Vec<Variable>,
     loop_steps: Vec<Variable>,
+    /// Per slot, the compact sequence its cell held when the slot last became a sequence, and
+    /// that sequence's length, first element and increment (see [`Translator::sequence_of`]).
+    sequence_cells: Vec<Variable>,
+    sequence_counts: Vec<Variable>,
+    sequence_firsts: Vec<Variable>,
+    sequence_steps: Vec<Variable>,
     labels: Vec<Option<Label>>,
     deopts: Vec<Deopt>,
     edges: Vec<PendingEdge>,
@@ -205,6 +211,10 @@ impl<'p> Translator<'p> {
         let loop_counts = declare(plan.loops, I64);
         let loop_firsts = declare(plan.loops, F64);
         let loop_steps = declare(plan.loops, F64);
+        let sequence_cells = declare(plan.slots.len(), I64);
+        let sequence_counts = declare(plan.slots.len(), F64);
+        let sequence_firsts = declare(plan.slots.len(), F64);
+        let sequence_steps = declare(plan.slots.len(), F64);
         let placeholder = Value::from_u32(0);
         Translator {
             plan,
@@ -225,6 +235,10 @@ impl<'p> Translator<'p> {
             loop_counts,
             loop_firsts,
             loop_steps,
+            sequence_cells,
+            sequence_counts,
+            sequence_firsts,
+            sequence_steps,
             labels: Vec::new(),
             deopts: Vec::new(),
             edges: Vec::new(),
@@ -2287,7 +2301,7 @@ impl<'p> Translator<'p> {
                 let vector = self.load_register(args[0]);
                 let sequence = matches!(types[0], Ty::IntSeq | Ty::DblSeq);
                 let (length, first, step) = if sequence {
-                    let (length, first, step) = self.sequence_info(vector, types[0]);
+                    let (length, first, step) = self.sequence_of(position, args[0], vector, types[0]);
                     (Length::Double(length), Some(first), Some(step))
                 } else {
                     let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
@@ -2428,12 +2442,12 @@ impl<'p> Translator<'p> {
                 } else if types[0] == Ty::IntSeq {
                     // A compact integer sequence is never longer than an integer can count.
                     let vector = self.load_register(args[0]);
-                    let (length, _, _) = self.sequence_info(vector, Ty::IntSeq);
+                    let (length, _, _) = self.sequence_of(position, args[0], vector, Ty::IntSeq);
                     self.builder.ins().fcvt_to_sint_sat(I32, length)
                 } else {
                     let vector = self.load_register(args[0]);
                     let length = if types[0] == Ty::DblSeq {
-                        let length = self.sequence_info(vector, Ty::DblSeq).0;
+                        let length = self.sequence_of(position, args[0], vector, Ty::DblSeq).0;
                         self.builder.ins().fcvt_to_sint_sat(I64, length)
                     } else {
                         self.builder.ins().load(I64, flags(), vector, LENGTH)
@@ -3512,6 +3526,7 @@ impl<'p> Translator<'p> {
                 self.builder.def_var(self.slot_doubles[slot], unboxed);
                 self.builder.def_var(self.slot_integers[slot], flag);
             }
+            Ty::IntSeq | Ty::DblSeq => self.remember_sequence(slot, value, ty),
             _ => {}
         }
         self.builder.ins().jump(done, &[]);
@@ -3683,6 +3698,7 @@ impl<'p> Translator<'p> {
                 self.builder.def_var(self.slot_doubles[slot], unboxed);
                 self.builder.def_var(self.slot_integers[slot], flag);
             }
+            Ty::IntSeq | Ty::DblSeq => self.remember_sequence(slot, value, ty),
             _ => {}
         }
         self.builder.ins().jump(done, &[]);
@@ -3710,6 +3726,9 @@ impl<'p> Translator<'p> {
             _ => {
                 self.store_slot_cell(slot, value);
                 self.increment(value);
+                if matches!(ty, Ty::IntSeq | Ty::DblSeq) {
+                    self.remember_sequence(slot, value, ty);
+                }
             }
         }
         if let Some((previous, dirty)) = release {
@@ -4463,6 +4482,57 @@ impl<'p> Translator<'p> {
             .ins()
             .icmp_imm_s(IntCC::Equal, actual, kind as i64);
         self.builder.ins().band(fits, compact)
+    }
+
+    /// Records that `slot` now holds the compact sequence `value` (or the length-one vector its
+    /// guard also passes), with its length, first element and increment, so that reads of the
+    /// slot find them in variables instead of loading them from the info vector each time.
+    /// Every site that gives a slot a sequence type calls this, so the variables change only
+    /// where the slot does, and a loop that only reads the slot reads loop-invariant values.
+    fn remember_sequence(&mut self, slot: usize, value: Value, ty: Ty) {
+        let (count, first, step) = self.sequence_info(value, ty);
+        self.builder.def_var(self.sequence_cells[slot], value);
+        self.builder.def_var(self.sequence_counts[slot], count);
+        self.builder.def_var(self.sequence_firsts[slot], first);
+        self.builder.def_var(self.sequence_steps[slot], step);
+    }
+
+    /// [`Self::sequence_info`] of `value`, the sequence in `register` at `position`. When the
+    /// register was loaded from a slot earlier in the block, the slot's remembered values
+    /// serve, after one comparison shows the register holds the object they describe. A
+    /// mismatch, including a slot whose variables were never defined and read as zero, reads
+    /// the info vector instead. The slot keeps that object alive, so its address cannot have
+    /// been reused for another sequence.
+    fn sequence_of(
+        &mut self,
+        position: usize,
+        register: usize,
+        value: Value,
+        ty: Ty,
+    ) -> (Value, Value, Value) {
+        let Some(Known::Slot(slot)) = self.known_object(position, register) else {
+            return self.sequence_info(value, ty);
+        };
+        let cell = self.builder.use_var(self.sequence_cells[slot]);
+        let count = self.builder.use_var(self.sequence_counts[slot]);
+        let first = self.builder.use_var(self.sequence_firsts[slot]);
+        let step = self.builder.use_var(self.sequence_steps[slot]);
+        let same = self.builder.ins().icmp(IntCC::Equal, cell, value);
+        let join = self.builder.create_block();
+        for _ in 0..3 {
+            self.builder.append_block_param(join, F64);
+        }
+        let read = self.builder.create_block();
+        self.builder.set_cold_block(read);
+        self.builder
+            .ins()
+            .brif(same, join, &[count, first, step], read, &[]);
+        self.builder.switch_to_block(read);
+        let (count, first, step) = self.sequence_info(value, ty);
+        self.builder.ins().jump(join, &[count, first, step]);
+        self.builder.switch_to_block(join);
+        let params = self.builder.block_params(join).to_vec();
+        (params[0], params[1], params[2])
     }
 
     /// The length, first element and increment of the compact sequence `value`, all doubles,
