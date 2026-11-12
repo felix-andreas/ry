@@ -541,11 +541,27 @@ struct CommandOutput {
 
 /// Runs `command` to completion, or kills it once `timeout` has passed. The pipes are drained
 /// on their own threads, because a child that fills a pipe nobody reads never exits.
+///
+/// The child starts with SIGINT at its default. A shell starts a background job (`&`) with SIGINT
+/// ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored SIGINT instead of
+/// installing its handler, so a case that interrupts itself with `tools::pskill` would never see
+/// the interrupt under a detached run.
 fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    // SAFETY: the closure runs between fork and exec, and calls only `signal`, which is
+    // async-signal-safe.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+            match libc::signal(libc::SIGINT, libc::SIG_DFL) == libc::SIG_ERR {
+                true => Err(std::io::Error::last_os_error()),
+                false => Ok(()),
+            }
+        });
+    }
     let mut child = command.spawn()?;
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {

@@ -2541,6 +2541,7 @@ name = "oracle"
 version = "0.4.3-beta"
 dependencies = [
  "clap",
+ "libc",
  "png",
  "serde",
  "serde_json",

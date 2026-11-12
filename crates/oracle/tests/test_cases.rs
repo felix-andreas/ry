@@ -319,6 +319,29 @@ fn compare_fails_on_a_missing_package_unless_skips_are_allowed() {
     std::fs::remove_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
 }
 
+/// A shell starts a background job (`&`) with SIGINT ignored, and GNU R keeps an ignored SIGINT,
+/// so an oracle run started that way must hand its engines the default disposition, or a case
+/// that interrupts itself sees no interrupt.
+#[test]
+fn a_case_can_interrupt_itself_when_the_oracle_inherits_an_ignored_sigint() {
+    if !gnu_r_available() {
+        eprintln!("skipped: GNU R is not installed");
+        return;
+    }
+    let case = case_directory().join("conditions__suspended_interrupts.R");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("trap '' INT; exec \"$0\" verify \"$1\"")
+        .arg(env!("CARGO_BIN_EXE_oracle"))
+        .arg(&case)
+        .output()
+        .unwrap_or_else(|error| panic!("sh: {error}"));
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("1 of 1 passed"), "{text}");
+}
+
 #[test]
 fn cases_survive_gc_torture() {
     cases_survive(ProcessEngine::ry_gc_torture());
