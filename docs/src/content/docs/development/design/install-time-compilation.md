@@ -226,6 +226,24 @@ native section must never run where it cannot.
   The repair for either is to reinstall the package with this build; whether `ry` should offer a
   command that rewrites a library's images in place is an open question below.
 
+## Packages without install-tier code
+
+A package with no native section runs correctly in tier 0 and the run-time JIT, with no error and
+no warning. That covers a library installed by GNU R (no code image at all), by an older ry or
+another build (the image is ignored, above), on a processor below the baseline, and with
+compilation turned off. The install tier only adds an entry to a closure's code; nothing else in
+the runtime depends on it being there.
+
+The switches, for debugging and for measuring:
+
+| Switch | Effect |
+| --- | --- |
+| `RY_INSTALL_TIER=0` | a session ignores every native section; code images still give tier-0 code and streams |
+| `RY_CODE_IMAGE=0` | a session ignores code images entirely (exists) |
+| `R CMD INSTALL --ry-no-install-tier` | the install writes the image without a native section |
+| `R CMD INSTALL --ry-no-code-image` | the install writes no image (exists) |
+| `RY_INSTALL_TIER=force` | every call of a closure with install-tier code enters it and never tiers up, for the tests below |
+
 ## Base and recommended packages
 
 `testthat_full` also spends time in base closures (`tryCatch`, `match.arg`, `vapply`'s R-level
@@ -240,6 +258,27 @@ The scalar native functions of `ahead.rs` remain as specializations: a closure w
 match a native function's types enters it, and any other call enters the closure's install-tier
 code. Both share the manifest, the link table and the proof table, which replaces native functions'
 per-function check list.
+
+## Robustness
+
+These land with the code, per `robustness.md`:
+
+- **Oracle package suites under the install tier.** The package suites run with
+  `RY_INSTALL_TIER=force` against packages installed with native sections, and must match GNU R
+  with no new skips.
+- **One scenario per hazard-table row, triggered mid-activation.** Each scenario installs a small
+  package whose function `outer` proves its rows, calls something that rebinds or flags `inner`
+  (`assignInNamespace`, `trace`, `debug`, `local_mocked_bindings`, `R_unLockBinding` from C), and
+  then calls `inner` again in the same activation. The output must show the new binding taking
+  effect at that second call, and the original again after a restore.
+- **GC stress.** The tier tests and the package suites above also run with the collector at every
+  allocation (the `gctorture` engine) over install-tier bodies, which checks that every value the
+  code holds across a helper call is in the window or rooted.
+- **Damaged sections.** A fuzzer flips, truncates and extends the native section of a real image
+  (manifest, cell table description, link-table names, code bytes) and loads it. Every input must
+  load cleanly or be refused with the damage warning and run in tier 0; none may crash. The
+  section's hash catches flipped code bytes; the parser checks every offset against the section's
+  length. Pinned regression inputs land with any bug it finds.
 
 ## Measures
 
@@ -266,6 +305,12 @@ The first build passes when, on the cloud VM:
 | anonymous and start-image RSS, `empty` and `testthat_full` | not above main |
 | image size (the whole `.ryc`) | at most 2x main's, for rlang, cli and testthat |
 | install time of rlang | at most 2x main's, and at most 20 s more |
+
+Install time and image size are also measured over the benchmark dependency set: every package in
+`tools/bench/packages/lock.tsv` (the 27 package suites of `packages.txt` and their dependencies,
+about 120 packages), installed by main and by the branch from the same
+sources. The pass lines there are a total install time of at most 1.5x main's, no single package
+above 2x main's or 60 s more, and a total library size of at most 1.5x main's.
 
 ## Open questions
 
