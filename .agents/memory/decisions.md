@@ -6211,6 +6211,25 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     side exits on deferred strings, wrappers and package classes until an extern element reader
     (`ry_altrep_int_elt` and the real and string forms) lands behind its `OBJECT|ALTREP` guard. Arithmetic on a wrapper over attributed data materializes and therefore
     copies, where GNU R reads through the data pointer.
+  - *The JIT keeps a sequence's info in per-slot variables.* A slot holding an `IntSeq` or
+    `DblSeq` keeps its `(count, first, step)` in SSA variables (`remember_sequence`,
+    `sequence_of` in `crates/jit/src/codegen.rs`), reused only within the block
+    (`known_object`). Variables that live across blocks were measured and rejected: slot status
+    can be not-loaded at a loop head (on-stack-replacement entry), so `load_slot` merges there
+    and the ssa crate keeps the nontrivial block parameters, which never hoist. A compact read
+    inside a loop therefore still costs about 13 Ir more than a plain one (convolution about
+    1.09x, nbody about 1.01x main's Ir). Closing that gap needs loop-invariant hoisting or a
+    loaded slot status at loop heads.
+  - *A new compact sequence is not rooted.* The interpreter makes one for every `a:b` it
+    evaluates, and a handle per sequence would pin each one until the enclosing call returned.
+    `new_sequence` (`crates/libr/src/altrep.rs`) relies on the ALTREP allocation keeping its info
+    vector alive, and a native caller roots the result on its way out of `boundary::enter`.
+  - *`a:b` compiles without the builtin call.* `Intrinsic::Colon` calls `jit_colon`, which
+    builds the integer result through `interp::arith::colon` and returns NULL for doubles, a
+    missing or out-of-range bound, or a heap error (parked), so tier 0 makes those results and
+    raises those errors. A site whose feedback shows doubles keeps the builtin call. The tier 0
+    builtin call cost about 1,250 Ir per `a:b`, more than the compact sequence's whole creation,
+    which is why the sequence's second allocation was not folded into the instance.
   - Pinned by the oracle cases `altrep__wrappers` and `datatable__compact_columns` and by data.table's
     own suite.
 
