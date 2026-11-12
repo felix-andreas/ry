@@ -550,6 +550,18 @@ pub fn heap() -> &'static mut Heap {
     }
 }
 
+/// The classes of compact integer and double sequences, or `None` before the interpreter is
+/// installed. It reads without [`interp`]'s panic path, so a hot caller such as the variable-read
+/// feedback stays a leaf function that saves no registers.
+#[inline]
+pub fn compact_sequence_classes() -> Option<[Sexp; 2]> {
+    // SAFETY: single-threaded access, as for `heap`.
+    unsafe {
+        let state = &*STATE.0.get();
+        state.interp.as_ref().map(|interp| interp.compact_sequence_classes)
+    }
+}
+
 /// The interpreter state.
 #[allow(clippy::mut_from_ref)]
 #[inline]

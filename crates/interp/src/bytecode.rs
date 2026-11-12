@@ -1177,7 +1177,19 @@ pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u32 {
 /// The [`feedback`] bit for `value`.
 pub unsafe fn value_kind(value: Sexp) -> u32 {
     if value.is_altrep() {
-        return altrep_kind(value);
+        let Some([integer, double]) = interp::compact_sequence_classes() else {
+            return feedback::OTHER;
+        };
+        let class = value.tag();
+        return if values::has_attributes(value) {
+            feedback::OTHER
+        } else if class == integer {
+            feedback::INTEGER_SEQUENCE
+        } else if class == double {
+            feedback::DOUBLE_SEQUENCE
+        } else {
+            feedback::OTHER
+        };
     }
     if value.is_array() {
         return match value.kind() {
@@ -1203,22 +1215,6 @@ pub unsafe fn value_kind(value: Sexp) -> u32 {
     }
 }
 
-/// The [`feedback`] bit for an ALTREP `value`. Every variable read records feedback, so this
-/// stays out of line to keep the plain-value path as short as it is without ALTREP kinds.
-#[cold]
-#[inline(never)]
-unsafe fn altrep_kind(value: Sexp) -> u32 {
-    let [integer, double] = interp().compact_sequence_classes;
-    let class = value.tag();
-    if values::has_attributes(value) {
-        feedback::OTHER
-    } else if class == integer {
-        feedback::INTEGER_SEQUENCE
-    } else if class == double {
-        feedback::DOUBLE_SEQUENCE
-    } else {
-        feedback::OTHER
-    }
 }
 
 // The compiler.

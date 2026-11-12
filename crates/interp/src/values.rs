@@ -1457,9 +1457,12 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
 /// serialization writes too, so reading it here saves the call into the host on hot paths.
 #[inline]
 pub unsafe fn compact_sequence(object: Sexp) -> Option<(usize, f64, f64)> {
-    let [integer, real] = interp().compact_sequence_classes;
+    if !object.is_altrep() {
+        return None;
+    }
+    let [integer, real] = interp::compact_sequence_classes()?;
     let class = object.tag();
-    if !object.is_altrep() || (class != integer && class != real) {
+    if class != integer && class != real {
         return None;
     }
     let &[count, first, increment] = object.car().slice::<f64>() else {
