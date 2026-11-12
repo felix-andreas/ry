@@ -1106,6 +1106,44 @@ fn string_functions_follow_r_and_the_standard_library() {
             read(edge_pieces),
             Model::Str(vec!["".into(), "a".into(), "".into(), "".into()])
         );
+        let nothing = ry_str_split(empty.lo, empty.hi, separator.lo, separator.hi);
+        assert_eq!(read(nothing), Model::Str(vec!["".into()]));
+        let wide = str_of("--");
+        let wide_pieces = ry_str_split(edges.lo, edges.hi, wide.lo, wide.hi);
+        assert_eq!(read(wide_pieces), Model::Str(vec!["-a".into(), "".into()]));
+        let accented = str_of("é,a part long enough for the heap,");
+        let comma = str_of(",");
+        let accented_pieces = ry_str_split(accented.lo, accented.hi, comma.lo, comma.hi);
+        assert_eq!(
+            read(accented_pieces),
+            Model::Str(vec![
+                "é".into(),
+                "a part long enough for the heap".into(),
+                "".into()
+            ])
+        );
+        ry_str_drop(accented.lo, accented.hi);
+        // Separators at every offset of an eight-byte word, alone and in runs, in texts whose
+        // length covers the word-at-a-time part and the tail.
+        for length in 0..40usize {
+            for stride in [1, 2, 3, 5, 7, 8, 9, 41] {
+                let text: String = (0..length)
+                    .map(|index| {
+                        if index % stride == stride - 1 {
+                            ','
+                        } else {
+                            'x'
+                        }
+                    })
+                    .collect();
+                let subject = str_of(&text);
+                let split = ry_str_split(subject.lo, subject.hi, comma.lo, comma.hi);
+                let expected = text.split(',').map(String::from).collect();
+                assert_eq!(read(split), Model::Str(expected), "splitting {text:?}");
+                ry_list_drop(split);
+                ry_str_drop(subject.lo, subject.hi);
+            }
+        }
         let back = ry_list_join(pieces, separator.lo, separator.hi);
         assert_eq!(text_of(back), text_of(joined));
 
@@ -1209,6 +1247,9 @@ fn string_functions_follow_r_and_the_standard_library() {
             pieces,
             whole,
             edge_pieces,
+            nothing,
+            wide_pieces,
+            accented_pieces,
             left,
             middle,
             none,

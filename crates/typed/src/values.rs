@@ -219,8 +219,7 @@ pub unsafe extern "C" fn ry_list_free(list: *mut List) {
 /// Frees a heap string buffer whose count reached zero.
 pub unsafe extern "C" fn ry_str_free(buffer: *mut u8) {
     let capacity = (*(buffer as *mut StrBuffer)).capacity as usize;
-    block_free(buffer, STR_HEADER + capacity);
-    live_add(-1);
+    object_free(buffer, STR_HEADER + capacity);
 }
 
 pub unsafe extern "C" fn ry_list_dup(list: *mut List) {
@@ -254,7 +253,7 @@ pub unsafe extern "C" fn ry_str_drop(lo: u64, hi: u64) {
 
 /// The number of counted lists, dicts and heap string buffers alive on this thread.
 pub unsafe extern "C" fn ry_live_objects() -> i64 {
-    LIVE_OBJECTS.with(Cell::get)
+    POOLS.with(|pools| pools.live.get())
 }
 
 // Construction.
@@ -262,7 +261,7 @@ pub unsafe extern "C" fn ry_live_objects() -> i64 {
 /// A box of `shape` with count one and `words` uninitialized field words, which the caller fills
 /// before anything can read or free it.
 pub unsafe extern "C" fn ry_box_new(shape: u32, objects: u32, strings: u32, words: u32) -> *mut u8 {
-    let boxed = block_alloc(BOX_FIELDS + 8 * words as usize) as *mut Boxed;
+    let boxed = object_alloc(BOX_FIELDS + 8 * words as usize) as *mut Boxed;
     boxed.write(Boxed {
         count: 1,
         kind: BOX,
@@ -272,7 +271,6 @@ pub unsafe extern "C" fn ry_box_new(shape: u32, objects: u32, strings: u32, word
         strings,
         words,
     });
-    live_add(1);
     boxed as *mut u8
 }
 
@@ -1964,6 +1962,36 @@ pub unsafe extern "C" fn ry_str_split(
         slice_mut::<Str>((*list).data, 1)[0] = string;
         return list;
     }
+    // A one-byte separator is ASCII, so it never falls inside a character, and the pieces can
+    // be cut from the bytes directly, without the general substring search. The text is read
+    // eight bytes at a time, once to count the pieces and once to cut them.
+    if let [byte] = *separator.as_bytes() {
+        let text = string.bytes();
+        let pattern = u64::from(byte) * 0x0101_0101_0101_0101;
+        let mut length = 1;
+        let mut index = 0;
+        while index < text.len() {
+            length += separators_in_word(text, index, pattern).count_ones() as usize;
+            index += 8;
+        }
+        let list = list_alloc(STR, length, length);
+        let mut slot = (*list).data as *mut Str;
+        let mut start = 0;
+        index = 0;
+        while index < text.len() {
+            let mut found = separators_in_word(text, index, pattern);
+            while found != 0 {
+                let at = index + (found.trailing_zeros() / 8) as usize;
+                slot.write(str_from_bytes(text.get_unchecked(start..at)));
+                slot = slot.add(1);
+                start = at + 1;
+                found &= found - 1;
+            }
+            index += 8;
+        }
+        slot.write(str_from_bytes(text.get_unchecked(start..)));
+        return list;
+    }
     let text = string.as_str();
     let length = text.split(separator).count();
     let list = list_alloc(STR, length, length);
@@ -1974,6 +2002,26 @@ pub unsafe extern "C" fn ry_str_split(
         *slot = str_from_bytes(piece.as_bytes());
     }
     list
+}
+
+/// The top bit of every byte, among the eight of `text` from `index` on, that equals the byte
+/// `pattern` repeats. Bytes past the end of the text never match.
+#[inline]
+unsafe fn separators_in_word(text: &[u8], index: usize, pattern: u64) -> u64 {
+    const LOW_BITS: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    let remaining = text.len() - index;
+    let (word, inside) = if remaining >= 8 {
+        let word = (text.as_ptr().add(index) as *const u64).read_unaligned();
+        (word, u64::MAX)
+    } else {
+        // An inline string of up to eight bytes holds them in its first word, zero-padded.
+        let word = str_from_bytes(text.get_unchecked(index..)).lo;
+        (word, (1 << (8 * remaining)) - 1)
+    };
+    // A matching byte is zero after the exclusive or, and the sum sets the top bit of every
+    // byte that has a low bit set without carrying into the next byte.
+    let differing = word ^ pattern;
+    !(((differing & LOW_BITS) + LOW_BITS) | differing | LOW_BITS) & inside
 }
 
 /// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
@@ -2537,85 +2585,119 @@ const UNIQUE_SEED: u64 = 0x2d35_8dcc_aa6c_78a5;
 static HASH_SEED: AtomicU64 = AtomicU64::new(0);
 static HASH_SEEDED: AtomicBool = AtomicBool::new(false);
 
-thread_local! {
-    static FREE_STACKS: [Cell<*mut FreeBlock>; CLASS_COUNT] =
-        const { [const { Cell::new(null_mut()) }; CLASS_COUNT] };
-    static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
+/// A thread's allocator state. It is one thread-local value because a thread-local read in a
+/// shared library is a call, and an allocation or a free that touched the free stacks and the
+/// live count as separate thread-locals paid that call twice.
+struct Pools {
+    free: [Cell<*mut FreeBlock>; CLASS_COUNT],
+    live: Cell<i64>,
     /// Freed blocks above 64 KiB by power-of-two class, kept so a loop that makes a large list
     /// every iteration reuses memory whose pages are already mapped.
-    static LARGE_STACKS: [Cell<*mut FreeBlock>; LARGE_CLASS_COUNT] =
-        const { [const { Cell::new(null_mut()) }; LARGE_CLASS_COUNT] };
-    static LARGE_KEPT: [Cell<u8>; LARGE_CLASS_COUNT] =
-        const { [const { Cell::new(0) }; LARGE_CLASS_COUNT] };
+    large: [Cell<*mut FreeBlock>; LARGE_CLASS_COUNT],
+    large_kept: [Cell<u8>; LARGE_CLASS_COUNT],
+}
+
+thread_local! {
+    static POOLS: Pools = const {
+        Pools {
+            free: [const { Cell::new(null_mut()) }; CLASS_COUNT],
+            live: Cell::new(0),
+            large: [const { Cell::new(null_mut()) }; LARGE_CLASS_COUNT],
+            large_kept: [const { Cell::new(0) }; LARGE_CLASS_COUNT],
+        }
+    };
 }
 
 // Allocation.
 
 /// A block of at least `size` bytes, 16-byte aligned: a pooled power of two up to 64 KiB, else
 /// a larger power of two that a freed block of its class provides when there is one.
+#[inline]
 unsafe fn block_alloc(size: usize) -> *mut u8 {
-    if size > MAX_BLOCK {
-        let class = large_class(size);
-        let kept = LARGE_STACKS.with(|stacks| {
-            let top = stacks[class].get();
-            if !top.is_null() {
-                stacks[class].set((*top).next);
-                LARGE_KEPT.with(|kept| kept[class].set(kept[class].get() - 1));
-            }
-            top
-        });
-        if !kept.is_null() {
-            return kept as *mut u8;
-        }
-        let layout = large_layout(size);
-        let block = alloc::alloc(layout);
-        if block.is_null() {
-            alloc::handle_alloc_error(layout);
-        }
-        return block;
-    }
-    let class = size_class(size);
-    FREE_STACKS.with(|stacks| {
-        let stack = &stacks[class];
-        let mut top = stack.get();
-        if top.is_null() {
-            top = refill(class);
-        }
-        stack.set((*top).next);
-        top as *mut u8
+    POOLS.with(|pools| block_alloc_in(pools, size))
+}
+
+/// A block for a counted object (a list, a dict, a box or a string buffer), which joins the
+/// thread's live count.
+#[inline]
+unsafe fn object_alloc(size: usize) -> *mut u8 {
+    POOLS.with(|pools| {
+        pools.live.set(pools.live.get() + 1);
+        block_alloc_in(pools, size)
     })
 }
 
-/// Returns a block from `block_alloc(size)`; `size` must be the size it was allocated with.
-unsafe fn block_free(block: *mut u8, size: usize) {
+/// Returns the block of a counted object, which leaves the thread's live count.
+#[inline]
+unsafe fn object_free(block: *mut u8, size: usize) {
+    POOLS.with(|pools| {
+        pools.live.set(pools.live.get() - 1);
+        block_free_in(pools, block, size)
+    })
+}
+
+/// [`block_alloc`] for a caller that already holds the thread's pools.
+#[inline]
+unsafe fn block_alloc_in(pools: &Pools, size: usize) -> *mut u8 {
     if size > MAX_BLOCK {
-        let class = large_class(size);
-        let keep = LARGE_KEPT.with(|kept| {
-            let count = kept[class].get();
-            let keep = count < LARGE_KEEP && size <= LARGE_KEEP_LIMIT;
-            if keep {
-                kept[class].set(count + 1);
-            }
-            keep
-        });
-        if keep {
-            let block = block as *mut FreeBlock;
-            LARGE_STACKS.with(|stacks| {
-                (*block).next = stacks[class].get();
-                stacks[class].set(block);
-            });
-        } else {
-            alloc::dealloc(block, large_layout(size));
-        }
-        return;
+        return large_alloc(pools, size);
     }
-    let class = size_class(size);
+    let stack = &pools.free[size_class(size)];
+    let mut top = stack.get();
+    if top.is_null() {
+        top = refill(size_class(size));
+    }
+    stack.set((*top).next);
+    top as *mut u8
+}
+
+#[cold]
+unsafe fn large_alloc(pools: &Pools, size: usize) -> *mut u8 {
+    let class = large_class(size);
+    let kept = pools.large[class].get();
+    if !kept.is_null() {
+        pools.large[class].set((*kept).next);
+        pools.large_kept[class].set(pools.large_kept[class].get() - 1);
+        return kept as *mut u8;
+    }
+    let layout = large_layout(size);
+    let block = alloc::alloc(layout);
+    if block.is_null() {
+        alloc::handle_alloc_error(layout);
+    }
+    block
+}
+
+/// Returns a block from `block_alloc(size)`; `size` must be the size it was allocated with.
+#[inline]
+unsafe fn block_free(block: *mut u8, size: usize) {
+    POOLS.with(|pools| block_free_in(pools, block, size))
+}
+
+/// [`block_free`] for a caller that already holds the thread's pools.
+#[inline]
+unsafe fn block_free_in(pools: &Pools, block: *mut u8, size: usize) {
+    if size > MAX_BLOCK {
+        return large_free(pools, block, size);
+    }
+    let stack = &pools.free[size_class(size)];
     let block = block as *mut FreeBlock;
-    FREE_STACKS.with(|stacks| {
-        let stack = &stacks[class];
-        (*block).next = stack.get();
-        stack.set(block);
-    });
+    (*block).next = stack.get();
+    stack.set(block);
+}
+
+#[cold]
+unsafe fn large_free(pools: &Pools, block: *mut u8, size: usize) {
+    let class = large_class(size);
+    let count = pools.large_kept[class].get();
+    if count < LARGE_KEEP && size <= LARGE_KEEP_LIMIT {
+        pools.large_kept[class].set(count + 1);
+        let block = block as *mut FreeBlock;
+        (*block).next = pools.large[class].get();
+        pools.large[class].set(block);
+    } else {
+        alloc::dealloc(block, large_layout(size));
+    }
 }
 
 /// Moves a block to a new size, keeping the first `min(old, new)` bytes.
@@ -2699,7 +2781,7 @@ fn system_layout(size: usize) -> Layout {
 }
 
 fn live_add(delta: i64) {
-    LIVE_OBJECTS.with(|live| live.set(live.get() + delta));
+    POOLS.with(|pools| pools.live.set(pools.live.get() + delta));
 }
 
 /// Adds `amount` to a count, saturating at the static count: a value whose count would
@@ -2723,14 +2805,14 @@ unsafe fn list_alloc(kind: u8, length: usize, capacity: usize) -> *mut List {
         .and_then(|bytes| bytes.checked_add(HEADER_BYTES))
         .unwrap_or_else(|| panic!("typed list of {capacity} items overflows memory"));
     let (list, data, capacity) = if bytes <= MAX_BLOCK {
-        let block = block_alloc(bytes);
+        let block = object_alloc(bytes);
         (
             block as *mut List,
             block.add(HEADER_BYTES),
             (pooled_size(bytes) - HEADER_BYTES) / width,
         )
     } else {
-        let header = block_alloc(HEADER_BYTES);
+        let header = object_alloc(HEADER_BYTES);
         (header as *mut List, block_alloc(capacity * width), capacity)
     };
     list.write(List {
@@ -2742,7 +2824,6 @@ unsafe fn list_alloc(kind: u8, length: usize, capacity: usize) -> *mut List {
         capacity: capacity as u64,
         data,
     });
-    live_add(1);
     list
 }
 
@@ -2752,12 +2833,11 @@ unsafe fn list_release_storage(list: *mut List) {
     let capacity = (*list).capacity as usize;
     let header = list as *mut u8;
     if (*list).data == header.add(HEADER_BYTES) {
-        block_free(header, HEADER_BYTES + capacity * width);
+        object_free(header, HEADER_BYTES + capacity * width);
     } else {
         block_free((*list).data, capacity * width);
-        block_free(header, HEADER_BYTES);
+        object_free(header, HEADER_BYTES);
     }
-    live_add(-1);
 }
 
 /// A copy of `list` with count one and room for `capacity` items, its strings counted again.
@@ -2888,44 +2968,50 @@ unsafe fn drop_items(kind: u8, data: *mut u8, length: usize) {
 }
 
 /// Frees a box whose count reached zero, and every box that held only through it, with a
-/// worklist rather than recursion, so a long chain of tags cannot overflow the stack.
+/// worklist rather than recursion, so a long chain of tags cannot overflow the stack. Only the
+/// marked words are visited, so a box of plain numbers is freed without a look at its fields.
 unsafe fn box_free(first: *mut Boxed) {
     let mut pending: SmallVec<[*mut Boxed; 16]> = SmallVec::new();
-    pending.push(first);
-    while let Some(boxed) = pending.pop() {
+    let mut boxed = first;
+    loop {
         let Boxed {
-            objects,
-            strings,
+            mut objects,
+            mut strings,
             words,
             ..
         } = *boxed;
         let fields = (boxed as *mut u8).add(BOX_FIELDS) as *const u64;
-        for word in 0..words as usize {
-            if objects & (1 << word) != 0 {
-                let child = *fields.add(word) as *mut List;
-                if child.is_null() {
-                    continue;
-                }
-                let count = (*child).count;
-                if count == STATIC_COUNT {
-                    continue;
-                }
-                if count > 1 {
-                    (*child).count = count - 1;
-                } else if (*child).kind == BOX {
-                    pending.push(child as *mut Boxed);
-                } else {
-                    ry_list_free(child);
-                }
-            } else if strings & (1 << word) != 0 {
-                str_drop(Str {
-                    lo: *fields.add(word),
-                    hi: *fields.add(word + 1),
-                });
+        while objects != 0 {
+            let child = *fields.add(objects.trailing_zeros() as usize) as *mut List;
+            objects &= objects - 1;
+            if child.is_null() {
+                continue;
+            }
+            let count = (*child).count;
+            if count == STATIC_COUNT {
+                continue;
+            }
+            if count > 1 {
+                (*child).count = count - 1;
+            } else if (*child).kind == BOX {
+                pending.push(child as *mut Boxed);
+            } else {
+                ry_list_free(child);
             }
         }
-        block_free(boxed as *mut u8, BOX_FIELDS + 8 * words as usize);
-        live_add(-1);
+        while strings != 0 {
+            let word = strings.trailing_zeros() as usize;
+            strings &= strings - 1;
+            str_drop(Str {
+                lo: *fields.add(word),
+                hi: *fields.add(word + 1),
+            });
+        }
+        object_free(boxed as *mut u8, BOX_FIELDS + 8 * words as usize);
+        match pending.pop() {
+            Some(next) => boxed = next,
+            None => break,
+        }
     }
 }
 
@@ -3490,16 +3576,16 @@ unsafe fn str_buffer_alloc(length: usize) -> *mut u8 {
     let Ok(capacity) = u32::try_from(capacity) else {
         panic!("typed string of {length} bytes is longer than a string buffer holds");
     };
-    let buffer = block_alloc(size);
+    let buffer = object_alloc(size);
     (buffer as *mut StrBuffer).write(StrBuffer { count: 1, capacity });
-    live_add(1);
     buffer
 }
 
+#[inline]
 unsafe fn str_from_bytes(bytes: &[u8]) -> Str {
     let length = bytes.len();
     if length > INLINE_CAPACITY {
-        return str_build(length, |cursor| cursor.push(bytes));
+        return str_from_long_bytes(bytes);
     }
     // An inline string is assembled from a few fixed-size reads that overlap where the length
     // is between two sizes, which costs a handful of instructions where a copy of `length`
@@ -3533,6 +3619,13 @@ unsafe fn str_from_bytes(bytes: &[u8]) -> Str {
         lo,
         hi: hi | (0x80 | length as u64) << 56,
     }
+}
+
+/// The heap string of more than `INLINE_CAPACITY` bytes. It is its own function so that
+/// `str_from_bytes` stays a few instructions with no frame where it is inlined.
+#[inline(never)]
+unsafe fn str_from_long_bytes(bytes: &[u8]) -> Str {
+    str_build(bytes.len(), |cursor| cursor.push(bytes))
 }
 
 /// A string of exactly `length` bytes, which `fill` writes through the cursor.
@@ -3896,7 +3989,7 @@ fn dict_seed() -> u64 {
 }
 
 unsafe fn dict_alloc(key_kind: u8, value_kind: u8, seed: u64) -> *mut Dict {
-    let dict = block_alloc(size_of::<Dict>()) as *mut Dict;
+    let dict = object_alloc(size_of::<Dict>()) as *mut Dict;
     dict.write(Dict {
         count: 1,
         kind: DICT,
@@ -3913,7 +4006,6 @@ unsafe fn dict_alloc(key_kind: u8, value_kind: u8, seed: u64) -> *mut Dict {
         index: null_mut(),
         removed_bits: null_mut(),
     });
-    live_add(1);
     dict
 }
 
@@ -3931,8 +4023,7 @@ unsafe fn dict_free(dict: *mut Dict) {
         }
     }
     dict_free_columns(dict);
-    block_free(dict as *mut u8, size_of::<Dict>());
-    live_add(-1);
+    object_free(dict as *mut u8, size_of::<Dict>());
 }
 
 /// Gives `dict` empty columns with room for `capacity` entries.
