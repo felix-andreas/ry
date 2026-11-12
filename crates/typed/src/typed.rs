@@ -32,8 +32,7 @@ use {
         strings::Encoding,
     },
     interp::{
-        annotations::decline, builtins::Arg, bytecode::TypedCall, unwind::Unwind,
-        values as rvalues,
+        annotations::decline, builtins::Arg, bytecode::TypedCall, unwind::Unwind, values as rvalues,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
@@ -272,7 +271,9 @@ unsafe fn compiled_or_refusal(
         AWAITING.with_borrow_mut(|awaiting| awaiting.remove(&key));
         COMPILED.with_borrow_mut(|compiled| compiled.remove(&key));
     }
-    match COMPILED.with_borrow(|compiled| compiled.get(&key).map(|entry| entry.as_ref().ok().copied())) {
+    match COMPILED
+        .with_borrow(|compiled| compiled.get(&key).map(|entry| entry.as_ref().ok().copied()))
+    {
         // A function the code calls was rebound since it compiled, or a `match` over any tag
         // misses shapes confirmed since: compile it again.
         Some(Some(compiled))
@@ -293,11 +294,15 @@ unsafe fn compiled_or_refusal(
         >= MAX_COMPILED
     {
         decline(|| format!("the session compiled its limit of {MAX_COMPILED} typed functions"));
-        return Err(Refusal::new("the session compiled its limit of typed functions"));
+        return Err(Refusal::new(
+            "the session compiled its limit of typed functions",
+        ));
     }
     if !COMPILING.with_borrow_mut(|compiling| compiling.insert(key.clone())) {
         decline(|| String::from("it is called while its own code is being compiled"));
-        return Err(Refusal::new("it is called while its own code is being compiled"));
+        return Err(Refusal::new(
+            "it is called while its own code is being compiled",
+        ));
     }
     let result = compile(function, params);
     COMPILING.with_borrow_mut(|compiling| compiling.remove(&key));
@@ -422,7 +427,11 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
     for site in &lowered.r_calls {
         heap.add_global_root(site.function);
         heap.add_global_root(site.call);
-        for conversion in site.arguments.iter().filter_map(|argument| argument.conversion) {
+        for conversion in site
+            .arguments
+            .iter()
+            .filter_map(|argument| argument.conversion)
+        {
             heap.add_global_root(conversion.function);
         }
         if let Some((conversion, _)) = site.result {
@@ -479,7 +488,10 @@ impl Callees for Linker {
             if lower::awaits_interpreter(&refusal) {
                 refusal
             } else {
-                Refusal::new("a typed function it calls does not compile")
+                Refusal(Cow::Owned(format!(
+                    "a typed function it calls does not compile: {}",
+                    refusal.0
+                )))
             }
         })?;
         self.calls_r |= compiled.calls_r;
@@ -1017,7 +1029,12 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     }
 }
 
-unsafe fn call_r(site: &RCall, mut words: *const u64, out: *mut u64, env: Sexp) -> Result<(), Unwind> {
+unsafe fn call_r(
+    site: &RCall,
+    mut words: *const u64,
+    out: *mut u64,
+    env: Sexp,
+) -> Result<(), Unwind> {
     let heap = interp::heap();
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     for argument in &site.arguments {
@@ -1051,7 +1068,12 @@ unsafe fn call_r(site: &RCall, mut words: *const u64, out: *mut u64, env: Sexp) 
 
 /// Applies the conversion `conversion` to `value`, the value of the code `code`, as the
 /// interpreter applies it.
-unsafe fn convert(conversion: lower::Conversion, code: Sexp, value: Sexp, env: Sexp) -> Result<Sexp, Unwind> {
+unsafe fn convert(
+    conversion: lower::Conversion,
+    code: Sexp,
+    value: Sexp,
+    env: Sexp,
+) -> Result<Sexp, Unwind> {
     let promise = interp::eval::forced_promise(code, value)?;
     interp::heap().root(promise);
     let argument = Arg {
@@ -1070,7 +1092,9 @@ unsafe fn write_converted(
     out: *mut u64,
 ) -> Result<(), Unwind> {
     let expected = storage(ty).map(|(kind, _)| kind);
-    if expected != Some(value.kind()) || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. }) {
+    if expected != Some(value.kind())
+        || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
+    {
         return Err(interp::unwind::error(format!(
             "`{}` gave a value of type `{}`, and the typed function was compiled for the type it \
              gave before, {ty:?}: convert the value to one type in R first",
@@ -1106,7 +1130,11 @@ unsafe fn write_converted(
                 Item::Int | Item::Lgl => 4,
                 _ => 8,
             };
-            std::ptr::copy_nonoverlapping(value.data() as *const u8, (*list).data as *mut u8, size * length);
+            std::ptr::copy_nonoverlapping(
+                value.data() as *const u8,
+                (*list).data as *mut u8,
+                size * length,
+            );
             *out = list as u64;
         }
         _ => {

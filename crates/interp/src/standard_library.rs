@@ -3464,8 +3464,12 @@ unsafe fn bits_value(call: &Call<'_>, value: i32) -> R<Sexp> {
     scalar_integer(value)
 }
 
-/// A bitwise operation on two integers' two's-complement bits.
+/// A bitwise operation on two integers' two's-complement bits: 64 of them when either is an
+/// `I64`, otherwise the 32 of an R integer.
 unsafe fn bitwise(call: &Call<'_>, operation: fn(i32, i32) -> i32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [first, second] = arguments(call, ["first", "second"])?;
     let first = integer_argument(call, "first", first)?;
     let second = integer_argument(call, "second", second)?;
@@ -3485,12 +3489,19 @@ unsafe fn num_bitwise_xor(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn num_bitwise_not(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number] = arguments(call, ["number"])?;
     bits_value(call, !integer_argument(call, "number", number)?)
 }
 
-/// Shifts an integer's bits by `bits`, from 0 to 31.
+/// Shifts an integer's bits by `bits`: from 0 to 63 when either is an `I64`, otherwise from 0 to
+/// 31.
 unsafe fn shift(call: &Call<'_>, operation: fn(i32, u32) -> i32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number, bits] = arguments(call, ["number", "bits"])?;
     let number = integer_argument(call, "number", number)?;
     let bits = whole(call, "bits", bits)?;
