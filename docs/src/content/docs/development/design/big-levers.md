@@ -1,6 +1,6 @@
 ---
 title: The big levers
-description: "An independent review of where ry's largest wins are: five ranked levers with the evidence from other language implementations, what to stop, where the runtime tracks are aimed wrong, and the cheapest measurement that confirms or kills each lever"
+description: "An independent review of where ry's largest wins are: five ranked levers with the evidence from other language implementations, what to stop, where the runtime tracks are aimed wrong, whether Cranelift is the right native backend, and the cheapest measurement that confirms or kills each lever"
 ---
 
 This draft is a critical review of ry's plan, written from outside the tracks that carry it out. It
@@ -43,6 +43,11 @@ The ranked levers follow from that table:
 
 Two of these recommendations are the user's to decide, because they touch user directives: the 10x
 target for untyped R is the user's north star, and single-thread first is a user directive.
+
+The native backend is not one of the levers. "The native backend" below measures Cranelift
+against the bar for typed ry and recommends keeping it: typed ry is 2.1x from Rust where generated
+code bounds the run time and 5.4x where the runtime library and the boundary do, and a better code
+generator does not change the second figure.
 
 ## What this rests on
 
@@ -156,7 +161,8 @@ current tree ("Blind spots" below).
 
 The typed runtime's bar is 1.5 to 2 times the time of equivalent Rust (`typed-runtime.md`). The
 [hill climb](/development/design/language-climb/) computes that score with `tools/climb/run.py`,
-but `tools/climb/log.tsv` holds no value for it. This review has two estimates:
+but `tools/climb/log.tsv` holds no value for it. This review has two estimates and one direct
+run:
 
 - Dividing the published typed times (`tools/bench/kernels/results.json` and
   `tools/bench/applications/results.json`) by the Rust twins' times measured here gives a geometric
@@ -171,6 +177,11 @@ but `tools/climb/log.tsv` holds no value for it. This review has two estimates:
   The binary is older than the harness, so this may be version skew and is unverified on the
   current tree. It still shows the failure mode: a typed program's speed depends on whether each
   call site reaches the native entry, and no run reports when one does not.
+- Running the same command on a release build of the current tree reports 4.95x, and the warm
+  repeats stay native. The Rust references for `array_sum`, `log_rank` and `vasicek` do a quarter
+  or a tenth of their typed programs' work, which also inflates the first estimate above. With
+  matched references the score is about 3.7x. "The native backend" below breaks it down by
+  program.
 
 ## The ceiling on untyped R
 
@@ -282,8 +293,8 @@ decided:
   ry "independent of R's semantics", and the benchmark runner already accepts a relative 1e-10
   difference in a typed checksum.
 - **Score against Rust on every step.** The hill climb's fitness function is typed ry over Rust,
-  and its log holds no value for it. The estimate above is about 4.7x, with five of 17 programs
-  within the 2x bar.
+  and its log holds no value for it. A run on the current tree gives about 3.7x once three
+  mismatched Rust references are corrected, with six of 17 programs within the 2x bar.
 
 **Who shows it works.** [mypyc](https://mypyc.readthedocs.io/en/latest/introduction.html) compiles
 type-annotated Python ahead of time for 1.5x to 5x, and mypy compiled with it is 4x faster.
@@ -496,6 +507,290 @@ directive, and bit-identical numerics is a settled agent decision that the oracl
 threshold and a worker-count check must prevent, and a second numeric mode that doubles part of
 the oracle's work.
 
+## The native backend
+
+By default, every native instruction ry generates comes out of Cranelift. Tier 1 of the R JIT and
+the typed core both build the IR in `crates/ssa`, and that crate holds the one lowering to
+Cranelift 0.136. The exception is the opt-in baseline tier, which has its own assembler and which
+a pull request in review deletes. The bar for typed ry has two halves. Run time close to Rust's is
+in `AGENTS.md`. Compile speed in Roc's class, far ahead of rustc's and with no LLVM-style pass
+pipeline, is the user's bar as relayed for this review, and no docs page states it yet. This
+section asks whether Cranelift can meet both, and compares it with a direct emitter in the style
+of Roc's dev backend, with copy-and-patch, and with LLVM as an optional release mode.
+
+**The answer.** Keep Cranelift as the only backend, shrink the IR that ry hands it, and spend the
+run-time effort on the typed runtime library, the boundary to R and ry's own lowering. The
+measurements behind that answer:
+
+- On the seven programs whose time is in generated code, typed ry takes 2.1 times Rust's time
+  (geometric mean), and four of them are within 1.4x. Cranelift's code is not what separates typed
+  ry from Rust.
+- The other ten programs take 5.4 times Rust's time, and nine of them do not slow down when the
+  generated code is made 1.3 to 6.6 times slower. No change to the generated code alone can move
+  them.
+- A small typed function compiles in 0.25 to 0.42 ms in a warm process, and Cranelift is 73% of
+  that. About two thirds of the largest function's IR is reference-count bookkeeping that ry
+  emits inline, so the cheapest large cut in compile time is in ry's lowering, and every backend
+  would inherit it.
+
+### How this was measured
+
+The numbers in this section come from a release build of the tree with timers added locally around
+`ssa::lower` and the code module's `define_function`, and with environment switches for
+Cranelift's register allocator and optimization level. Those timers are not in the tree. The code
+measured is what a session compiles in memory, not position-independent code for a file. The
+machine is the shared 4-core x86-64 VM used above, with GNU R 4.6.2 and rustc 1.101.0-nightly.
+
+Typed run times are the benchmark harness's minimum over its repeats on a clock with 1 ms
+resolution, and the Rust references use a finer clock. A typed time of a few milliseconds
+therefore carries a large error: `fib` read 6 ms in one session and 8 ms in another. Compile times
+are the best of three to five process runs, and they varied by up to 30% between runs.
+
+### Run time: where the distance to Rust is
+
+`tools/climb/run.py --only speed` on this build reports typed ry at 4.95 times Rust's time over 17
+programs. Three of the Rust references do less work than their typed programs, which their
+checksums show:
+
+| Program | Rust reference | Typed program | Reported | With a matched reference |
+| --- | --- | --- | --- | --- |
+| `array_sum` | 5 passes | 20 passes | 12.2x | about 4.0x |
+| `log_rank` | 4,000 subjects | 16,000 subjects | 33.8x | about 7.4x |
+| `vasicek` | 2,000 steps | 20,000 steps | 11.4x | about 1.0x |
+
+With those three matched, the score is about 3.7x, and six of 17 programs are within the 2x bar.
+
+Switching Cranelift to its single-pass register allocator makes the generated code slower and
+changes nothing else, so it sorts the programs by what bounds them. The ratios come from the
+`run.py` session with the three corrections, and the slowdowns from a separate session:
+
+| Programs, with typed time over Rust's | Geometric mean | Run time under the single-pass allocator |
+| --- | --- | --- |
+| `loop_sum` 1.0, `array_dot` 1.2, `drawdown` 1.3, `closures` 1.4, `fib` 2.9, `array_sum` about 4.0, `array_filter` 7.3 | 2.1x | 1.3x to 6.6x slower |
+| `vasicek` about 1.0, `report` 1.5, `vector_arith` 2.2, `array_map` 2.7, `bond_book` 3.3, `log_rank` about 7.4, `team_scores` 9.2, `expr_tree` 12.4, `orders` 16.7, `sales` 51.4 | 5.4x | within 5% either way, except `bond_book`, which slows by 5% to 18% |
+
+The second row's time is outside the code Cranelift generates. `sales` is refused and runs
+interpreted. For the others this is an inference from their insensitivity, not a profile: the time
+is in the typed runtime library, in allocation, and in conversions at the boundary, which are the
+open items lever 1 depends on. Bringing that row to the first row's 2.1x would move the score from
+about 3.7x to 2.1x. A perfect backend applied to the first row alone would move it to about 2.7x.
+
+The first row has a cause of its own that is neither Cranelift nor the library. Typed `array_sum`
+takes 50 to 56 ms, and the same loop written in Rust and compiled through Cranelift takes 20 to
+28 ms for the same work. That factor of two is in the instructions ry's lowering emits for the
+loop, and it is unprofiled.
+
+The Rust references compiled through rustc's Cranelift backend (`-Zcodegen-backend=cranelift`)
+show what LLVM adds, and when:
+
+| Rust source | Cranelift's code against LLVM's, both at `-O` |
+| --- | --- |
+| The 17 references as written, with iterators, closures and slices | 3.9x slower (geometric mean), from 1.2x to 17.5x. `loop_sum` is 11.3x slower and `array_dot` 10.8x |
+| `loop_sum`, `array_dot`, `array_sum` and `array_filter` rewritten as index loops over raw pointers | 1.4x, 1.0x, 1.5x to 2.0x, and 0.6x to 0.8x across reruns |
+
+For scale, LLVM at `opt-level=0` is 6.3x slower than LLVM at `-O` on the 17 references. Four
+kernels are a thin base, and Cranelift's win on the `array_filter` loop may be an artifact of the
+sorted input.
+
+Cranelift has no inliner in its default pipeline and
+"[generally doesn't mess with control-flow at all in its mid-end](https://fitzgen.com/2025/11/19/inliner.html)",
+because the Wasm it was built for arrives already optimized. Idiomatic Rust needs inlining and
+scalar replacement before its loops are loops, so it loses a factor of four. The typed benchmark
+kernels are written as index loops, which reach Cranelift flat, and that is why typed `loop_sum`
+(7 ms) and `array_dot` (4 to 5 ms) are within 1.0x to 1.5x of `rustc -O`. The like-for-like
+comparison is the table's second row: on flat loops LLVM adds 1.0x to 2.0x.
+
+Two limits follow. A typed program written as pipelines of closures gets its inlining and fusion
+from ry or not at all: the lowering inlines local function literals, and `fusion::fuse` covers one
+shape, a count of a logical list. LLVM also vectorizes where the language allows it. The
+idiomatic `array_filter` counts matches in an integer, and LLVM runs it in 1.4 ms, against 8.2 ms
+for its own index loop with a floating-point accumulator. That speed is consistent with a
+vectorized count, though the assembly was not inspected.
+
+The published gap on input that is already optimized is of the same size. Cranelift's README puts
+its code about 14% behind an LLVM-based Wasm engine. On TPC-DS query code in Umbra,
+[Engelke and Schwarz](https://home.cit.tum.de/~engelke/pubs/2403-cgo.pdf) measure 4.62 s for
+Cranelift against 4.12 s for optimized LLVM on x86-64, and 16.37 s against 12.88 s on AArch64.
+Every measurement of ry here is x86-64, so the AArch64 gap may be the larger one for ry as well.
+
+### Compile time: what a typed function costs
+
+Sixty small typed functions compiled in one process, with the first round dropped, cost this much
+each. The cells are medians in µs, so a row does not add up exactly:
+
+| Function | Cranelift instructions | Total | Cranelift, the function | Cranelift, the trampoline | `ssa` to Cranelift | ry's front end | Finalize |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Sum loop | 63 | 262 | 144 | 36 | 12 | 56 | 4 |
+| Dot product | 137 | 418 | 256 | 48 | 22 | 85 | 5 |
+| Recursive `fib` | 68 | 268 | 162 | 33 | 13 | 52 | 4 |
+| Branches | 59 | 247 | 136 | 38 | 12 | 51 | 4 |
+
+The mean is 311 µs per function. Cranelift takes 73% of it, and 14 points of that go to the
+host-convention trampoline that `backend::compile` defines beside every function: four to six
+instructions that cost 33 to 48 µs. A function that small shows the fixed cost of one
+`define_function` call, module bookkeeping included. Lowering `ssa` to Cranelift's IR is 5%, and
+ry's own front end (typed IR, fusion, ownership, and the timers' own printing) about 20%. The
+first function a process compiles costs about 0.5 ms more than a warm one.
+
+Between about 1,100 and 5,200 instructions, the cost is 1.7 to 2.1 µs per Cranelift instruction:
+
+| Program | Lines | Typed functions compiled | Cranelift instructions | Machine code | Time in Cranelift | Every typed compile |
+| --- | --- | --- | --- | --- | --- | --- |
+| `closures` | 11 | 1 | 1,148 | 7.3 KB | 2.4 ms | 3.1 ms |
+| `report` | 15 | 1 | 2,797 | 15.3 KB | 4.8 ms | 6.1 ms |
+| `team_scores` | 24 | 2 | 3,070 | 17.3 KB | 5.8 ms | 9.5 ms |
+
+Tier 1 lands on the same figure. Across the untyped benchmark programs it compiled 31 bodies with
+a median of 1,034 Cranelift instructions in a median of 1.8 ms each (75.6 ms in total), at 1.8 µs
+per instruction, with the single-pass allocator on bodies without loops. Above that range the
+backtracking allocator grows faster than linearly: the comment on `Allocator` in
+`crates/ssa/src/lower.rs` records 100 ms against 17 ms for the single-pass allocator on a
+38,000-instruction body.
+
+Against the bar, the 16 typed programs that compile take 0.7 to 9.5 ms each, in process and cold.
+`rustc -O` takes 118 to 340 ms on each Rust reference, and 98 to 159 ms through its Cranelift
+backend. Those figures include process start and linking, which ry does not have, so they compare
+what a user waits for and not the code generators. By that measure typed ry is one to two orders
+of magnitude ahead of rustc at this size. Roc publishes no compile-speed benchmark to compare
+with. Against the fastest published single-pass compilers, ry is behind: Umbra's direct emitter
+compiles 6,678 functions in 64 ms, which is about 10 µs per function.
+
+The figure that could matter is the cost per source line. Over the 17 programs the typed compile
+costs 183 µs per source line cold, and an estimated 110 µs warm (47 Cranelift instructions per
+line at 1.8 µs each, plus the front end). A 300,000-line code base written entirely in typed ry
+would then take an estimated 33 to 55 s to compile on one core. No install-time compile of typed
+code exists, so each session compiles in memory the functions it calls, and pays only for those.
+Compiling on several workers should divide the wait, and an edit should cost the 0.3 to 7 ms of
+the functions it touches. Neither was measured.
+
+Cranelift's settings bound what tuning it can give:
+
+| Setting | Small functions, mean | `report` | Run time |
+| --- | --- | --- | --- |
+| Default: backtracking allocator, `opt_level = "speed"` | 311 µs | 4.8 ms in Cranelift | baseline |
+| Single-pass allocator | 253 µs (19% less) | 2.9 ms | `loop_sum` 6.6x and `array_dot` 6x slower, `array_filter` 2.8x, `drawdown` 2.2x, `array_sum` 2x, `closures` 1.7x, `fib` 1.3x |
+| No mid-end (`opt_level = "none"`) | 243 µs (22% less) | 4.9 ms | within run-to-run variation, except `array_dot` at 6 ms against 4 ms |
+| Both | 175 µs (44% less) | 2.6 ms | as with the single-pass allocator |
+
+Settings alone give at most a factor of two, and the allocator's half of it costs more run time
+than a typed loop can afford.
+
+The larger factor is the IR's volume. `report` is 15 lines of source and reaches Cranelift as
+about 2,200 `ssa` instructions in 711 blocks. It contains 127 inline reference-count drops. Each
+one is 12 instructions over five blocks: a null test, a test for a count of -1, the decrement, a
+zero test, the store, and a cold call that frees. Together they are about 1,500 instructions, two
+thirds of the function. The function also has 35 returns, and the early exits read in its IR dump
+each drop the live values on a path of their own. `team_scores` has 132 drops and 37 returns, and
+`closures` 46 and 29. A split of the dumps by control flow puts 57% of `report`'s instructions on
+paths that only cold blocks reach, 55% of `closures`' and 41% of `team_scores`'. A drop that is
+one call on those paths, and exits that share their cleanup, would remove most of that share, and
+in this size range compile time follows the instruction count.
+
+### The options
+
+| Option | Compile time against Cranelift today | Code speed against Cranelift today | What it costs ry |
+| --- | --- | --- | --- |
+| Cranelift, fed as today | 1 | 1 | Nothing |
+| Cranelift, fed less IR | An estimated 1.4x to 2x faster on functions like `report`, and 14% on small ones | Equal or better, with smaller code | Changes inside `crates/typed/src/backend.rs` and the ownership pass |
+| Cranelift's single-pass allocator for typed functions without loops, as tier 1 does | 19% faster on small functions, 39% on `report` | 1.3x slower on `fib` and 1.7x on `closures`, which have no loops | A rule that also excludes recursive and call-heavy functions |
+| A direct single-pass emitter | 4.3x to 16x faster by published figures for whole pipelines, so an estimated 2x to 3x for a whole typed compile | 1.6x slower by the best published figure | A second lowering and two instruction encoders, and a tiering scheme for typed code |
+| Copy-and-patch | Faster than any compiler that selects instructions | 2.4x slower than LLVM `-O0` in TPDE's measurement | A Clang step in the build for the stencils, plus everything the direct emitter costs |
+| LLVM for a release mode | About 10x slower with its optimizing pipeline | 1.0x to 2.0x faster on ry's scalar loops, more where it vectorizes | LLVM as a build dependency, a second lowering, and a second code generator to test |
+
+**A direct emitter.** [TPDE](https://arxiv.org/abs/2505.22610) is the best published example. In
+Wasmtime, with Wasm translation included and Cranelift's IR optimizations off, it compiles 4.3x
+faster than Cranelift and 2.7x faster than Cranelift with the single-pass allocator. Its code is
+1.6x slower than default Cranelift's and 1.3x faster than the single-pass allocator's. Umbra's
+direct emitter compiles 16x faster than Cranelift "at similar execution performance" on database
+query code (4.83 s of execution against 4.62 s). Zig made its own x86-64 backend the
+[default for debug builds](https://ziglang.org/devlog/2025/) in 2025 (hello world in 275 ms
+against 918 ms through LLVM) and keeps LLVM for release builds. Roc splits the same way, with
+`roc_gen_dev` for development builds and LLVM for optimized ones. Every one of these is the fast
+half of a two-backend design.
+
+For ry the fast half would remove most of the 73% that Cranelift takes, which makes a typed
+compile an estimated 2x to 3x faster. Its code would be 1.6x slower by TPDE's figure, and the
+6.6x that Cranelift's single-pass allocator costs `loop_sum` is the upper bound. Typed code would
+then need tiers and a way to switch between them, where today it runs at full speed from its
+first call. ry has paid for a backend of its own once, on the untyped side: the baseline tier has
+an assembler for two instruction sets and compiles a body in a median of 28 µs, and `decisions.md`
+records that it does not beat tier 0. That tier calls tier 0's steps and does not compile typed
+values, so it says what an assembler costs to keep and nothing about a typed emitter's code. The
+stronger reason to wait is that a direct emitter's cost grows with the IR's volume as Cranelift's
+does, so shrinking the IR comes first whichever backend follows.
+
+**Copy-and-patch.** `decisions.md` rejects it for the baseline tier because the stencils need a
+Clang build step and the gain over a good interpreter is modest. The numbers support that for
+typed code too. The [original paper](https://arxiv.org/abs/2011.13127) reports code 14% faster
+than LLVM `-O0` and compilation two orders of magnitude faster, but it keeps locals in memory
+across stencils. TPDE's authors measure a copy-and-patch compiler for LLVM IR on SPECint 2017 at
+2.4x slower and 4.4x larger code than LLVM `-O0`'s. Typed ry's good results are register-allocated
+loops, the one thing stencils cannot give. `typed-runtime.md` names a copy-and-patch baseline as
+the fix if first-call compile time proves too high, and this review disagrees with that page:
+shrink the IR first, and take Cranelift's single-pass setting before a new compiler.
+
+**LLVM for a release mode.** This is the option that sounds most like "close to Rust". Its case
+rests on the mid-end. On IR shaped like ry's benchmark kernels LLVM is worth 1.0x to 2.0x, and if
+it gave each of the seven programs bound by generated code a full 1.5x, the score would move from
+about 3.7x to 3.1x. It has two larger possible gains that these programs do not measure. A typed
+program written as pipelines of closures would get from LLVM the inlining and fusion that ry's
+lowering does for one shape today. LLVM could also inline the runtime library into generated code
+if ry shipped the library as bitcode, which is how Roc treats its builtins, and that could move
+the ten library-bound programs. Whether it would depends on whether their time is call overhead
+or the callee's own work, and that is unmeasured.
+
+The costs are a pipeline of the kind the bar rules out and a second lowering from `ssa`, against
+the decision that the IR has one. The optimizing pipeline compiles about 10x slower than
+Cranelift (11.36 s against 1.07 s in Umbra), and WebKit measured LLVM at
+[4.7x the compile time of B3](https://webkit.org/blog/5852/introducing-the-b3-jit-compiler/) for
+equal code quality. A cheap LLVM pipeline is no answer: in Umbra it compiles slower than Cranelift
+(1.63 s) and its code is slower too (5.23 s). An LLVM mode therefore fits only an ahead-of-time
+build, where a compile that is 10x slower is paid once. Lever 1 asks for that build, and until it
+exists there is nowhere for LLVM to go. For vectorization ry has another route: whole-list
+operations run in kernels written in Rust, which LLVM compiles when ry itself is built, so a fused
+pipeline that ends in a count or a sum belongs in such a kernel.
+
+### Recommendation
+
+1. **Keep Cranelift as the only backend**, with the backtracking allocator for typed code. Its
+   code is within 1.0x to 1.5x of `rustc -O` on the simplest loops ry feeds it, and its compile
+   time is far inside the bar at the size of an edit.
+2. **Shrink the IR.** Emit a drop on a cold path as one call, share cleanup between exits, and
+   judge the lowering by Cranelift instructions per source line (47 today).
+3. **Drop the per-function trampoline** in favor of one per signature. It is 14% of a small
+   function's compile.
+4. **Close the library and boundary gaps of lever 1, and profile the typed loops that trail the
+   same loop in Rust.** The ten library-bound programs stand at 5.4x, and they are most of the
+   distance between 3.7x and the 2x bar.
+5. **Fix the three Rust references**, make `run.py` fail when a typed checksum and its Rust
+   checksum differ, and record the score in `tools/climb/log.tsv` with each step.
+6. **Decide on LLVM when the ahead-of-time build exists**, by the measurement in the last row of
+   the table below.
+
+This agrees with "One SSA IR and one install-time pipeline for typed and untyped compiled code"
+and with the rejection of copy-and-patch in `decisions.md`. It adds one thing to them: the
+instruction count that reaches Cranelift is a number to track, because both tiers pay 1.8 µs for
+each one.
+
+### The experiment that confirms or kills this
+
+The single-pass run and the index-loop Rust above were the first two tests, and either could have
+killed the recommendation. Had Cranelift's code been the bound, the library-bound programs would
+have slowed under the single-pass allocator, and the index-loop Rust would have stayed several
+times slower through Cranelift than through LLVM. Nine of ten programs held, and three of four
+loops came within 1.5x.
+
+The cheapest remaining experiment is a day of work in `backend.rs`: emit drops as calls on cold
+paths, share the exit cleanup, and compare Cranelift instructions and compile time on `report`,
+`team_scores` and `closures` before and after. The thresholds below are this review's proposals.
+
+| Result | Meaning |
+| --- | --- |
+| Instructions and compile time both fall by 30% or more on all three, and run time holds | Confirmed. Cranelift stays, and the typed compile is near an estimated 70 µs per source line |
+| Instructions fall and compile time does not follow | Killed for compile time. Cranelift's cost is not set by what ry controls, and the next candidates are its single-pass setting for functions that run once, then a direct emitter |
+| A code base generated with `--typed` spends more than 10% of a cold `ry test` run compiling typed code after the IR shrinks | Same conclusion as the row above |
+| After lever 1's library gaps close, programs bound by generated code are more than 2x from Rust written as index loops, on IR with no avoidable instructions, or a profile puts the library-bound programs' time in call overhead | Killed for run time. Reopen LLVM as the ahead-of-time release mode, with the runtime library as bitcode |
+
 ## What to stop or demote
 
 - **10x as the forecast and the public bar for untyped R** (the 10x row of the roadmap table in
@@ -566,6 +861,7 @@ Each lever has one cheap measurement that could kill it.
 | 3. Call removal | Flatten the five hottest call chains of the testthat workload by hand in R source, and time the workload. This gives the inlining tier's upper bound without building it | The flattened workload gains less than 1.3x. If it gains 3x or more, this review's ceiling is wrong, and the 10x forecast deserves another look |
 | 4. Base kernels | Split tier-0 and call-setup time in `--profile-summary` by owning namespace (base and recommended, testthat with rlang, cli and withr, other packages, the user's package), and list the 50 base closures with the most inclusive time | The data-frame family is under 5% of every code base and of the corpus |
 | 5. Cores | Time `exp`, `log` and `pnorm` kernels on one and four threads at 1e5 to 1e7 elements with a bit-identity check, and take the kernel share of one production-shaped batch run | The share of large element-wise kernels in a batch run is under 10% |
+| Backend | In `crates/typed/src/backend.rs`, emit reference-count drops as calls on cold paths and share the exit cleanup, then compare Cranelift instructions and compile time on `report`, `team_scores` and `closures` | Instructions fall and compile time does not follow. Then Cranelift's single-pass setting and a direct emitter are the next candidates ("The native backend") |
 
 One more measurement comes before all of them: run the three full-size code bases on a release
 build and publish the result as a suite. It is the benchmark `AGENTS.md` defines, and

@@ -1066,7 +1066,8 @@ pub fn trace_back_program(seed: u64) -> String {
 
 const TRACE_PREAMBLE: &str = r#"if (!requireNamespace("rlang", quietly = TRUE)) {
     cat("rlang is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 body_only <- body(rlang:::trace_back)
 if (identical(body_only[[1]], as.name("{")) && length(body_only) == 3L &&
@@ -1293,7 +1294,8 @@ pub fn native_helpers_program(seed: u64) -> String {
 
 const NATIVE_HELPERS_PREAMBLE: &str = r#"if (!requireNamespace("withr", quietly = TRUE) || format(packageVersion("withr")) != "3.0.3") {
     cat("withr 3.0.3 is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 r_body <- function(f) {
     code <- body(f)
