@@ -815,7 +815,7 @@ fn code_image_round_trip(body: &str, a: &str, b: &str, mutations: &[(usize, u8)]
         // SAFETY: the interpreter is installed, and every object it reads is rooted by the
         // global environment or the handle scope.
         unsafe {
-            let (direct, _) = outcomes(&body, a, b);
+            let (direct, _) = outcomes(body, a, b);
             let mark = crate::heap().handle_mark();
             let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
             let global = values::global_env();

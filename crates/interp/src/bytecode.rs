@@ -9441,6 +9441,7 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
             (0..formals.min(length(names))).find(|&index| names.element(index) == symbol)
         {
             let owner = (*state.interp).slot_owner as usize;
+            #[allow(clippy::borrow_deref_ref, clippy::needless_borrow)]
             let missing = (&(*state.interp).frames)
                 .get(owner)
                 .map_or(0, |frame| frame.missing);

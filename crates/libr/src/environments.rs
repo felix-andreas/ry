@@ -709,7 +709,7 @@ pub unsafe extern "C" fn R_DelayedBindingEnvironment(symbol: Sexp, env: Sexp) ->
                 &[BindingType::Delayed],
                 "R_DelayedBindingEnvironment",
             )?;
-            Ok(interp::eval::promise_env(innermost_promise(promise))?)
+            interp::eval::promise_env(innermost_promise(promise))
         },
     )
 }
@@ -1011,7 +1011,7 @@ pub unsafe extern "C" fn R_DotDelayedExpression(index: c_int, env: Sexp) -> Sexp
 pub unsafe extern "C" fn R_DotDelayedEnvironment(index: c_int, env: Sexp) -> Sexp {
     enter(|| {
         let promise = dot_promise(index, env, DotType::Delayed, "R_DotDelayedEnvironment")?;
-        Ok(interp::eval::promise_env(promise)?)
+        interp::eval::promise_env(promise)
     })
 }
 

@@ -11,6 +11,9 @@
 //! which is what the differential tests use to run everything through compiled code.
 
 #![allow(unsafe_op_in_unsafe_fn)]
+// Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
 mod analysis;
 mod codegen;
@@ -769,7 +772,9 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             }
         };
         for (words, state) in loops
-            .chunks_exact_mut(runtime::LOOP_WORDS)
+            .as_chunks_mut::<{ runtime::LOOP_WORDS }>()
+            .0
+            .iter_mut()
             .zip(machine.loops.iter())
         {
             words.copy_from_slice(&[

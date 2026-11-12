@@ -2183,7 +2183,7 @@ impl Lowering<'_> {
                 }
                 let a = self.to_i64(a)?;
                 let b = self.to_i64(b)?;
-                let op = match &*name {
+                let op = match name {
                     "Num.bitwise_and" => Bits::And,
                     "Num.bitwise_or" => Bits::Or,
                     "Num.bitwise_xor" => Bits::Xor,
@@ -2280,7 +2280,7 @@ impl Lowering<'_> {
                     _ => Err(Refusal::new("a `Num.round` of something other than an F64")),
                 }
             }
-            "List.count_if" | "List.walk" => self.walk(&name, &arguments),
+            "List.count_if" | "List.walk" => self.walk(name, &arguments),
             "length" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `length`"));
@@ -2748,7 +2748,7 @@ impl Lowering<'_> {
                 Ok(self.builder.emit(Type::Bool, Op::Truth(empty)))
             }
             "List.sublist" | "List.take_first" | "List.take_last" | "List.drop_first"
-            | "List.drop_last" => self.slice(&name, &arguments),
+            | "List.drop_last" => self.slice(name, &arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
             ".ry_update" => self.update(&arguments),
@@ -4097,16 +4097,7 @@ impl Lowering<'_> {
             return Err(Refusal::new("a `paste` of nothing"));
         }
         let separator = self.string(&separator);
-        let pasted = if vectors {
-            let mut vector_parts = SmallVec::new();
-            for part in parts {
-                vector_parts.push(self.as_vector(part)?);
-            }
-            self.builder.emit(
-                Type::vector(Item::Str),
-                Op::PasteVectors(vector_parts, separator),
-            )
-        } else if collapse.is_some() {
+        let pasted = if vectors || collapse.is_some() {
             let mut vector_parts = SmallVec::new();
             for part in parts {
                 vector_parts.push(self.as_vector(part)?);
