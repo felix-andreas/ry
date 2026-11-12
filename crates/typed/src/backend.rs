@@ -460,6 +460,8 @@ impl Emitter<'_> {
                 let wide = self.wide(values[0]);
                 (wide, self.iconst(0))
             }
+            // A ry list is an item of a list of lists, held as its pointer.
+            Type::Vector { array: true, .. } => (values[0], self.iconst(0)),
             _ => return Err(Refusal::new("an item that is not a scalar")),
         })
     }
@@ -616,16 +618,33 @@ impl Emitter<'_> {
                 let value = match item {
                     Item::Str => {
                         let (a, b) = (self.get(*a)?, self.get(*b)?);
-                        let equal = self.call(
-                            address!(values::ry_str_equal),
-                            &[I64; 4],
-                            &[I32],
-                            &[a[0], a[1], b[0], b[1]],
-                        )[0];
+                        let words = [a[0], a[1], b[0], b[1]];
                         match op {
-                            Compare::Eq => equal,
-                            Compare::Ne => self.builder.ins().bxor_imm_s(equal, 1),
-                            _ => return Err(Refusal::new("an ordering comparison of strings")),
+                            Compare::Eq | Compare::Ne => {
+                                let equal = self.call(
+                                    address!(values::ry_str_equal),
+                                    &[I64; 4],
+                                    &[I32],
+                                    &words,
+                                )[0];
+                                match op {
+                                    Compare::Eq => equal,
+                                    _ => self.builder.ins().bxor_imm_s(equal, 1),
+                                }
+                            }
+                            _ => {
+                                let order = self.call(
+                                    address!(values::ry_str_compare),
+                                    &[I64; 4],
+                                    &[I32],
+                                    &words,
+                                )[0];
+                                let compared =
+                                    self.builder
+                                        .ins()
+                                        .icmp_imm_s(integer_condition(*op), order, 0);
+                                self.logical(compared)
+                            }
                         }
                     }
                     Item::Dbl => {
@@ -647,8 +666,8 @@ impl Emitter<'_> {
                         let compared = self.logical(compared);
                         self.na_or(na, compared)
                     }
-                    Item::Record(_) | Item::Tag(_) => {
-                        return Err(Refusal::new("a comparison of records or tags"));
+                    Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
+                        return Err(Refusal::new("a comparison of records, tags or lists"));
                     }
                 };
                 SmallVec::from_slice(&[value])
@@ -1906,7 +1925,7 @@ impl Emitter<'_> {
                 self.builder.ins().load(I64, flags, address, 0),
                 self.builder.ins().load(I64, flags, address, 8),
             ]),
-            Item::Record(_) | Item::Tag(_) => {
+            Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
                 SmallVec::from_slice(&[self.builder.ins().load(I64, flags, address, 0)])
             }
         }
@@ -2111,14 +2130,14 @@ fn kind(item: Item) -> i64 {
         Item::Lgl => values::LGL,
         Item::Str => values::STR,
         Item::I64 => values::I64,
-        Item::Record(_) | Item::Tag(_) => values::OBJECT,
+        Item::Record(_) | Item::Tag(_) | Item::Array(_) => values::OBJECT,
     })
 }
 
 fn item_size(item: Item) -> i64 {
     match item {
         Item::Int | Item::Lgl => 4,
-        Item::Dbl | Item::I64 | Item::Record(_) | Item::Tag(_) => 8,
+        Item::Dbl | Item::I64 | Item::Record(_) | Item::Tag(_) | Item::Array(_) => 8,
         Item::Str => 16,
     }
 }
