@@ -861,7 +861,12 @@ what `just perf` uses. The `iterate` profile keeps `opt-level = 3` but drops cro
 uses 16 codegen units ([Build profiles](/development#build-profiles)). Plain `cargo test --release` builds
 with the release profile's fat LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS
 and takes 30 minutes on four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and
-11 minutes without it. A budget measured under `cargo test-release` can differ from a release
+11 minutes without it. A test that needs another package's binary (`libR.so`, `ry-rcmd`) builds it
+with `syntax::testing::cargo_build`, a `cargo build` in the profile the test runs in, so it lands
+beside that `ry`. The helper drops the variables cargo sets for the test (`CARGO_PKG_NAME`,
+`OUT_DIR` and so on): build scripts such as ring's rerun when those change, so a nested `cargo
+build` that inherits them rebuilds most of the dependency tree, and the next plain build rebuilds
+it back. A budget measured under `cargo test-release` can differ from a release
 binary's, so a number you quote comes from a release build. Debug builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which
 keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
 

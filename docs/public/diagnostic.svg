@@ -1,18 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 814 292" width="814" height="292" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 814 92" width="814" height="92" role="img" aria-labelledby="title desc">
 <title id="title">ry check reports a match that misses a case</title>
-<desc id="desc">$ ry check payment.R
-non-exhaustive-match
-
-  × this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ =&gt; ...` arm
-   ──[payment.R:7:3]
- 6 │ balance &lt;- function(payment: Payment) -&gt; double {
+<desc id="desc">  × this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ =&gt; ...` arm
  7 │   match (payment) {
-   │   ^^^^^^^^^^^^^^^
- 8 │     :Paid(amount = a) =&gt; a
-  help: Add an arm for `:Pending` (`ry check --fix --unsafe-fixes` applies it)
-
-1 problem in 1 file
-1 fixable with `ry check --fix --unsafe-fixes`</desc>
+   │   ^^^^^^^^^^^^^^^</desc>
 <style>
 .bg { fill: #f6f8fa; stroke: #d0d7de; }
 text { fill: #1f2328; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; white-space: pre; }
@@ -25,16 +15,8 @@ text { fill: #e6edf3; }
 .magenta { fill: #d2a8ff; } .cyan { fill: #56d4dd; } .dim { fill: #8b949e; }
 }
 </style>
-<rect class="bg" x="0.5" y="0.5" width="813" height="291" rx="6"/>
-<text y="30.5"><tspan x="16.0" class="dim">$</tspan><tspan x="24.4"> ry check payment.R</tspan></text>
-<text y="50.5"><tspan x="16.0" class="red">non-exhaustive-match</tspan></text>
-<text y="90.5"><tspan x="16.0">  </tspan><tspan x="32.8" class="red">×</tspan><tspan x="41.2"> this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ =&gt; ...` arm</tspan></text>
-<text y="110.5"><tspan x="16.0">   ──[</tspan><tspan x="66.4" class="cyan" font-weight="bold" text-decoration="underline">payment.R:7:3</tspan><tspan x="175.6">]</tspan></text>
-<text y="130.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">6</tspan><tspan x="32.8"> │ balance &lt;- function(payment: Payment) -&gt; double {</tspan></text>
-<text y="150.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">7</tspan><tspan x="32.8"> │   match (payment) {</tspan></text>
-<text y="170.5"><tspan x="16.0">   │ </tspan><tspan x="58.0" class="magenta" font-weight="bold">  ^^^^^^^^^^^^^^^</tspan></text>
-<text y="190.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">8</tspan><tspan x="32.8"> │     :Paid(amount = a) =&gt; a</tspan></text>
-<text y="210.5"><tspan x="16.0" class="cyan">  help: </tspan><tspan x="83.2">Add an arm for `:Pending` (`ry check --fix --unsafe-fixes` applies it)</tspan></text>
-<text y="250.5"><tspan x="16.0">1 problem in 1 file</tspan></text>
-<text y="270.5"><tspan x="16.0">1 fixable with `ry check --fix --unsafe-fixes`</tspan></text>
+<rect class="bg" x="0.5" y="0.5" width="813" height="91" rx="6"/>
+<text y="30.5"><tspan x="16.0">  </tspan><tspan x="32.8" class="red">×</tspan><tspan x="41.2"> this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ =&gt; ...` arm</tspan></text>
+<text y="50.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">7</tspan><tspan x="32.8"> │   match (payment) {</tspan></text>
+<text y="70.5"><tspan x="16.0">   │ </tspan><tspan x="58.0" class="magenta" font-weight="bold">  ^^^^^^^^^^^^^^^</tspan></text>
 </svg>
