@@ -182,6 +182,34 @@ fn an_unreachable_connection_is_closed_with_a_warning() {
     assert_eq!(std::fs::read_to_string(&path).expect("the file"), "kept\n");
 }
 
+/// A call native code builds holds its argument values inline as its expressions. Once the
+/// closure it calls is compiled (from its second call on), the arguments pass as pooled argument
+/// references, and a released reference must not keep the expression it named, or the pool
+/// would keep the connection alive however unreachable it is.
+#[test]
+fn a_connection_passed_inline_to_a_compiled_closure_is_still_collected() {
+    let r = r_with_base();
+    let path = temporary_file("inline.txt");
+    let path_value = r.string(&path.to_string_lossy());
+    let mark = r.protected.get();
+    let con = r
+        .eval("file", &[(None, path_value), (None, r.string("w"))])
+        .expect("file");
+    for line in ["one", "two", "three"] {
+        r.eval("writeLines", &[(None, r.string(line)), (None, con)])
+            .expect("writeLines");
+    }
+    r.release_to(mark);
+    let before = connection_count(&r);
+    unsafe { (r.api().ry_collect)(1) };
+    r.eval("getAllConnections", &[]).expect("getAllConnections");
+    assert_eq!(connection_count(&r), before - 1);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file"),
+        "one\ntwo\nthree\n"
+    );
+}
+
 #[test]
 fn standard_output_goes_to_the_console() {
     let r = r_with_base();

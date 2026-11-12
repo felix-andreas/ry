@@ -9353,6 +9353,10 @@ unsafe fn slot_call_moving(
 ) -> R<Option<Sexp>> {
     let call = state.constant(instruction, 2);
     let value = *slot;
+    // Unlike the environment path, which scans every register, scanning this activation's own
+    // expression registers is enough. A value that reaches the slot through a promise is counted
+    // by that promise too, so it reads as shared and never moves, and tier 1 keeps its boxed
+    // registers in this window, so the scan sees compiled code's copies as well.
     if expression_registers_hold(state, value, 0..0, instruction.operand(0)) {
         return Ok(None);
     }
