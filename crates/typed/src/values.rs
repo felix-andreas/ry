@@ -3497,7 +3497,42 @@ unsafe fn str_buffer_alloc(length: usize) -> *mut u8 {
 }
 
 unsafe fn str_from_bytes(bytes: &[u8]) -> Str {
-    str_build(bytes.len(), |cursor| cursor.push(bytes))
+    let length = bytes.len();
+    if length > INLINE_CAPACITY {
+        return str_build(length, |cursor| cursor.push(bytes));
+    }
+    // An inline string is assembled from a few fixed-size reads that overlap where the length
+    // is between two sizes, which costs a handful of instructions where a copy of `length`
+    // bytes is a call. Short strings are the common case wherever text is split or converted.
+    let start = bytes.as_ptr();
+    let (lo, hi) = if length >= 8 {
+        let first = (start as *const u64).read_unaligned();
+        let last = (start.add(length - 8) as *const u64).read_unaligned();
+        let rest = if length == 8 {
+            0
+        } else {
+            last >> (8 * (16 - length))
+        };
+        (first, rest)
+    } else if length >= 4 {
+        let first = u64::from((start as *const u32).read_unaligned());
+        let last = u64::from((start.add(length - 4) as *const u32).read_unaligned());
+        (first | last << (8 * (length - 4)), 0)
+    } else if length > 0 {
+        let first = u64::from(*start);
+        let middle = u64::from(*start.add(length / 2));
+        let last = u64::from(*start.add(length - 1));
+        (
+            first | middle << (8 * (length / 2)) | last << (8 * (length - 1)),
+            0,
+        )
+    } else {
+        (0, 0)
+    };
+    Str {
+        lo,
+        hi: hi | (0x80 | length as u64) << 56,
+    }
 }
 
 /// A string of exactly `length` bytes, which `fill` writes through the cursor.
@@ -4060,7 +4095,16 @@ unsafe fn value_slot(dict: *const Dict, position: usize) -> *mut u8 {
 unsafe fn key_hash(dict: *const Dict, key: *const u8) -> u64 {
     let seed = (*dict).seed;
     match (*dict).key_kind {
-        STR => hash_bytes(seed, (*(key as *const Str)).bytes()),
+        STR => {
+            let string = *(key as *const Str);
+            // The bytes past an inline string's end are zero, so equal inline strings are
+            // equal words and the two words are hashed as they are.
+            if string.is_inline() {
+                fold_multiply(hash_word(seed, string.lo) ^ string.hi, HASH_K0 ^ seed)
+            } else {
+                hash_bytes(seed, string.bytes())
+            }
+        }
         DBL => hash_word(seed, double_key(*(key as *const f64))),
         _ => hash_word(seed, *(key as *const i32) as u32 as u64),
     }

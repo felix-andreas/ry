@@ -663,11 +663,12 @@ unsafe fn list_type(value: Sexp, length: usize) -> Option<Type> {
     item.map(Type::List)
 }
 
-/// Whether a `CHARSXP` is a string the typed core can hold: not `NA`, and UTF-8.
+/// Whether a `CHARSXP` is a string the typed core can hold: not `NA`, and UTF-8. An interned
+/// string had its bytes checked when it was interned, so only another string is read here.
 unsafe fn usable_string(charsxp: Sexp) -> bool {
     charsxp != interp::heap().known().na_string
         && !charsxp.has_gp(gp::LATIN1 | gp::BYTES)
-        && std::str::from_utf8(charsxp.bytes()).is_ok()
+        && (charsxp.is_valid_utf8() || std::str::from_utf8(charsxp.bytes()).is_ok())
 }
 
 /// The arguments of one call as machine words, with what converting them allocated.

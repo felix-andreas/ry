@@ -43,6 +43,18 @@ fn strings_switch_to_heap_past_fifteen_bytes() {
     let inline = str_of("abc");
     assert_eq!(inline.lo, u64::from_le_bytes(*b"abc\0\0\0\0\0"));
     assert_eq!(inline.hi, 0x83 << 56);
+    // Every inline length holds its bytes in order with zeros after them, read from the end of
+    // a buffer so that a read past the string's last byte would show under a memory checker.
+    let source = "abcdefghijklmno";
+    for length in 0..=source.len() {
+        let text = source[..length].to_owned().into_boxed_str();
+        let string = str_of(&text);
+        let mut expected = [0u8; 16];
+        expected[..length].copy_from_slice(text.as_bytes());
+        expected[15] = 0x80 | length as u8;
+        let words = [string.lo.to_le_bytes(), string.hi.to_le_bytes()].concat();
+        assert_eq!(words, expected, "{text:?}");
+    }
     assert_eq!(live(), before, "strings leaked");
 }
 
