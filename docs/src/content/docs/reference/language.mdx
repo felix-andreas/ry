@@ -116,7 +116,7 @@ print(first_or([], 7))
 </TabItem>
 </Tabs>
 
-```text ry run runtime=ry strict exact
+```text ry run runtime=ry exact
 10i64
 7i64
 ```
@@ -215,7 +215,7 @@ describe <- function(xs: List<I64>) -> Str {
 print(describe([5, 6, 7]))
 ```
 
-```text ry run runtime=ry strict exact
+```text ry run runtime=ry exact
 [1] "starts positive, 2 more"
 ```
 
@@ -235,7 +235,7 @@ print(add_strings("4", "5"))
 print(add_strings("4", "five"))
 ```
 
-```text ry run runtime=ry strict exact
+```text ry run runtime=ry exact
 :Ok(9i64)
 :Err(:InvalidNumStr)
 ```
@@ -263,6 +263,30 @@ bindings too, because a literal bound there is a ry value: `n <- 4` is an `I64`,
 for `sqrt(Num.to_r(n))`. An `F64`, `Bool` or `Str` shares R's representation and passes unconverted.
 [Crossing between R and ry scalars](/reference/type-system#crossing-between-r-and-ry-scalars) has
 the rules.
+
+In strict mode the checker enforces the boundary. A function whose signature is written entirely in
+ry types is a native function, which is compiled to machine code, and its body may hold only ry
+values. An R function's result is converted right where it returns, or the call stands as a
+statement of its own:
+
+```r
+label_width <- function(label: Str) -> I64 {
+  width <- nchar(label)
+  Num.from_r(width)
+}
+print(label_width("native"))
+```
+
+```text ry check typing strict
+native
+
+  x `nchar` is an R function, and a native function holds only ry values, so its result cannot be
+    used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+```
+
+A function with an R type in its signature, such as `function(path: character) -> F64`, is a
+boundary function: it may mix R values and ry values freely, and the interpreter runs it when it
+has to. [Native functions](/reference/type-system#native-functions) has the full rule.
 
 ## Where to go next
 

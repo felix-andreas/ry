@@ -122,6 +122,24 @@ left, in order of expected gain:
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
+### What the `native` check pins and over-reports
+
+`ry check` reports what keeps a native function off native code (`decisions.md`, "Nativeness is a strict-mode diagnostic"). Each item here is a gap in the typed core that the check found; closing one means deleting its blocker in `semantics::native` (or its entry in `test_scenarios::NATIVE_CHECK_EXCEPTIONS`) and its row in `reference/type-system.mdx`, "Native functions".
+
+- **The checker passes it, the typed core refuses it** (pinned in `NATIVE_CHECK_EXCEPTIONS`):
+  - An R call whose value is unused compiles only as a statement of a `{` block that is not its last. As the last statement of a loop body, as a bare loop body, in an `if` branch or a `match` arm in statement position it refuses ("it uses the value of R's `cat` directly"), although nothing reads the value (`tests/native/pinned-r-statement-tails.R`).
+  - `Num.from_r(nchar(x))` refuses ("`Num.from_r` of a value typed code computed"), while `Str.from_r(toupper(x))` and `Num.from_r(sqrt(x))` compile (`tests/native/pinned-from-r-of-base-function.R`).
+- **Legitimate ry the typed core refuses, so the check reports it:**
+  - `try`, which lowers to an R call of `.ry_try`;
+  - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
+  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.reverse`, `List.keep_if`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it must shrink to nothing as the typed core gains them;
+  - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;
+  - a function with `-> NULL` that ends in a loop, `<<-`, `...`, named arguments or a left-out default in a call of a typed function, a `Dict` of anything but `I64`, `F64` and `Str`, and `List.map(xs, Num.to_f64)` by name.
+- **The docs examples for these run without strict mode.** The blocks for `try`, list patterns and `List.first` in `reference/language.mdx`, `reference/type-system.mdx` ("List and `as` patterns") and `ry.mdx` ("Errors as values") dropped `strict` from their markers. Restore it as each construct compiles.
+- **Over-reports.** A base R function the typed core computes itself (`Lowerer::builtin`: `length`, `sqrt`, `nchar`, `paste0`, `sprintf`, ...) is an R function to the rule, so its value needs a conversion that the compiled code does not. `a:b` is reported although `for (i in a:b)` compiles. Decide whether those base functions become part of typed ry or stay R.
+- **Not judged.** A call the native entry declines (record, tuple, function or computed argument from R code, a `Dict` or `Set` result) has no finding. A finding for a top-level call of a native function with such an argument would close it.
+- **Two lists are mirrored by hand.** `native::COMPILED_STD` against `Lowerer::builtin`, and `native::gives_table_value` against `interp::dataframe::gives_table_value`. The cross-check test catches a missing `COMPILED_STD` entry only for functions the corpus calls; a test that compares the lists directly belongs in a crate that sees both.
+
 ### Gaps the typed public ports found
 
 Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
@@ -144,6 +162,7 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). This extends the install-time compiler that writes machine code for a package's numeric functions into `R/<package>.ryc` (`crates/jit/src/ahead.rs`, CLI reference "build and install"); the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
 
 - **Precondition.** The typed benchmark programs run natively. `vasicek` (R calls per step) and `sales` (a `DataFrame` parameter) do not yet ("Open: the typed core", `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`).
+- **What the checker gives it.** In strict mode a native function without a `native` finding compiles (`decisions.md`, "Nativeness is a strict-mode diagnostic"), so the set of functions to compile ahead of time is the native functions of a strict-clean project, and a function listed in `test_scenarios::NATIVE_CHECK_EXCEPTIONS` is the remaining place where the build has to fall back.
 - **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image's native section, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
 - **Step 2: a whole-program build of a typed script** (`ry build --exe` in `typed-runtime.md`), which compiles the script with the typed standard library and the packages it uses into one executable; untyped R in it stays on the JIT.
 - **The slow path.** Install-time code and the typed core both fall back to the interpreter on a failed entry test. Bun instead runs a compiled slow second version of the function; decide which one ry uses here, by measurement.

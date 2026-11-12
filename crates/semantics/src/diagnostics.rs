@@ -2667,8 +2667,8 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 }
 
 /// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
-/// strict origins for. An origin that is an assignment's value is phrased against the assigned
-/// name.
+/// strict origins and native blockers for. An origin that is an assignment's value is phrased
+/// against the assigned name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -2706,6 +2706,19 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(check) = item_check(db, item) else {
             continue;
         };
+        for blocker in &check.native_blockers {
+            let range = blocker.range + offset;
+            let source = file
+                .text(db)
+                .get(usize::from(range.start())..usize::from(range.end()))
+                .unwrap_or_default();
+            diagnostics.push(Diagnostic::new(
+                range,
+                Severity::Error,
+                "native",
+                blocker.kind.message(source),
+            ));
+        }
         if check.strict_origins.is_empty() {
             continue;
         }

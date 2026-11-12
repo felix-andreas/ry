@@ -196,7 +196,7 @@ A missing case is a `non-exhaustive-match` error. Patterns are `_`, a name, a li
 Functions that can fail return `:Ok(value)` or `:Err(reason)`, and `try` returns an `:Err` from the
 enclosing function early:
 
-```r ry run runtime=ry strict
+```r ry run runtime=ry
 List.first([])
 #> :Err(:ListWasEmpty)
 parse_sum <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
@@ -275,7 +275,12 @@ strict
 `ry check --annotate` writes the inferred types into the file. Under strict mode, `ry run` and
 `ry load` refuse code with a strict-mode error, and a typed function compiles to native code before
 its first call. Typed ry is strict: a typed function's call of another typed function computes every
-argument before the call, while an argument written in R code stays lazy. [Strict mode](/reference/type-system#strict-mode) lists what it reports.
+argument before the call, while an argument written in R code stays lazy. A function whose signature
+is written entirely in ry types must run natively, so strict mode also reports, with the code
+`native`, an R value it uses outside a conversion such as `Num.from_r`, and each construct the
+native compiler does not compile yet, such as `try` or a list pattern. A function with an R type in
+its signature is where R values and ry values meet, and it is not judged.
+[Strict mode](/reference/type-system#strict-mode) lists what it reports.
 
 ## Loading packages
 
