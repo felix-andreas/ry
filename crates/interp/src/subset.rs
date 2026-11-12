@@ -453,6 +453,10 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let object = values::materialize(object)?;
+    if let Some(offsets) = sequence_offsets(index) {
+        let count = offsets.len();
+        return Ok(Some(gather_kind(object, offsets, count)?));
+    }
     let index = values::materialize(index)?;
     match index.kind() {
         SexpType::Integer => {
@@ -523,6 +527,19 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         _ => Ok(None),
     }
+}
+
+/// The zero-based offsets a compact sequence subscript selects, computed from its `c(n, n1,
+/// inc)` info instead of expanding it, as GNU R reads a compact subscript through `*_ELT`. `None`
+/// unless every element is at least one, the only case that needs no further rules. An
+/// increment of zero cannot occur, and offsets past the end are the caller's to check.
+unsafe fn sequence_offsets(index: Sexp) -> Option<impl ExactSizeIterator<Item = usize> + Clone> {
+    let (count, first, increment) = values::compact_sequence(index)?;
+    let last = first + increment * count.saturating_sub(1) as f64;
+    if first.min(last) < 1.0 {
+        return None;
+    }
+    Some((0..count).map(move |slot| (first + increment * slot as f64).trunc() as usize - 1))
 }
 
 /// One bit per element, inline for vectors of up to 256 elements.
@@ -2744,36 +2761,43 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         return Ok(false);
     }
     let count = length(target);
-    let index = values::materialize(index)?;
-    let offsets: Vec<usize> = match index.kind() {
-        SexpType::Integer => {
-            let positions = values::ints(index);
-            if positions
-                .iter()
-                .any(|&position| position <= 0 || position as usize > count)
-            {
-                return Ok(false);
-            }
-            positions
-                .iter()
-                .map(|&position| position as usize - 1)
-                .collect()
+    let offsets: Vec<usize> = if let Some(offsets) = sequence_offsets(index) {
+        if offsets.clone().any(|offset| offset >= count) {
+            return Ok(false);
         }
-        SexpType::Real => {
-            let positions = values::reals(index);
-            // NaN fails both comparisons, so an NA subscript also declines.
-            if !positions
-                .iter()
-                .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
-            {
-                return Ok(false);
+        offsets.collect()
+    } else {
+        let index = values::materialize(index)?;
+        match index.kind() {
+            SexpType::Integer => {
+                let positions = values::ints(index);
+                if positions
+                    .iter()
+                    .any(|&position| position <= 0 || position as usize > count)
+                {
+                    return Ok(false);
+                }
+                positions
+                    .iter()
+                    .map(|&position| position as usize - 1)
+                    .collect()
             }
-            positions
-                .iter()
-                .map(|&position| position as usize - 1)
-                .collect()
+            SexpType::Real => {
+                let positions = values::reals(index);
+                // NaN fails both comparisons, so an NA subscript also declines.
+                if !positions
+                    .iter()
+                    .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
+                {
+                    return Ok(false);
+                }
+                positions
+                    .iter()
+                    .map(|&position| position as usize - 1)
+                    .collect()
+            }
+            _ => return Ok(false),
         }
-        _ => return Ok(false),
     };
     if !offsets.len().is_multiple_of(value_count) {
         return Ok(false);
