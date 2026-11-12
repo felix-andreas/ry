@@ -12,7 +12,6 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-mod ahead;
 mod analysis;
 mod assembler;
 mod baseline;
@@ -129,8 +128,6 @@ pub fn install() {
 }
 
 pub fn install_mode(mode: Mode) {
-    // Install-time machine code runs whether or not the run-time JIT is on.
-    ahead::install();
     let (entries, back_edges, baseline) = match mode {
         Mode::Off => {
             bytecode::set_tier(None);

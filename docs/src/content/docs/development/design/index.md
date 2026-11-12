@@ -98,9 +98,3 @@ types, Rust-like layouts for numbers, strings, lists, records and tags, direct c
 environment, native values freed by compiler-inserted reference counts with in-place reuse, and
 conversion only at the R boundary. It builds to the runtime contract of the native-types design.
 
-### [Install-time compilation of package closures](/development/design/install-time-compilation/)
-
-How `ry install` compiles every closure of a package to position-independent machine code, so
-package code runs natively from its first call. Every assumption the code makes is a branch with a
-generic side, so `assignInNamespace`, `trace` and testthat's mocking change what a running
-activation calls at its next call, with no deoptimization metadata.

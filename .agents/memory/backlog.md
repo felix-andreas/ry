@@ -144,10 +144,10 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 ## Open: ahead-of-time compilation of typed ry (mid priority)
 
-Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). This extends the install-time compiler that writes machine code for a package's numeric functions into `R/<package>.ryc` (`crates/jit/src/ahead.rs`, CLI reference "build and install"); the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
+Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). Untyped install-time machine code was built and removed (`decisions.md`, "Code images hold bytecode only"), so this starts from git history of `crates/jit/src/ahead.rs` and `crates/ssa/src/section.rs` if it writes into the image; the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
 
 - **Precondition.** The typed benchmark programs run natively. `vasicek` (R calls per step) and `sales` (a `DataFrame` parameter) do not yet ("Open: the typed core", `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`).
-- **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image's native section, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
+- **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
 - **Step 2: a whole-program build of a typed script** (`ry build --exe` in `typed-runtime.md`), which compiles the script with the typed standard library and the packages it uses into one executable; untyped R in it stays on the JIT.
 - **The slow path.** Install-time code and the typed core both fall back to the interpreter on a failed entry test. Bun instead runs a compiled slow second version of the function; decide which one ry uses here, by measurement.
 
@@ -2775,17 +2775,6 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
-- **Install-time native code: the gaps.** The image's native section is written
-  (`crates/jit/src/ahead.rs`), but it compiles only scalar numeric closures for guessed argument
-  types (annotations, constant defaults, then double, integer and logical shapes), not the
-  checker's inferred types, which the install cannot query yet. Records are refused because each
-  process numbers record layouts anew. Coverage on real packages is small (rlang 16 of 1,294
-  functions, cli 28 of 897, testthat 13 of 1,101): the refusals are about the value domain
-  (`...`, strings, lists, base functions native code lacks, calls of closures that are not
-  native), not about missing facts, so checker types and argument facts lift only a few dozen
-  functions per package. Baseline code for every body from its first entry measured 8.06G
-  against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
-  until baseline code inlines fast paths.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by

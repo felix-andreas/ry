@@ -58,7 +58,7 @@ use {
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
-        Heap, Liveness, Marker, WellKnown,
+        Heap, Liveness, Marker,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
@@ -6015,37 +6015,6 @@ pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> us
 /// What a [`BaselineStep`] answers when the activation is done.
 pub const BASELINE_STOP: usize = STOP;
 
-/// The `Arithmetic` step for each operator of [`ARITHS`], in its order. Baseline code knows a
-/// site's operator when it compiles, so it calls the step whose operator is a constant, which
-/// compiles to the operator's own computation instead of a dispatch over all of them.
-pub static ARITHMETIC_STEPS: [BaselineStep; ARITHS.len()] = [
-    step_arithmetic_of::<0>,
-    step_arithmetic_of::<1>,
-    step_arithmetic_of::<2>,
-    step_arithmetic_of::<3>,
-    step_arithmetic_of::<4>,
-    step_arithmetic_of::<5>,
-    step_arithmetic_of::<6>,
-    step_arithmetic_of::<7>,
-    step_arithmetic_of::<8>,
-    step_arithmetic_of::<9>,
-    step_arithmetic_of::<10>,
-    step_arithmetic_of::<11>,
-    step_arithmetic_of::<12>,
-];
-
-unsafe extern "C" fn step_arithmetic_of<const INDEX: usize>(
-    state: *mut std::ffi::c_void,
-    at: usize,
-) -> usize {
-    guarded(state, at, |state, at| {
-        if let Some(pc) = arithmetic_fast(state, at, ARITHS[INDEX].0) {
-            return baseline_answer(pc, at + 1 + operand_count(Op::Arithmetic));
-        }
-        step_slow::<{ Op::Arithmetic as u32 }, true>(state, at)
-    })
-}
-
 /// Encodes the pc a step continues at for baseline code: 0 for the next instruction, the pc
 /// plus one for any other, and [`STOP`] as itself. Almost every instruction falls through, and
 /// a zero answer lets the code after each call be one test and one branch instead of a compare
@@ -6082,22 +6051,6 @@ pub mod baseline_layout {
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.
     pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
-    /// The step table pointer inside `Interp`.
-    pub const STEPS: usize = std::mem::offset_of!(crate::Interp, baseline_steps);
-    /// The activation's constant pool, a plain list.
-    pub const CONSTANTS: usize = std::mem::offset_of!(Activation<'static, 'static>, constants);
-    /// The pointer to the activation's `Machine`.
-    pub const MACHINE: usize = std::mem::offset_of!(Activation<'static, 'static>, machine);
-    /// The closure inside a `Machine`.
-    pub const FUNCTION: usize = std::mem::offset_of!(super::Machine<'static>, function);
-    /// The heap pointer.
-    pub const HEAP: usize = std::mem::offset_of!(Activation<'static, 'static>, heap);
-    /// The lookup cache's stamps, one `u64` per lookup slot.
-    pub const CACHE_EPOCHS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
-        + std::mem::offset_of!(super::LookupCache, epochs);
-    /// The lookup cache's cells, an (enclosure, binding cell) pair per lookup slot.
-    pub const CACHE_SLOTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
-        + std::mem::offset_of!(super::LookupCache, slots);
 }
 
 /// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
@@ -6152,47 +6105,18 @@ macro_rules! handlers {
         $(
             unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
                 guarded(state, at, |state, at| {
-                    if let Some(pc) = fast_step::<{ Op::$op as u32 }>(state, at) {
-                        return baseline_answer(pc, at + 1 + operand_count(Op::$op));
+                    let instruction =
+                        Instruction { code: state.code, at, registers: state.registers };
+                    let flow = $body(state, instruction);
+                    let next = at + 1 + operand_count(Op::$op);
+                    let pc = advance::<false>(state, at, next, flow);
+                    if $roots && pc != STOP {
+                        release(state);
                     }
-                    step_slow::<{ Op::$op as u32 }, $roots>(state, at)
+                    baseline_answer(pc, next)
                 })
             }
         )*
-
-        /// The general body of a baseline step. It stays out of line so that the step's fast
-        /// path does not pay the body's register saves on every call.
-        #[inline(never)]
-        unsafe fn step_slow<const OP: u32, const ROOTS: bool>(
-            state: &mut Activation<'_, '_>,
-            at: usize,
-        ) -> usize {
-            let instruction = Instruction { code: state.code, at, registers: state.registers };
-            let flow = shared::<OP>(state, instruction);
-            let next = at + 1 + operand_count(OPS[OP as usize]);
-            let pc = advance::<false>(state, at, next, flow);
-            if ROOTS && pc != STOP {
-                release(state);
-            }
-            baseline_answer(pc, next)
-        }
-
-        /// The one copy of each op's body that runs one instruction at a time: the baseline step
-        /// and tier 0's single-step handler both call it. Tier 0's own handler keeps the body
-        /// inlined, because a call there costs every instruction its arguments' spills: calling
-        /// this copy from tier 0 too took 3.4% more instructions on `testthat_full`.
-        #[inline(never)]
-        unsafe fn shared<const OP: u32>(
-            state: &mut Activation<'_, '_>,
-            instruction: Instruction,
-        ) -> R<Flow> {
-            $(
-                if OP == Op::$op as u32 {
-                    return $body(state, instruction);
-                }
-            )*
-            unreachable!("an op without a handler body")
-        }
 
         /// The step each op runs as in baseline machine code, indexed like [`OPS`].
         pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
@@ -6207,11 +6131,7 @@ macro_rules! handlers {
             #[inline(never)]
             unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
                 let instruction = Instruction { code: state.code, at, registers: state.registers };
-                let flow = if SINGLE {
-                    shared::<{ Op::$op as u32 }>(state, instruction)
-                } else {
-                    $body(state, instruction)
-                };
+                let flow = $body(state, instruction);
                 let pc = advance::<SINGLE>(state, at, at + 1 + operand_count(Op::$op), flow);
                 if SINGLE {
                     state.stepped = pc;
@@ -6445,24 +6365,6 @@ macro_rules! fast_paths {
                 become GENERIC_HANDLERS[Op::$op as usize](state, at)
             }
         )*
-
-        /// The fast path of op `OP`, for its baseline step, which tries it first as tier 0's
-        /// handler does. `Jump` has its own step, which counts back edges.
-        #[inline(always)]
-        unsafe fn fast_step<const OP: u32>(
-            state: &mut Activation<'_, '_>,
-            at: usize,
-        ) -> Option<usize> {
-            if OP == Op::Arithmetic as u32 {
-                return arithmetic_fast(state, at, ARITHS.get(*state.code.add(at + 1) as usize)?.0);
-            }
-            $(
-                if OP == Op::$op as u32 && OP != Op::Jump as u32 {
-                    return $fast(state, at);
-                }
-            )*
-            None
-        }
 
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*
@@ -6964,53 +6866,12 @@ unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at
     if !form_fits(left, right, real, known.nil) {
         become arithmetic_miss(state, at);
     }
-    let (value, kind) = quick_value(heap, &known, operator, real, left, right);
-    let Some(value) = value else {
-        become run_arithmetic::<false>(state, at);
-    };
-    state.record_kind(at, kind);
-    let destination = *code.add(at + 2);
-    *registers.add(destination as usize) = value;
-    (*state.interp).visible = true;
-    let next = at + 1 + operand_count(Op::Arithmetic);
-    // A comparison that the next instruction branches on, as every loop test and most `if`
-    // tests are, takes the branch itself and saves that instruction's dispatch. An NA leaves
-    // the error to the branch.
-    if kind == feedback::LOGICAL_SCALAR
-        && *code.add(next) as u32 == op_word(Op::JumpUnless)
-        && *code.add(next + 1) == destination
-    {
-        if value == known.true_value {
-            state.record_kind(next, feedback::BRANCH_NOT_TAKEN);
-            dispatch!(state, next + 1 + operand_count(Op::JumpUnless));
-        }
-        if value == known.false_value {
-            state.record_kind(next, feedback::BRANCH_TAKEN);
-            dispatch!(state, *code.add(next + 3) as usize);
-        }
-    }
-    dispatch!(state, next);
-}
-
-/// `left operator right` for two plain scalars that fit the form `real` ([`form_fits`]), as
-/// [`fast_arithmetic`] computes it, with the result's feedback kind. The value is `None` when
-/// the generic handler must compute it: an integer result that is NA or overflows, or an
-/// allocation the young generation has no room for.
-#[inline(always)]
-unsafe fn quick_value(
-    heap: &mut Heap,
-    known: &WellKnown,
-    operator: Arith,
-    real: bool,
-    left: Sexp,
-    right: Sexp,
-) -> (Option<Sexp>, u16) {
     let logical = |result: Option<bool>| match result {
         Some(true) => Some(known.true_value),
         Some(false) => Some(known.false_value),
         None => Some(known.logical_na_value),
     };
-    if real {
+    let (value, kind) = if real {
         let as_real = |value: Sexp| {
             if value.kind() == SexpType::Integer {
                 let integer = *value.data().cast::<i32>();
@@ -7062,35 +6923,32 @@ unsafe fn quick_value(
             Arith::LessEqual => (logical((!na).then_some(a <= b)), feedback::LOGICAL_SCALAR),
             _ => (logical((!na).then_some(a >= b)), feedback::LOGICAL_SCALAR),
         }
-    }
-}
-
-/// `Arithmetic` in baseline code, for its step: the quick form's computation, chosen from the
-/// operands at each run, because baseline code calls the step of the generic instruction
-/// whatever form tier 0 wrote over it.
-#[inline(always)]
-unsafe fn arithmetic_fast(
-    state: &mut Activation<'_, '_>,
-    at: usize,
-    operator: Arith,
-) -> Option<usize> {
-    let code = state.code;
-    let registers = state.registers;
-    let left = *registers.add(*code.add(at + 3) as usize);
-    let right = *registers.add(*code.add(at + 4) as usize);
-    let heap = &mut *state.heap;
-    let known = *heap.known();
-    let real = left.kind() != SexpType::Integer || right.kind() != SexpType::Integer;
-    if !form_fits(left, right, real, known.nil) {
-        return None;
-    }
-    quick_form(operator, real)?;
-    let (value, kind) = quick_value(heap, &known, operator, real, left, right);
-    let value = value?;
+    };
+    let Some(value) = value else {
+        become run_arithmetic::<false>(state, at);
+    };
     state.record_kind(at, kind);
-    *registers.add(*code.add(at + 2) as usize) = value;
+    let destination = *code.add(at + 2);
+    *registers.add(destination as usize) = value;
     (*state.interp).visible = true;
-    Some(at + 1 + operand_count(Op::Arithmetic))
+    let next = at + 1 + operand_count(Op::Arithmetic);
+    // A comparison that the next instruction branches on, as every loop test and most `if`
+    // tests are, takes the branch itself and saves that instruction's dispatch. An NA leaves
+    // the error to the branch.
+    if kind == feedback::LOGICAL_SCALAR
+        && *code.add(next) as u32 == op_word(Op::JumpUnless)
+        && *code.add(next + 1) == destination
+    {
+        if value == known.true_value {
+            state.record_kind(next, feedback::BRANCH_NOT_TAKEN);
+            dispatch!(state, next + 1 + operand_count(Op::JumpUnless));
+        }
+        if value == known.false_value {
+            state.record_kind(next, feedback::BRANCH_TAKEN);
+            dispatch!(state, *code.add(next + 3) as usize);
+        }
+    }
+    dispatch!(state, next);
 }
 
 /// A specialized form whose operands are no longer of its kinds: the site goes back to the

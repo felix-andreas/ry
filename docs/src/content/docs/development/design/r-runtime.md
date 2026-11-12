@@ -631,7 +631,8 @@ and the call that would compile the closure (its second, or its first when the b
 decodes that code instead. Decoding costs about as much as compiling, so the image does not move
 compilation earlier: a namespace fetches many closures it never calls, such as every S3 method it
 registers, and calls many others only once. What the image adds is what compiling cannot produce,
-the trained profile below, and the native code it reserves room for.
+the trained profile below. An image holds no machine code (`decisions.md`, "Code images hold
+bytecode only").
 
 - **Identity.** A record is identified by its offset and length in the database, and a closure
   within the record by the order the stream reader creates closures. The image is stamped with the
@@ -683,23 +684,6 @@ the trained profile below, and the native code it reserves room for.
 - **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
   --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
   without one.
-- **Native code.** The native section after the payloads holds install-time machine code
-  (`crates/jit/src/ahead.rs`). The install compiles each recorded closure with the native-function
-  compiler (`crates/jit/src/native.rs`) for up to four argument-type guesses, taken from its
-  annotations and constant defaults and otherwise from double, integer and logical scalars and
-  vectors. The code goes through `crates/ssa` and `cranelift-object`, and `ssa::section` links it
-  into position-independent code, with helper addresses in a link table filled when the section
-  is mapped. The section is mapped read-only and executable straight from the file when its
-  offset is page-aligned, so processes share the pages. A manifest in the section names each
-  function's record entry and ordinal, its argument types, and the names it looks up: a base
-  builtin, or a sibling closure that calls are compiled against directly. A call tests its
-  arguments' types on entry; when none match, or a lookup no longer finds what the code was
-  compiled against, it runs in tier 0, so the code needs no deoptimization metadata. A passed
-  check is kept until any binding is unlocked (`interp::code_image::check_epoch`), once every binding
-  it read is locked. Records, whose layouts each process numbers anew, keep a function in the
-  interpreter. Two gaps remain. The checker's inferred types are not used yet, so the types are
-  guesses. And arguments are read only when they are values, constants or variables, as for the
-  JIT's native entry, so `f(-1)` runs in the interpreter.
 
 The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
 against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
@@ -899,16 +883,10 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   separate copies of tier 0's handlers. `RY_JIT=baseline` runs every body in it alone,
   `RY_JIT=force` installs it on the first entry, and the third field of
   `RY_JIT_THRESHOLDS=entries,back_edges,baseline` sets its threshold.
-- **Planned: baseline code in the code image.** This waits until the baseline beats tier 0,
-  because before that, writing it at install time only moves a loss to disk. The install would
-  emit each recorded closure's baseline code into the image's native section beside the native
-  functions. Baseline code would reach steps and stubs only through
-  `call [table + index * 8]`, never through an absolute or relative address. The steps' order then
-  becomes an ABI: each index names one tier-0 step or stub, and the table is filled when the
-  section is mapped. The image stamp would carry a hash of that index list, so a build whose step
-  set differs reads the baseline code as absent, as it does today for a build with another layout.
-  Because the code keeps tier 0's activation and calls the same steps, it needs no
-  deoptimization metadata and no relocations beyond the table base.
+- **Measured, not built: baseline code in the code image.** Writing each closure's baseline
+  code at install would remove the run-time compile, but the baseline's execution alone costs
+  3.1% more instructions than tier 0 on `testthat_full`, and the most it could save is about 3.1%
+  (`decisions.md`, "Code images hold bytecode only").
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
@@ -1080,7 +1058,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Card marking for remembered old objects | V8, HotSpot | planned | minor collections during a load cost about 24M instructions each, mostly re-marking namespace frames being filled | |
 | A buffered `unserializeFromConn` | GNU R | planned | it reads a few bytes per call: 93M instructions of the 11-package `library()` | |
 | Per-package code images written at install time, beside the lazy-load database | Bun | built, no speedup yet | package load and warm-up; decoding a closure costs about what compiling it does, so untrained images cost 1.3% more instructions on `library(survival)` | `crates/interp/src/code_image.rs` |
-| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles; tier 0 keeps `eval` and non-standard evaluation, the JIT keeps hot loops; `ry install --explain` lists what stayed in the interpreter and what each native function tests and looks up | Bun (`--aot`) | built for scalar numeric closures with guessed argument types; checker types and arguments that are calls are open (`backlog.md`, "Install-time native code: the gaps") | callgrind, images on against `RY_CODE_IMAGE=0`, JIT off: testthat workload 7.850G against 7.834G, `library()` of six packages 1.546G against 1.536G, because few of their functions are scalar numeric; a top-level loop of 300,000 calls to a package's scalar functions runs 4.78G against 7.22G instructions, and 4.78G against 7.27G with the JIT on | `crates/jit/src/ahead.rs`, `crates/ssa/src/section.rs` |
+| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles | Bun (`--aot`) | built for scalar numeric closures, measured neutral, removed (`decisions.md`, "Code images hold bytecode only") | testthat workload 7.850G against 7.834G instructions with images off, because few package functions are scalar numeric | |
 | One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | IR built; install-time code planned | two SSA forms and two lowerings to Cranelift | `crates/ssa` |
 | Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | built, no speedup yet: loops tier up within their first call anyway, and a training run on other types makes the JIT refuse to recompile | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
@@ -1176,14 +1154,14 @@ Package code is meant to run as machine code calling machine code, with tier 0 k
 non-standard evaluation and whatever compiled code declines. Four parts make that up, and they
 are one design because each constrains the others: the frame is what compiled code reads, the
 calling convention decides what a frame holds on entry, unboxed values decide when the frame is
-written, and install-time code decides which of these facts are known before the first call.
+written, and compiling ahead decides which of these facts are known before the first call.
 
 | Part | Status | Owner |
 | --- | --- | --- |
 | Slot frames, environments made on demand | built for tier 0 (`slot-frames.md`) | frames |
 | A direct calling convention between closures | built from tier 0 to tier 0; machine to machine planned | frames (tier 0), JIT (machine code) |
 | Unboxed length-1 doubles, integers and logicals in compiled code | built inside tier 1 and native functions; across calls planned | JIT |
-| Whole-package compilation at install, with entry guards and deoptimization to tier 0 | scalar native functions built; general bodies planned | JIT |
+| Whole-package compilation at install, with entry guards and deoptimization to tier 0 | measured and removed for untyped closures (`decisions.md`, "Code images hold bytecode only"); strict typed closures planned | JIT |
 
 The targets are at least 80% of closures in rlang, cli and testthat running as machine code (5 to
 11% today), 30% fewer instructions on the testthat workload, and the application workloads at twice GNU R's
@@ -1212,8 +1190,7 @@ which do not need the caller's environment. A call that passes `...` on appends 
 caller's `...` slot collected.
 
 Between machine code (planned), a call of a sibling closure in a locked namespace is a direct
-machine call to the callee's entry for the argument types at hand, guarded once by the image's
-check epoch. Pure arguments (`native::pure_value`) are passed evaluated and unboxed; the rest are
+machine call to the callee's entry for the argument types at hand, guarded once per call. Pure arguments (`native::pure_value`) are passed evaluated and unboxed; the rest are
 passed as promises over the caller's frame, exactly as tier 0 passes them.
 
 **What makes the environment.** The frame keeps no environment until something hands one out.
@@ -1264,14 +1241,6 @@ to a slot before anything that can read the frame (a generic call, a dispatching
 trigger, a deoptimization, a return to tier 0), passed to a callee that is not machine code,
 stored into a vector or list, captured by a promise, or returned to a caller that expects a
 `SEXP`. A machine-to-machine call passes and returns it unboxed, per the callee's specialization.
-
-**Install-time code.** `ry install` compiles each closure of a locked namespace it can type to
-machine code in the image's native section: an entry that checks its guards (the manifest's
-builtins and siblings, against the check epoch) and the argument types of its specialization,
-then runs the body on a slot window, calling siblings directly and everything else through tier
-0's call path. A failed entry guard runs the call in tier 0. A failed guard inside the body
-deoptimizes through the frame-state map, which the image stores beside the code. Tier 0 keeps
-`eval` and non-standard evaluation.
 
 ### Builtin fast paths
 

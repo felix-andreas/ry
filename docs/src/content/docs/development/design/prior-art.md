@@ -195,10 +195,10 @@ refers to its steps.
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Closed bindings per locked namespace: the bindings are closed though their values are not | Bun | **Adopt** (step 2) | Direct calls to sibling namespace functions and imports, invalidated by `unlockBinding` and `assignInNamespace` |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt as a hybrid, built for numeric functions** | `ry install` compiles from checker, closed-namespace and effect-free facts into the code image's native section; tier 0 keeps `eval` and NSE, the JIT keeps hot loops |
+| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt for strict typed code only** | Untyped package closures measured neutral and were removed (`decisions.md`, "Code images hold bytecode only"); typed closures are the open target |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | Mapped images shared across worker processes | Bun | **Adopt, planned** (step 5) | callr, parallel and doParallel workers map the same package images; measured as resident memory per worker |
-| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry install --explain` |
+| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt, planned** | For strict typed code, beside its ahead-of-time compiler |
 | Each program runs interpreted, compiled, and compiled with types erased; guesses forced to fail; facts checked | Bun | **Adopt** | Typed differential tests and fuzzing |
 | No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first call that needs it |
 | A standalone executable with its machine code mapped from the file | Bun | **Adopt** | `ry build --exe` |
@@ -615,22 +615,12 @@ that apply Bun's closed-world reasoning to untyped packages:
   `ry build --exe`, which writes a standalone executable as `bun compile` does. Worker processes
   started by callr, parallel and doParallel load the same packages, so mapping each package's image
   read-only lets them share it (planned as step 5, measured as resident memory per worker).
-- **Ahead-of-time machine code at install time, as one tier of a hybrid** (built for a package's
-  numeric functions, for the argument types their annotations or constant defaults declare, and
-  otherwise for guessed scalar and vector types; the checker's inferred types are not used yet).
-  `ry install` compiles each package to machine code from facts it can prove without running
-  anything: ry's checker and inferred types, the closed bindings of the locked namespace, and the
-  effect-free fact per function. A value from outside the package (an argument from user code, a result of `.Call`)
-  is tested once where it enters, and a failed test takes the tier-0 path for that call. The code
-  goes through the one SSA IR and `cranelift-object` into the native section of the package's code
-  image, mapped read-only so the test processes of one CI machine share it. Tier 0 keeps `eval` and
-  non-standard evaluation, and the JIT keeps hot loops, because Bun's numbers show ahead-of-time
-  code losing to a JIT once warm. `ry install --explain` lists the functions left in the
-  interpreter and, for each native specialization, the arguments it tests on entry and the names it
-  looks up. It is measured on the testthat workload and on package load
-  time.
-- **`ry install --explain`** for the slow-path report. With no profile, it ranks the functions
-  left in the interpreter by size.
+- **Ahead-of-time machine code for strict typed code.** Inside typed code a type is a fact, so
+  the code needs no guesses and tests an R value once at the typed boundary. For untyped package
+  closures the idea was built and measured: scalar numeric functions compiled at install covered
+  5 to 11% of closures and left the testthat workload unchanged, and baseline code for every body
+  could save at most about 3% of its instructions, so code images hold bytecode only
+  (`decisions.md`, "Code images hold bytecode only").
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
 **What ry rejects.**
@@ -679,8 +669,8 @@ runs a compiled slow second version of the function.
   values, which is what Bun's flow analysis needs, and untyped R stays on the JIT.
 - **A slow second version instead of the interpreter.** A compiled copy that takes the failing
   argument as a plain R value would keep the call native without discarding code.
-- **A free, tested and by-name split** in `ry install --explain`, which today lists entry tests and
-  looked-up names per specialization but gives no program-wide count.
+- **A free, tested and by-name split** in a slow-path report for typed code, with a
+  program-wide count.
 
 ## Production JITs: JavaScriptCore, LuaJIT and V8
 

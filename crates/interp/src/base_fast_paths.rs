@@ -716,18 +716,7 @@ unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<
             interp().visible = true;
             code(&matched)?
         }
-        None if tagged => return Ok(None),
-        None => {
-            // A closure with install-time machine code carries the same mark.
-            let value = match crate::code_image::native_hooks() {
-                Some(hooks) => (hooks.call)(function, args).transpose()?,
-                None => None,
-            };
-            if value.is_some() && activity::enabled() {
-                crate::eval::count_package_call(function, None, args);
-            }
-            return Ok(value);
-        }
+        None => return Ok(None),
     };
     if value.is_some() {
         activity::count(Counter::NativeEntries);

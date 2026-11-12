@@ -24,19 +24,15 @@ use {
         logging,
     },
     heap::{
-        HEAP_ENCLOSURE_EPOCH_OFFSET,
         env::layout as frame,
-        object::{
-            ENVIRONMENT_ENCLOSURE_OFFSET, ENVIRONMENT_FRAME_OFFSET, SYMBOL_EPOCH_OFFSET, SexpType,
-            VECTOR_DATA_OFFSET, gp, header_layout,
-        },
+        object::{ENVIRONMENT_FRAME_OFFSET, Sexp, SexpType, VECTOR_DATA_OFFSET, gp, header_layout},
     },
     interp::{
         bytecode::{
-            self, ARITHMETIC_STEPS, ARITHS, Arith, BASELINE, BASELINE_STEPS, Machine, Op,
-            baseline_layout, operand_count,
+            self, ARITHS, Arith, BASELINE, BASELINE_STEPS, Machine, Op, baseline_layout,
+            operand_count,
         },
-        heap, interp,
+        heap,
         values::{self, missing_arg, nil, unbound},
     },
     std::{cell::RefCell, ffi::c_void, sync::OnceLock, time::Instant},
@@ -57,8 +53,6 @@ const DATA: u8 = VECTOR_DATA_OFFSET as u8;
 const OBJECT_FLAG: u8 = 1 << 0;
 const ALTREP_FLAG: u8 = 1 << 1;
 const ARRAY_FLAG: u8 = 1 << 4;
-/// A triple's third field, a closure's environment.
-const THIRD: u32 = 32;
 
 /// Compiles baseline code for the activation's body and stores it in the body's `BASELINE`
 /// constant, or stores the unbound marker there when the body does not compile, so it is not
@@ -69,10 +63,7 @@ pub unsafe fn compile(machine: &Machine<'_>) {
         let started = Instant::now();
         let result = Arch::host()
             .ok_or("this host has no baseline backend")
-            .and_then(|arch| {
-                publish_step_table(arch)?;
-                assemble(arch, machine.code)
-            })
+            .and_then(|arch| assemble(arch, machine.code))
             .and_then(|bytes| install(&bytes).map(|address| (address, bytes.len())));
         let heap = heap();
         match result {
@@ -110,6 +101,7 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
         if words.len() > MAX_WORDS {
             return Err("the body is too long");
         }
+        let constants = code.cdr();
         let mut asm = Assembler::new(arch);
         let dispatch = asm.label();
         let jump_to_pc = asm.label();
@@ -127,22 +119,15 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
             return Err("a truncated instruction");
         }
         asm.prologue(
-            baseline_layout::STEPS as u32,
+            step_table(arch)?,
             baseline_layout::REGISTERS as u32,
             baseline_layout::INTERP as u32,
         );
         asm.jump(jump_to_pc);
         let visible = baseline_layout::VISIBLE as u32;
-        let pool = baseline_layout::CONSTANTS as u32;
-        let header = baseline_layout::HEADER as u32;
-        let machine = baseline_layout::MACHINE as u32;
-        let function = baseline_layout::FUNCTION as u32;
-        let heap = baseline_layout::HEAP as u32;
-        let epochs = baseline_layout::CACHE_EPOCHS as u32;
-        let cells = baseline_layout::CACHE_SLOTS as u32;
-        let slot = |index: usize| (VECTOR_DATA_OFFSET + index * 8) as u32;
+        let nil_address = nil().as_ptr() as u64;
         // Slow paths of inline instructions, placed after the body so the fast paths stay dense.
-        let mut cold: Vec<(Label, usize, usize, usize)> = Vec::new();
+        let mut cold: Vec<(Label, Op, usize, usize)> = Vec::new();
         // Answers other than fall-through, tested after the body for the same reason: the label
         // they start at and the branch target the step may answer.
         let mut taken: Vec<(Label, Option<usize>)> = Vec::new();
@@ -158,24 +143,19 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                 }
             };
             let next = pc + 1 + count;
-            let step = match op {
-                Op::Arithmetic if operand(0) < ARITHS.len() => ARITHMETIC + operand(0),
-                Op::Arithmetic => return Err("an unknown arithmetic operator"),
-                _ => STEPS + op as usize,
-            };
             asm.bind(labels[pc]);
             match op {
                 Op::Jump if operand(0) > pc => asm.jump(label_of(operand(0))?),
                 Op::Resume => asm.jump(label_of(operand(0))?),
                 Op::Move => asm.copy_register(operand(0) as u32, operand(1) as u32),
                 Op::Constant => {
-                    asm.load_pool(pool, slot(operand(1)));
-                    asm.store_object(operand(0) as u32);
+                    let value = constants.element(operand(1));
+                    asm.store_register_constant(operand(0) as u32, value.as_ptr() as u64);
                     asm.store_interp_byte(visible, 1);
                 }
                 Op::GetVar => {
                     let slow = asm.label();
-                    variable_arguments(&mut asm, slot(operand(1)), operand(2) as u32);
+                    variable_arguments(&mut asm, constants.element(operand(1)), operand(2) as u32);
                     asm.call_table(GET_VAR_STUB);
                     asm.branch_accumulator_zero(Condition::Equal, slow);
                     asm.store(
@@ -184,11 +164,11 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                         Reg::Window,
                         operand(0) as u32 * 8,
                     );
-                    cold.push((slow, step, pc, next));
+                    cold.push((slow, op, pc, next));
                 }
                 Op::SetVar => {
                     let slow = asm.label();
-                    variable_arguments(&mut asm, slot(operand(0)), operand(2) as u32);
+                    variable_arguments(&mut asm, constants.element(operand(0)), operand(2) as u32);
                     asm.load(
                         Width::W64,
                         Reg::Accumulator,
@@ -197,7 +177,7 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                     );
                     asm.call_table(SET_VAR_STUB);
                     asm.branch_accumulator_zero(Condition::Equal, slow);
-                    cold.push((slow, step, pc, next));
+                    cold.push((slow, op, pc, next));
                 }
                 Op::Arithmetic if let Some(stub) = comparison_stub(ARITHS[operand(0)].0) => {
                     let slow = asm.label();
@@ -211,91 +191,22 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                         Reg::Window,
                         operand(1) as u32 * 8,
                     );
-                    cold.push((slow, step, pc, next));
-                }
-                // `guard_fast` inline, for a guard whose frame cannot bind the symbol: it passes
-                // while nothing shadows the name and its base binding is still the function, or
-                // while the lookup cache still holds the function's cell for this enclosure. A
-                // failing guard runs the step, which jumps to the fallback.
-                Op::Guard if operand(3) == 0 => {
-                    let slow = asm.label();
-                    let have_env = asm.label();
-                    let enclosure = asm.label();
-                    let cached = asm.label();
-                    asm.load(Width::W64, Reg::T0, Reg::Activation, header);
-                    asm.load(Width::W64, Reg::T0, Reg::T0, 0);
-                    asm.load(Width::W64, Reg::T1, Reg::Steps, (NIL * 8) as u32);
-                    asm.compare(Reg::T0, Reg::T1);
-                    asm.branch(Condition::NotEqual, have_env);
-                    asm.load(Width::W64, Reg::T0, Reg::Activation, machine);
-                    asm.load(Width::W64, Reg::T0, Reg::T0, function);
-                    asm.load(Width::W64, Reg::T0, Reg::T0, THIRD);
-                    asm.jump(enclosure);
-                    asm.bind(have_env);
-                    asm.load(
-                        Width::W64,
-                        Reg::T0,
-                        Reg::T0,
-                        ENVIRONMENT_ENCLOSURE_OFFSET as u32,
-                    );
-                    asm.bind(enclosure);
-                    asm.load(Width::W64, Reg::T2, Reg::Activation, pool);
-                    asm.load(Width::W64, Reg::T3, Reg::T2, slot(operand(0)));
-                    asm.load(Width::W64, Reg::T2, Reg::T2, slot(operand(1)));
-                    asm.load(Width::W16, Reg::T1, Reg::T0, header_layout::GP as u32);
-                    asm.test_constant(Reg::T1, u32::from(gp::DETACHED));
-                    asm.branch(Condition::NotEqual, cached);
-                    asm.load(Width::W16, Reg::T1, Reg::T3, header_layout::GP as u32);
-                    asm.test_constant(Reg::T1, u32::from(gp::BOUND_ELSEWHERE));
-                    asm.branch(Condition::NotEqual, cached);
-                    asm.load(Width::W64, Reg::T4, Reg::T3, header_layout::SECOND as u32);
-                    asm.load(Width::W64, Reg::T4, Reg::T4, header_layout::SECOND as u32);
-                    asm.compare(Reg::T4, Reg::T2);
-                    asm.branch(Condition::Equal, labels[next]);
-                    asm.load(Width::W8, Reg::T1, Reg::T4, header_layout::KIND as u32);
-                    asm.compare_constant(Reg::T1, SexpType::Promise as u32);
-                    asm.branch(Condition::NotEqual, cached);
-                    asm.load(Width::W64, Reg::T4, Reg::T4, header_layout::FIRST as u32);
-                    asm.compare(Reg::T4, Reg::T2);
-                    asm.branch(Condition::Equal, labels[next]);
-                    asm.bind(cached);
-                    let lookup = operand(2) as u32;
-                    asm.load(Width::W64, Reg::T4, Reg::T3, SYMBOL_EPOCH_OFFSET as u32);
-                    asm.load(Width::W64, Reg::T5, Reg::Activation, heap);
-                    asm.load(
-                        Width::W64,
-                        Reg::T5,
-                        Reg::T5,
-                        HEAP_ENCLOSURE_EPOCH_OFFSET as u32,
-                    );
-                    asm.add(Reg::T4, Reg::T5);
-                    asm.load(Width::W64, Reg::T5, Reg::Activation, epochs);
-                    asm.load(Width::W64, Reg::T5, Reg::T5, lookup * 8);
-                    asm.compare(Reg::T4, Reg::T5);
-                    asm.branch(Condition::NotEqual, slow);
-                    asm.load(Width::W64, Reg::T5, Reg::Activation, cells);
-                    asm.load(Width::W64, Reg::T4, Reg::T5, lookup * 16);
-                    asm.compare(Reg::T4, Reg::T0);
-                    asm.branch(Condition::NotEqual, slow);
-                    asm.load(Width::W64, Reg::T4, Reg::T5, lookup * 16 + 8);
-                    asm.load(Width::W64, Reg::T4, Reg::T4, header_layout::SECOND as u32);
-                    asm.compare(Reg::T4, Reg::T2);
-                    asm.branch(Condition::NotEqual, slow);
-                    asm.jump(labels[next]);
-                    cold.push((slow, step, pc, next));
+                    cold.push((slow, op, pc, next));
                 }
                 Op::Unfused => {}
                 Op::Visible => asm.store_interp_byte(visible, 1),
                 Op::Invisible => asm.store_interp_byte(visible, 0),
                 Op::SetSrcref if operand(1) == 0 => {
-                    asm.load_pool(pool, slot(operand(0)));
-                    asm.store_interp_object(baseline_layout::SRCREF as u32);
+                    let srcref = constants.element(operand(0));
+                    asm.store_interp_constant(
+                        baseline_layout::SRCREF as u32,
+                        srcref.as_ptr() as u64,
+                    );
                 }
                 Op::EndStatement if operand(2).saturating_sub(operand(1)) <= MAX_INLINE_CLEARS => {
-                    asm.load_table(NIL);
-                    asm.store_object(operand(0) as u32);
+                    asm.store_register_constant(operand(0) as u32, nil_address);
                     for register in operand(1)..operand(2) {
-                        asm.store_object(register as u32);
+                        asm.store_register_constant(register as u32, nil_address);
                     }
                 }
                 Op::BranchUnlessBuiltin => {
@@ -317,10 +228,10 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                     );
                 }
                 Op::BranchUnlessPrimitive => {
+                    let primitive = constants.element(operand(1));
                     asm.load_object(operand(0) as u32);
                     asm.branch_object_is(
-                        pool,
-                        slot(operand(1)),
+                        primitive.as_ptr() as u64,
                         Condition::NotEqual,
                         label_of(operand(2))?,
                     );
@@ -347,13 +258,13 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                         label_of(next)?,
                     );
                     asm.bind(slow);
-                    asm.call_step(step, pc as u32);
+                    asm.call_step(STEPS + op as usize, pc as u32);
                     let other = asm.label();
                     asm.branch_accumulator_zero(Condition::NotEqual, other);
                     taken.push((other, Some(operand(2))));
                 }
                 _ => {
-                    asm.call_step(step, pc as u32);
+                    asm.call_step(STEPS + op as usize, pc as u32);
                     let target = branch_target(op, &operand).filter(|&target| target != next);
                     if let Some(target) = target {
                         label_of(target)?;
@@ -375,9 +286,9 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
             }
             pc = next;
         }
-        for (slow, step, pc, next) in cold {
+        for (slow, op, pc, next) in cold {
             asm.bind(slow);
-            asm.call_step(step, pc as u32);
+            asm.call_step(STEPS + op as usize, pc as u32);
             asm.branch_accumulator_zero(Condition::Equal, labels[next]);
             asm.jump(dispatch);
         }
@@ -432,30 +343,20 @@ const COMPARISONS: [(Arith, Condition, Condition); 6] = [
 const COMPARISON_STUBS: usize = 2;
 /// Where [`BASELINE_STEPS`] starts in the step table.
 const STEPS: usize = COMPARISON_STUBS + COMPARISONS.len();
-/// Where [`ARITHMETIC_STEPS`] starts in the step table.
-const ARITHMETIC: usize = STEPS + BASELINE_STEPS.len();
-/// The step table entry that holds `NULL`, which code stores without holding its address.
-const NIL: usize = ARITHMETIC + ARITHMETIC_STEPS.len();
 
 /// The step table every body's code calls through: the shared stubs' addresses, then
-/// [`BASELINE_STEPS`], then [`ARITHMETIC_STEPS`], then `NULL`. It is built once and never freed, like the code that reads
-/// it, and code finds it through [`Interp::baseline_steps`].
+/// [`BASELINE_STEPS`]. It is built once and never freed, like the code that reads it.
 static TABLE: OnceLock<Result<usize, &'static str>> = OnceLock::new();
 
-/// Builds the step table once and points the `Interp` at it, which baseline code needs before
-/// it runs, whether this process or an install compiled it.
-pub(crate) fn publish_step_table(arch: Arch) -> Result<(), &'static str> {
+fn step_table(arch: Arch) -> Result<u64, &'static str> {
     let table = *TABLE.get_or_init(|| {
         let (bytes, entries) = assemble_stubs(arch)?;
         let start = install(&bytes)? as usize;
         let mut table: Vec<usize> = entries.iter().map(|entry| start + entry).collect();
         table.extend(BASELINE_STEPS.iter().map(|&step| step as usize));
-        table.extend(ARITHMETIC_STEPS.iter().map(|&step| step as usize));
-        table.push(nil().as_ptr() as usize);
         Ok(Box::leak(table.into_boxed_slice()).as_ptr() as usize)
     });
-    interp().baseline_steps = table? as *const usize;
-    Ok(())
+    table.map(|address| address as u64)
 }
 
 /// The stubs' code and the offset each starts at. A stub is a leaf that takes its arguments in
@@ -714,7 +615,7 @@ fn probe_slot(asm: &mut Assembler, cell: Label, slow: Label) {
 
 /// Finds the binding cell of the symbol in `T4` in the activation's own frame at the position
 /// lookup slot `T6` last found it, leaving it in `T3`, as `Frame::find_hinted` does on a hint
-/// that matches. A frame without the symbol, a stale hint
+/// that matches; `T5` holds the symbol's filter bit. A frame without the symbol, a stale hint
 /// and a frame whose hints are off branch to `slow`. Global and base frames keep their
 /// bindings on the symbols and an empty frame here, so their filter rejects every symbol.
 fn probe_frame(asm: &mut Assembler, slow: Label) {
@@ -730,12 +631,6 @@ fn probe_frame(asm: &mut Assembler, slow: Label) {
     );
     asm.load(Width::W64, Reg::T0, Reg::T0, 0);
     asm.load(Width::W64, Reg::T1, Reg::T0, at(frame::FILTER));
-    asm.filter_bit(
-        Reg::T5,
-        Reg::T4,
-        frame::FILTER_MULTIPLIER,
-        frame::FILTER_SHIFT,
-    );
     asm.test(Reg::T1, Reg::T5);
     asm.branch(Condition::Equal, slow);
     asm.load(Width::W32, Reg::T1, Reg::T0, at(frame::FORMALS));
@@ -776,16 +671,10 @@ fn comparison_stub(operator: Arith) -> Option<usize> {
         .map(|position| COMPARISON_STUBS + position)
 }
 
-/// Loads the arguments of a variable stub: the symbol, from byte `symbol` of the constant pool,
-/// and its lookup slot.
-fn variable_arguments(asm: &mut Assembler, symbol: u32, slot: u32) {
-    asm.load(
-        Width::W64,
-        Reg::T4,
-        Reg::Activation,
-        baseline_layout::CONSTANTS as u32,
-    );
-    asm.load(Width::W64, Reg::T4, Reg::T4, symbol);
+/// Loads the arguments of a variable stub: the symbol, its frame filter bit and its lookup slot.
+fn variable_arguments(asm: &mut Assembler, symbol: Sexp, slot: u32) {
+    asm.constant(Reg::T4, symbol.as_ptr() as u64);
+    asm.constant(Reg::T5, frame::filter_bit(symbol));
     asm.constant(Reg::T6, u64::from(slot));
 }
 
