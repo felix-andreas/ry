@@ -482,10 +482,11 @@ impl<'p> Translator<'p> {
                 slot,
                 load,
                 forcing,
+                volatile,
             } => {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
+                    self.load_slot(position, &before, slot, ty, forcing, volatile, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.in_variables() {
@@ -523,7 +524,7 @@ impl<'p> Translator<'p> {
             }
             Action::GetFunSlot { dst, slot, load } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, false, None)?;
+                    self.load_slot(position, &before, slot, ty, false, false, None)?;
                 }
                 let value = self.load_slot_cell(slot);
                 self.store_register(dst, value);
@@ -3275,6 +3276,7 @@ impl<'p> Translator<'p> {
         slot: usize,
         ty: Ty,
         forcing: bool,
+        volatile: bool,
         dst: Option<usize>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -3321,12 +3323,13 @@ impl<'p> Translator<'p> {
         }
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
+        let volatile_constant = iconst(&mut self.builder, volatile as usize);
         let result = self
             .call(
                 runtime::jit_load as *const () as usize,
-                &[I64, I64, I64],
+                &[I64, I64, I64, I64],
                 Some(I32),
-                &[self.activation, pc_constant, slot_constant],
+                &[self.activation, pc_constant, slot_constant, volatile_constant],
             )
             .ok_or(Refusal("a helper without a result"))?;
         let error =
@@ -3381,7 +3384,12 @@ impl<'p> Translator<'p> {
                 self.guard(fits, mismatch);
             }
         }
-        self.set_status(slot, merged_status);
+        if volatile {
+            let unloaded = self.builder.ins().iconst(I32, 0);
+            self.set_status(slot, unloaded);
+        } else {
+            self.set_status(slot, merged_status);
+        }
         match ty {
             Ty::Int | Ty::Lgl => {
                 let unboxed = self.unbox(value, ty);

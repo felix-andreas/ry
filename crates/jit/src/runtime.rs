@@ -568,13 +568,33 @@ pub unsafe extern "C" fn jit_fused(activation: *mut Activation, pc: i64) -> i32 
 }
 
 /// Loads the variable `GetVar` at `pc` reads into its slot. Returns the slot's status.
-pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
+/// `volatile` is nonzero when the compiled code already loads the variable at every read, as it
+/// does once a read has called an active binding.
+pub unsafe extern "C" fn jit_load(
+    activation: *mut Activation,
+    pc: i64,
+    slot: i64,
+    volatile: i64,
+) -> i32 {
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let epoch = heap().binding_epoch();
+            let reads = eval::active_binding_reads();
             let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));
-            finish_load(activation, slot, loaded, epoch)
+            let result = finish_load(activation, slot, loaded, epoch);
+            // Code that would reuse the value of a load that called an active binding hands the
+            // activation to tier 0 after the load, and the recompile reads the variable again at
+            // every use. Comparing a count also catches a binding that a forced promise read,
+            // which only costs that variable its reuse.
+            if volatile == 0
+                && result != outcome::LOAD_FAILED
+                && eval::active_binding_reads() != reads
+            {
+                bytecode::record_active_binding(machine.code, pc as usize);
+                return outcome::LOAD_INVALIDATED;
+            }
+            result
         })
     }
 }
