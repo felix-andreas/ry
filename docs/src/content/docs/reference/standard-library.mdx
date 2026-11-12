@@ -167,7 +167,19 @@ state <- list(seen = Dict.empty(), count = 0L)
 for (i in 1:100000) state$seen <- Dict.insert(state$seen, i, TRUE)
 ```
 
-A dictionary, set or list also updates in place through a helper function, when the call has the form
+A record's field updates in place the same way, when the update gives the field a call on its own
+value, `r <- (..r, field = f(r$field, ...))`, the fields given after it are constants, and nothing
+else holds the record:
+
+```r ry run runtime=ry dput
+column <- (name = "x", values = [])
+for (i in 1:100000) column <- (..column, values = List.append(column$values, i * 2L))
+List.len(column$values)
+#> 100000i64
+```
+
+A dictionary, set or list also updates in place through a helper function, at top level or inside
+another function, when the call has the form
 `x <- helper(x, ...)` and the helper either reassigns its own parameter or returns the update of
 its first parameter directly, as in `function(seen, key) Dict.insert(seen, key, TRUE)`:
 

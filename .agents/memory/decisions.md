@@ -4802,6 +4802,17 @@ check` releases its trees once, and memoized records are compact" below).
   is that environment's own compiled closure (whose updates the compiler orders with
   `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
   copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
+- **Record fields.** `r <- (..r, field = f(r$field, ...))` lowers to `.ry_update(r, ...)`, and
+  `rebind_call` routes it to `rebind_update`, which evaluates the field's call with `r$field` as a
+  nested target, so the record is a list on the chain. That needs records to count their
+  holders: an interpreter-made plain record is a counted record (`records::allocate`) whose slots
+  `set_record_slot` keeps counted, while tuples and tags stay saturated. The fields given after
+  the updating one must be constants, because their code could otherwise see the field
+  half-updated. When the record is still solely held afterwards, the new values go into its slots;
+  otherwise the update builds a new record (`records::with_slots`). In a slot frame the compiler
+  leaves such an update to `CallRebinding` instead of evaluating its arguments into registers
+  (`eval::updates_own_field`), and the call makes the frame's environment. 2e6 updates of
+  `List.append(r$values, x)` inside a function take about 0.7 s.
 - **Moving a value into a helper's parameter** was first rejected as unsound and is now built
   with escape checks and an undo journal; see "Moving a collection into a helper's parameter".
 - **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
@@ -5030,6 +5041,16 @@ check` releases its trees once, and memoized records are compact" below).
   the object being changed. It must run before the sharing check, because ending the move makes
   the object shared again and forces the copy. A copied closure (`values` duplicate) is reported
   to `created_closure` like a fresh one.
+- **Slot frames.** A function's frame that keeps its slots has no binding cell to move from, so
+  the move names its binding as `moves::Binding` (a cell, or a slot by the header's register and
+  the slot's position) and the caller's names as `moves::Heads` (an environment, or a slot frame
+  by index). `op_call_rebinding` in `bytecode.rs` hands a closure call to
+  `moves::call_moving_from`, the same check, journal and restore that `call_moving` uses from an
+  environment, with the other arguments built as the frame's lazy promises. `resolve_function`
+  reads a slot frame's own bindings without making its environment, and the move is refused
+  while a register of the calling expression holds the value, since registers are not counted.
+  2e6 calls of `xs <- helper(xs, i)` inside a function take about 2 s for a list, a dictionary
+  and a set alike, against 5.8 s for 40,000 before.
 - **Limits.** The tail update covers only the last statement and stays off in a body that creates
   a closure. Both are in `backlog.md`.
 
