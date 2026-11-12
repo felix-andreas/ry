@@ -1168,7 +1168,15 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "Str.from_utf16(list(70000L))",
-        "`units` must be a list of numbers from 0 to 65535",
+        "`units` must hold numbers from 0 to 65535, but item 1 is 70000",
+    ),
+    (
+        "Str.from_utf8_lossy(list(104L, 256L))",
+        "`bytes` must hold numbers from 0 to 255, but item 2 is 256",
+    ),
+    (
+        "List.take_first(list(1L), -1L)",
+        "`count` must be zero or more, not -1",
     ),
 ];
 

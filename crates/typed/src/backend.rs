@@ -26,8 +26,9 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC, MemFlagsData, SigRef,
-        Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine, Value, Variable,
+        AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC,
+        MemFlagsData, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine,
+        Value, Variable,
         types::{F64, I32, I64},
     },
     std::sync::atomic::AtomicBool,
@@ -94,7 +95,7 @@ pub fn compile(
     callees: &[Callee],
     r_calls: &[usize],
 ) -> Result<Code, Refusal> {
-    ssa::with_module(|module| -> Result<Code, Refusal> {
+    ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
         let id = module.declare(&own_signature)?;
@@ -1333,6 +1334,29 @@ impl Emitter<'_> {
                 let short = self.builder.ins().band_imm_u(shifted, 0x7F);
                 SmallVec::from_slice(&[self.builder.ins().select(inline, short, x[1])])
             }
+            Op::ToUtf8(a) => {
+                let x = self.get(*a)?;
+                let list = self.call_words(address!(values::ry_str_to_utf8), I64, &[x[0], x[1]]);
+                SmallVec::from_slice(&[list])
+            }
+            Op::FromUtf8Lossy(a) => {
+                let list = self.one(*a)?;
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let decoded = self.call(
+                    address!(values::ry_list_from_utf8_lossy),
+                    &[I64; 2],
+                    &[I32],
+                    &[list, out],
+                )[0];
+                let bad = self.builder.ins().icmp_imm_s(IntCC::Equal, decoded, 0);
+                self.fail_if(bad, &inst.fail_drops)?;
+                self.load_item(out, Item::Str)
+            }
             Op::RepeatStr(a, count) => {
                 let x = self.get(*a)?;
                 let count = self.one(*count)?;
@@ -1465,6 +1489,40 @@ impl Emitter<'_> {
                     I64,
                     &[pointer, owned, w0, w1],
                 );
+                SmallVec::from_slice(&[list])
+            }
+            Op::Swap(list, first, second) => {
+                let pointer = self.one(*list)?;
+                let owned = self.owned(inst, 0);
+                let (first, second) = (self.one(*first)?, self.one(*second)?);
+                let list = self.call_words(
+                    address!(values::ry_list_swap),
+                    I64,
+                    &[pointer, owned, first, second],
+                );
+                SmallVec::from_slice(&[list])
+            }
+            Op::Extend(first, second) => {
+                let (a, b) = (self.one(*first)?, self.one(*second)?);
+                let (a_owned, b_owned) = (self.owned(inst, 0), self.owned(inst, 1));
+                let list = self.call_words(
+                    address!(values::ry_list_concat),
+                    I64,
+                    &[a, a_owned, b, b_owned],
+                );
+                self.fail_if_null(list, inst)?;
+                SmallVec::from_slice(&[list])
+            }
+            Op::Slice(list, start, count) => {
+                let pointer = self.one(*list)?;
+                let owned = self.owned(inst, 0);
+                let (start, count) = (self.one(*start)?, self.one(*count)?);
+                let list = self.call_words(
+                    address!(values::ry_list_slice),
+                    I64,
+                    &[pointer, owned, start, count],
+                );
+                self.fail_if_null(list, inst)?;
                 SmallVec::from_slice(&[list])
             }
             Op::Poll => {

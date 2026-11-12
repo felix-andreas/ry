@@ -60,7 +60,8 @@ local({
     print(f)
     lines <- readLines(f, warn = FALSE)
     close(f)
-    cat(List.to_r(execute(List.from_r(lines))), sep = "")
+    items <- List.from_r(lines)
+    cat(List.to_r(execute(items)), sep = "")
   })
   seconds <- proc.time()[[3]] - started
   value <- NULL
