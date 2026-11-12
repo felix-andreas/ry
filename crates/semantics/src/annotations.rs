@@ -42,6 +42,11 @@ pub struct Annotation<'db> {
     /// Parameters typed only by an inline signature. It sits on the formals and so never
     /// restates which parameters are optional; the formals alone decide it.
     pub inline_parameters: Vec<String>,
+    /// Whether the function literal carries a type on every formal, or on its result when it
+    /// has no formals. The runtime reads only those, so it compiles no function whose
+    /// parameter types are written elsewhere; a result type written elsewhere does not matter
+    /// to it.
+    pub inline_signature: bool,
     /// Shape violations. A block with any carries no typing payload, so it never cascades.
     pub errors: Vec<(String, TextRange)>,
     /// Violations reported only when type checking is on; like `errors`, they strip the payload.
@@ -295,8 +300,12 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
     }
     let mut named = Vec::new();
     let mut variadic = None;
+    let mut every_formal = true;
+    let mut any_formal = false;
     for (index, formal) in formals(site).into_iter().enumerate() {
+        any_formal = true;
         let Some(ascription) = formal.ascription else {
+            every_formal = false;
             continue;
         };
         let ty = lowering
@@ -318,9 +327,11 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
             });
         }
     }
-    let ret = site
+    let written_return = site
         .children()
-        .find(|child| child.kind() == SyntaxKind::RETURN_TYPE)
+        .find(|child| child.kind() == SyntaxKind::RETURN_TYPE);
+    annotation.inline_signature = every_formal && (any_formal || written_return.is_some());
+    let ret = written_return
         .and_then(|ret| lowering.lower_child_type(&ret))
         .unwrap_or_else(|| unknown(db));
     annotation.inline_parameters = named

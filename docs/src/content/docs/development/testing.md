@@ -827,6 +827,17 @@ disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user jou
 `crates/ry/tests/scenarios/`. [Robustness](/development/robustness/) documents both, including the
 scenario format and the replay variables.
 
+`native_diagnostics_agree_with_the_typed_core` in the same file holds the strict-mode
+[native function](/reference/type-system#native-functions) findings to what the native compiler
+does. It checks each program of a corpus in strict mode, runs it with `RY_TYPED_LOG=1`, and fails
+when a function without a `native` or `interpreted` finding runs in the interpreter. The corpus is
+the typed benchmark programs, the friendly climb programs, and `crates/ry/tests/native/*.R`, where a
+program's header states what it shows: `# blocked: f, g` names the functions that must get a
+finding, and `# boundary: h` the ones with an R type in their signature. Add a program there for a
+construct the compiler gains or the checker starts to report. The test also fails when no natively
+running function of the corpus calls a standard library function that
+`semantics::native::COMPILED_STD` lists as compiled.
+
 ## Incrementality
 
 A fixture checks what an edit produces, but not how much work it took to get there.
