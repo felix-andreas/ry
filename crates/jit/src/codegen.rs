@@ -150,6 +150,9 @@ struct Translator<'p> {
     nil: i64,
     /// The position of the first instruction of the block being translated.
     block_start: usize,
+    /// While the steps of a direct call are translated, the block where tier 0 makes the call
+    /// itself, which is where a variable the steps cannot peek sends it.
+    call_fallback: Option<Label>,
 }
 
 /// An object tier 0 already holds for a value compiled code keeps unboxed.
@@ -220,6 +223,7 @@ impl<'p> Translator<'p> {
             edges: Vec::new(),
             nil: values::nil().as_ptr() as i64,
             block_start: 0,
+            call_fallback: None,
         }
     }
 
@@ -545,9 +549,12 @@ impl<'p> Translator<'p> {
                 call,
                 args,
                 entry,
+                rebinding,
                 dst,
             } => {
-                self.direct_call(position, before, steps, function, call, args, entry, dst)?;
+                self.direct_call(
+                    position, before, steps, function, call, args, entry, rebinding, dst,
+                )?;
             }
             Action::NativeCall {
                 steps,
@@ -571,6 +578,9 @@ impl<'p> Translator<'p> {
                 for argument in args {
                     values.push(match *argument {
                         Argument::Slot(slot) => self.load_slot_cell(slot),
+                        Argument::Constant(value) => {
+                            self.builder.ins().iconst(I64, value.as_ptr() as i64)
+                        }
                         Argument::Unboxed { register, ty } if ty.in_variables() => {
                             self.use_register(register, ty)
                         }
@@ -1392,6 +1402,7 @@ impl<'p> Translator<'p> {
         call: Sexp,
         args: &[Argument],
         entry: annotations::Entry,
+        rebinding: Option<Sexp>,
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -1424,10 +1435,26 @@ impl<'p> Translator<'p> {
         let result = self.call_step(pc, validate)?;
         self.branch_on_outcome(result, continued, failed, invalidated);
         self.builder.switch_to_block(unobserved);
+        let outer = self.call_fallback.replace(observed);
         for &(step, state) in steps {
             self.action(position, self.plan.state(state), step)?;
         }
+        self.call_fallback = outer;
         self.flush_all(&before, failed);
+        if let Some(target) = rebinding {
+            let target = self.builder.ins().iconst(I64, target.as_ptr() as i64);
+            let moves = self
+                .call(
+                    runtime::jit_rebinding_moves as *const () as usize,
+                    &[I64, I64],
+                    Some(I32),
+                    &[self.activation, target],
+                )
+                .ok_or(Refusal("a helper without a result"))?;
+            let direct = self.builder.create_block();
+            self.builder.ins().brif(moves, observed, &[], direct, &[]);
+            self.builder.switch_to_block(direct);
+        }
         let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (16 * args.len().max(1)) as u32,
@@ -1436,6 +1463,10 @@ impl<'p> Translator<'p> {
         for (index, argument) in args.iter().enumerate() {
             let (kind, bits) = match *argument {
                 Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
+                Argument::Constant(value) => (
+                    representation::BOXED,
+                    self.builder.ins().iconst(I64, value.as_ptr() as i64),
+                ),
                 Argument::Unboxed { register, ty } => {
                     let value = self.use_register(register, ty);
                     let (kind, bits) = match ty {
@@ -3545,7 +3576,12 @@ impl<'p> Translator<'p> {
         self.builder.ins().brif(declined, slow, &[], peeked, &[]);
         self.builder.switch_to_block(slow);
         self.builder.set_cold_block(slow);
-        self.hand_off(position, before);
+        match self.call_fallback {
+            Some(fallback) => {
+                self.builder.ins().jump(fallback, &[]);
+            }
+            None => self.hand_off(position, before),
+        }
         self.builder.switch_to_block(peeked);
         let value = self.load_slot_cell(slot);
         let fits = self.check(value, ty);

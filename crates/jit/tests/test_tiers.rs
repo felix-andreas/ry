@@ -895,6 +895,50 @@ fn run_time_binding_shadows_cached_global_function() {
 }
 
 #[test]
+fn direct_call_arguments_agree_with_tier_zero() {
+    // A direct call passes a constant that is not an unboxed scalar as the object itself, and a
+    // variable the body only passes to calls as the value it peeks. A variable it cannot peek (an
+    // unforced promise, an active binding, a `..1`, a missing one) leaves the call to tier 0,
+    // which keeps the argument lazy. `x <- f(x, ...)` on a list in a frame with an environment
+    // is tier 0's too, because tier 0 moves the list into the call.
+    const CASES: &[&str] = &[
+        "f <- function() { out <- \"\"; for (i in 1:30) out <- label(i, \"n\"); out }; f()",
+        "f <- function() { s <- 0; for (i in 1:30) s <- s + pick(i, NULL); s }; f()",
+        "f <- function(v) { s <- 0; for (i in 1:30) s <- s + twice(v); s }; f(4)",
+        "f <- function(v) { for (i in 1:30) r <- ignore(v); r }; f(stop(\"forced\"))",
+        "f <- function() { s <- 0; for (i in 1:30) s <- s + twice(glob); s }; f()",
+        "f <- function() { s <- 0; for (i in 1:30) s <- s + twice(ab); s }; f()",
+        "f <- function() { for (i in 1:30) r <- twice(not_bound_anywhere); r }; f()",
+        "f <- function() { s <- 0; for (i in 1:30) { if (i == 15) assign(\"glob\", 100); s <- s + twice(glob) }; s }; f()",
+        "f <- function(...) { s <- 0; for (i in 1:30) s <- s + twice(..1); s }; f(2)",
+        "f <- function() { l <- list(); for (i in 1:30) l <- append_to(l, i); length(l) }; f()",
+        "f <- function() { e <- environment(); l <- list(); for (i in 1:30) l <- append_to(l, i); length(l) }; f()",
+        "f <- function() { x <- 1; for (i in 1:30) x <- add(x, \"one\"); x }; f()",
+    ];
+    with_interpreter(|| unsafe {
+        run("label <- function(x, s) paste(s, x)
+             pick <- function(x, y) if (is.null(y)) x else y
+             twice <- function(z) z * 2
+             ignore <- function(z) 1
+             append_to <- function(l, v) { l[[length(l) + 1L]] <- v; l }
+             add <- function(x, how) x + nchar(how)
+             glob <- 10
+             count <- 0
+             makeActiveBinding(\"ab\", function() { count <<- count + 1; count }, globalenv())");
+        for case in CASES {
+            jit::install_mode(Mode::Off);
+            run("count <- 0; glob <- 10");
+            let reference = run(case);
+            jit::install_mode(Mode::Force);
+            run("count <- 0; glob <- 10");
+            let compiled = run(case);
+            jit::install_mode(Mode::Off);
+            assert_eq!(reference, compiled, "{case}");
+        }
+    });
+}
+
+#[test]
 fn closures_from_one_site_share_code_but_not_lookups() {
     // Each call of `make` makes a new closure from one `function` expression, so the closures
     // share one compiled body. Code whose functions all live in long-lived environments runs

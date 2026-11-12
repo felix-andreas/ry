@@ -626,6 +626,9 @@ pub enum Argument {
     },
     /// A loaded variable whose boxed value is in its slot cell.
     Slot(usize),
+    /// A constant of the call that is not an unboxed scalar, passed as the object itself, as
+    /// tier 0 passes it.
+    Constant(Sexp),
 }
 
 /// A callback-taking library function compiled code runs as a loop of its own.
@@ -891,6 +894,10 @@ pub enum Action<'a> {
         args: &'a [Argument],
         /// The callee's annotation checks, decided from the arguments' compile-time types.
         entry: Entry,
+        /// For `x <- f(x, ...)`, the variable `x` when it may hold a value tier 0 moves into the
+        /// call. The call then runs in tier 0 whenever the frame has an environment and `x`
+        /// holds such a value.
+        rebinding: Option<Sexp>,
         dst: (usize, Ty),
     },
     /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
@@ -1398,6 +1405,7 @@ pub unsafe fn plan<'a>(
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
         slots: List::new_in(arena),
+        passed_from: 0,
         speculated: Map::with_hasher_in(FxBuildHasher, arena),
         speculations: List::new_in(arena),
         registers,
@@ -1632,6 +1640,10 @@ struct Builder<'a> {
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
     slots: List<'a, Sexp>,
+    /// The first slot of a variable the body only passes to calls. Such a slot exists so a
+    /// direct call can peek the variable's value; the body never reads or assigns it, so it says
+    /// nothing about which names the frame binds.
+    passed_from: usize,
     /// Speculation results by symbol, so each lookup resolves once.
     speculated: Map<'a, Sexp, Option<Sexp>>,
     speculations: List<'a, Speculation>,
@@ -1705,6 +1717,36 @@ impl<'a> Builder<'a> {
             }
             formal = formal.cdr();
         }
+        self.passed_from = self.slots.len();
+        for position in 0..self.insts.len() {
+            let inst = &self.insts[position];
+            if !matches!(inst.op, Op::CallGeneric | Op::CallRebinding) {
+                continue;
+            }
+            let call = self.constant(inst.operand(2));
+            for (tag, symbol) in values::pairlist_items(call.cdr()) {
+                if tag != values::nil()
+                    || symbol.kind() != SexpType::Symbol
+                    || symbol == values::symbols().dots
+                    || symbol == values::missing_arg()
+                    || self.slot_of.contains_key(&symbol)
+                {
+                    continue;
+                }
+                self.slot_of.insert(symbol, self.slots.len());
+                self.slots.push(symbol);
+                self.hints.push(Ty::Boxed);
+                self.declared.push(Ty::Boxed);
+            }
+        }
+    }
+
+    /// The slot of a variable the body reads or assigns itself.
+    fn variable_slot(&self, symbol: Sexp) -> Option<usize> {
+        self.slot_of
+            .get(&symbol)
+            .copied()
+            .filter(|&slot| slot < self.passed_from)
     }
 
     fn slot(&self, symbol: Sexp) -> usize {
@@ -2318,36 +2360,41 @@ impl<'a> Builder<'a> {
             ),
             Op::CallGeneric | Op::CallRebinding => {
                 let call = self.constant(operand(2));
-                // `x <- f(x, ...)` may move a ry dictionary or set into the call to update it in
-                // place, which only tier 0 does, so the call is inlined only when the variable
-                // cannot hold one.
+                // `x <- f(x, ...)` may move a ry dictionary or set, or a plain list, into the
+                // call to update it in place, which only tier 0 does. The call is inlined only
+                // when the variable cannot hold one; a direct call checks the value instead.
                 let inlinable = inst.op == Op::CallGeneric
                     || self
                         .slot_of
                         .get(&self.constant(operand(3)))
                         .is_some_and(|&slot| state.slots[slot].ty.is_plain());
+                let rebinding = (!inlinable).then(|| self.constant(operand(3)));
                 let inlined = match state.registers[operand(1)] {
-                    _ if !inlinable => None,
-                    Ty::Closure(formals, body) => {
+                    Ty::Closure(formals, body) if inlinable => {
                         self.inline(state, call, formals, body, None, operand(0))
                     }
-                    Ty::Fun(function) if function.kind() == SexpType::Closure => self
-                        .inline(
-                            state,
-                            call,
-                            function.car(),
-                            bytecode::closure_body(function),
-                            Some(function.tag()),
-                            operand(0),
-                        )
-                        .or_else(|| {
+                    Ty::Fun(function) if function.kind() == SexpType::Closure => {
+                        let inlined = match inlinable {
+                            true => self.inline(
+                                state,
+                                call,
+                                function.car(),
+                                bytecode::closure_body(function),
+                                Some(function.tag()),
+                                operand(0),
+                            ),
+                            false => None,
+                        };
+                        inlined.or_else(|| {
                             self.direct_call(
                                 state,
                                 call,
                                 function,
+                                rebinding,
                                 (operand(0), self.call_result_at(inst.pc, function)),
                             )
-                        }),
+                        })
+                    }
                     _ => None,
                 };
                 match inlined {
@@ -3152,6 +3199,7 @@ impl<'a> Builder<'a> {
         state: &mut State<'a>,
         call: Sexp,
         function: Sexp,
+        rebinding: Option<Sexp>,
         dst: (usize, Ty),
     ) -> Option<Action<'a>> {
         let mut lowering = Lowering {
@@ -3177,6 +3225,14 @@ impl<'a> Builder<'a> {
                 args.push(Argument::Slot(slot));
                 continue;
             }
+            if !matches!(
+                expression.kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            ) && !constant_type(expression).is_unboxed()
+            {
+                args.push(Argument::Constant(expression));
+                continue;
+            }
             let register = self.lower_expression(&mut lowering, expression, 0)?;
             args.push(Argument::Unboxed {
                 register,
@@ -3194,6 +3250,7 @@ impl<'a> Builder<'a> {
                 let ty = match *argument {
                     Argument::Unboxed { ty, .. } => ty,
                     Argument::Slot(slot) => after.slots[slot].ty,
+                    Argument::Constant(value) => constant_type(value),
                 };
                 (ty.is_unboxed() || ty.is_vector()).then_some(ty)
             })
@@ -3240,6 +3297,7 @@ impl<'a> Builder<'a> {
             call,
             args: args.leak(),
             entry,
+            rebinding,
             dst,
         })
     }
@@ -3395,7 +3453,7 @@ impl<'a> Builder<'a> {
                     return None;
                 }
                 if lowering.closed.is_none()
-                    && let Some(&slot) = self.slot_of.get(&head)
+                    && let Some(slot) = self.variable_slot(head)
                 {
                     // A closure this activation made, called from inlined code: inline it too.
                     self.peek_slot(lowering, head, false)?;
@@ -3962,7 +4020,7 @@ impl<'a> Builder<'a> {
 
     /// Whether the activation's own frame may bind `symbol`.
     fn bound_locally(&self, symbol: Sexp) -> bool {
-        self.locals.contains(&symbol) || self.slot_of.contains_key(&symbol)
+        self.locals.contains(&symbol) || self.variable_slot(symbol).is_some()
     }
 
     /// The function `symbol` resolves to from the enclosure, found without forcing promises,

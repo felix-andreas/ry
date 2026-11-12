@@ -20,7 +20,7 @@ use {
         arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
-        eval, heap,
+        eval, heap, moves,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
         values,
@@ -878,6 +878,27 @@ pub unsafe extern "C" fn jit_call(
                         outcome::OK
                     }
                 }
+            }
+        })
+    }
+}
+
+/// 1 when tier 0 may move the value of `target` into a rebinding call `target <- f(target, ...)`,
+/// which it does only from a frame with an environment, so compiled code makes the call through
+/// tier 0's instruction instead.
+pub unsafe extern "C" fn jit_rebinding_moves(activation: *mut Activation, target: *mut Header) -> i32 {
+    unsafe {
+        guarded(activation, 1, |activation| {
+            let Some(target) = Sexp::from_raw(target) else {
+                return 1;
+            };
+            let env = machine(activation).env();
+            if env == values::nil() {
+                return 0;
+            }
+            match heap().frame_cell(env, target) {
+                Some(cell) => i32::from(moves::movable_kind(cell.cdr())),
+                None => 0,
             }
         })
     }

@@ -362,6 +362,12 @@ unsafe fn end_all() -> R<()> {
 /// How many entries `value` has, when it is a value a move handles: a dictionary, a set, or a
 /// plain list, which an update may grow in place. An Array or a list with attributes is never
 /// updated in place, so moving one gains nothing.
+/// Whether `value` is of a kind a rebinding call may move into its callee: a ry dictionary or
+/// set, or a plain list.
+pub unsafe fn movable_kind(value: Sexp) -> bool {
+    unsafe { extent(value).is_some() }
+}
+
 unsafe fn extent(value: Sexp) -> Option<usize> {
     match value.kind() {
         SexpType::Record
