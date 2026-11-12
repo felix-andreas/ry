@@ -130,6 +130,7 @@ use {
     },
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
+    thin_vec::ThinVec,
 };
 
 /// One closure call: GNU R's function context.
@@ -176,8 +177,9 @@ pub struct Frame {
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
     pub args: u32,
-    /// `on.exit` expressions, in the order they run.
-    pub on_exit: Vec<Sexp>,
+    /// `on.exit` expressions, in the order they run. A thin vector is one word and allocates
+    /// nothing while empty, which keeps the frame small enough to copy without a `memcpy` call.
+    pub on_exit: ThinVec<Sexp>,
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
@@ -187,7 +189,7 @@ pub struct Frame {
     /// frame's start.
     pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
-    pub closures: usize,
+    pub closures: u32,
     /// The handle stack's height when the frame is pushed: [`eval::leave`] releases what the
     /// call rooted, its default promises included, down to it.
     pub handle_mark: u32,
@@ -201,6 +203,120 @@ impl Frame {
     /// environment itself if the frame reifies.
     pub unsafe fn owns(&self, env: Sexp) -> bool {
         self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
+    }
+}
+
+// A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
+// few vector moves; above that it becomes a `memcpy` call on every call.
+const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
+
+/// The frames of the closure calls in progress, innermost last. A frame is written into its slot
+/// and popped by lowering the depth, so a call never moves one out: a slot above the depth stays
+/// allocated and owns nothing, because popping takes its `on.exit` list and condition stacks,
+/// and the next call writes over it. Reads see the live frames as a slice.
+pub struct FrameStack {
+    slots: Vec<Frame>,
+    /// How many slots hold live frames; never more than `slots.len()`.
+    depth: usize,
+}
+
+impl FrameStack {
+    pub const fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    pub fn push(&mut self, frame: Frame) {
+        self.push_with(|| frame);
+    }
+
+    /// Pushes the frame `build` makes. The slot is found first, so the frame is built in it
+    /// rather than on the stack and copied.
+    #[inline(always)]
+    pub fn push_with(&mut self, build: impl FnOnce() -> Frame) {
+        match self.slots.get_mut(self.depth) {
+            // A slot above the depth owns nothing, so it is overwritten without being dropped.
+            Some(slot) => unsafe { std::ptr::write(slot, build()) },
+            None => self.slots.push(build()),
+        }
+        self.depth += 1;
+    }
+
+    /// Pops the top frame and hands back its condition stacks; read its other fields first. The
+    /// frame's slot is left in place for the next call to write over.
+    #[inline(always)]
+    pub fn pop(&mut self) -> Option<(HandlerStack, RestartStack)> {
+        let depth = self.depth.checked_sub(1)?;
+        let frame = self.slots.get_mut(depth)?;
+        self.depth = depth;
+        if !frame.on_exit.is_empty() {
+            frame.on_exit = ThinVec::new();
+        }
+        Some((frame.handlers.take(), frame.restarts.take()))
+    }
+
+    /// Keeps the first `depth` frames, releasing what the others own.
+    pub fn truncate(&mut self, depth: usize) {
+        if depth >= self.depth {
+            return;
+        }
+        if let Some(popped) = self.slots.get_mut(depth..self.depth) {
+            for frame in popped {
+                release(frame);
+            }
+        }
+        self.depth = depth;
+    }
+
+    pub fn clear(&mut self) {
+        self.truncate(0);
+    }
+}
+
+/// Drops what a popped frame owns, leaving only plain values in its slot.
+#[inline(always)]
+fn release(frame: &mut Frame) {
+    if !frame.on_exit.is_empty() {
+        frame.on_exit = ThinVec::new();
+    }
+    frame.handlers = None;
+    frame.restarts = None;
+}
+
+impl std::ops::Deref for FrameStack {
+    type Target = [Frame];
+
+    #[inline(always)]
+    fn deref(&self) -> &[Frame] {
+        // `depth` never exceeds `slots.len()`.
+        unsafe { self.slots.get_unchecked(..self.depth) }
+    }
+}
+
+impl std::ops::DerefMut for FrameStack {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Frame] {
+        unsafe { self.slots.get_unchecked_mut(..self.depth) }
+    }
+}
+
+impl<'a> IntoIterator for &'a FrameStack {
+    type Item = &'a Frame;
+    type IntoIter = std::slice::Iter<'a, Frame>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut FrameStack {
+    type Item = &'a mut Frame;
+    type IntoIter = std::slice::IterMut<'a, Frame>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -333,7 +449,7 @@ pub enum TaskCallbackRoutine {
 }
 
 pub struct Interp {
-    pub frames: Vec<Frame>,
+    pub frames: FrameStack,
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
@@ -568,7 +684,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let symbols = values::Symbols::install(heap);
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
-        frames: Vec::new(),
+        frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
         frame_args: Vec::new(),
         method_vars: Vec::new(),

@@ -74,8 +74,7 @@ fn scenarios_hold() {
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
 /// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 3] = [
-    ("log_rank", "a record parameter"),
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 2] = [
     (
         "sales",
         "a `DataFrame` parameter, which the table engine runs",
