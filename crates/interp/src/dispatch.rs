@@ -483,7 +483,9 @@ struct MethodStrings {
 /// `top`, then `top` itself when `search_top` is set, the generic's methods table, and the
 /// search path.
 struct MethodScope {
-    call_env: Sexp,
+    /// The frames below `top`, innermost first, found by the one walk that finds `top`, so the
+    /// lookup of each candidate name reads them without walking the chain again.
+    frames: SmallVec<[Sexp; 4]>,
     top: Sexp,
     search_top: bool,
     table: Option<Sexp>,
@@ -491,6 +493,7 @@ struct MethodScope {
 
 unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
     let mut env = call_env;
+    let mut frames = SmallVec::new();
     // A frame chain that ends without a top environment continues at the base environment, as
     // in GNU R: the global frame is not searched.
     let (top, search_top) = loop {
@@ -500,6 +503,7 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
         if is_top_env(env) {
             break (env, true);
         }
+        frames.push(env);
         env = env.enclosure();
     };
     let table = match crate::heap().frame_cell(top_env(def_env), symbols().dot_s3_methods_table) {
@@ -507,7 +511,7 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
         None => nil(),
     };
     Ok(MethodScope {
-        call_env,
+        frames,
         top,
         search_top,
         table: (table.kind() == SexpType::Environment).then_some(table),
@@ -524,12 +528,10 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
 /// The method `name` in `scope`, through the name's row for the part from the top environment
 /// on.
 unsafe fn lookup_in_scope(name: Sexp, scope: &MethodScope) -> R<Option<Sexp>> {
-    let mut env = scope.call_env;
-    while env != scope.top && env != values::empty_env() {
+    for &env in &scope.frames {
         if let Some(function) = function_in_frame(name, env)? {
             return Ok(Some(function));
         }
-        env = env.enclosure();
     }
     let heap = crate::heap();
     let stamp = heap.lookup_stamp(name);
