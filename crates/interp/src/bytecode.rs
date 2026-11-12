@@ -1033,7 +1033,9 @@ pub enum Op {
     /// `dst call internal first count`: a call of a base closure whose body is only
     /// `.Internal(f(...))`, inlined as GNU R's compiler inlines its "safe base internals": the
     /// internal's arguments, evaluated in the caller, are in registers `first..first + count`,
-    /// and the builtin `internal` runs on them with `call` as the call its errors name.
+    /// and the builtin runs on them with `call` as the call its errors name. `internal` is the
+    /// builtin's index in the interpreter's builtin table, not a constant, so that a handler or
+    /// compiled code reaches its definition without loading the primitive object first.
     Internal,
 }
 
@@ -3741,13 +3743,12 @@ impl Compiler {
             }
         }
         let call_constant = self.constant(call);
-        let internal = self.constant(inline.internal);
         self.emit(
             Op::Internal,
             &[
                 dst,
                 call_constant,
-                internal,
+                inline.internal.primitive_index(),
                 first,
                 inline.arguments.len() as u32,
             ],
@@ -4905,6 +4906,9 @@ enum Operand {
     Loop,
     /// An operator of [`ARITHS`].
     Operator,
+    /// An index into the interpreter's builtin table that names an internal with a primitive
+    /// object. Code images are stamped with the runtime build, whose table order they share.
+    Internal,
     /// A number the handler reads without indexing anything with it.
     Immediate,
     /// A fused program ([`fusion`]), checked by [`valid_fusion_program`].
@@ -4965,7 +4969,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
-        Op::Internal => &[Register, Call, Constant, Base, Count],
+        Op::Internal => &[Register, Call, Internal, Base, Count],
         Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
     })
 }
@@ -5139,6 +5143,12 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                 Target => is_start(value),
                 Loop => value < loops,
                 Operator => value < ARITHS.len(),
+                Internal => interp()
+                    .builtin(value as u32)
+                    .is_some_and(|definition| {
+                        definition.kind == crate::builtins::Kind::Internal
+                            && definition.object.is_some()
+                    }),
                 Immediate => true,
                 Fusion => valid_fusion_program(
                     constant(value)?,
@@ -9269,8 +9279,7 @@ unsafe fn op_super_assign(state: &mut Activation<'_, '_>, instruction: Instructi
 unsafe fn op_internal(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let first = instruction.operand(3);
     let call = state.constant(instruction, 1);
-    let function = state.constant(instruction, 2);
-    let definition = eval::builtin_def(function)?;
+    let (definition, function) = internal_at(instruction.operand(2) as u32)?;
     let mut args = eval::Args::new();
     for index in 0..instruction.operand(4) {
         args.push(Arg {
@@ -9286,6 +9295,17 @@ unsafe fn op_internal(state: &mut Activation<'_, '_>, instruction: Instruction) 
     instruction.output(0, value);
     (*state.interp).visible = true;
     Ok(Flow::Next)
+}
+
+/// The definition and primitive object of the internal an [`Op::Internal`] names by its index in
+/// the builtin table. The compiler and [`verify`] only let through an index that names an
+/// internal with an object, so the error is unreachable for verified code.
+#[inline(always)]
+pub fn internal_at(index: u32) -> R<(&'static BuiltinDef, Sexp)> {
+    interp()
+        .builtin(index)
+        .and_then(|definition| Some((definition, definition.object?)))
+        .ok_or_else(|| error("invalid primitive"))
 }
 
 unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
