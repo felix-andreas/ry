@@ -1313,6 +1313,9 @@ suggests `List.from_r()`.
 | `== != < > <= >=` | numbers and `Str` for ordering, any item for equality | `List<Bool>` |
 | `& \| !` | `Bool` | `List<Bool>` |
 
+Strings order as R orders `character` values in the session's collation locale, both as items and
+as single `Str` values: in the `C` locale that is code point order, so `"B" < "a"` is `TRUE`.
+
 `/` on `I64` items is a `type-mismatch`, as it is on a single `I64`, and it decides undecided
 literal items as `F64`, so `[1, 2] / 2` is a `List<F64>`. When the code runs, two lists of different
 lengths are an error rather than recycled.
