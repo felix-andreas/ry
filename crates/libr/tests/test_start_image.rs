@@ -114,6 +114,19 @@ cat("global", ls(globalenv(), all.names = TRUE), "\nbase", ls(baseenv(), all.nam
 cat("Autoloads", ls(as.environment("Autoloads"), all.names = TRUE), "\n")
 "#;
 
+/// The values a session computes for its own process, which a start from the image must not
+/// take from the process that wrote the image.
+const PROCESS: &str = r#"
+cat("pid", Sys.getpid(), "\n")
+cat("time", format(as.numeric(Sys.time()), digits = 15), "\n")
+cat("args", commandArgs(trailingOnly = TRUE), "\n")
+cat("tempdir under TMPDIR", startsWith(tempdir(), normalizePath(Sys.getenv("TMPDIR"))), "\n")
+cat("tempdir exists", dir.exists(tempdir()), "\n")
+cat("interactive", interactive(), "\n")
+cat("seed", exists(".Random.seed", globalenv()), "\n")
+cat("options", sort(names(.Options)), "\n")
+"#;
+
 #[test]
 fn a_native_start_sets_what_base_r_profile_and_hooks_set() {
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-start");
@@ -266,6 +279,75 @@ fn a_native_start_sets_what_base_r_profile_and_hooks_set() {
             );
         }
     }
+
+    // Nothing process-specific comes from the image: the writer's tempdir, pid, arguments,
+    // start time and random seed never reach a session that starts from it.
+    let process = scratch.join("process.R");
+    fs::write(&process, PROCESS).expect("write the script");
+    let mut native_pids = Vec::new();
+    for run in ["first", "second"] {
+        let temporary = scratch.join(format!("tmp-{run}"));
+        fs::create_dir_all(&temporary).expect("create a temporary directory");
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("read the clock")
+            .as_secs_f64()
+            - 1.0;
+        let facts = |mode: Option<&str>| {
+            let mut command = Command::new(home.join("bin/Rscript"));
+            command
+                .arg(&process)
+                .arg(run)
+                .env_remove("R_HOME")
+                .env_remove("RY_IMAGE")
+                .env("TMPDIR", &temporary);
+            match mode {
+                Some(mode) => command.env("RY_NATIVE_START", mode),
+                None => command.env("RY_IMAGE", "0"),
+            };
+            let output = command.output().expect("run Rscript");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            let mut pid = None;
+            let mut time = None;
+            let mut rest = String::new();
+            for line in text.lines() {
+                if let Some(value) = line.strip_prefix("pid ") {
+                    pid = value.trim().parse::<u32>().ok();
+                } else if let Some(value) = line.strip_prefix("time ") {
+                    time = value.trim().parse::<f64>().ok();
+                } else {
+                    rest.push_str(line);
+                    rest.push('\n');
+                }
+            }
+            (
+                pid.expect("the script prints its pid"),
+                time.expect("the script prints the time"),
+                rest,
+            )
+        };
+        let (pid, time, native) = facts(Some("require"));
+        let (_, _, slow) = facts(None);
+        assert_eq!(native, slow, "process values in the {run} start");
+        assert!(
+            native.contains(&format!("args {run} \n"))
+                && native.contains("tempdir under TMPDIR TRUE")
+                && native.contains("interactive FALSE")
+                && native.contains("seed FALSE"),
+            "process values in the {run} start: {native}"
+        );
+        assert!(
+            time >= started,
+            "the start time {time} predates the run ({started})"
+        );
+        native_pids.push(pid);
+    }
+    assert_ne!(native_pids[0], native_pids[1], "two starts share a pid");
 
     // A user's repositories file is read by utils' own code.
     fs::write(

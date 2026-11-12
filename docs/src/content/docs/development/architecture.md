@@ -605,6 +605,10 @@ session as it stands after `.First.sys()`, which [the CLI reference](/reference/
 describes for users. `crates/heap/src/image.rs` writes and loads the heap part,
 `crates/interp/src/image.rs` saves the interpreter state outside the heap and decides when an
 image applies, and `crates/interp/src/session.rs` either loads the image or starts the slow way.
+The image holds the namespaces, their attachment and the writer's options; every start
+computes the process values (`tempdir()`, the pid, `commandArgs()`, `interactive()`, the start
+time, with no `.Random.seed`) and reads the environment, and the image's identity covers the
+build, the format and a stamp of the base R start-up code it replaces natively.
 
 - **Build output, read-only.** `ry-rcmd build-base` writes the image as its last step, into the
   base tree at `library/base/R/ry-start.image`, by running `ry-rcmd write-start-image` with an
@@ -652,7 +656,8 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   path clears the options first and detaches the profile's second `Autoloads`, and unlocks utils'
   `osVersion` around its hook. `a_native_start_sets_what_base_r_profile_and_hooks_set` in
   `crates/libr/tests/test_start_image.rs` compares both paths with a slow start under a dozen
-  environments.
+  environments, and checks that two starts get their own pid, temporary directory, arguments and
+  start time.
 - **Relocated paths.** The image records the R home it was written in (the base tree's staging
   directory) and its canonical form. The loader moves every string under either prefix to the
   directory the image file really lives in, which is where a slow start's resolved namespace paths

@@ -7878,6 +7878,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `interactive()`, paths under `R_HOME`) were already computed at start and are not in the image.
   The stamp joins the image identity through the profile hash and the replaced closures' hash,
   plus the hash of `R_HOME/etc/repositories`.
+- **Which closures, and rebinding them.** `NATIVE_START_CLOSURES` names the code whose effects
+  the native start reproduces: utils' `.onLoad`, `.get_repositories`, `.read_repositories` and
+  `.expand_BioC_repository_URLs`, grDevices' `.onLoad` and `.select_device`, stats' `.onLoad`,
+  and base's `.libPaths` and `.expand_R_libs_env_var`. None is replaced or rebound: the bindings
+  stay the image's closures, and only their start-time call is skipped. A user's
+  `assignInNamespace` runs after start-up, so it cannot change what start-up did; code that could
+  run before it (a site or user profile, `R_DEFAULT_PACKAGES`) forces the slow start, which calls
+  the closures as bound.
 - **Allowlist, not denylist.** `START_VARIABLES` lists every variable the profile and the
   replaced closures read, each marked `Native`, `RCode` (set and not empty forces the R code),
   `Loading` (read later by package loading, unaffected) or `Unread` (read on a path the native
