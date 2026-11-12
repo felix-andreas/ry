@@ -6202,9 +6202,15 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     (`altrep__sequence_arithmetic`), and keeping the operand compact saves the expansion's memory,
     so no oracle case pins the inspect state after arithmetic. `abs` and the accuracy check of
     `%%` still expand through `values::ints`/`arith::real_at`.
-  - *Summaries ask the class.* `sum`, `min` and `max` call an ALTREP argument's own `Sum`, `Min`
-    or `Max` method first (the `altrep_summary` host hook), as GNU R does, so `sum(1:n)` reads no
-    elements and a class's errors surface as GNU R's.
+  - *Summaries ask the class, then read without expanding.* `sum`, `min` and `max` of a lone
+    integer or double ALTREP argument call its class's `Sum`, `Min` or `Max` method first (the
+    `altrep_summary` host hook), as GNU R does, so `sum(1:n)` reads no elements. When the class
+    has no answer, a compact sequence is still not expanded, because GNU R reads it by region:
+    `min` and `max` read its two ends, and `sum`, `prod`, `all`, `any` and `mean` read it into a
+    fresh rooted vector (`SequenceRead` in `crates/interp/src/arith.rs`). `range` expands it,
+    since GNU R's `range.default` combines its arguments with `c()`. Each case was checked against
+    GNU R's `inspect` one process at a time, because Rscript compiles a top-level loop and folds a
+    `3:12` in its body into one shared constant, which pollutes a looped comparison.
   - *Assignment unwraps.* Storing a wrapper into a variable or slot keeps its data when the
     wrapper is the only owner (`values::unwrap_assigned`), so a hot loop sees a plain vector.
   - *Wrappers share data as GNU R's do.* A shallow duplicate of a wrapper shares the wrapped
