@@ -36,7 +36,7 @@ use {
     crate::{
         backend::{Callee, Code, Trampoline},
         ir::{Item, Type},
-        lower::{Callees, RCall, RResult, Speculation},
+        lower::{Callees, Lowered, RCall, RResult, Speculation},
         values::{Boxed, List, Str},
     },
     heap::{
@@ -383,28 +383,39 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
     })
 }
 
-/// Compiles `function` for `params` until the code is current. Compiled code confirms the tag
-/// shapes it constructs, and a `match` over any tag compiled before them, in this code or in a
-/// function it calls, would not test for them.
+/// Compiles `function` for `params`. Compiled code confirms the tag shapes it constructs, and a
+/// `match` over any tag lowered before them, in this code or in a function it calls, would not
+/// test for them. So the shapes a lowering constructs are confirmed before any machine code is
+/// generated, and the function is lowered again until its matches saw every confirmed shape.
+/// Only lowering repeats, which is a small part of a compilation.
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
     for _ in 0..MAX_SHAPE_ROUNDS {
-        let compiled = compile_once(function, params)?;
-        if compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
-            return Ok(compiled);
+        let (lowered, linker) = lower_settled(function, params)?;
+        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
+            params.iter().map(|&ty| storage(ty)).collect();
+        let result = storage(lowered.function.result);
+        if !interp::annotations::admits_storage(function, &arguments, result) {
+            return Err(Refusal::new("the types fail the closure's annotations"));
+        }
+        for &shape in &lowered.constructed {
+            shapes::confirm(shape);
+        }
+        if earliest(lowered.epoch, linker.epoch).is_none_or(|epoch| epoch == shapes::epoch()) {
+            return generate(params, lowered, linker);
         }
     }
     Err(Refusal::new("the shapes a `match` tests for keep growing"))
 }
 
-/// How many times [`compile`] tries before the shapes settle.
+/// How many times [`compile`] lowers before the shapes settle.
 const MAX_SHAPE_ROUNDS: usize = 4;
 
-unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
+/// Lowers `function` with a result type that its recursive calls agree with.
+unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Linker), Refusal> {
     let declared = declared_result(function);
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
     let mut refusal = Refusal::new("the result type depends on the recursion");
-    let mut found = None;
-    'guesses: for &first in &guesses {
+    for &first in &guesses {
         let mut guess = first;
         for _ in 0..=MAX_REVISIONS {
             let mut linker = Linker::default();
@@ -412,24 +423,22 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
                 Ok(lowered) => lowered,
                 Err(why) => {
                     refusal = why;
-                    continue 'guesses;
+                    break;
                 }
             };
             let result = lowered.function.result;
             if result == guess || !calls_itself(&lowered.function) {
-                found = Some((lowered, linker));
-                break 'guesses;
+                return Ok((lowered, linker));
             }
             guess = result;
         }
     }
-    let (lowered, linker) = found.ok_or(refusal)?;
+    Err(refusal)
+}
+
+/// Machine code for a lowered function whose shapes are confirmed.
+unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<Compiled, Refusal> {
     let mut ir = lowered.function;
-    let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
-        params.iter().map(|&ty| storage(ty)).collect();
-    if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
-        return Err(Refusal::new("the types fail the closure's annotations"));
-    }
     unbox::unbox(&mut ir);
     fusion::fuse(&mut ir);
     ownership::insert(&mut ir);
@@ -464,9 +473,6 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
     std::mem::forget(lowered.r_calls);
     let mut speculations = lowered.speculations;
     speculations.extend(linker.speculations);
-    for &shape in &lowered.constructed {
-        shapes::confirm(shape);
-    }
     let epoch = earliest(lowered.epoch, linker.epoch);
     Ok(Compiled {
         code,

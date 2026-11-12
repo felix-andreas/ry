@@ -57,7 +57,7 @@ pub struct Lowered {
     pub r_calls: Vec<RCall>,
     /// The [`shapes::epoch`] whose confirmed shapes a `match` over any tag tests for.
     pub epoch: Option<u64>,
-    /// The tag shapes the code constructs, which the caller confirms once the code compiles.
+    /// The tag shapes the code constructs, which the caller confirms before it generates code.
     pub constructed: SmallVec<[u32; 4]>,
 }
 
