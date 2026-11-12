@@ -4771,7 +4771,7 @@ check` releases its trees once, and memoized records are compact" below).
   `recode`. `text` decodes a whole table in parallel when the column has at least a sixteenth as
   many rows as levels and seeks per row otherwise, so printing ten rows of a table with 63
   million levels decodes ten blocks.
-- **Build.** `Interner::finish` still sorts one 16-byte key per level, then encodes runs of
+- **Build.** `Interner::finish` sorts one 16-byte key per level, then encodes runs of
   blocks in parallel and joins the pieces. Runs of tied 12-byte prefixes sort in parallel.
 - **Impact.** In `tests/test_memory.rs`, `join_x` holds 32 bytes per row where it held 39; the
   budgets there pin it. One source of truth for label to code, and less memory for every
@@ -6076,20 +6076,40 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   resident between
   queries, and the 1e8 joins have about 3 GB to spare. It stays in `backlog.md`.
 - **Impact.** Group-by q1 at 1e7 rows in that build is 0.028 s (0.014 s in a release build), and
-  the 1e8 group-by is 15.5 s from R against data.table's 59.3 s, at the same 8.5 GB peak as
-  before. On the R-vector cases of `runtime_peak_memory_stays_near_gnu_r` the advice adds 3 to
-  5 MB of peak (data.table's `dt[v > 0.5]` loop: 370 MB with it, 365 MB with transparent huge
-  pages disabled for the process, GNU R 341 MB).
+  the 1e8 group-by takes 15.5 to 17.9 s from R over two runs against data.table's 59.3 to
+  65.3 s, at the same 8.5 GB peak as before.
+- **The gain varies with how fast the kernel finds free 2 MiB blocks.** On one build the 1e8
+  joins took 8.1 s from R in one run and 11.1 s in another (9.2 s and 11.3 s from Rust), and a
+  Rust-driver run of the slower kind counted about 1,100 direct compaction stalls
+  (`compact_stall` in `/proc/vmstat`) with almost no fallback to small pages. A pool of freed
+  mappings would not depend on it (`backlog.md`, "A query's large buffers are faulted in afresh
+  each time").
+- **A block that is reserved in full and touched as it fills opts out** with
+  `heap::large::keep_small_pages`, which takes the block's layout and advises its whole
+  mapping, because advice on a part would split the mapping and a split mapping cannot be
+  resized in place. The bytecode register file (16 MiB, `State::default` in
+  `crates/interp/src/bytecode.rs`) does: on huge pages its first touch committed 2 MiB and
+  raised a small script's peak from 58.2 MB to 60.2 MB. With the opt-out, a small script, a
+  script that loads data.table and the three cases of `runtime_peak_memory_stays_near_gnu_r`
+  peak within 0.5 MB of the same binary with the allocator's advice dropped (an interposed
+  `madvise`).
+- **Rejected: advising only blocks of 32 MiB or more**, which also spares the register file. It
+  cost the 1e7-row joins 15 to 40% (q3 0.14 s against 0.10 s), because their buffers of 9 to
+  20 MB went back to a fault per 4 KiB, and a fault costs about 1.4 µs on the measuring
+  machine (11 ms for 32 MiB).
 
 ## Group-bys and joins run on ry's kernels, not Polars' streaming engine
 
 - **Question.** Polars' streaming engine runs a plan in morsels and can spill, so it was the
   candidate for fitting db-benchmark's 1e8 joins and group-by in 15 GB without ry's own kernels
   (`crates/table/src/group.rs`, `join.rs`) and without the allocator work.
-- **Measurement.** `db_benchmark --polars-streaming` (`crates/table/benches/db_benchmark.rs`) runs
-  each question as a plain Polars plan on the streaming engine over the tables ry's reader
-  built, with factor columns replaced by their codes, in the same process and allocator as the
-  kernels. Faster of two runs, seconds, 4 threads, 15 GB:
+- **Measurement.** `db_benchmark --polars-streaming`, built with `--features polars-streaming`
+  (`crates/table/benches/streaming.rs`), runs each question as a plain Polars plan on the
+  streaming engine over the tables ry's reader built, with factor columns replaced by their
+  codes, in the same process and allocator as the kernels. Faster of two runs, seconds,
+  4 threads, 15 GB. The two columns were measured back to back; the design page's table is a
+  separate run, and runs of the kernels differ by up to 35% ("The global allocator's large
+  blocks ask for huge pages"):
 
   | 1e8 rows | ry kernels | Polars 0.55 streaming |
   | --- | ---: | ---: |
@@ -6116,8 +6136,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   0.67 s in total.
 - **Decision.** The kernels stay. Streaming runs out of memory on exactly the two questions the
   15 GB budget is about (the group-by with nearly one group per row and the join of two 1e8-row
-  tables), and it is slower on eight of the thirteen questions it finishes at 1e8, by up to four
-  times (group-by q2, q8 and q9).
+  tables), and it is slower on eight of the thirteen questions it finishes at 1e8, by 3.6 to 5.1
+  times on group-by q2, q8 and q9.
 - **What streaming does better**, kept as work for the kernels (`backlog.md`, "Open: DataFrame"):
   group-by q4 (three double means over 100 groups), where ry adds doubles in row order as
   data.table does and Polars sums per morsel, and group-by q1 and join q1 and q3 by 10 to 35%.

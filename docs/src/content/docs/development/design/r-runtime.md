@@ -1607,27 +1607,27 @@ The last column is the same engine driven from Rust, without R.
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.129 | 0.028 | 0.019 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.151 | 0.025 | 0.020 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.222 | 0.077 | 0.074 |
-| groupby q4: three means by `id4` | 0.160 | 0.088 | 0.088 |
-| groupby q5: three sums by `id6` | 0.266 | 0.084 | 0.090 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.798 | 0.092 | 0.121 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.484 | 0.048 | 0.037 |
-| groupby q8: the two largest `v3` by `id6` | 1.486 | 0.160 | 0.163 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.624 | 0.076 | 0.054 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.502 | 0.666 | 0.637 |
-| `:=` on a whole column, 100 times | 3.727 | 0.789 | 0.675 |
-| `:=` on 1% of rows, 100 times | 0.467 | 2.148 | 0.703 |
-| `:=` adding a column, 100 times | 4.498 | 0.848 | 0.911 |
-| join q1: small, on `id1` | 0.444 | 0.070 | 0.082 |
-| join q2: medium, on `id2` | 0.553 | 0.074 | 0.096 |
-| join q3: medium, left, on `id2` | 0.642 | 0.101 | 0.126 |
-| join q4: medium, on factor `id5` | 0.558 | 0.083 | 0.103 |
-| join q5: big, on `id3` | 3.537 | 0.373 | 0.426 |
-| keyed rolling join | 0.119 | 0.084 | 0.072 |
-| total | 20.37 | 5.91 | 4.50 |
-| peak memory (GB) | 7.7 | 8.4 | 4.8 |
+| groupby q1: `sum(v1)` by `id1` | 0.273 | 0.023 | 0.020 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.810 | 0.023 | 0.021 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.864 | 0.069 | 0.077 |
+| groupby q4: three means by `id4` | 0.305 | 0.095 | 0.106 |
+| groupby q5: three sums by `id6` | 0.297 | 0.080 | 0.110 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 1.026 | 0.084 | 0.132 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.711 | 0.033 | 0.054 |
+| groupby q8: the two largest `v3` by `id6` | 1.540 | 0.130 | 0.172 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.687 | 0.057 | 0.061 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.887 | 0.651 | 0.777 |
+| `:=` on a whole column, 100 times | 4.563 | 0.798 | 0.658 |
+| `:=` on 1% of rows, 100 times | 0.536 | 2.129 | 0.881 |
+| `:=` adding a column, 100 times | 4.653 | 0.863 | 1.047 |
+| join q1: small, on `id1` | 0.437 | 0.078 | 0.080 |
+| join q2: medium, on `id2` | 0.564 | 0.089 | 0.093 |
+| join q3: medium, left, on `id2` | 0.670 | 0.110 | 0.112 |
+| join q4: medium, on factor `id5` | 0.645 | 0.084 | 0.083 |
+| join q5: big, on `id3` | 3.017 | 0.456 | 0.362 |
+| keyed rolling join | 0.110 | 0.088 | 0.055 |
+| total | 23.60 | 5.94 | 4.90 |
+| peak memory (GB) | 7.7 | 8.4 | 4.7 |
 <!-- /bench-table:1e7 -->
 
 At db-benchmark's 5 GB size (1e8 rows) the table holds the ten group-by questions alone,
@@ -1639,17 +1639,17 @@ columns in the engine (`DataFrame.select` of one `Expr.sum` per column), because
 <!-- bench-table:1e8-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 1.377 | 0.155 | 0.171 |
-| groupby q2: `sum(v1)` by `id1, id2` | 1.784 | 0.161 | 0.175 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.672 | 1.163 | 1.248 |
-| groupby q4: three means by `id4` | 1.934 | 0.803 | 0.823 |
-| groupby q5: three sums by `id6` | 2.031 | 1.197 | 1.315 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 8.981 | 0.749 | 0.856 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 6.051 | 0.879 | 0.624 |
-| groupby q8: the two largest `v3` by `id6` | 14.803 | 2.422 | 2.081 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.864 | 0.484 | 0.398 |
-| groupby q10: `sum(v3)`, count by all six ids | 17.754 | 7.456 | 6.315 |
-| total | 59.25 | 15.47 | 14.01 |
+| groupby q1: `sum(v1)` by `id1` | 1.203 | 0.174 | 0.188 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.945 | 0.196 | 0.194 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 2.064 | 1.069 | 1.358 |
+| groupby q4: three means by `id4` | 1.911 | 0.894 | 0.929 |
+| groupby q5: three sums by `id6` | 1.786 | 1.577 | 1.484 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.083 | 0.950 | 0.979 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 7.437 | 0.958 | 0.964 |
+| groupby q8: the two largest `v3` by `id6` | 16.767 | 3.026 | 2.927 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.987 | 0.636 | 0.458 |
+| groupby q10: `sum(v3)`, count by all six ids | 20.156 | 8.459 | 8.149 |
+| total | 65.34 | 17.94 | 17.63 |
 | peak memory (GB) | 12.5 | 8.5 | 8.5 |
 <!-- /bench-table:1e8-groupby -->
 
@@ -1662,12 +1662,12 @@ answer: the kernel stops it at 14.2 GB resident.
 <!-- bench-table:1e8-joins -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| join q1: small, on `id1` | out of memory | 0.676 | 0.707 |
-| join q2: medium, on `id2` | out of memory | 0.691 | 0.841 |
-| join q3: medium, left, on `id2` | out of memory | 1.021 | 1.293 |
-| join q4: medium, on factor `id5` | out of memory | 0.721 | 0.764 |
-| join q5: big, on `id3` | out of memory | 4.954 | 5.597 |
-| total | out of memory | 8.06 | 9.20 |
+| join q1: small, on `id1` | out of memory | 0.707 | 0.815 |
+| join q2: medium, on `id2` | out of memory | 1.156 | 0.980 |
+| join q3: medium, left, on `id2` | out of memory | 1.264 | 1.351 |
+| join q4: medium, on factor `id5` | out of memory | 1.043 | 1.188 |
+| join q5: big, on `id3` | out of memory | 6.922 | 6.976 |
+| total | out of memory | 11.09 | 11.31 |
 | peak memory (GB) | over 14.2 | 11.6 | 11.9 |
 <!-- /bench-table:1e8-joins -->
 
@@ -1690,8 +1690,10 @@ Three choices keep the joins inside the machine:
   because a query maps its buffers afresh and would otherwise take a page fault per 4 KiB.
 
 `tests/test_memory.rs` in `crates/table` pins the bytes per row that the reader, each join
-question and the grouped sums allocate at their peak and hold afterwards, so a buffer that scales
-with the rows and outlives its use fails a test.
+question and the grouped sums allocate at their peak and hold afterwards, on four threads and
+with a margin of 1 to 4 bytes per row. A buffer that scales with the rows, outlives its use and
+is larger than that margin fails the test. The test counts allocated bytes, not resident memory,
+and does not check the answers, which `tests/test_table.rs` does.
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the

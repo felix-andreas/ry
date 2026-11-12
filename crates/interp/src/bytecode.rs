@@ -124,10 +124,9 @@ impl Default for State {
         let mut registers: Vec<Sexp> = Vec::with_capacity(REGISTER_FILE_CAPACITY);
         // The file is touched only as deep as calls nest, so on huge pages a session that uses
         // a few kilobytes of it would hold 2 MiB.
-        keep_small_pages(
-            registers.as_mut_ptr().cast(),
-            registers.capacity() * size_of::<Sexp>(),
-        );
+        if let Ok(layout) = std::alloc::Layout::array::<Sexp>(registers.capacity()) {
+            keep_small_pages(registers.as_mut_ptr().cast(), layout);
+        }
         State {
             registers,
             bodies: FxHashMap::default(),

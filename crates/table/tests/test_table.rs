@@ -1832,7 +1832,8 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
                 by.push(named(key, column(key)));
             }
         }
-        if by.is_empty() {
+        // One query in four without `by`, which aggregates the whole table as one group.
+        if by.is_empty() && rng.chance(3, 4) {
             by.push(named("g1", column("g1")));
         }
         if rng.chance(1, 2) {
@@ -1983,6 +1984,82 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
                 &format!("{what}, column {name}"),
             );
         }
+    });
+}
+
+/// Joins of two tables with about 65,536 rows each. Up to that many rows of `i`, and when `i` is
+/// no longer than `x`, the kernel indexes `i` and scans `x`. Past either bound it buckets `x`,
+/// and several tasks build that index, so the sizes sit on both sides of the bound. The keys are
+/// an integer over a narrow or a wide range and a factor whose level tables differ between the
+/// tables, with enough distinct values that a join does not multiply its rows.
+#[test]
+fn fuzz_large_joins_agree_with_the_polars_plans() {
+    for_each_seed(6, |seed| {
+        let mut rng = SplitMix64(seed);
+        let size = |rng: &mut SplitMix64| match rng.below(4) {
+            0 => 65_535,
+            1 => 65_536,
+            2 => 65_537,
+            _ => 66_000 + rng.below(70_000),
+        };
+        let (x_rows, i_rows) = (size(&mut rng), size(&mut rng));
+        let range = match rng.below(3) {
+            0 => x_rows / 2,
+            1 => x_rows * 6,
+            _ => 1_500_000_000,
+        };
+        let offset = rng.below(1000) as i32 - 500;
+        let level_count = [40_000, 70_000][rng.below(2)];
+        let side = |rng: &mut SplitMix64, rows: usize, levels: Vec<String>, value: &str| {
+            let k: Vec<i32> = (0..rows)
+                .map(|_| match rng.chance(1, 20) {
+                    true => NA_INTEGER,
+                    false => rng.below(range) as i32 + offset,
+                })
+                .collect();
+            let f: Vec<i32> = (0..rows)
+                .map(|_| match rng.chance(1, 20) {
+                    true => NA_INTEGER,
+                    false => 1 + rng.below(levels.len()) as i32,
+                })
+                .collect();
+            let values: Vec<i32> = (0..rows).map(|row| row as i32).collect();
+            frame(vec![
+                ("k", ints(&k)),
+                ("f", RVector::Factor { codes: f, levels }),
+                (value, ints(&values)),
+            ])
+        };
+        let x_levels: Vec<String> = (0..level_count).map(|level| format!("l{level}")).collect();
+        // The other table lists the labels in another order, lacks some and adds some.
+        let i_levels: Vec<String> = (level_count / 8..level_count + level_count / 8)
+            .rev()
+            .map(|level| format!("l{level}"))
+            .collect();
+        let x = side(&mut rng, x_rows, x_levels, "v");
+        let i = side(&mut rng, i_rows, i_levels, "w");
+        let on = match rng.below(3) {
+            0 => vec![On::equal("k", "k")],
+            1 => vec![On::equal("f", "f")],
+            _ => vec![On::equal("f", "f"), On::equal("k", "k")],
+        };
+        let joined = Query {
+            rows: Rows::Join(Join {
+                other: i,
+                on,
+                drop_unmatched: rng.chance(1, 2),
+                roll: Roll::None,
+                mult: [Mult::All, Mult::First, Mult::Last][rng.below(3)],
+                each_i: false,
+            }),
+            ..Query::default()
+        };
+        let what = format!("seed {seed}: {x_rows} rows of x, {i_rows} rows of i");
+        assert_same_output(
+            execute(&mut x.fork(), joined.clone()),
+            execute_with_plans_only(&mut x.fork(), joined),
+            &what,
+        );
     });
 }
 
@@ -3699,6 +3776,7 @@ fn fuzz_level_tables_against_a_reference() {
             to_r(text.as_materialized_series()).unwrap_or_else(|error| panic!("{error}")),
             RVector::Character(codes.iter().map(label_of).collect())
         );
+        assert!(text.n_chunks() >= 1, "the text of {rows} rows has no chunk");
 
         let recoded = |column: &table::polars::prelude::Column| {
             let series =
@@ -3774,6 +3852,129 @@ fn a_large_string_column_becomes_a_factor_with_sorted_levels() {
         to_r(text.as_materialized_series()).unwrap_or_else(|error| panic!("{error}")),
         RVector::Character(values)
     );
+}
+
+/// A factor column without rows is still text in one chunk. Polars rejects a column that has no
+/// chunk when it rechunks or concatenates it, which writing a table, `%chin%` and a planned join
+/// on the column all do.
+#[test]
+fn a_factor_without_rows_reads_as_text() {
+    let mut table = frame(vec![
+        ("f", factor(&[1, 2, 1], &["a", "b"])),
+        ("v", ints(&[1, 2, 3])),
+    ]);
+    assert_eq!(written(&table), "f,v\na,1\nb,2\na,3\n");
+    let no_row = Rows::Filter(binary(BinaryOp::Greater, column("v"), Expr::Integer(9)));
+    let empty = run_table(&mut table, query(no_row, Select::All));
+    assert_eq!(empty.height(), 0);
+    assert_eq!(written(&empty), "f,v\n");
+
+    let column = column_of("f", factor(&[], &["a", "b"]));
+    let text = factor::text(&column).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(text.n_chunks(), 1);
+    assert_eq!(vector(&text), RVector::Character(vec![]));
+    let listed = ops::chin(&column, &[Some("a")]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(vector(&listed), RVector::Logical(vec![]));
+
+    let other = frame(vec![
+        ("f", factor(&[2, 1], &["b", "c"])),
+        ("w", ints(&[7, 8])),
+    ]);
+    let joined = Query {
+        rows: Rows::Join(Join {
+            other,
+            on: vec![On::equal("f", "f")],
+            drop_unmatched: false,
+            roll: Roll::None,
+            mult: Mult::All,
+            each_i: false,
+        }),
+        ..Query::default()
+    };
+    assert_same_output(
+        execute(&mut empty.fork(), joined.clone()),
+        execute_with_plans_only(&mut empty.fork(), joined),
+        "a join onto a table without rows",
+    );
+}
+
+/// A factor stores its codes in one, two or four bytes by its level count, so level counts on
+/// both sides of each width are built, read back, turned into text and recoded onto a level
+/// table in another order.
+#[test]
+fn a_factor_reads_back_at_every_code_width() {
+    for count in [1_i32, 2, 255, 256, 257, 65_535, 65_536, 65_537] {
+        let levels: Vec<String> = (0..count).map(|level| format!("level {level:05}")).collect();
+        let codes: Vec<i32> = vec![1, count, NA_INTEGER, 1 + count / 2, count];
+        let label_of =
+            |code: &i32| (*code != NA_INTEGER).then(|| levels[*code as usize - 1].clone());
+        let built = RVector::Factor {
+            codes: codes.clone(),
+            levels: levels.clone(),
+        };
+        let column = column_of("f", built.clone());
+        assert_eq!(vector(&column), built, "{count} levels");
+        let text = factor::text(&column).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            vector(&text),
+            RVector::Character(codes.iter().map(label_of).collect()),
+            "{count} levels as text"
+        );
+
+        let reversed: Vec<String> = levels.iter().rev().cloned().collect();
+        let reversed_levels = std::sync::Arc::new(factor::Levels::from_labels(
+            reversed.iter().map(String::as_str),
+        ));
+        let recoded = factor::recode(&column, &reversed_levels)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            to_r(&recoded).unwrap_or_else(|error| panic!("{error}")),
+            RVector::Factor {
+                codes: codes
+                    .iter()
+                    .map(|code| match *code {
+                        NA_INTEGER => NA_INTEGER,
+                        code => count + 1 - code,
+                    })
+                    .collect(),
+                levels: reversed,
+            },
+            "{count} levels recoded"
+        );
+    }
+}
+
+/// A level table stores each label as the length of the prefix it shares with the label before
+/// it, the length of the rest, and the rest. Both lengths take one byte or several, so labels
+/// are built whose shared prefix and whose rest are empty, short, and long enough for every
+/// width of the length.
+#[test]
+fn a_level_table_holds_labels_of_every_length() {
+    let lengths = [0, 1, 13, 14, 15, 16, 17, 141, 142, 143, 144, 145, 300, 16_500, 70_000];
+    let mut labels: Vec<String> = Vec::new();
+    for shared in lengths {
+        for rest in lengths {
+            // The digits keep labels apart whose lengths add up to the same total.
+            labels.push(format!(
+                "{}{}|{shared}|{rest}",
+                "s".repeat(shared),
+                "r".repeat(rest)
+            ));
+        }
+    }
+    for sorted in [false, true] {
+        if sorted {
+            labels.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        }
+        let levels = factor::Levels::from_labels(labels.iter().map(String::as_str));
+        assert_eq!(levels.len(), labels.len());
+        assert_eq!(levels.to_strings(), labels);
+        for (code, label) in labels.iter().enumerate() {
+            assert_eq!(levels.get(code as u32).as_ref(), Some(label));
+            assert_eq!(levels.position(label), Some(code as u32));
+        }
+        assert_eq!(levels.position(&"s".repeat(70_001)), None);
+    }
 }
 
 fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {

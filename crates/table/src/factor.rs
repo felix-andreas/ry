@@ -591,7 +591,9 @@ pub fn text(column: &Column) -> Result<Column> {
             CodeValues::U16(values) => u32::from(values[row]),
             CodeValues::U32(values) => values[row],
         };
-        let pieces: Vec<Utf8ViewArray> = (0..rows.div_ceil(TASK))
+        // A column without rows still gets one empty chunk: Polars rejects a column that has
+        // none when it rechunks or concatenates it.
+        let pieces: Vec<Utf8ViewArray> = (0..rows.div_ceil(TASK).max(1))
             .into_par_iter()
             .map(|task| {
                 let start = task * TASK;
@@ -982,7 +984,7 @@ impl Interner {
         keys.par_chunk_by_mut(|before, key| prefix_of(before) == prefix_of(key))
             .for_each(|run| {
                 if run.len() > 1 {
-                    run.par_sort_unstable_by(|a, b| label_of(a).cmp(label_of(b)));
+                    run.par_sort_unstable_by(|left, right| label_of(left).cmp(label_of(right)));
                 }
             });
         let span = partitions

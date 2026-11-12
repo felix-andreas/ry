@@ -214,34 +214,30 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
     }
 }
 
-/// Keeps the pages inside `length` bytes at `address` small. [`Mapped`] asks for huge pages on
-/// its large blocks, which suits a buffer that is filled at once. A block that is reserved in
+/// Keeps the pages of the block of `layout` at `address` small. [`Mapped`] asks for huge pages
+/// on its large blocks, which suits a buffer that is filled at once. A block that is reserved in
 /// full and touched only as far as it is used, such as a stack, would commit 2 MiB at its first
 /// touch and at every 2 MiB after, so its owner calls this before the first touch.
 ///
-/// The call is advice and changes no contents, so it is safe for any range and its result is not
-/// checked.
-pub fn keep_small_pages(address: *mut u8, length: usize) {
+/// The advice covers the block's whole mapping. Advice on a part of it would split the mapping
+/// in two, and a split mapping cannot be resized in place. A block that is reallocated
+/// afterwards gets the allocator's advice again.
+///
+/// The call is advice and changes no contents. A block that did not come from [`Mapped`] has no
+/// mapping of its own, and the kernel then refuses the call or applies it to pages that were
+/// small anyway, so the result is not checked.
+pub fn keep_small_pages(address: *mut u8, layout: Layout) {
     #[cfg(target_os = "linux")]
-    {
-        let page = page_size();
-        let start = (address as usize).next_multiple_of(page);
-        let end = (address as usize).saturating_add(length) / page * page;
-        if end > start {
-            // SAFETY: `madvise` with `MADV_NOHUGEPAGE` reads and writes no memory; on a range
-            // that is not mapped it fails without effect.
-            unsafe {
-                libc::madvise(
-                    start as *mut libc::c_void,
-                    end - start,
-                    libc::MADV_NOHUGEPAGE,
-                );
-            }
+    if let (true, Some(length)) = (is_mapped(layout), page_rounded(layout.size())) {
+        // SAFETY: `madvise` with `MADV_NOHUGEPAGE` reads and writes no memory, and it fails
+        // without effect on a range that is not mapped.
+        unsafe {
+            libc::madvise(address.cast(), length, libc::MADV_NOHUGEPAGE);
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _unused = (address, length);
+        let _unused = (address, layout);
     }
 }
 
@@ -306,6 +302,7 @@ unsafe fn remap(address: NonNull<u8>, length: usize, new_length: usize) -> Optio
 }
 
 /// The size of a transparent huge page on the platforms ry targets.
+#[cfg(target_os = "linux")]
 const HUGE_PAGE_BYTES: usize = 2 << 20;
 
 /// Asks the kernel to back one of the global allocator's blocks with huge pages. A table query

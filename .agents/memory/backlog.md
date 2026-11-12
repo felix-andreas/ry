@@ -2673,7 +2673,7 @@ The end-to-end guard rests on the corpus suites.
   five db-benchmark joins peak at 11.6 GB from R and 11.9 GB from Rust, and data.table is killed
   at 14.2 GB before its first answer (`development/design/r-runtime.md`, section 7;
   `tests/test_memory.rs` in `crates/table` pins the bytes per row). What remains, largest first:
-  - **q5 takes 5 s where q1 to q4 take 0.7 to 1.0 s.** It buckets `join_big`'s 1e8 rows over a
+  - **q5 takes 5 to 7 s where q1 to q4 take 0.7 to 1.3 s.** It buckets `join_big`'s 1e8 rows over a
     key range of 2e8 and gathers 13 columns for 9e7 output rows through random row indices. Not
     profiled yet. Candidates: partition both sides by the key's high bits so each partition's
     buckets fit the cache, and gather the built side's columns in bucket order.
@@ -2683,9 +2683,16 @@ The end-to-end guard rests on the corpus suites.
     factor columns of a file finish in parallel. A partition whose labels all fit a view inline
     could turn its views into keys in place, and a column with few levels could keep u8 or u16
     codes from the first slice on instead of narrowing at the end.
+  - **A lookup with a few rows and a wide key range gets bucket bounds sized by the larger
+    table.** `indexable` in `crates/table/src/join.rs` allows a code range of 8 times the rows
+    of both tables up to 2^27 codes and twice the rows beyond, at 4 bytes per code, whichever
+    side is bucketed. Ten lookup rows whose keys span 2e8 values, joined to 1e8 rows, would
+    take 0.8 GB of bounds (derived from the rule, not measured). Bounding the range by the
+    bucketed side's own rows would send such a join to the Polars plan, so it needs a hashed
+    kernel path first. `test_memory.rs` has no step of this shape.
 - **`:=` on a row subset loses to data.table.** db-benchmark's loop
-  `for (step in 1:100) x[id4 == step, v1 := v1 + 1L]` at 1e7 rows takes 2.1 s from R and 0.70 s
-  from the Rust driver against data.table's 0.47 s. `assign_filtered` in
+  `for (step in 1:100) x[id4 == step, v1 := v1 + 1L]` at 1e7 rows takes 2.1 s from R and 0.7 to
+  0.9 s from the Rust driver against data.table's 0.5 s. `assign_filtered` in
   `crates/table/src/query.rs` runs it as a Polars plan (filter, then a left join on a row index,
   then `when/then`), which builds a new column and a join's scratch on every pass, while
   data.table answers `id4 == step` from an automatic index and writes the matching rows in
@@ -2710,13 +2717,13 @@ The end-to-end guard rests on the corpus suites.
 - **A text column is joined from its slices at the end**, which copies its strings once
   (`Builder::Text`); building the final `Utf8View` buffers directly would avoid it.
 - **Where Polars' streaming engine is faster than the kernels** (`decisions.md`, "Group-bys and
-  joins run on ry's kernels, not Polars' streaming engine"; `db_benchmark --polars-streaming`
-  reproduces it). At 1e8 rows group-by q4 takes 0.82 s against 0.22 s: three double means over
+  joins run on ry's kernels, not Polars' streaming engine"; `db_benchmark --polars-streaming`,
+  built with `--features polars-streaming`, reproduces it). At 1e8 rows group-by q4 takes 0.82 s against 0.22 s: three double means over
   100 groups go through `dense_by_code` in `crates/table/src/group.rs`, where every thread scans
   all row codes for its own code range so that doubles are added in row order as data.table
   adds them. A blocked or pairwise sum whose result does not depend on the thread count would
   let the per-thread dense states serve doubles too; decide first whether bit-equality with
-  data.table's sums is worth the scan. Group-by q10 at 1e7 rows (0.65 s against 0.54 s) pays the
+  data.table's sums is worth the scan. Group-by q10 at 1e7 rows (0.64 to 0.78 s against 0.54 s) pays the
   same scan. Join q3 (the left join) takes 1.29 s against 1.07 s.
 - **A query's large buffers are faulted in afresh each time.** The global allocator maps every
   block of 1 MB or more and unmaps it when freed (`heap::large::Mapped`), on huge pages, so a
@@ -2724,7 +2731,9 @@ The end-to-end guard rests on the corpus suites.
   touched pages (group-by q10 at 1e7 rows without LTO: 0.43 s against 0.73 s) but keeps memory
   resident between queries, and the 1e8 joins have about 3 GB to spare (`decisions.md`, "The
   global allocator's large blocks ask for huge pages"). Keeping scratch small (the grouped
-  median) and a per-query arena are the alternatives.
+  median) and a per-query arena are the alternatives. Fresh huge pages also make a query's
+  time depend on the kernel's compaction: the 1e8 joins took 8.1 s in one run and 11.1 s in
+  another on the same build.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`, so
   `lubridate::floor_date` runs on R vectors in the `trials` module), no `cast`, `n_unique`,
   `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,

@@ -7,8 +7,9 @@
 //! row.
 //!
 //! The budgets count allocated bytes, which includes reserved capacity a run never touches. They
-//! are pinned a little above the measured peaks, because the pool's threads interleave their
-//! allocations differently from run to run. A step that goes over its budget either gained a
+//! are pinned 1 to 4 bytes per row above the measured peaks, because the pool's threads
+//! interleave their allocations differently from run to run, so a smaller buffer can hide in
+//! that margin. The test fixes the thread count, because the reader's peak grows with it. A step that goes over its budget either gained a
 //! per-row buffer or kept one alive longer: fix that, and raise a budget only for memory the
 //! answer itself needs.
 
@@ -95,63 +96,63 @@ struct Budget {
 const BUDGETS: &[Budget] = &[
     Budget {
         step: "read join_x",
-        peak: 92.0,
-        held: 34.0,
+        peak: 88.5,
+        held: 33.0,
     },
     Budget {
         step: "read join_big",
-        peak: 94.0,
-        held: 35.0,
-    },
-    Budget {
-        step: "join small on id1",
-        peak: 38.0,
+        peak: 90.5,
         held: 34.0,
     },
     Budget {
+        step: "join small on id1",
+        peak: 37.0,
+        held: 33.5,
+    },
+    Budget {
         step: "join medium on id2",
-        peak: 44.0,
+        peak: 42.5,
         held: 39.0,
     },
     Budget {
         step: "left join medium on id2",
-        peak: 49.0,
-        held: 44.0,
+        peak: 47.0,
+        held: 43.0,
     },
     Budget {
         step: "join medium on id5",
-        peak: 46.0,
-        held: 41.0,
+        peak: 44.5,
+        held: 40.5,
     },
     Budget {
         step: "join big on id3",
-        peak: 52.0,
-        held: 47.0,
+        peak: 49.5,
+        held: 46.0,
     },
     Budget {
         step: "read groupby",
-        peak: 88.0,
-        held: 38.0,
+        peak: 82.0,
+        held: 36.5,
     },
     Budget {
         step: "sum by id1",
-        peak: 10.0,
+        peak: 9.0,
         held: 0.5,
     },
     Budget {
         step: "sum by id3",
-        peak: 32.0,
+        peak: 28.0,
         held: 0.5,
     },
     Budget {
         step: "sum by id6",
-        peak: 26.0,
+        peak: 21.0,
         held: 0.5,
     },
     Budget {
         step: "sum and count by all six ids",
-        peak: 68.0,
-        held: 30.0,
+        peak: 55.0,
+        held: 29.0,
     },
     Budget {
         step: "sum of every row",
@@ -160,8 +161,19 @@ const BUDGETS: &[Budget] = &[
     },
 ];
 
+/// The threads every step runs on. A thread holds a slice of the file and its own scratch while
+/// it works, which at this test's row count is a visible share of the peak, so the budgets hold
+/// for one thread count.
+const THREADS: &str = "4";
+
 #[test]
 fn peak_memory_per_row_stays_within_budget() -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: this is the binary's only test, and it sets the variables before anything it calls
+    // reads the environment or starts a thread pool.
+    unsafe {
+        std::env::set_var("POLARS_MAX_THREADS", THREADS);
+        std::env::set_var("RAYON_NUM_THREADS", THREADS);
+    }
     let dir = std::env::temp_dir().join(format!("ry-table-memory-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let outcome = measure_steps(&dir);
