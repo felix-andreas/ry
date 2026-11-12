@@ -3,14 +3,12 @@
 # workload, and has the runtime compile and write the code of every recorded closure.
 #
 # Arguments: the package, the library it is installed in, its source directory, the training
-# workload ("none", "tests", "examples", or the path of a script), and whether to print what kept
-# each function from machine code ("true" or "false").
+# workload ("none", "tests", "examples", or the path of a script).
 arguments <- commandArgs(TRUE)
 package <- arguments[[1L]]
 library <- arguments[[2L]]
 source_directory <- arguments[[3L]]
 training <- arguments[[4L]]
-explain <- arguments[[5L]] == "true"
 
 .Internal(ryCodeImageRecord(file.path(library, package)))
 namespace <- loadNamespace(package, lib.loc = library)
@@ -61,12 +59,12 @@ if (training == "tests") {
     run_quietly(training, chdir = TRUE)
 }
 
-counts <- .Internal(ryCodeImageWrite(trained, explain, TRUE))
+counts <- .Internal(ryCodeImageWrite(trained, TRUE))
 summary <- sprintf(
-    "closures=%d written=%d native=%d",
-    counts[["closures"]], counts[["written"]], counts[["native"]]
+    "closures=%d written=%d",
+    counts[["closures"]], counts[["written"]]
 )
-left_out <- counts[-(1:3)]
+left_out <- counts[-(1:2)]
 if (length(left_out)) {
     summary <- sprintf("%s (left out: %s)", summary, paste0(names(left_out), " (", left_out, ")", collapse = ", "))
 }

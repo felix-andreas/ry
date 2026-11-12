@@ -54,8 +54,8 @@ Otherwise the tree walker runs it.
   language object's gp bits are serialized, so a marker would change `serialize()` and `digest()`
   of a quoted loop.
 - The optimizing tier never sees this code. Its `TIER_STATE` is `profile::TIER_OFF`, which entry
-  scheduling skips and `back_edge` turns into a reset of the back-edge counter, so no baseline or
-  tier-1 code is compiled and no feedback is recorded. The tier's frames and resume points assume a
+  scheduling skips and `back_edge` turns into a reset of the back-edge counter, so no tier-1 code
+  is compiled and no feedback is recorded. The tier's frames and resume points assume a
   call frame, and in the global environment every closure call, active binding and `<<-` from a
   callee writes the loop's variables, so a compiled global could not stay in a register across any
   call.

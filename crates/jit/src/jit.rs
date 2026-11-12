@@ -15,19 +15,10 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
-mod ahead;
 mod analysis;
-mod assembler;
-mod baseline;
 mod codegen;
 mod native;
 pub use native::has_native;
-
-/// Whether the body of `code` has baseline machine code.
-pub fn has_baseline(code: Sexp) -> bool {
-    // SAFETY: a code object's constants always have the baseline slot.
-    unsafe { baseline::has_baseline(code) }
-}
 mod runtime;
 
 use {
@@ -60,9 +51,6 @@ pub enum Mode {
     Off,
     On,
     Force,
-    /// Every body gets baseline code at its first entry and nothing compiles further, which is
-    /// what the differential tests use to run everything through the baseline tier alone.
-    Baseline,
 }
 
 impl Mode {
@@ -71,7 +59,6 @@ impl Mode {
         match std::env::var("RY_JIT").as_deref() {
             Ok("off" | "0" | "false") => Mode::Off,
             Ok("force") => Mode::Force,
-            Ok("baseline") => Mode::Baseline,
             _ => Mode::On,
         }
     }
@@ -132,26 +119,17 @@ pub fn install() {
 }
 
 pub fn install_mode(mode: Mode) {
-    // Install-time machine code runs whether or not the run-time JIT is on.
-    ahead::install();
-    let (entries, back_edges, baseline) = match mode {
+    let (entries, back_edges) = match mode {
         Mode::Off => {
             bytecode::set_tier(None);
             return;
         }
-        // Baseline code calls tier 0's step for every instruction, which saves instructions but
-        // spreads a hot path over more code than tier 0's shared handlers: with bodies getting it
-        // at 200 entries, `validation` ran 1% fewer instructions with 8% more instruction-cache
-        // misses and 5% more mispredicted branches, and more wall time. The default leaves it out
-        // until it inlines the common instructions' fast paths.
-        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, bytecode::NEVER),
+        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
-        Mode::Force => (2, 1, 1),
-        Mode::Baseline => (i32::MAX, i32::MAX, 1),
+        Mode::Force => (2, 1),
     };
-    let (entries, back_edges, baseline) =
-        thresholds_override().unwrap_or((entries, back_edges, baseline));
+    let (entries, back_edges) = thresholds_override().unwrap_or((entries, back_edges));
     MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
@@ -159,15 +137,13 @@ pub fn install_mode(mode: Mode) {
         worth_recording,
         back_edge,
         back_edge_threshold: back_edges,
-        baseline: baseline::compile,
-        baseline_threshold: baseline,
         call: native::call,
     }));
 }
 
-/// `RY_JIT_THRESHOLDS=ENTRIES,BACK_EDGES,BASELINE` replaces the mode's thresholds, for sweeping
-/// them; `0` stands for never.
-fn thresholds_override() -> Option<(i32, i32, i32)> {
+/// `RY_JIT_THRESHOLDS=ENTRIES,BACK_EDGES` replaces the mode's thresholds, for sweeping them; `0`
+/// stands for never.
+fn thresholds_override() -> Option<(i32, i32)> {
     let text = std::env::var("RY_JIT_THRESHOLDS").ok()?;
     let mut parts = text
         .split(',')
@@ -176,7 +152,7 @@ fn thresholds_override() -> Option<(i32, i32, i32)> {
             Ok(value) => Some(value),
             Err(_) => None,
         });
-    Some((parts.next()??, parts.next()??, parts.next()??))
+    Some((parts.next()??, parts.next()??))
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
