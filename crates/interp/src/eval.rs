@@ -1694,6 +1694,10 @@ unsafe fn collect_evaluated_args(
             } else {
                 eval(expression, env)?
             };
+            // A variable's value comes back unrooted, held only by its binding, and a later
+            // argument can rebind it: in `c(x, {x <- 5; 3})` the old `x` is then held by `args`
+            // alone, which the collector cannot see.
+            crate::heap().root(value);
             args.push(Arg {
                 tag: arguments.tag(),
                 value,

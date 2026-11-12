@@ -1027,6 +1027,14 @@ overhead, not allocation.
   counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
   which only an `f` that reads `parent.frame()` can observe.
 
+- Two public programs run slower than GNU R (`tools/bench/public/results.json`); neither regressed
+  since the public record before it (same-machine A/B). Profiles from `ry run --profile-summary`:
+  - fannkuchredux (0.88x): 51% JIT code, 21% builtins, 15% closure call setup. Each flip calls
+    the `rev.default` closure, and `[` (3.6M calls) and `:` (3.3M) run as builtins that allocate
+    a vector, where the JIT could reverse a prefix in place and index a range without making it.
+  - binarytrees_naive (0.92x): 66% tier-0 instructions, 16% call setup, `c` 8% and `[[` 5%. The
+    recursive `tree` and `check` closures, defined inside `execute`, never leave tier 0.
+
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench applications` (`tools/bench/applications/`, results in
 `benchmarks.mdx`) reproduces the gap on production-shaped workloads. `ry run --profile-summary
@@ -1110,7 +1118,11 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ### Tier-0 call entry and dispatch
 
-- On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. That is after the raw pool reads and the out-of-line tier schedule (`decisions.md`, "Tier-0 call entry"). `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine` for the handler. The register clear is about 16 of `grow_registers`' 57 and must stay. What remains needs superinstructions (a fused guard plus `GetFun`, a fused `GetVar` plus `Element`), together with a per-site epoch stamp that re-proves `effects::resolve` and a test that rebinds a base function between two calls at one site, or a thinner call path (the AOT track's call plans).
+- On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine`. The register clear is about 16 of `grow_registers`' 57 and must stay.
+- Superinstructions and guard dedup were measured and do not pay (`decisions.md`, "Tier-0 superinstructions do not pay"). Trimming `Activation` saves about 2 instructions per call, because the fields the baseline JIT reads sit at fixed offsets.
+- Leaf code (a closure body that makes no call) could skip saving and restoring the environment flags and pushing and releasing the handle.
+- The closure frame push and pop (`eval::enter` and `eval::leave`) are about 5.9% of a testthat_full iteration, about 460 instructions per call against GNU R's `begincontext` plus `endcontext`, partly two copies of `Frame` into `state.frames`. Building the frame in place and trimming the handle release and `on.exit` checks in `leave` has a ceiling of about 3%.
+- What remains beyond that is a thinner call path (the AOT track's call plans).
 
 ### Queued with measured ceilings
 
