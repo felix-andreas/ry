@@ -1,5 +1,5 @@
 [stdout]
-| -- R_DEFAULT_PACKAGES=NULL 
+| -- R_DEFAULT_PACKAGES=NULL R_PAPERSIZE=a4 
 | search: .GlobalEnv Autoloads package:base 
 | lib paths: ROOT/lib ROOT/user/4.6 
 | R_LIBS_USER: ROOT/user/4.6 
@@ -8,7 +8,7 @@
 | editor: 
 | utils loaded: FALSE 
 | locale: C 
-| -- R_DEFAULT_INTERNET_TIMEOUT=17 
+| -- R_DEFAULT_INTERNET_TIMEOUT=17 R_PAPERSIZE=a4 
 | search: .GlobalEnv package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base 
 | lib paths: ROOT/lib ROOT/user/4.6 
 | R_LIBS_USER: ROOT/user/4.6 
@@ -17,12 +17,30 @@
 | editor: ed-for-test 
 | utils loaded: TRUE 
 | locale: C 
-| -- R_REPOSITORIES=NULL 
+| -- R_REPOSITORIES=NULL R_PAPERSIZE=a4 
 | search: .GlobalEnv package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base 
 | lib paths: ROOT/lib ROOT/user/4.6 
 | R_LIBS_USER: ROOT/user/4.6 
 | timeout: 60 
 | papersize: a4 
+| editor: ed-for-test 
+| utils loaded: TRUE 
+| locale: C 
+| -- R_REPOSITORIES=NULL R_PAPERSIZE= 
+| search: .GlobalEnv package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base 
+| lib paths: ROOT/lib ROOT/user/4.6 
+| R_LIBS_USER: ROOT/user/4.6 
+| timeout: 60 
+| papersize: letter 
+| editor: ed-for-test 
+| utils loaded: TRUE 
+| locale: C 
+| -- R_PAPERSIZE= 
+| search: .GlobalEnv package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base 
+| lib paths: ROOT/lib ROOT/user/4.6 
+| R_LIBS_USER: ROOT/user/4.6 
+| timeout: 60 
+| papersize: letter 
 | editor: ed-for-test 
 | utils loaded: TRUE 
 | locale: C 

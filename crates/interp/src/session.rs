@@ -873,7 +873,9 @@ pub(crate) unsafe fn eval_text(text: &str, env: Sexp) -> R<Sexp> {
 }
 
 /// Reads `R_HOME/etc/Renviron` the way GNU R does: `NAME=value` lines, where `${VAR-default}`
-/// and `${VAR:-default}` expand, and a variable already set wins.
+/// and `${VAR:-default}` expand, and a line whose value expands to something not empty assigns
+/// it, replacing a value already in the environment. `R_PAPERSIZE_USER=${R_PAPERSIZE}` relies on
+/// both: it replaces an inherited `R_PAPERSIZE_USER` only when `R_PAPERSIZE` is set.
 fn read_renviron() {
     let home = crate::system::r_home();
     // SAFETY: the session starts before any other thread exists.
@@ -1000,10 +1002,10 @@ fn read_renviron_file(home: &str) {
                 continue;
             };
             let name = name.trim();
-            if std::env::var_os(name).is_some() {
+            let value = expand_environment(value.trim().trim_matches(|c| c == '\'' || c == '"'));
+            if value.is_empty() {
                 continue;
             }
-            let value = expand_environment(value.trim().trim_matches(|c| c == '\'' || c == '"'));
             // SAFETY: as above.
             unsafe { std::env::set_var(name, value) };
         }
@@ -1065,16 +1067,22 @@ fn expand_environment(value: &str) -> String {
             return result;
         };
         let inner = &after[..end];
-        let (name, default) = match inner
+        // `${NAME-default}` defaults only when NAME is unset, `${NAME:-default}` also when it is
+        // empty, as in the shell.
+        let (name, default, empty_is_unset) = match inner
             .find(":-")
             .map(|position| (position, 2))
             .or_else(|| inner.find('-').map(|position| (position, 1)))
         {
-            Some((position, width)) => (&inner[..position], Some(&inner[position + width..])),
-            None => (inner, None),
+            Some((position, width)) => (
+                &inner[..position],
+                Some(&inner[position + width..]),
+                width == 2,
+            ),
+            None => (inner, None, false),
         };
         match std::env::var(name) {
-            Ok(found) if !found.is_empty() => result.push_str(&found),
+            Ok(found) if !(empty_is_unset && found.is_empty()) => result.push_str(&found),
             _ => {
                 if let Some(default) = default {
                     result.push_str(&expand_environment(
