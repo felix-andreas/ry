@@ -789,7 +789,7 @@ unsafe fn call_attached(
     entry: u32,
     ordinal: u32,
 ) -> Option<R<Sexp>> {
-    let (arguments, read) = native::gather(function, args)?;
+    let (arguments, read, _) = native::gather(function, args)?;
     let (types, words) = native::argument_words(&arguments)?;
     let (index, result, entry_point) = SECTIONS.with_borrow(|sections| {
         let functions = sections

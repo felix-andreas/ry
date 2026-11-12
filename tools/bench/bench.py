@@ -68,6 +68,9 @@ SHORT = 0.1
 WIDE = 0.10
 PROGRAM_TIMEOUT = 300
 STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
+# A typed call that first runs in the interpreter to observe an R value's type logs this, then
+# compiles on its next call, so the line is not a refusal.
+AWAITING = "it waits on the interpreter to run `"
 
 
 def main():
@@ -344,6 +347,14 @@ def same_checksum(value, reference):
     return value == reference or math.isclose(number, expected, rel_tol=1e-10, abs_tol=1e-300)
 
 
+def interpreted(line):
+    """The function a `RY_TYPED_LOG` line says runs in the interpreter, or the line itself. The
+    harness's own functions log a reason that quotes the program's argument, so the harness
+    baseline matches them by name."""
+    name, marker, _ = line.removeprefix("typed: ").partition(" runs in the interpreter: ")
+    return name if marker else line
+
+
 def failure_reason(out, err):
     return ((err.strip() or out.strip() or "failed").splitlines() or ["failed"])[-1][:300]
 
@@ -387,13 +398,12 @@ class WorkloadRunner:
             status, out, err, _, _ = spawn(engine.command + [script.name], env, cwd=self.work / "typed")
             if status != 0:
                 sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
-            return [line for line in err.splitlines() if line.startswith("typed: ") and "compiled for" not in line]
+            return [line for line in err.splitlines()
+                    if line.startswith("typed: ") and "compiled for" not in line and AWAITING not in line]
         if "" not in self.refusals:
-            self.refusals[""] = log('measure("empty", function() Num.to_f64(0))\n')
-        lines = log((root / program["typed_source"]).read_text())
-        for line in self.refusals[""]:
-            if line in lines:
-                lines.remove(line)
+            self.refusals[""] = {interpreted(line) for line in log('measure("empty", function() Num.to_f64(0))\n')}
+        lines = [line for line in log((root / program["typed_source"]).read_text())
+                 if interpreted(line) not in self.refusals[""]]
         return "; ".join(dict.fromkeys(line.removeprefix("typed: ") for line in lines)) or None
 
     def close(self):
@@ -438,7 +448,7 @@ class PublicRunner:
         if status != 0:
             sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
         lines = [line.removeprefix("typed: ") for line in err.splitlines()
-                 if line.startswith("typed: ") and "compiled for" not in line]
+                 if line.startswith("typed: ") and "compiled for" not in line and AWAITING not in line]
         return "; ".join(dict.fromkeys(lines)) or None
 
     def close(self):
