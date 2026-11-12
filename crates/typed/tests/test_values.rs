@@ -536,7 +536,7 @@ fn fused_counts_follow_three_valued_logic() {
                 let result = (0..length)
                     .map(|at| {
                         let (x, y) = (value(left, at), value(right, at));
-                        (!x.is_nan() && !y.is_nan()).then(|| match op {
+                        (!x.is_nan() && !y.is_nan()).then_some(match op {
                             EQ => x == y,
                             NE => x != y,
                             LT => x < y,
@@ -547,7 +547,7 @@ fn fused_counts_follow_three_valued_logic() {
                     })
                     .collect();
                 let base = if wholes { MASK_I64 } else { MASK_DBL };
-                program.push(base + op | (left as u32) << 8 | (right as u32) << 16);
+                program.push((base + op) | (left as u32) << 8 | (right as u32) << 16);
                 lanes.push(result);
                 continue;
             }
@@ -665,9 +665,10 @@ fn fused_counts_follow_three_valued_logic() {
                 })
                 .collect();
             let last = &lanes[lanes.len() - 1];
-            let expected = if lengths.is_empty() || lengths.iter().any(|&found| found != length) {
-                None
-            } else if last.contains(&None) {
+            let expected = if lengths.is_empty()
+                || lengths.iter().any(|&found| found != length)
+                || last.contains(&None)
+            {
                 None
             } else {
                 Some(last.iter().filter(|&&lane| lane == Some(true)).count() as i64)

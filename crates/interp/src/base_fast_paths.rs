@@ -1367,7 +1367,10 @@ impl ClosureFrame {
 /// nor the environment a slot frame would need as its target is made.
 pub(crate) unsafe fn finish(frame: ClosureFrame, value: Sexp, visible: bool) -> R<Sexp> {
     let state = interp();
-    if state.prologue.is_some_and(|marked| marked.resolve() == frame.resolve()) {
+    if state
+        .prologue
+        .is_some_and(|marked| marked.resolve() == frame.resolve())
+    {
         state.prologue = None;
         state.visible = visible;
         return Ok(value);
@@ -3440,9 +3443,9 @@ unsafe fn make_restart_for(make_restart: Sexp, name: Sexp, spec: Sexp) -> R<Sexp
     let mut position = 0;
     while formal.kind() == SexpType::Pairlist {
         let symbol = formal.tag();
-        let value = if symbol == names.handler && spec.kind() != SexpType::String {
-            spec
-        } else if symbol == names.description && spec.kind() == SexpType::String {
+        let value = if (symbol == names.handler && spec.kind() != SexpType::String)
+            || (symbol == names.description && spec.kind() == SexpType::String)
+        {
             spec
         } else {
             eval::eval(formal.car(), env)?

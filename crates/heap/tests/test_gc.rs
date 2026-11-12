@@ -1027,9 +1027,9 @@ fn moved_elements_keep_their_counts_and_survive_in_the_new_vector() {
         heap.collect(Collection::Minor);
         heap.collect(Collection::Intermediate);
         heap.collect(Collection::Major);
-        for index in 0..400 {
+        for (index, &count) in counts.iter().enumerate() {
             assert_eq!(to.element(index).slice::<i32>(), &[index as i32]);
-            assert_eq!(to.element(index).refcount(), counts[index]);
+            assert_eq!(to.element(index).refcount(), count);
         }
     }
 }
@@ -1888,7 +1888,7 @@ fn run_interning(seed: u64, steps: usize, stress: bool) {
         Encoding::Latin1,
         Encoding::Bytes,
     ];
-    let mut text = |rng: &mut SplitMix64, longest: usize| -> Vec<u8> {
+    let text = |rng: &mut SplitMix64, longest: usize| -> Vec<u8> {
         // A small alphabet makes repeats common; lengths cross the scan's 4, 8 and 16-byte paths.
         let length = rng.below(longest + 1);
         (0..length)

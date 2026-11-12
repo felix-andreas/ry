@@ -1604,6 +1604,7 @@ pub fn diff<'text>(
     };
     // A full load reruns every statement already, so only a reload looks for what a change
     // reaches.
+    #[allow(clippy::while_immutable_condition)]
     while !full {
         if !changed.is_empty() {
             let roots: Vec<&str> = eager

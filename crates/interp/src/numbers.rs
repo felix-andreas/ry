@@ -354,7 +354,7 @@ pub fn convert(source: Source) -> Option<i64> {
         Source::Int(value) => Some(value),
         Source::F64(value) => {
             (value.is_finite() && value.fract() == 0.0 && (-LIMIT..LIMIT).contains(&value))
-                .then(|| value as i64)
+                .then_some(value as i64)
         }
     }
 }

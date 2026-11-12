@@ -470,7 +470,11 @@ unsafe fn checked<T>(
 
 /// The frame slot that holds `slot`'s variable, while the activation runs in a slot frame
 /// without an environment.
-unsafe fn frame_slot(activation: &Activation, machine: &Machine<'_>, slot: i64) -> Option<*mut Sexp> {
+unsafe fn frame_slot(
+    activation: &Activation,
+    machine: &Machine<'_>,
+    slot: i64,
+) -> Option<*mut Sexp> {
     unsafe {
         compiled(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
     }
@@ -490,7 +494,11 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
             let heap = heap();
-            let epoch = if validate != 0 { heap.binding_epoch() } else { 0 };
+            let epoch = if validate != 0 {
+                heap.binding_epoch()
+            } else {
+                0
+            };
             let mark = heap.handle_mark();
             let stepped = bytecode::step_one(machine, pc as usize);
             heap.release_handles(mark);
@@ -519,16 +527,18 @@ pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> 
 /// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
 pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
     unsafe {
-        checked(activation, quiet::FAILED, |activation| {
-            match bytecode::quiet_step(machine(activation), pc as usize) {
+        checked(
+            activation,
+            quiet::FAILED,
+            |activation| match bytecode::quiet_step(machine(activation), pc as usize) {
                 None => quiet::DECLINED,
                 Some(Ok(())) => quiet::STEPPED,
                 Some(Err(unwind)) => {
                     park(activation, unwind);
                     quiet::FAILED
                 }
-            }
-        })
+            },
+        )
     }
 }
 
