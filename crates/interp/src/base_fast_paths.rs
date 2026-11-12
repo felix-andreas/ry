@@ -1679,9 +1679,6 @@ unsafe fn calls_base_c(index: usize) -> R<bool> {
                 return Ok(false);
             }
         }
-        if frame.pending != nil() && heap.frame_cell(frame.pending, symbol).is_some() {
-            return Ok(false);
-        }
         frame.function.tag()
     };
     if scope == nil() {

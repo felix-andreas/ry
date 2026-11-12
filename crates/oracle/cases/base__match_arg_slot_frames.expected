@@ -8,9 +8,10 @@
 | [1] "red"  "blue"
 | [1] "south" "east" 
 | [1] "min" "max"
+| [1] "a" "b" "u"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| c("min", "max")
+| c("a", "b", "u")

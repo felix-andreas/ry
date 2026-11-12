@@ -37,3 +37,15 @@ inner <- function(kind = c("min", "max"), ...) match.arg(kind)
 outer <- function(...) inner(...)
 for (i in 1:60) { o <- outer(); v <- "ma"; p <- outer(kind = v) }
 print(c(o, p))
+# A `c` bound only once the caller's frame has an environment: after `environment()`, by a
+# callee writing into `parent.frame()`, and by a closure over the frame assigning into its enclosure.
+after_env <- function(kind = c("x", "y")) { environment(); assign("c", function(...) "a"); match.arg(kind) }
+set_c <- function() assign("c", function(...) "b", envir = parent.frame())
+by_callee <- function(kind = c("x", "y")) { set_c(); match.arg(kind) }
+by_closure <- function(kind = c("x", "y")) {
+  g <- function() assign("c", function(...) "u", envir = parent.env(environment()))
+  g()
+  match.arg(kind)
+}
+for (i in 1:60) { r1 <- after_env(); r2 <- by_callee(); r3 <- by_closure() }
+print(c(r1, r2, r3))
