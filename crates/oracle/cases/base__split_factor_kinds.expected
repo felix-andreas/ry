@@ -1,0 +1,162 @@
+[stdout]
+| $a
+| [1] 3 6
+| 
+| $b
+| [1] 1 4
+| 
+| $c
+| [1] 5
+| 
+| $unused
+| integer(0)
+| 
+| $a
+| [1] NaN   2
+| 
+| $b
+| [1] 1.5 0.0
+| 
+| $c
+| [1] Inf
+| 
+| $unused
+| numeric(0)
+| 
+| $a
+| [1] NA  "z"
+| 
+| $b
+| [1] "u" "x"
+| 
+| $c
+| [1] "y"
+| 
+| $unused
+| character(0)
+| 
+| $a
+| [1]    NA FALSE
+| 
+| $b
+| [1] TRUE TRUE
+| 
+| $c
+| [1] TRUE
+| 
+| $unused
+| logical(0)
+| 
+| $a
+| [1] 3+0i 6+0i
+| 
+| $b
+| [1] 1+0i 4+0i
+| 
+| $c
+| [1] 5+0i
+| 
+| $unused
+| complex(0)
+| 
+| $a
+| [1] 03 06
+| 
+| $b
+| [1] 01 04
+| 
+| $c
+| [1] 05
+| 
+| $unused
+| raw(0)
+| 
+| List of 4
+|  $ a     :List of 2
+|   ..$ : NULL
+|   ..$ : logi NA
+|  $ b     :List of 2
+|   ..$ : num 1
+|   ..$ : int [1:2] 2 3
+|  $ c     :List of 1
+|   ..$ :List of 1
+|   .. ..$ : num 4
+|  $ unused: list()
+| $a
+| three   six 
+|     3     6 
+| 
+| $b
+|  one four 
+|    1    4 
+| 
+| $c
+| five 
+|    5 
+| 
+| $unused
+| named numeric(0)
+| 
+| $a
+| [1] 3 6
+| 
+| $b
+| [1] 1 4
+| 
+| $c
+| [1] 5
+| 
+| $p
+| [1]  1  3  4  6  7  9 10 12
+| 
+| $q
+| [1]  2  5  8 11
+| 
+| [1] "data length is not a multiple of split variable"
+| $a
+| integer(0)
+| 
+| $b
+| integer(0)
+| 
+| $a
+| integer(0)
+| 
+| $x.1
+| [1] 1 5
+| 
+| $y.1
+| [1] 2 6
+| 
+| $x.2
+| [1] 3
+| 
+| $y.2
+| [1] 4
+| 
+| $`1`
+|   a b
+| 1 1 a
+| 3 3 c
+| 
+| $`2`
+|   a b
+| 2 2 b
+| 4 4 d
+| 
+| [1] 5 3 8 1
+| [1] "east"  "north" "south" "west" 
+|  east north south  west 
+| 25001 25000 25001 25001 
+|     east    north    south     west 
+| 10199368  9799252  9998772 10399544 
+|     east    north    south     west 
+| 10199368  9799252  9998772 10399544 
+|  a  z 
+| 25 NA 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

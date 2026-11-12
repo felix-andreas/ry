@@ -776,10 +776,8 @@ pub(crate) unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
     }
     let from_last = flag(call.arg(2), "'fromLast' must be TRUE or FALSE")?;
     let duplicated = duplicated_elements(x, call.arg(1), from_last, "unique")?;
-    let kept: Vec<usize> = (0..duplicated.len())
-        .filter(|&index| !duplicated[index])
-        .collect();
-    select_elements(x, &kept)
+    let kept = duplicated.len - duplicated.count();
+    crate::subset::select_positions(x, duplicated.clear_positions(), kept)
 }
 
 unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
@@ -789,11 +787,11 @@ unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
         return alloc(SexpType::Logical, 0);
     }
     let duplicated = duplicated_elements(x, call.arg(1), from_last, "duplicated")?;
-    let flags: Vec<i32> = duplicated
-        .iter()
-        .map(|&duplicate| duplicate as i32)
-        .collect();
-    values::logical_vector(&flags)
+    let result = values::alloc_uninit(SexpType::Logical, duplicated.len)?;
+    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+        *slot = i32::from(duplicated.contains(index));
+    }
+    Ok(result)
 }
 
 unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
@@ -804,9 +802,9 @@ unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
     }
     let duplicated = duplicated_elements(x, call.arg(1), from_last, "anyDuplicated")?;
     let found = if from_last {
-        duplicated.iter().rposition(|&duplicate| duplicate)
+        duplicated.last()
     } else {
-        duplicated.iter().position(|&duplicate| duplicate)
+        duplicated.first()
     };
     values::scalar_integer(found.map_or(0, |index| index as i32 + 1))
 }
@@ -1052,34 +1050,120 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
     if !codes.is_empty() && !observations.is_multiple_of(codes.len()) {
         warning("data length is not a multiple of split variable")?;
     }
-    let mut members: Vec<Vec<usize>> = vec![Vec::new(); level_count];
-    for index in 0..observations {
-        let code = codes[index % codes.len()];
+    let mut counts = vec![0usize; level_count];
+    for &code in codes.iter().cycle().take(observations) {
         if code == NA_INTEGER {
             continue;
         }
         if code < 1 || code as usize > level_count {
             return Err(error("factor has bad level"));
         }
-        members[code as usize - 1].push(index);
+        counts[code as usize - 1] += 1;
     }
     let names = values::names(x);
     let result = alloc(SexpType::List, level_count)?;
-    for (level, indices) in members.iter().enumerate() {
-        let piece = alloc(x.kind(), indices.len())?;
-        for (position, &index) in indices.iter().enumerate() {
-            crate::subset::copy_element(x, index, piece, position)?;
-        }
-        if names != nil() {
-            let piece_names = select_elements(names, indices)?;
-            values::set_attr(piece, symbols().names, piece_names)?;
-        }
+    let mut name_pieces = Vec::new();
+    for (level, &count) in counts.iter().enumerate() {
+        let piece = alloc(x.kind(), count)?;
         values::set_elt(result, level, piece);
+        if names != nil() {
+            let piece_names = alloc(SexpType::String, count)?;
+            values::set_attr(piece, symbols().names, piece_names)?;
+            name_pieces.push(piece_names);
+        }
+    }
+    let pieces: Vec<Sexp> = (0..level_count)
+        .map(|level| result.element(level))
+        .collect();
+    let heap = crate::heap();
+    match x.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            let mut targets: Vec<&mut [i32]> =
+                pieces.iter().map(|&p| values::ints_mut(p)).collect();
+            scatter(values::ints(x), codes, &mut targets);
+        }
+        SexpType::Real => {
+            let mut targets: Vec<&mut [f64]> =
+                pieces.iter().map(|&p| values::reals_mut(p)).collect();
+            scatter(values::reals(x), codes, &mut targets);
+        }
+        SexpType::Complex => {
+            let mut targets: Vec<&mut [_]> =
+                pieces.iter().map(|&p| values::complexes_mut(p)).collect();
+            scatter(values::complexes(x), codes, &mut targets);
+        }
+        SexpType::Raw => {
+            let mut targets: Vec<&mut [u8]> = pieces.iter().map(|&p| values::raws_mut(p)).collect();
+            scatter(values::raws(x), codes, &mut targets);
+        }
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            for_each_member(codes, observations, level_count, |level, slot, index| {
+                heap.set_element(pieces[level], slot, x.element(index));
+            });
+        }
+        _ => {
+            let mut failure = None;
+            for_each_member(codes, observations, level_count, |level, slot, index| {
+                if failure.is_none()
+                    && let Err(error) = crate::subset::copy_element(x, index, pieces[level], slot)
+                {
+                    failure = Some(error);
+                }
+            });
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+    }
+    if names != nil() {
+        let names = values::materialize(names)?;
+        for_each_member(codes, observations, level_count, |level, slot, index| {
+            heap.set_element(name_pieces[level], slot, names.element(index));
+        });
     }
     if levels.kind() == SexpType::String {
         values::set_attr(result, symbols().names, levels)?;
     }
     Ok(result)
+}
+
+/// Calls `visit(level, slot, index)` for each observation `index` whose recycled factor code is
+/// not `NA`, with `slot` its position within its level's piece. The codes are already checked
+/// to lie in `1..=level_count`.
+fn for_each_member(
+    codes: &[i32],
+    observations: usize,
+    level_count: usize,
+    mut visit: impl FnMut(usize, usize, usize),
+) {
+    let mut cursors = vec![0usize; level_count];
+    for (index, &code) in codes.iter().cycle().take(observations).enumerate() {
+        if code == NA_INTEGER {
+            continue;
+        }
+        let level = code as usize - 1;
+        if let Some(cursor) = cursors.get_mut(level) {
+            visit(level, *cursor, index);
+            *cursor += 1;
+        }
+    }
+}
+
+/// Moves each element of `source` into the piece of its level, for elements stored inline.
+fn scatter<T: Copy>(source: &[T], codes: &[i32], targets: &mut [&mut [T]]) {
+    let mut cursors = vec![0usize; targets.len()];
+    for (&value, &code) in source.iter().zip(codes.iter().cycle()) {
+        if code == NA_INTEGER {
+            continue;
+        }
+        let level = code as usize - 1;
+        if let (Some(target), Some(cursor)) = (targets.get_mut(level), cursors.get_mut(level)) {
+            if let Some(slot) = target.get_mut(*cursor) {
+                *slot = value;
+            }
+            *cursor += 1;
+        }
+    }
 }
 
 unsafe fn do_identical(call: &Call<'_>) -> R<Sexp> {
@@ -2209,7 +2293,7 @@ unsafe fn duplicated_elements(
     incomparables: Sexp,
     from_last: bool,
     what: &str,
-) -> R<Vec<bool>> {
+) -> R<Bits> {
     if !x.kind().is_vector() {
         return Err(error(format!("{what}() applies only to vectors")));
     }
@@ -2226,7 +2310,7 @@ unsafe fn duplicated_elements(
     {
         return Ok(duplicate_flags(keys, from_last));
     }
-    let mut duplicated = vec![false; count];
+    let mut duplicated = Bits::new(count);
     let visit: Box<dyn Iterator<Item = usize>> = if from_last {
         Box::new((0..count).rev())
     } else {
@@ -2242,7 +2326,7 @@ unsafe fn duplicated_elements(
                 .iter()
                 .any(|&seen| identical(x.element(seen), element, &flags))
             {
-                duplicated[index] = true;
+                duplicated.insert(index);
             } else {
                 bucket.push(index);
             }
@@ -2253,10 +2337,12 @@ unsafe fn duplicated_elements(
     let mut seen: FxHashSet<&Key<'_>> = FxHashSet::default();
     for index in visit {
         let key = &keys[index];
-        if !seen.insert(key) {
-            duplicated[index] = !incomparables
+        if !seen.insert(key)
+            && !incomparables
                 .as_ref()
-                .is_some_and(|keys| keys.contains(key));
+                .is_some_and(|keys| keys.contains(key))
+        {
+            duplicated.insert(index);
         }
     }
     Ok(duplicated)
@@ -2269,7 +2355,7 @@ unsafe fn duplicated_elements(
 enum PlainKeys<'a> {
     Integer(&'a [i32]),
     Real(&'a [f64]),
-    Interned(Sexp, usize),
+    Interned(&'a [Sexp]),
 }
 
 /// `None` for other kinds, and for vectors too long for the 32-bit positions of `PositionTable`.
@@ -2280,7 +2366,7 @@ unsafe fn plain_keys<'a>(vector: Sexp) -> Option<PlainKeys<'a>> {
     match vector.kind() {
         SexpType::Logical | SexpType::Integer => Some(PlainKeys::Integer(values::ints(vector))),
         SexpType::Real => Some(PlainKeys::Real(values::reals(vector))),
-        SexpType::String if all_ascii(vector) => Some(PlainKeys::Interned(vector, length(vector))),
+        SexpType::String if all_ascii(vector) => Some(PlainKeys::Interned(vector.slice::<Sexp>())),
         _ => None,
     }
 }
@@ -2323,10 +2409,10 @@ unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mu
             |index| real_key(x[index]),
             positions,
         ),
-        (PlainKeys::Interned(table, table_count), PlainKeys::Interned(x, _)) => hashed_matches(
-            table_count,
-            |index| table.element(index),
-            |index| x.element(index),
+        (PlainKeys::Interned(table), PlainKeys::Interned(x)) => hashed_matches(
+            table.len(),
+            |index| table[index],
+            |index| x[index],
             positions,
         ),
         _ => positions.fill(0),
@@ -2334,14 +2420,13 @@ unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mu
 }
 
 /// Which elements repeat an earlier one (a later one with `from_last`).
-unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Vec<bool> {
+unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Bits {
     match keys {
         PlainKeys::Integer(values) => {
             if let Some(range) = DenseRange::of(values, values.len()) {
-                let mut seen = vec![false; range.slots()];
+                let mut seen = Bits::new(range.slots());
                 return visit_in_order(values.len(), from_last, |index| {
-                    let slot = range.slot(values[index]);
-                    std::mem::replace(&mut seen[slot], true)
+                    !seen.insert(range.slot(values[index]))
                 });
             }
             hashed_duplicates(values.len(), from_last, |index| values[index])
@@ -2349,8 +2434,8 @@ unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Vec<bool> {
         PlainKeys::Real(values) => {
             hashed_duplicates(values.len(), from_last, |index| real_key(values[index]))
         }
-        PlainKeys::Interned(vector, count) => {
-            hashed_duplicates(count, from_last, |index| vector.element(index))
+        PlainKeys::Interned(strings) => {
+            hashed_duplicates(strings.len(), from_last, |index| strings[index])
         }
     }
 }
@@ -2419,11 +2504,7 @@ fn hashed_matches<K: TableKey>(
     }
 }
 
-fn hashed_duplicates<K: TableKey>(
-    count: usize,
-    from_last: bool,
-    key: impl Fn(usize) -> K,
-) -> Vec<bool> {
+fn hashed_duplicates<K: TableKey>(count: usize, from_last: bool, key: impl Fn(usize) -> K) -> Bits {
     let mut positions = PositionTable::new(count);
     visit_in_order(count, from_last, |index| {
         positions.find_or_insert(key(index), index, &key).is_some()
@@ -2432,18 +2513,98 @@ fn hashed_duplicates<K: TableKey>(
 
 /// `flag(index)` for each of `count` indices, visited first to last or, with `from_last`, last
 /// to first.
-fn visit_in_order(count: usize, from_last: bool, mut flag: impl FnMut(usize) -> bool) -> Vec<bool> {
-    let mut flags = vec![false; count];
+fn visit_in_order(count: usize, from_last: bool, mut flag: impl FnMut(usize) -> bool) -> Bits {
+    let mut flags = Bits::new(count);
     if from_last {
         for index in (0..count).rev() {
-            flags[index] = flag(index);
+            if flag(index) {
+                flags.insert(index);
+            }
         }
     } else {
-        for (index, slot) in flags.iter_mut().enumerate() {
-            *slot = flag(index);
+        for index in 0..count {
+            if flag(index) {
+                flags.insert(index);
+            }
         }
     }
     flags
+}
+
+/// A set of indices below `len`, one bit each.
+struct Bits {
+    words: Vec<u64>,
+    len: usize,
+}
+
+impl Bits {
+    fn new(len: usize) -> Self {
+        Self {
+            words: vec![0; len.div_ceil(64)],
+            len,
+        }
+    }
+
+    /// Adds `index`, answering whether it was absent.
+    fn insert(&mut self, index: usize) -> bool {
+        let Some(word) = self.words.get_mut(index / 64) else {
+            return false;
+        };
+        let bit = 1 << (index % 64);
+        let absent = *word & bit == 0;
+        *word |= bit;
+        absent
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        self.words
+            .get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
+    }
+
+    fn count(&self) -> usize {
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    fn first(&self) -> Option<usize> {
+        let (index, word) = self
+            .words
+            .iter()
+            .enumerate()
+            .find(|(_, word)| **word != 0)?;
+        Some(index * 64 + word.trailing_zeros() as usize)
+    }
+
+    fn last(&self) -> Option<usize> {
+        let (index, word) = self
+            .words
+            .iter()
+            .enumerate()
+            .rfind(|(_, word)| **word != 0)?;
+        Some(index * 64 + 63 - word.leading_zeros() as usize)
+    }
+
+    /// The indices below `len` not in the set, in increasing order.
+    fn clear_positions(&self) -> impl Iterator<Item = usize> + '_ {
+        let len = self.len;
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, &word)| {
+                let mut remaining = !word;
+                std::iter::from_fn(move || {
+                    (remaining != 0).then(|| {
+                        let bit = remaining.trailing_zeros() as usize;
+                        remaining &= remaining - 1;
+                        index * 64 + bit
+                    })
+                })
+            })
+            .take_while(move |&position| position < len)
+    }
 }
 
 /// A key that `PositionTable` can hash. The hash must spread every input bit into the high bits,

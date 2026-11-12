@@ -483,15 +483,7 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
                 return Ok(None);
             }
             let selected = flags.iter().filter(|&&flag| flag != 0).count();
-            let positions = flags
-                .iter()
-                .enumerate()
-                .filter_map(|(position, &flag)| match flag {
-                    0 => None,
-                    NA_LOGICAL => Some(NA_POSITION),
-                    _ => Some(position),
-                });
-            Ok(Some(gather_kind(object, positions, selected)?))
+            Ok(Some(gather_logical(object, flags, selected)?))
         }
         _ => Ok(None),
     }
@@ -590,6 +582,90 @@ unsafe fn gather_kind(
         }
     }
     Ok(result)
+}
+
+/// `object[flags]` for a logical subscript as long as `object` that selects `count` elements,
+/// with NA where a flag is `NA`. A data frame subset calls this once per column with the same
+/// subscript, so the positions are resolved in runs on the stack, one pass over the flags per
+/// column without a position list on the heap.
+unsafe fn gather_logical(object: Sexp, flags: &[i32], count: usize) -> R<Sexp> {
+    let kind = object.kind();
+    if matches!(kind, SexpType::String | SexpType::List) {
+        let result = alloc(kind, count)?;
+        let source = object.slice::<Sexp>();
+        let missing = if kind == SexpType::String {
+            na_string()
+        } else {
+            nil()
+        };
+        let heap = crate::heap();
+        let mut slot = 0;
+        selected_runs(flags, |run| {
+            for &position in run {
+                heap.set_element(
+                    result,
+                    slot,
+                    source.get(position).copied().unwrap_or(missing),
+                );
+                slot += 1;
+            }
+        });
+        return Ok(result);
+    }
+    let result = values::alloc_uninit(kind, count)?;
+    if kind == SexpType::Real {
+        gather_runs(
+            values::reals(object),
+            values::reals_mut(result),
+            flags,
+            NA_REAL,
+        );
+    } else {
+        gather_runs(
+            values::ints(object),
+            values::ints_mut(result),
+            flags,
+            NA_INTEGER,
+        );
+    }
+    Ok(result)
+}
+
+/// Writes `source[flags]` into `output`, which has one slot per selected element.
+fn gather_runs<T: Copy>(source: &[T], output: &mut [T], flags: &[i32], missing: T) {
+    let mut written = 0;
+    selected_runs(flags, |run| {
+        let Some(slots) = output.get_mut(written..) else {
+            return;
+        };
+        for (slot, &position) in slots.iter_mut().zip(run) {
+            *slot = source.get(position).copied().unwrap_or(missing);
+        }
+        written += run.len();
+    });
+}
+
+/// Calls `emit` with the positions a logical subscript selects, in order and in runs of at most
+/// 64, giving [`NA_POSITION`] for an `NA` flag. Each run is compacted without a branch per flag:
+/// every flag writes its position and only a selecting flag advances the cursor.
+fn selected_runs(flags: &[i32], mut emit: impl FnMut(&[Position])) {
+    const RUN: usize = 64;
+    let mut run = [0; RUN];
+    for (chunk_index, chunk) in flags.chunks(RUN).enumerate() {
+        let base = chunk_index * RUN;
+        let mut selected = 0;
+        for (offset, &flag) in chunk.iter().enumerate() {
+            // The cursor never passes `offset`, so it stays inside the run; the mask lets the
+            // compiler see that.
+            run[selected % RUN] = if flag == NA_LOGICAL {
+                NA_POSITION
+            } else {
+                base + offset
+            };
+            selected += usize::from(flag != 0);
+        }
+        emit(&run[..selected]);
+    }
 }
 
 /// `source[positions]` for an atomic vector of plain elements, with NA past the end.
