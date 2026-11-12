@@ -499,7 +499,11 @@ place hot functions moves resident text by megabytes between two builds of nearl
 (one change measured +2.6 MB of `libR.so` text with identical anonymous and image RSS). Judge the
 size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
 grow only by about what the change adds. Resident text is checked on the shipped layout
-(`tools/layout/optimize.sh`) when a release is cut.
+(`tools/layout/optimize.sh`) when a release is cut. `tools/bench/bench.py` prints each program's
+peak in those parts (whole process, anonymous, start image and `libR.so` resident, sampled from
+`/proc/<pid>/smaps` every 20 ms) and the `.text` size of each build's `libR.so`. With
+`--baseline`, it also prints the paired ratio baseline / ry for each program and its geometric mean
+with a 95% interval, so a value above 1 means the build under test is faster.
 
 Two builds can share `target/base-r` in a comparison, because each loads only images its own
 name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see

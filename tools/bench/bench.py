@@ -16,6 +16,15 @@ machine's speed hits all engines alike. Each suite first evicts every ry build's
 page cache (evict.py), so peak RSS compares builds from the same page-cache state. A program's time on an engine is the median over rounds,
 and its ratio to GNU R is the median of the per-round ratios, with a 95% bootstrap interval over
 rounds. A suite's geometric mean has a bootstrap interval that resamples each program's rounds.
+With `--baseline`, every program and the suite also get the paired ratio baseline / ry the same
+way, so a value above 1 means the build under test is faster.
+
+Peak RSS comes in parts, because they behave differently (development/testing.md): the process's
+whole peak (`VmHWM`), and the peaks of its anonymous memory outside the start-up image, of the
+image's resident pages and of `libR.so`'s resident pages, all read from `/proc/<pid>` every 20 ms
+while it runs (every engine alike; a process shorter than that has no sample). The run's
+metadata holds the size of each ry build's `libR.so` `.text` section, which is judged in place of
+its resident pages.
 
 A run fails, and writes nothing, when any program fails on any engine or prints a checksum that
 differs from GNU R's (a numeric checksum may differ by a relative 1e-10, the room a different
@@ -45,7 +54,8 @@ with a slow one. A build whose runtime predates `RY_IMAGE_LOG` cannot report one
 refuses it.
 
 `--samples FILE` keeps every round's raw samples in FILE as it goes, and a later run with the same
-FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
+FILE and options resumes after the last complete round. A run of several suites keeps each suite's
+in FILE with the suite's name before its extension (`samples.kernels.json`). `--write` needs at least 10 rounds and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
 Usage: tools/bench/bench.py SUITE... | all [--ry PATH] [--rscript PATH] [--rounds N] [--seed N]
@@ -102,6 +112,7 @@ def main():
     args.ry = os.path.abspath(args.ry)
     args.baseline = args.baseline and os.path.abspath(args.baseline)
     suites = SUITES if "all" in args.suites else args.suites
+    args.suites = suites
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
@@ -307,7 +318,7 @@ def run_suite(suite, manifest, missing, args, meta):
     table = engines(args, suite)
     programs = selected(manifest, args)
     runner = {"public": PublicRunner, "packages": PackageRunner}.get(suite, WorkloadRunner)(suite, args)
-    samples_path = pathlib.Path(args.samples).with_suffix(f".{suite}.json") if args.samples else None
+    samples_path = samples_file(args, suite)
     state = load_samples(samples_path, args, table, programs)
     shuffle = random.Random(f"{args.seed}:{suite}")
     for _ in range(len(state["rounds"])):
@@ -336,6 +347,8 @@ def run_suite(suite, manifest, missing, args, meta):
                 save_samples(samples_path, state)
             state["extra"] += [program["id"] for program in wide]
             save_samples(samples_path, state)
+        if samples_path is not None:
+            print(f"samples in {samples_path}", flush=True)
         results = summarize(suite, manifest, programs, table, state, args, meta, runner)
     finally:
         runner.close()
@@ -392,37 +405,95 @@ def describe(result):
 
 def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
-    resident set in MiB. `wait4` reports the child's own peak, which covers the whole process from
-    start-up on and any process it waited for. The status is None when the process timed out or,
-    with `check_images`, when ry reported an image it could not use: such a process timed a slow
-    start, so its numbers do not count."""
+    memory in MiB (`MEMORY_PARTS`, from `sample_memory`). The status is None when the process timed
+    out or, with `check_images`, when ry reported an image it could not use: such a process timed a
+    slow start, so its numbers do not count."""
     with tempfile.TemporaryFile("w+") as stdout, tempfile.TemporaryFile("w+") as stderr:
         started = time.monotonic()
         child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd)
-        expired = threading.Event()
+        expired, finished = threading.Event(), threading.Event()
+        memory = {}
 
         def expire():
             expired.set()
             child.kill()
 
         timer = threading.Timer(timeout, expire)
+        sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory))
         timer.start()
+        sampler.start()
         try:
-            _, status, usage = os.wait4(child.pid, 0)
+            _, status = os.waitpid(child.pid, 0)
         finally:
             timer.cancel()
+            finished.set()
+            sampler.join()
         child.returncode = os.waitstatus_to_exitcode(status)
         seconds = time.monotonic() - started
         stdout.seek(0)
         stderr.seek(0)
         out, err = stdout.read(), stderr.read()
     if expired.is_set():
-        return None, out, f"timed out after {timeout} s", seconds, usage.ru_maxrss / 1024
+        return None, out, f"timed out after {timeout} s", seconds, memory
     unused = [line for line in err.splitlines()
               if line.startswith((IMAGE_UNUSED, IMAGE_WRITTEN))] if check_images else []
     if unused:
-        return None, out, f"started without an image it should load ({unused[0]})", seconds, usage.ru_maxrss / 1024
-    return child.returncode, out, err, seconds, usage.ru_maxrss / 1024
+        return None, out, f"started without an image it should load ({unused[0]})", seconds, memory
+    return child.returncode, out, err, seconds, memory
+
+
+# The parts of a process's memory a result records, in MiB: the whole peak (`VmHWM`), then the
+# peaks of anonymous memory outside the start-up image, of the image's resident pages and of
+# `libR.so`'s. `wait4`'s `ru_maxrss` cannot give the whole peak: a child forked from this script
+# starts with the script's own resident size as its high-water mark, and keeps it across `exec`.
+MEMORY_PARTS = {"peak": "peak_mib", "anonymous": "anonymous_mib", "image": "image_mib", "libr": "libr_mib"}
+
+
+def sample_memory(pid, finished, peaks):
+    """Records in `peaks` the process's high-water resident size (`VmHWM`, which `exec` resets) and
+    the largest anonymous, start-up image and `libR.so` resident sizes seen in `/proc/<pid>/smaps`,
+    until `finished` is set. The image is mapped privately, so its pages a start writes are
+    anonymous too; they count as the image's. Reading smaps takes about 1 ms for ry and 3 ms for
+    GNU R, which is why it runs every 20 ms rather than more often, and so growth in a process's
+    last 20 ms is missed and a process shorter than that has no sample."""
+    while not finished.wait(0.02):
+        try:
+            with open(f"/proc/{pid}/status") as status:
+                high_water = next(int(line.split()[1]) for line in status if line.startswith("VmHWM:"))
+            with open(f"/proc/{pid}/smaps") as smaps:
+                text = smaps.read()
+        except (OSError, StopIteration):
+            return
+        peaks["peak"] = max(peaks.get("peak", 0.0), high_water / 1024)
+        sizes = {"anonymous": 0, "image": 0, "libr": 0}
+        mapping = ""
+        for line in text.splitlines():
+            if line.startswith("Rss:"):
+                if mapping.endswith(".image"):
+                    sizes["image"] += int(line.split()[1])
+                elif mapping.endswith(runtime_library_name()):
+                    sizes["libr"] += int(line.split()[1])
+            elif line.startswith("Anonymous:"):
+                if not mapping.endswith(".image"):
+                    sizes["anonymous"] += int(line.split()[1])
+            elif not line[:1].isupper():
+                fields = line.split(None, 5)
+                mapping = fields[5] if len(fields) > 5 else ""
+        for part, kib in sizes.items():
+            peaks[part] = max(peaks.get(part, 0.0), kib / 1024)
+
+
+def memory_fields(memory):
+    return {field: round(memory[part], 1) for part, field in MEMORY_PARTS.items() if part in memory}
+
+
+def merge_memory(memories):
+    """The peaks of several processes run one after another, part by part."""
+    merged = {}
+    for memory in memories:
+        for part, mib in memory.items():
+            merged[part] = max(merged.get(part, 0.0), mib)
+    return merged
 
 
 def same_checksum(value, reference):
@@ -461,12 +532,12 @@ class WorkloadRunner:
             source, harness, folder = root / program["source"], self.harness, self.work / "plain"
         script = folder / f"{program['id']}.R"
         script.write_text(harness + "\n" + source.read_text())
-        status, out, err, _, peak = spawn(engine.command + [script.name], engine.env, cwd=folder)
+        status, out, err, _, memory = spawn(engine.command + [script.name], engine.env, cwd=folder)
         lines = [line for line in out.splitlines() if line.startswith(program["id"] + " ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         _, checksum, median, _, cold = lines[-1].split()
-        return {"seconds": float(median), "checksum": checksum, "cold": float(cold), "peak_mib": round(peak, 1)}
+        return {"seconds": float(median), "checksum": checksum, "cold": float(cold), **memory_fields(memory)}
 
     def typed_refusal(self, program, engine):
         """The refusals `RY_TYPED_LOG` reports for the typed program beyond those of the harness
@@ -502,13 +573,13 @@ class PublicRunner:
 
     def run(self, program, engine):
         source = root / program["source"]
-        status, out, err, _, peak = spawn(engine.command + [source.name], engine.env, cwd=source.parent)
+        status, out, err, _, memory = spawn(engine.command + [source.name], engine.env, cwd=source.parent)
         stem = source.name.removesuffix(".R")
         lines = [line for line in out.splitlines() if line.startswith(stem + " ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         _, checksum, seconds = lines[-1].split()
-        return {"seconds": float(seconds), "checksum": checksum, "peak_mib": round(peak, 1)}
+        return {"seconds": float(seconds), "checksum": checksum, **memory_fields(memory)}
 
     def close(self):
         pass
@@ -552,34 +623,42 @@ class PackageRunner:
             # R error, which exits with status 1 (`test.data.table()` raises its error summary
             # after running every test). Such a script ran to its end and counts as failed. A
             # signal, a timeout or any other status means the suite did not finish.
-            seconds, peak, passed, failed = 0.0, 0.0, 0, 0
+            seconds, memories, passed, failed = 0.0, [], 0, 0
             for script in sorted(tests.glob("*.R")):
-                status, out, err, elapsed, script_peak = spawn(engine.command + [script.name], env, cwd=tests,
-                                                               timeout=corpus.SUITE_TIMEOUT)
+                status, out, err, elapsed, memory = spawn(engine.command + [script.name], env, cwd=tests,
+                                                          timeout=corpus.SUITE_TIMEOUT)
                 if status not in (0, 1):
                     return {"seconds": None, "reason": f"{script.name}: {failure_reason(out, err)}"}
                 seconds += elapsed
-                peak = max(peak, script_peak)
+                memories.append(memory)
                 passed += status == 0
                 failed += status == 1
             return {"seconds": round(seconds, 3), "checksum": f"{passed} passed, {failed} failed, 0 errors",
-                    "tests": {"passed": passed, "failed": failed, "errors": 0}, "peak_mib": round(peak, 1)}
+                    "tests": {"passed": passed, "failed": failed, "errors": 0},
+                    **memory_fields(merge_memory(memories))}
         driver = self.work / "driver.R"
         driver.write_text(corpus.driver(name, kind, tests))
-        status, out, err, seconds, peak = spawn(engine.command + [str(driver)], env, cwd=tests,
-                                                timeout=corpus.SUITE_TIMEOUT)
+        status, out, err, seconds, memory = spawn(engine.command + [str(driver)], env, cwd=tests,
+                                                  timeout=corpus.SUITE_TIMEOUT)
         lines = [line for line in out.splitlines() if line.startswith("RESULT ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         passed, failed, _, errors = (int(value) for value in lines[-1].split()[1:])
         return {"seconds": round(seconds, 3), "checksum": f"{passed} passed, {failed} failed, {errors} errors",
-                "tests": {"passed": passed, "failed": failed, "errors": errors}, "peak_mib": round(peak, 1)}
+                "tests": {"passed": passed, "failed": failed, "errors": errors}, **memory_fields(memory)}
 
     def close(self):
         subprocess.run(["rm", "-rf", str(self.work)], check=True)
 
 
 # Samples.
+
+def samples_file(args, suite):
+    if not args.samples:
+        return None
+    path = pathlib.Path(args.samples)
+    return path if len(args.suites) == 1 else path.with_name(f"{path.stem}.{suite}{path.suffix or '.json'}")
+
 
 def load_samples(path, args, table, programs):
     key = {"rounds": args.rounds, "seed": args.seed, "filter": args.filter, "ry": args.ry,
@@ -653,9 +732,16 @@ def geomean(values):
 def summarize(suite, manifest, programs, table, state, args, meta, runner):
     rows = []
     included = {engine.key: [] for engine in table[1:]}
+    keys = {engine.key for engine in table}
+    pairs = [(f"baseline{typed}", f"ry{typed}") for typed in ("", "_typed")
+             if f"baseline{typed}" in keys and f"ry{typed}" in keys]
+    paired_included = {new: [] for _, new in pairs}
     for program in programs:
         name = program["id"]
-        row = {"id": name, "display": program["display"], "seconds": {}, "ratio": {}, "peak_mib": {}, "flags": []}
+        row = {"id": name, "display": program["display"], "seconds": {}, "ratio": {}, "flags": [],
+               **{field: {} for field in MEMORY_PARTS.values()}}
+        if pairs:
+            row["paired"] = {}
         if suite == "packages":
             row["version"] = program["version"]
             row["runner"] = program["runner"]
@@ -687,7 +773,10 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                                      "reason": f"checksum {checksums[0]}, GNU R printed {reference}"})
             median = statistics.median(run["seconds"] for run in runs)
             row["seconds"][engine.key] = round(median, 4)
-            row["peak_mib"][engine.key] = max(run["peak_mib"] for run in runs)
+            for field in MEMORY_PARTS.values():
+                sizes = [run[field] for run in runs if field in run]
+                if sizes:
+                    row[field][engine.key] = max(sizes)
             if median < SHORT:
                 row["flags"].append({"kind": "too_short", "engine": engine.key})
         if failures:
@@ -703,43 +792,73 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                 row["flags"].append({"kind": "wide_interval", "engine": engine.key})
             if not short:
                 included[engine.key].append(ratios)
+        for old, new in pairs:
+            ratios = paired(state, name, old, new)
+            if not ratios or failures:
+                continue
+            median, low, high = interval(ratios, args.seed)
+            row["paired"][new] = {"median": round(median, 4), "low": round(low, 4), "high": round(high, 4)}
+            if not any(flag["kind"] == "too_short" and flag["engine"] in (old, new) for flag in row["flags"]):
+                paired_included[new].append(ratios)
         if suite in ("kernels", "applications") and "typed_source" in program and not failures:
             typed = next(engine for engine in table if engine.typed)
             reason = runner.typed_refusal(program, typed)
             if reason:
                 row["flags"].append({"kind": "typed_refused", "engine": typed.key, "reason": reason})
         rows.append(row)
-    geomeans = {}
-    for key, per_program in included.items():
-        if per_program:
-            point, low, high = geomean_interval(per_program, args.seed)
-            geomeans[key] = {"median": round(point, 4), "low": round(low, 4), "high": round(high, 4),
-                             "programs": len(per_program)}
-    return {
+    def geomeans(included):
+        means = {}
+        for key, per_program in included.items():
+            if per_program:
+                point, low, high = geomean_interval(per_program, args.seed)
+                means[key] = {"median": round(point, 4), "low": round(low, 4), "high": round(high, 4),
+                              "programs": len(per_program)}
+        return means
+    results = {
         "schema": SCHEMA, "suite": suite, "name": manifest["name"],
         "meta": dict(meta, rounds=args.rounds, extra_rounds=args.extra_rounds, seed=args.seed),
         "engines": {engine.key: engine.label for engine in table},
-        "programs": rows, "geomean": geomeans,
+        "programs": rows, "geomean": geomeans(included),
     }
+    if pairs:
+        results["paired_geomean"] = geomeans(paired_included)
+    return results
 
 
 def print_table(results, table):
     keys = [engine.key for engine in table if engine.key in results["engines"]]
-    print("| program | " + " | ".join(results["engines"][key] for key in keys) + " | "
-          + " | ".join(f"GNU R / {results['engines'][key]}" for key in keys[1:]) + " | flags |")
-    print("| --- |" + " ---: |" * (2 * len(keys) - 1) + " --- |")
+    pairs = [key for key in keys if key in results.get("paired_geomean", {}) or
+             any(key in row.get("paired", {}) for row in results["programs"])]
+    label = results["engines"]
+    print("| program | " + " | ".join(label[key] for key in keys) + " | "
+          + " | ".join(f"GNU R / {label[key]}" for key in keys[1:])
+          + "".join(f" | {label['baseline' + key.removeprefix('ry')]} / {label[key]}" for key in pairs)
+          + " | flags |")
+    print("| --- |" + " ---: |" * (2 * len(keys) - 1 + len(pairs)) + " --- |")
     for row in results["programs"]:
         cells = [f"{row['seconds'][key]:.3f} s" if key in row["seconds"] else "" for key in keys]
-        for key in keys[1:]:
-            ratio = row["ratio"].get(key)
+        for ratio in [row["ratio"].get(key) for key in keys[1:]] + [row.get("paired", {}).get(key) for key in pairs]:
             cells.append(f"{ratio['median']:.2f}x ({ratio['low']:.2f} to {ratio['high']:.2f})" if ratio else "")
         flags = ", ".join(f"{flag['kind']} ({flag['engine']})" for flag in row["flags"])
         if row.get("failures"):
             flags = ", ".join(["FAILED"] + ([flags] if flags else []))
         print(f"| {row['display']} | " + " | ".join(cells) + f" | {flags} |")
+    print("\nPeak memory in MiB: whole process / anonymous / start-up image / libR.so resident\n")
+    print("| program | " + " | ".join(label[key] for key in keys) + " |")
+    print("| --- |" + " ---: |" * len(keys))
+    for row in results["programs"]:
+        cells = [" / ".join(f"{row[field][key]:.1f}" if key in row.get(field, {}) else "-"
+                            for field in MEMORY_PARTS.values()) for key in keys]
+        print(f"| {row['display']} | " + " | ".join(cells) + " |")
     for key, mean in results["geomean"].items():
-        print(f"\nGeometric mean of GNU R / {results['engines'][key]} over {mean['programs']} programs: "
+        print(f"\nGeometric mean of GNU R / {label[key]} over {mean['programs']} programs: "
               f"{mean['median']:.2f}x (95% interval {mean['low']:.2f} to {mean['high']:.2f})")
+    for key, mean in results.get("paired_geomean", {}).items():
+        print(f"\nGeometric mean of {label['baseline' + key.removeprefix('ry')]} / {label[key]} over "
+              f"{mean['programs']} programs: {mean['median']:.2f}x "
+              f"(95% interval {mean['low']:.2f} to {mean['high']:.2f}; above 1 means {label[key]} is faster)")
+    for build, size in results["meta"].get("libr_text_bytes", {}).items():
+        print(f"\nlibR.so .text of {build}: {size / 1024 / 1024:.2f} MiB ({size} bytes)")
 
 
 # Metadata.
@@ -781,14 +900,27 @@ def metadata(args):
                             "cat(paste(R.version$major, R.version$minor, sep = '.'), '\\n', La_library(), '\\n', extSoftVersion()[['BLAS']], '\\n', sep = '')"],
                            capture_output=True, text=True, check=True).stdout.splitlines()
     version, lapack, blas = (probe + ["", "", ""])[:3]
+    text = {build: text_size(runtime_of(binary))
+            for build, binary in (("ry", args.ry), ("baseline", args.baseline)) if binary and runtime_of(binary)}
     return {
         "date": time.strftime("%Y-%m-%d"),
         "ry_commit": commit(args.ry),
+        "libr_text_bytes": {build: size for build, size in text.items() if size is not None},
         "too_short_seconds": SHORT,
         "gnu_r": {"version": version.strip(), "blas": (blas or lapack).strip()},
         "machine": {"cpu": cpu, "cores": os.cpu_count(), "kernel": f"{platform.system()} {platform.release()}"},
         "command": "tools/bench/bench.py " + " ".join(shlex.quote(argument) for argument in sys.argv[1:]),
     }
+
+
+def text_size(library):
+    """The size in bytes of the `.text` section of the runtime library `library` (`size -A`), or
+    None where `size` is missing."""
+    try:
+        listing = subprocess.run(["size", "-A", str(library)], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return next((int(line.split()[1]) for line in listing.splitlines() if line.startswith(".text ")), None)
 
 
 def commit(ry):
