@@ -1532,10 +1532,16 @@ unsafe fn expand_sequence(object: Sexp, kind: SexpType) -> ApiResult<Sexp> {
     }
     let (length, first, increment) = sequence_info(object);
     runtime().heap.root(object);
-    let data = runtime().heap.alloc_vector(kind, length)?;
+    // Every element is written below before anything reads the vector.
+    let data = runtime().heap.alloc_vector_uninit(kind, length as usize)?;
     if kind == SexpType::Integer {
-        for (index, slot) in data.slice_mut::<i32>().iter_mut().enumerate() {
-            *slot = (first + increment * index as f64) as i32;
+        // An integer sequence's first element and increment are integers and its last element
+        // fits, so stepping in integers gives the same elements as the double formula.
+        let (first, increment) = (first as i32, increment as i32);
+        let mut value = first;
+        for slot in data.slice_mut::<i32>() {
+            *slot = value;
+            value = value.wrapping_add(increment);
         }
     } else {
         for (index, slot) in data.slice_mut::<f64>().iter_mut().enumerate() {

@@ -786,6 +786,9 @@ pub unsafe fn env_length(env: Sexp) -> usize {
 /// fail, so an error from the method is parked like an element accessor's
 /// ([`crate::unwind::park`]) and the length reads as 0 until it is raised.
 unsafe fn altrep_length(object: Sexp) -> usize {
+    if let Some((count, _, _)) = compact_sequence(object) {
+        return count;
+    }
     match (interp().hooks.altrep_length)(object) {
         Ok(count) => count,
         Err(unwind) => {
@@ -848,6 +851,11 @@ macro_rules! typed_slice {
         #[cold]
         #[inline(never)]
         unsafe fn $altrep<'a>(object: Sexp) -> &'a [$type] {
+            // A compact sequence keeps its expansion in its second data slot, which reads
+            // without a call into the class.
+            if compact_sequence(object).is_some() && object.cdr() != nil() {
+                return object.cdr().slice::<$type>();
+            }
             // The accessor cannot fail, so a method's error is parked, as for elements. The
             // class's own data pointer comes first, since materializing copies the whole vector
             // on every read.
