@@ -11,6 +11,17 @@
 //! done something visible, so once it has, giving up is an error instead of a second run.
 
 #![allow(unsafe_op_in_unsafe_fn)]
+// Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
+#![allow(clippy::missing_safety_doc)]
+// The lowering's `to_*` helpers take `&mut self` because they emit code, and its builder callbacks
+// have long closure types.
+#![allow(
+    clippy::wrong_self_convention,
+    clippy::type_complexity,
+    clippy::explicit_counter_loop,
+    clippy::needless_borrow,
+    clippy::unnecessary_cast
+)]
 
 pub mod backend;
 pub mod ir;

@@ -445,24 +445,26 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         });
     }
     let started = std::time::Instant::now();
-    let (address, size) = ssa::with_module(Allocator::Backtracking, |module| -> Result<_, Refusal> {
-        let own_signature = signature(params, guess, CallConv::Host);
-        let id = module.declare(&own_signature)?;
-        let mut builder = Builder::new(own_signature.clone());
-        let own = builder.import_function(id, own_signature);
-        let mut walker = Walker::new(function, &parameters, Some(guess));
-        walker.allocates = allocates;
-        // SAFETY: the walk reads the closure's own body and constants.
-        let mut builder = unsafe { emit(builder, CallConv::Host, false, own, &mut walker, body) }?;
-        builder.seal_all_blocks();
-        let compiled = builder.finalize();
-        if std::env::var_os("RY_JIT_DUMP").is_some() {
-            eprintln!("{compiled}");
-        }
-        let size = module.define(id, &compiled)?;
-        module.finalize()?;
-        Ok((module.address(id), size))
-    })?;
+    let (address, size) =
+        ssa::with_module(Allocator::Backtracking, |module| -> Result<_, Refusal> {
+            let own_signature = signature(params, guess, CallConv::Host);
+            let id = module.declare(&own_signature)?;
+            let mut builder = Builder::new(own_signature.clone());
+            let own = builder.import_function(id, own_signature);
+            let mut walker = Walker::new(function, &parameters, Some(guess));
+            walker.allocates = allocates;
+            // SAFETY: the walk reads the closure's own body and constants.
+            let mut builder =
+                unsafe { emit(builder, CallConv::Host, false, own, &mut walker, body) }?;
+            builder.seal_all_blocks();
+            let compiled = builder.finalize();
+            if std::env::var_os("RY_JIT_DUMP").is_some() {
+                eprintln!("{compiled}");
+            }
+            let size = module.define(id, &compiled)?;
+            module.finalize()?;
+            Ok((module.address(id), size))
+        })?;
     if crate::logging() {
         eprintln!(
             "jit: native function for {params:?} -> {guess:?} in {} us, {size} bytes",
@@ -1028,7 +1030,7 @@ impl<'p> Walker<'p> {
                     "a function that is neither a closure nor a base function",
                 ))?;
                 let operation =
-                    Operation::of(&name).ok_or(Refusal("a base function native code lacks"))?;
+                    Operation::of(name).ok_or(Refusal("a base function native code lacks"))?;
                 self.builtin(emitter, operation, &args, statement)
             }
             _ => Err(Refusal("an expression that is not a scalar computation")),
@@ -2177,7 +2179,7 @@ impl<'p> Walker<'p> {
             let speculation = resolve_function(expression.car(), self.environment)
                 .ok_or(Refusal("a function the lookup cannot resolve"))?;
             let operation = base_builtin(speculation.function, expression.car())
-                .and_then(|name| Operation::of(&name))
+                .and_then(Operation::of)
                 .filter(|operation| {
                     matches!(
                         operation,
@@ -3160,7 +3162,9 @@ pub(crate) unsafe fn gather(
                          constants, variables and arithmetic: compute it into a variable before \
                          the call",
                         position + 1,
-                        interp::deparse::deparse_first_line(bytecode::source_of_body(arg.value.cdr()))
+                        interp::deparse::deparse_first_line(bytecode::source_of_body(
+                            arg.value.cdr()
+                        ))
                     )
                 });
                 return None;
@@ -3625,40 +3629,43 @@ unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
     if let Some(found) = TRAMPOLINES.with_borrow(|trampolines| trampolines.get(&key).copied()) {
         return Some(found);
     }
-    let compiled = ssa::with_module(Allocator::Backtracking, |module| -> Result<usize, Refusal> {
-        let mut outer = Signature::new(CallConv::Host);
-        outer.params.extend([AbiParam::new(I64); 4]);
-        outer.returns.push(AbiParam::new(I64));
-        let id = module.declare(&outer)?;
-        let mut builder = Builder::new(outer);
-        let entry = builder.create_block();
-        builder.append_block_params_for_function_params(entry);
-        builder.switch_to_block(entry);
-        let &[address, budget, words, out] = builder.block_params(entry) else {
-            return Err(Refusal("a trampoline without its parameters"));
-        };
-        let mut arguments: SmallVec<[Value; 5]> = SmallVec::new();
-        arguments.push(budget);
-        for (index, &ty) in params.iter().enumerate() {
-            arguments.push(builder.ins().load(
-                machine_type(ty),
-                MemFlagsData::trusted(),
-                words,
-                8 * index as i32,
-            ));
-        }
-        let inner = builder.import_signature(signature(params, result, CallConv::Host));
-        let call = builder.ins().call_indirect(inner, address, &arguments);
-        let &[status, value] = builder.inst_results(call) else {
-            return Err(Refusal("a native call without a status and a value"));
-        };
-        builder.ins().store(MemFlagsData::trusted(), value, out, 0);
-        builder.ins().return_(&[status]);
-        builder.seal_all_blocks();
-        module.define(id, &builder.finalize())?;
-        module.finalize()?;
-        Ok(module.address(id))
-    });
+    let compiled = ssa::with_module(
+        Allocator::Backtracking,
+        |module| -> Result<usize, Refusal> {
+            let mut outer = Signature::new(CallConv::Host);
+            outer.params.extend([AbiParam::new(I64); 4]);
+            outer.returns.push(AbiParam::new(I64));
+            let id = module.declare(&outer)?;
+            let mut builder = Builder::new(outer);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            let &[address, budget, words, out] = builder.block_params(entry) else {
+                return Err(Refusal("a trampoline without its parameters"));
+            };
+            let mut arguments: SmallVec<[Value; 5]> = SmallVec::new();
+            arguments.push(budget);
+            for (index, &ty) in params.iter().enumerate() {
+                arguments.push(builder.ins().load(
+                    machine_type(ty),
+                    MemFlagsData::trusted(),
+                    words,
+                    8 * index as i32,
+                ));
+            }
+            let inner = builder.import_signature(signature(params, result, CallConv::Host));
+            let call = builder.ins().call_indirect(inner, address, &arguments);
+            let &[status, value] = builder.inst_results(call) else {
+                return Err(Refusal("a native call without a status and a value"));
+            };
+            builder.ins().store(MemFlagsData::trusted(), value, out, 0);
+            builder.ins().return_(&[status]);
+            builder.seal_all_blocks();
+            module.define(id, &builder.finalize())?;
+            module.finalize()?;
+            Ok(module.address(id))
+        },
+    );
     let address = match compiled {
         Ok(address) => address,
         Err(Refusal(why)) => {

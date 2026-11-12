@@ -111,7 +111,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             [random_object(r, rng), r.string(class), r.nil()]
         }
         12..=14 => [
-            strings(r, &[&["", "a", "rytest.tag", "dim"][rng.below(4)]]),
+            strings(r, &[["", "a", "rytest.tag", "dim"][rng.below(4)]]),
             r.nil(),
             r.nil(),
         ],

@@ -714,6 +714,7 @@ pub trait GlobalEnv<'db> {
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
 pub static CHECK_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
 
+#[allow(clippy::too_many_arguments)]
 pub fn check_item_with_annotation<'db>(
     db: &'db dyn Db,
     module: &Module,

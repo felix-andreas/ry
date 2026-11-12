@@ -326,8 +326,7 @@ impl Space {
                 } else {
                     None
                 };
-                if let Some((start, end)) =
-                    claim_run(&mut self.allocated[page], held, slots, from)
+                if let Some((start, end)) = claim_run(&mut self.allocated[page], held, slots, from)
                 {
                     // SAFETY: both offsets are inside a committed page.
                     let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
@@ -1259,12 +1258,10 @@ impl Space {
         for bitmap in &mut bitmaps {
             let bytes = input.take(page_count * size_of::<Bitmap>())?;
             bitmap.reserve_exact(page_count);
-            for page in bytes.chunks_exact(size_of::<Bitmap>()) {
+            for page in bytes.as_chunks::<{ size_of::<Bitmap>() }>().0 {
                 let mut words = [0u64; BITMAP_WORDS];
-                for (word, bytes) in words.iter_mut().zip(page.chunks_exact(8)) {
-                    let mut array = [0u8; 8];
-                    array.copy_from_slice(bytes);
-                    *word = u64::from_le_bytes(array);
+                for (word, bytes) in words.iter_mut().zip(page.as_chunks::<8>().0) {
+                    *word = u64::from_le_bytes(*bytes);
                 }
                 bitmap.push(words);
             }

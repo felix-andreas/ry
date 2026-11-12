@@ -135,7 +135,12 @@ impl State {
             marker.mark(register);
         }
         for body in self.bodies.values() {
-            if let Body::Code { pair, formals, srcref } = *body {
+            if let Body::Code {
+                pair,
+                formals,
+                srcref,
+            } = *body
+            {
                 marker.mark(pair);
                 marker.mark(formals);
                 marker.mark(srcref);
@@ -148,7 +153,8 @@ impl State {
         self.call_plans.clear_dead(liveness);
         // The weak pair's key is already cleared when its body died, so the entry's own key is
         // what says whether the body survives.
-        self.bodies.retain(|&body, _| unsafe { liveness.is_live(body) });
+        self.bodies
+            .retain(|&body, _| unsafe { liveness.is_live(body) });
     }
 }
 
@@ -160,7 +166,11 @@ enum Body {
     /// not keep the body alive through the code's reference to its source. Compiling reads the
     /// formals and the srcref, so a closure over the same body with other formals (from
     /// `as.function`, say) compiles its own code.
-    Code { pair: Sexp, formals: Sexp, srcref: Sexp },
+    Code {
+        pair: Sexp,
+        formals: Sexp,
+        srcref: Sexp,
+    },
 }
 
 /// The register file holds this many registers across all active frames. Deep recursion runs
@@ -437,7 +447,9 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         && !crate::annotations::is_typed(function)
     {
         if state.bodies.len() > MAX_TRACKED_BODIES {
-            state.bodies.retain(|_, body| matches!(body, Body::Code { .. }));
+            state
+                .bodies
+                .retain(|_, body| matches!(body, Body::Code { .. }));
         }
         return eval::eval(body, env);
     }
@@ -451,8 +463,11 @@ unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let formals = function.car();
     let srcref = values::get_attr(function, symbols().srcref);
-    if let Some(&Body::Code { pair, formals: compiled_formals, srcref: compiled_srcref }) =
-        interp().bytecode.bodies.get(&body)
+    if let Some(&Body::Code {
+        pair,
+        formals: compiled_formals,
+        srcref: compiled_srcref,
+    }) = interp().bytecode.bodies.get(&body)
         && compiled_formals == formals
         && compiled_srcref == srcref
     {
@@ -470,9 +485,15 @@ unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
             code
         }
     };
-    let pair = heap
-        .alloc_weak_ref(body, code, values::nil(), 0, false)?;
-    interp().bytecode.bodies.insert(body, Body::Code { pair, formals, srcref });
+    let pair = heap.alloc_weak_ref(body, code, values::nil(), 0, false)?;
+    interp().bytecode.bodies.insert(
+        body,
+        Body::Code {
+            pair,
+            formals,
+            srcref,
+        },
+    );
     Ok(code)
 }
 
@@ -4091,7 +4112,8 @@ impl Compiler {
                     return self.fallback(call, dst);
                 };
                 let inner_args = values::pairlist_items(inner.cdr());
-                if eval::builtin_def(function)?.prologue && inner_args.is_empty() && !self.argument {
+                if eval::builtin_def(function)?.prologue && inner_args.is_empty() && !self.argument
+                {
                     let function = self.constant(function);
                     let inner = self.constant(inner);
                     self.emit(Op::Prologue, &[dst, function, inner]);
@@ -9590,6 +9612,7 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
             (0..formals.min(length(names))).find(|&index| names.element(index) == symbol)
         {
             let owner = (*state.interp).slot_owner as usize;
+            #[allow(clippy::borrow_deref_ref, clippy::needless_borrow)]
             let missing = (&(*state.interp).frames)
                 .get(owner)
                 .map_or(0, |frame| frame.missing);
