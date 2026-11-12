@@ -7,7 +7,7 @@
 //! the scenario's workspace. When a journey ends, its editor session is held against a server
 //! started from scratch on the same disk and buffers.
 //!
-//! `SCENARIO=<name>` runs one scenario.
+//! `SCENARIO=<name>` runs one scenario, and a name that matches none is an error.
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -50,18 +50,22 @@ fn scenarios_hold() {
         "no scenarios found in {}",
         directory.display()
     );
+    let scenarios: Vec<(String, PathBuf)> = paths
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("scenario names are UTF-8")
+                .to_owned();
+            (name, path)
+        })
+        .collect();
+    let scenarios = select_scenarios(scenarios, std::env::var("SCENARIO").ok().as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
     corpus_library();
-    let only = std::env::var("SCENARIO").ok();
     let mut failures = Vec::new();
-    for path in paths {
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .expect("scenario names are UTF-8")
-            .to_owned();
-        if only.as_ref().is_some_and(|only| only != &name) {
-            continue;
-        }
+    for (name, path) in scenarios {
         let text = fs::read_to_string(&path).expect("a scenario reads");
         match run_scenario(&name, &text) {
             Ok(Outcome::Passed(steps)) => eprintln!("scenario {name}: {steps} steps passed"),
@@ -70,6 +74,62 @@ fn scenarios_hold() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The scenarios `SCENARIO` selects. Unset or empty (`just scenarios` with no name) selects them
+/// all; a name that matches none is an error listing the known names, so a misspelled name
+/// cannot pass by running nothing.
+fn select_scenarios<T>(
+    scenarios: Vec<(String, T)>,
+    only: Option<&str>,
+) -> Result<Vec<(String, T)>, String> {
+    let Some(only) = only.filter(|only| !only.is_empty()) else {
+        return Ok(scenarios);
+    };
+    let known: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+    if !known.contains(&only) {
+        return Err(format!(
+            "SCENARIO={only} names no scenario; the known scenarios are: {}",
+            known.join(", ")
+        ));
+    }
+    Ok(scenarios
+        .into_iter()
+        .filter(|(name, _)| name == only)
+        .collect())
+}
+
+#[test]
+fn scenario_filter_rejects_unknown_names() {
+    let scenarios = || {
+        vec![
+            ("check-fix".to_owned(), ()),
+            ("edit-and-rename".to_owned(), ()),
+        ]
+    };
+    let names = |selected: Vec<(String, ())>| -> Vec<String> {
+        selected.into_iter().map(|(name, ())| name).collect()
+    };
+    assert_eq!(
+        select_scenarios(scenarios(), None).map(names),
+        Ok(vec!["check-fix".to_owned(), "edit-and-rename".to_owned()])
+    );
+    assert_eq!(
+        select_scenarios(scenarios(), Some("")).map(names),
+        Ok(vec!["check-fix".to_owned(), "edit-and-rename".to_owned()])
+    );
+    assert_eq!(
+        select_scenarios(scenarios(), Some("check-fix")).map(names),
+        Ok(vec!["check-fix".to_owned()])
+    );
+    assert_eq!(
+        select_scenarios(scenarios(), Some("chek-fix")).map(names),
+        Err(
+            "SCENARIO=chek-fix names no scenario; the known scenarios are: check-fix, \
+             edit-and-rename"
+                .to_owned()
+        )
+    );
 }
 
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
