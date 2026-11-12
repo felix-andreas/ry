@@ -258,8 +258,11 @@ fn a_case_needing_a_locale_runs_only_where_the_locale_loads() {
     std::fs::create_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
     let case = |name: &str, locale: &str| {
         let path = directory.join(name);
-        std::fs::write(&path, format!("# oracle: requires locale {locale}\ncat(1)\n"))
-            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        std::fs::write(
+            &path,
+            format!("# oracle: requires locale {locale}\ncat(1)\n"),
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         path
     };
     let present = case("present.R", "C.UTF-8");

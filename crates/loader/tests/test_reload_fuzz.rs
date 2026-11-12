@@ -97,7 +97,7 @@ fn random_edits_are_each_reported_once() {
             .expect("plans");
         loader.commit(root);
         // Each edit changes the size, so it shows even within one timestamp tick.
-        let mut rng = SplitMix64(0x0ED1_75 ^ seed);
+        let mut rng = SplitMix64(0x0ED175 ^ seed);
         let mut text = String::from("f <- function() 22\n");
         for step in 0..5 {
             let edited = rng.chance(1, 2);

@@ -47,6 +47,7 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
     );
     let identity_end = IDENTITY_OFFSET + identity_length as usize;
 
+    #[allow(clippy::type_complexity)]
     let stale_variants: [(&str, fn(&mut Vec<u8>)); 2] = [
         ("another build's", |bytes| bytes[IDENTITY_OFFSET] ^= 1),
         ("an older format's", |bytes| bytes[7] -= 1),

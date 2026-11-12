@@ -451,8 +451,7 @@ unsafe fn resolve(
         };
         let callee = speculation.function;
         let safe = if callee.kind() == SexpType::Closure {
-            bytecode::compiled_body(callee)?.is_ok()
-                && resolve(callee, found, visiting)?
+            bytecode::compiled_body(callee)?.is_ok() && resolve(callee, found, visiting)?
         } else {
             match base_builtin(callee, symbol) {
                 Some("<-" | "=" | "[<-" | "[[<-") => true,

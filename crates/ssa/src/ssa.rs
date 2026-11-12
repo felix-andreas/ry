@@ -832,7 +832,10 @@ impl Builder {
         // its users to its replacement, so they are checked again if that one goes too.
         let mut users: Vec<SmallVec<[u32; 2]>> = vec![SmallVec::new(); params.len()];
         for (user, &(block, index)) in params.iter().enumerate() {
-            for edge in predecessors.get(block as usize).map_or(&[][..], |edges| edges) {
+            for edge in predecessors
+                .get(block as usize)
+                .map_or(&[][..], |edges| edges)
+            {
                 let Some(&argument) = self
                     .function
                     .variable_args

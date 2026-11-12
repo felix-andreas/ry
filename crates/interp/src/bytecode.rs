@@ -4248,7 +4248,8 @@ impl Compiler {
                     return self.fallback(call, dst);
                 };
                 let inner_args = values::pairlist_items(inner.cdr());
-                if eval::builtin_def(function)?.prologue && inner_args.is_empty() && !self.argument {
+                if eval::builtin_def(function)?.prologue && inner_args.is_empty() && !self.argument
+                {
                     let function = self.constant(function);
                     let inner = self.constant(inner);
                     self.emit(Op::Prologue, &[dst, function, inner]);
@@ -9184,49 +9185,53 @@ unsafe fn slot_promises_into(
     args: &mut eval::Args,
 ) -> R<bool> {
     args.clear();
-    let mut cell = arguments;
-    while cell.kind() == SexpType::Pairlist {
-        let expression = cell.car();
-        let fits = match expression.kind() {
-            SexpType::Symbol if expression == symbols().dots => {
-                slot_named(state, expression).is_some_and(|slot| forwardable_dots(*slot))
-            }
-            SexpType::Symbol => eval::dot_dot_index(expression).is_none(),
-            SexpType::Bytecode => expression.cdr().element(SLOTS) != nil(),
-            SexpType::Promise => false,
-            _ => true,
-        };
-        if !fits {
-            return Ok(false);
-        }
-        cell = cell.cdr();
-    }
     let owner = (*state.interp).slot_owner as usize;
+    let mark = (*state.interp).references_used;
+    let unforced = (&(*state.interp).frames)[owner].unforced;
     let missing = missing_arg();
+    // One pass builds the arguments and gives up at the first one that needs the frame's
+    // environment, which is rare, undoing what it made: references go back to the pool, and
+    // the frame's count of unforced promises returns to what it was, since a promise made
+    // over a pending environment counts itself and one made over a reified one does not.
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
         let value = match expression.kind() {
-            _ if expression == missing => expression,
+            _ if expression == missing => Some(expression),
             SexpType::Symbol if expression == symbols().dots => {
-                slot_dots_into(state, references, args)?;
-                cell = cell.cdr();
-                continue;
-            }
-            SexpType::Symbol => match eager.then(|| slot_eager_argument(state, expression)) {
-                Some(Some(value)) => value,
-                _ if references => {
-                    let slot = slot_index(state, expression)
-                        .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
-                    eval::argument_reference(owner, slot, expression)?
+                if slot_dots_into(state, references, args)? {
+                    cell = cell.cdr();
+                    continue;
                 }
-                _ => eval::slot_promise(owner, expression)?,
-            },
-            SexpType::Bytecode if references => eval::code_reference(owner, expression)?,
+                None
+            }
+            SexpType::Symbol if eval::dot_dot_index(expression).is_some() => None,
+            SexpType::Symbol => Some(
+                match eager.then(|| slot_eager_argument(state, expression)) {
+                    Some(Some(value)) => value,
+                    _ if references => {
+                        let slot = slot_index(state, expression)
+                            .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
+                        eval::argument_reference(owner, slot, expression)?
+                    }
+                    _ => eval::slot_promise(owner, expression)?,
+                },
+            ),
+            SexpType::Bytecode if expression.cdr().element(SLOTS) == nil() => None,
+            SexpType::Bytecode if references => Some(eval::code_reference(owner, expression)?),
             // Code the compiler rejected (it defines a function, say) runs uncompiled over the
             // pending environment, so the frame gets one only if the callee forces it.
-            SexpType::Bytecode | SexpType::Language => eval::slot_promise(owner, expression)?,
-            _ => expression,
+            SexpType::Bytecode | SexpType::Language => Some(eval::slot_promise(owner, expression)?),
+            SexpType::Promise => None,
+            _ => Some(expression),
+        };
+        let Some(value) = value else {
+            (&mut (*state.interp).frames)[owner].unforced = unforced;
+            if (*state.interp).references_used != mark {
+                eval::release_references(mark);
+            }
+            args.clear();
+            return Ok(false);
         };
         args.push(Arg {
             tag: cell.tag(),
@@ -9747,6 +9752,7 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
             (0..formals.min(length(names))).find(|&index| names.element(index) == symbol)
         {
             let owner = (*state.interp).slot_owner as usize;
+            #[allow(clippy::borrow_deref_ref, clippy::needless_borrow)]
             let missing = (&(*state.interp).frames)
                 .get(owner)
                 .map_or(0, |frame| frame.missing);
