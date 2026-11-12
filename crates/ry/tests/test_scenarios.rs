@@ -1502,8 +1502,8 @@ struct Journey {
     /// Set by `ignore SIGINT`: later runs start with SIGINT ignored, as a background job of a
     /// non-interactive shell does.
     ignore_sigint: bool,
-    /// Variables `env` set for later `run` steps.
-    environment: BTreeMap<String, String>,
+    /// Variables `env` sets (`Some`) and `unset` removes (`None`) for later `run` steps.
+    environment: BTreeMap<String, Option<String>>,
     /// The package library this scenario's R processes search ([`scenario_library`]).
     library: Option<&'static Path>,
 }
@@ -1577,8 +1577,12 @@ impl Journey {
             ["env", name, value] => {
                 self.environment.insert(
                     (*name).to_owned(),
-                    value.replace("$ROOT", &self.root.to_string_lossy()),
+                    Some(value.replace("$ROOT", &self.root.to_string_lossy())),
                 );
+                Ok(())
+            }
+            ["unset", name] => {
+                self.environment.insert((*name).to_owned(), None);
                 Ok(())
             }
             ["remove", path] => {
@@ -2062,8 +2066,13 @@ impl Journey {
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
                     .env_remove("RY_LIBR")
                     .env_remove("RY_IMAGE")
-                    .envs(library_variables(self.library))
-                    .envs(&self.environment);
+                    .envs(library_variables(self.library));
+                for (name, value) in &self.environment {
+                    match value {
+                        Some(value) => command.env(name, value),
+                        None => command.env_remove(name),
+                    };
+                }
                 if *program == "single-ry" {
                     // A release finds nothing beside it, so neither may the copy that stands in.
                     command.env_remove("RY_BASE_R");
