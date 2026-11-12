@@ -66,7 +66,14 @@ fn build() -> Code {
         .expect("define entry");
 
     let mut code = module
-        .finish(&|name| matches!(name, "add_seven" | "flag"))
+        .finish(
+            &|name| matches!(name, "add_seven" | "flag"),
+            &[(
+                "increment".into(),
+                // lea rax, [rdi + 1]; ret
+                vec![0x48, 0x8D, 0x47, 0x01, 0xC3],
+            )],
+        )
         .expect("link");
     code.metadata = b"front end".to_vec();
     code
@@ -95,13 +102,17 @@ fn linked_code_runs_from_a_file_at_any_offset() {
             .expect("load")
             .expect("this processor runs x86-64-v2 code");
         assert_eq!(loaded.metadata, b"front end");
-        for name in ["twice", "entry"] {
+        for name in ["twice", "entry", "increment"] {
             let address = loaded.functions[name];
-            // SAFETY: both functions were built with the signature `i64 -> i64`.
+            // SAFETY: every function was built with the signature `i64 -> i64`.
             let function = unsafe {
                 std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(address as *const u8)
             };
-            let expected = if name == "twice" { 42 } else { 1049 };
+            let expected = match name {
+                "twice" => 42,
+                "increment" => 22,
+                _ => 1049,
+            };
             assert_eq!(function(21), expected, "{name} at base {base}");
         }
     }
@@ -121,7 +132,7 @@ fn unknown_symbols_fail_at_link_and_load() {
     builder.ins().return_(&[address]);
     builder.seal_all_blocks();
     module.define(id, &builder.finalize()).expect("define");
-    assert!(module.finish(&|_| false).is_err());
+    assert!(module.finish(&|_| false, &[]).is_err());
 
     let code = build();
     let bytes = section::encode(&code, 0);

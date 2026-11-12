@@ -238,15 +238,20 @@ impl ObjectModule {
         Ok(size)
     }
 
-    /// Links every defined function into one block of code and its link table. `known` says
-    /// whether the loader will be able to resolve a symbol.
-    pub fn finish(self, known: &dyn Fn(&str) -> bool) -> Result<crate::section::Code, Error> {
+    /// Links every defined function into one block of code and its link table, after the
+    /// functions of `prefix` (see [`crate::section::link`]). `known` says whether the loader will
+    /// be able to resolve a symbol.
+    pub fn finish(
+        self,
+        known: &dyn Fn(&str) -> bool,
+        prefix: &[(Box<str>, Vec<u8>)],
+    ) -> Result<crate::section::Code, Error> {
         let names = self.names;
         let product = self.object.finish();
         let bytes = product
             .emit()
             .map_err(|_| Error("Cranelift could not write the object"))?;
-        crate::section::link(&bytes, &names, known)
+        crate::section::link(&bytes, &names, known, prefix)
     }
 }
 

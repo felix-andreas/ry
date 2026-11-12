@@ -89,7 +89,7 @@ pub struct Frame {
 /// symbol never moves and neighbouring symbols differ only in low bits.
 #[inline(always)]
 fn filter_bit(symbol: Sexp) -> u64 {
-    1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
+    1 << ((symbol.as_ptr() as u64).wrapping_mul(layout::FILTER_MULTIPLIER) >> layout::FILTER_SHIFT)
 }
 
 /// Every binding a frame gains passes here, which is what makes [`gp::BOUND_ELSEWHERE`] sound:
@@ -130,6 +130,11 @@ pub mod layout {
     /// A slot is a symbol and its cell, each a pointer.
     pub const SLOT: usize = size_of::<Binding>();
     pub const SLOT_CELL: usize = std::mem::offset_of!(Binding, cell);
+
+    /// A symbol's [`FILTER`] bit is `1 << ((address * FILTER_MULTIPLIER) >> FILTER_SHIFT)`,
+    /// which machine code computes itself so that it holds no symbol's address.
+    pub const FILTER_MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
+    pub const FILTER_SHIFT: u8 = 58;
 
     /// The [`FILTER`] bit of `symbol`.
     pub fn filter_bit(symbol: crate::object::Sexp) -> u64 {

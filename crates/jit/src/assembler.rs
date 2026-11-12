@@ -174,8 +174,10 @@ impl Assembler {
     }
 
     /// Saves the pinned registers and loads them from the activation, which arrives as the
-    /// first argument. The second argument, the pc to start at, is left in the accumulator.
-    pub fn prologue(&mut self, steps: u64, registers_offset: u32, interp_offset: u32) {
+    /// first argument, and the step table from `steps_offset` in the `Interp`. The second
+    /// argument, the pc to start at, is left in the accumulator. Nothing here depends on where
+    /// the code or the runtime lies, so the same bytes run in any process.
+    pub fn prologue(&mut self, steps_offset: u32, registers_offset: u32, interp_offset: u32) {
         match self.arch {
             Arch::X64 => {
                 // Five pushes after the return address leave the stack 16-byte aligned for calls.
@@ -188,9 +190,9 @@ impl Assembler {
                 // mov r15, [rbx + interp]
                 self.bytes(&[0x4C, 0x8B, 0xBB]);
                 self.u32(interp_offset);
-                // mov r13, steps
-                self.bytes(&[0x49, 0xBD]);
-                self.u64(steps);
+                // mov r13, [r15 + steps]
+                self.bytes(&[0x4D, 0x8B, 0xAF]);
+                self.u32(steps_offset);
                 // lea r14, [rip + table]
                 self.bytes(&[0x4C, 0x8D, 0x35]);
                 self.fixups.push(Fixup::Table {
@@ -212,7 +214,7 @@ impl Assembler {
                 self.a64_mov(19, 0);
                 self.a64_load(20, 19, registers_offset);
                 self.a64_load(23, 19, interp_offset);
-                self.a64_constant(21, steps);
+                self.a64_load(21, 23, steps_offset);
                 // adr x22, table
                 self.fixups.push(Fixup::Table {
                     at: self.code.len() as u32,
@@ -402,31 +404,51 @@ impl Assembler {
         self.store_scratch_register(to);
     }
 
-    /// Stores the 64-bit `value` into register `to` of the window.
-    pub fn store_register_constant(&mut self, to: u32, value: u64) {
+    /// Loads the word at byte `at` of the list whose pointer lies at `pool` in the
+    /// activation, such as a constant of the constant pool, into the object scratch register.
+    pub fn load_pool(&mut self, pool: u32, at: u32) {
         match self.arch {
             Arch::X64 => {
-                // mov rax, value
-                self.bytes(&[0x48, 0xB8]);
-                self.u64(value);
+                // mov rax, [rbx + pool]; mov rax, [rax + at]
+                self.bytes(&[0x48, 0x8B]);
+                self.x64_memory(0, 3, pool);
+                self.bytes(&[0x48, 0x8B]);
+                self.x64_memory(0, 0, at);
             }
-            Arch::A64 => self.a64_constant(16, value),
+            Arch::A64 => {
+                self.a64_load(16, 19, pool);
+                self.a64_load(16, 16, at);
+            }
         }
+    }
+
+    /// Loads entry `index` of the step table into the object scratch register.
+    pub fn load_table(&mut self, index: usize) {
+        let offset = (index * 8) as u32;
+        match self.arch {
+            Arch::X64 => {
+                // mov rax, [r13 + offset]
+                self.bytes(&[0x49, 0x8B]);
+                self.x64_memory(0, 13, offset);
+            }
+            Arch::A64 => self.a64_load(16, 21, offset),
+        }
+    }
+
+    /// Stores the object scratch register into register `to` of the window.
+    pub fn store_object(&mut self, to: u32) {
         self.store_scratch_register(to);
     }
 
-    /// Stores the 64-bit `value` at `offset` in the `Interp`.
-    pub fn store_interp_constant(&mut self, offset: u32, value: u64) {
+    /// Stores the object scratch register at `offset` in the `Interp`.
+    pub fn store_interp_object(&mut self, offset: u32) {
         match self.arch {
             Arch::X64 => {
-                // mov rax, value; mov [r15 + offset], rax
-                self.bytes(&[0x48, 0xB8]);
-                self.u64(value);
+                // mov [r15 + offset], rax
                 self.bytes(&[0x49, 0x89]);
                 self.x64_memory(0, 15, offset);
             }
             Arch::A64 => {
-                self.a64_constant(16, value);
                 self.a64_address(17, 23, offset);
                 self.word(0xF900_0000 | (17 << 5) | 16);
             }
@@ -551,18 +573,21 @@ impl Assembler {
     }
 
     /// Branches to `label` when the loaded object is (`Equal`) or is not (`NotEqual`) the
-    /// object at `address`.
-    pub fn branch_object_is(&mut self, address: u64, condition: Condition, label: Label) {
+    /// word at byte `at` of the list whose pointer lies at `pool` in the activation.
+    pub fn branch_object_is(&mut self, pool: u32, at: u32, condition: Condition, label: Label) {
         match self.arch {
             Arch::X64 => {
-                // mov rcx, address; cmp rax, rcx
-                self.bytes(&[0x48, 0xB9]);
-                self.u64(address);
+                // mov rcx, [rbx + pool]; mov rcx, [rcx + at]; cmp rax, rcx
+                self.bytes(&[0x48, 0x8B]);
+                self.x64_memory(1, 3, pool);
+                self.bytes(&[0x48, 0x8B]);
+                self.x64_memory(1, 1, at);
                 self.bytes(&[0x48, 0x39, 0xC8]);
                 self.x64_jcc(condition, label);
             }
             Arch::A64 => {
-                self.a64_constant(17, address);
+                self.a64_load(17, 19, pool);
+                self.a64_load(17, 17, at);
                 // cmp x16, x17
                 self.word(0xEB00_001F | (17 << 16) | (16 << 5));
                 self.a64_branch_if(condition, label);
@@ -796,6 +821,43 @@ impl Assembler {
                 let r = register.a64();
                 let base = if value < 0 { 0xD100_0000 } else { 0x9100_0000 };
                 self.word(base | (value.unsigned_abs() << 10) | (r << 5) | r);
+            }
+        }
+    }
+
+    /// `to = 1 << ((from * multiplier) >> shift)`, the bit a multiplicative hash of `from`
+    /// selects. It clobbers `rcx` on x64 and `x17` on arm64.
+    pub fn filter_bit(&mut self, to: Reg, from: Reg, multiplier: u64, shift: u8) {
+        match self.arch {
+            Arch::X64 => {
+                let from = from.x64();
+                let to = to.x64();
+                // mov rcx, multiplier
+                self.bytes(&[0x48, 0xB9]);
+                self.u64(multiplier);
+                // imul rcx, from
+                self.bytes(&[0x48 | (from >> 3), 0x0F, 0xAF, 0xC8 | (from & 7)]);
+                // shr rcx, shift
+                self.bytes(&[0x48, 0xC1, 0xE9, shift]);
+                // mov to, 1
+                self.bytes(&[0x48 | (to >> 3), 0xC7, 0xC0 | (to & 7)]);
+                self.u32(1);
+                // shl to, cl
+                self.bytes(&[0x48 | (to >> 3), 0xD3, 0xE0 | (to & 7)]);
+            }
+            Arch::A64 => {
+                let from = from.a64();
+                let to = to.a64();
+                let shift = u32::from(shift);
+                self.a64_constant(17, multiplier);
+                // mul x17, x17, from
+                self.word(0x9B00_7C00 | (from << 16) | (17 << 5) | 17);
+                // lsr x17, x17, #shift
+                self.word(0xD340_0000 | (shift << 16) | (63 << 10) | (17 << 5) | 17);
+                // movz to, #1
+                self.word(0xD280_0000 | (1 << 5) | to);
+                // lslv to, to, x17
+                self.word(0x9AC0_2000 | (17 << 16) | (to << 5) | to);
             }
         }
     }

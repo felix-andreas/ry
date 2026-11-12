@@ -6041,6 +6041,10 @@ pub mod baseline_layout {
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.
     pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
+    /// The step table pointer inside `Interp`.
+    pub const STEPS: usize = std::mem::offset_of!(crate::Interp, baseline_steps);
+    /// The activation's constant pool, a plain list.
+    pub const CONSTANTS: usize = std::mem::offset_of!(Activation<'static, 'static>, constants);
 }
 
 /// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
@@ -6095,9 +6099,12 @@ macro_rules! handlers {
         $(
             unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
                 guarded(state, at, |state, at| {
+                    if let Some(pc) = fast_step::<{ Op::$op as u32 }>(state, at) {
+                        return baseline_answer(pc, at + 1 + operand_count(Op::$op));
+                    }
                     let instruction =
                         Instruction { code: state.code, at, registers: state.registers };
-                    let flow = $body(state, instruction);
+                    let flow = shared::<{ Op::$op as u32 }>(state, instruction);
                     let next = at + 1 + operand_count(Op::$op);
                     let pc = advance::<false>(state, at, next, flow);
                     if $roots && pc != STOP {
@@ -6107,6 +6114,23 @@ macro_rules! handlers {
                 })
             }
         )*
+
+        /// The one copy of each op's body that runs one instruction at a time: the baseline step
+        /// and tier 0's single-step handler both call it. Tier 0's own handler keeps the body
+        /// inlined, because a call there costs every instruction its arguments' spills: calling
+        /// this copy from tier 0 too took 3.4% more instructions on `testthat_full`.
+        #[inline(never)]
+        unsafe fn shared<const OP: u32>(
+            state: &mut Activation<'_, '_>,
+            instruction: Instruction,
+        ) -> R<Flow> {
+            $(
+                if OP == Op::$op as u32 {
+                    return $body(state, instruction);
+                }
+            )*
+            unreachable!("an op without a handler body")
+        }
 
         /// The step each op runs as in baseline machine code, indexed like [`OPS`].
         pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
@@ -6121,7 +6145,11 @@ macro_rules! handlers {
             #[inline(never)]
             unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
                 let instruction = Instruction { code: state.code, at, registers: state.registers };
-                let flow = $body(state, instruction);
+                let flow = if SINGLE {
+                    shared::<{ Op::$op as u32 }>(state, instruction)
+                } else {
+                    $body(state, instruction)
+                };
                 let pc = advance::<SINGLE>(state, at, at + 1 + operand_count(Op::$op), flow);
                 if SINGLE {
                     state.stepped = pc;
@@ -6355,6 +6383,21 @@ macro_rules! fast_paths {
                 become GENERIC_HANDLERS[Op::$op as usize](state, at)
             }
         )*
+
+        /// The fast path of op `OP`, for its baseline step, which tries it first as tier 0's
+        /// handler does. `Jump` has its own step, which counts back edges.
+        #[inline(always)]
+        unsafe fn fast_step<const OP: u32>(
+            state: &mut Activation<'_, '_>,
+            at: usize,
+        ) -> Option<usize> {
+            $(
+                if OP == Op::$op as u32 && OP != Op::Jump as u32 {
+                    return $fast(state, at);
+                }
+            )*
+            None
+        }
 
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*

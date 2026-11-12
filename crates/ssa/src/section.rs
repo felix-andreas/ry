@@ -53,6 +53,10 @@ pub const FILE_ALIGNMENT: u64 = 16 * 1024;
 /// of every page size lets the loader protect the code and the table separately.
 const TABLE_ALIGNMENT: usize = 64 * 1024;
 
+/// Where each prefix function, and the object's code after them, starts: the alignment the
+/// processor fetches code best at.
+const PREFIX_ALIGNMENT: usize = 64;
+
 /// The most symbols or functions one section may hold.
 const MAX_NAMES: usize = 1 << 20;
 
@@ -100,24 +104,41 @@ fn host_runs(target: u32) -> bool {
 }
 
 /// Links the relocatable ELF object `object`, whose text defines the functions `names`, into one
-/// block of code with its link table. Every symbol the code reads from the table must be `known`
-/// to the loader, and every function in `names` must be defined.
+/// block of code with its link table, after the functions of `prefix`. Every symbol the code
+/// reads from the table must be `known` to the loader, and every function in `names` must be
+/// defined. A prefix function is code that needs no linking: it reads nothing from the link
+/// table and refers to nothing outside its own bytes, as the baseline tier's code does.
 pub fn link(
     object: &[u8],
     names: &[Box<str>],
     known: &dyn Fn(&str) -> bool,
+    prefix: &[(Box<str>, Vec<u8>)],
 ) -> Result<Code, Error> {
     let file = object::File::parse(object).map_err(|_| Error("the object does not parse"))?;
-    let text = file
-        .section_by_name(".text")
-        .ok_or(Error("the object has no code"))?;
-    let text_index = text.index();
-    let mut code = text
-        .data()
-        .map_err(|_| Error("the object's code does not read"))?
-        .to_vec();
+    let mut code = Vec::new();
+    let mut functions = Vec::with_capacity(prefix.len() + names.len());
+    for (name, bytes) in prefix {
+        code.resize(code.len().next_multiple_of(PREFIX_ALIGNMENT), 0);
+        let offset = u32::try_from(code.len()).map_err(|_| Error("the code is larger than 4GB"))?;
+        functions.push((name.clone(), offset));
+        code.extend_from_slice(bytes);
+    }
+    code.resize(code.len().next_multiple_of(PREFIX_ALIGNMENT), 0);
+    let start = code.len();
+    // An object without functions may have no text at all.
+    let text = file.section_by_name(".text");
+    if text.is_none() && !names.is_empty() {
+        return Err(Error("the object has no code"));
+    }
+    if let Some(text) = &text {
+        code.extend_from_slice(
+            text.data()
+                .map_err(|_| Error("the object's code does not read"))?,
+        );
+    }
+    let text_index = text.as_ref().map(|text| text.index());
     if file.sections().any(|section| {
-        section.index() != text_index
+        Some(section.index()) != text_index
             && section.relocations().next().is_some()
             && section
                 .name()
@@ -130,21 +151,25 @@ pub fn link(
     let mut slots: FxHashMap<Box<str>, usize> = FxHashMap::default();
     let mut defined: FxHashMap<&str, u64> = FxHashMap::default();
     for symbol in file.symbols() {
-        if symbol.section_index() == Some(text_index)
+        if symbol.section_index() == text_index
+            && text_index.is_some()
             && symbol.kind() == SymbolKind::Text
             && let Ok(name) = symbol.name()
         {
             defined.insert(name, symbol.address());
         }
     }
-    for (offset, relocation) in text.relocations() {
+    for (offset, relocation) in text.iter().flat_map(|text| text.relocations()) {
         let RelocationTarget::Symbol(index) = relocation.target() else {
             return Err(Error("a relocation that names no symbol"));
         };
         let symbol = file
             .symbol_by_index(index)
             .map_err(|_| Error("a relocation names a missing symbol"))?;
-        let place = usize::try_from(offset).map_err(|_| Error("a relocation past the code"))?;
+        let place = usize::try_from(offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(start))
+            .ok_or(Error("a relocation past the code"))?;
         if place.checked_add(4).is_none_or(|end| end > code.len()) {
             return Err(Error("a relocation past the code"));
         }
@@ -178,10 +203,10 @@ pub fn link(
                 if symbol.is_undefined() {
                     return Err(Error("the code calls a function outside itself"));
                 }
-                if symbol.section_index() != Some(text_index) {
+                if symbol.section_index() != text_index {
                     return Err(Error("the code refers to data outside itself"));
                 }
-                symbol.address() as i64
+                (start as u64 + symbol.address()) as i64
             }
             _ => return Err(Error("a relocation of a kind the linker lacks")),
         };
@@ -190,12 +215,12 @@ pub fn link(
             i32::try_from(displacement).map_err(|_| Error("a relocation out of range"))?;
         code[place..place + 4].copy_from_slice(&displacement.to_le_bytes());
     }
-    let mut functions = Vec::with_capacity(names.len());
     for name in names {
         let offset = *defined
             .get(&**name)
             .ok_or(Error("a declared function was never defined"))?;
-        let offset = u32::try_from(offset).map_err(|_| Error("the code is larger than 4GB"))?;
+        let offset = u32::try_from(start as u64 + offset)
+            .map_err(|_| Error("the code is larger than 4GB"))?;
         functions.push((name.clone(), offset));
     }
     if code.len() > u32::MAX as usize {

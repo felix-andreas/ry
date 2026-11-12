@@ -493,6 +493,10 @@ pub struct Interp {
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
+    /// The table baseline machine code calls its stubs and steps through, which the jit sets
+    /// before any baseline code runs. Code reads it from here rather than holding its address,
+    /// so code compiled at install time runs in any process.
+    pub baseline_steps: *const usize,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
     /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, by builtin index and read
@@ -700,6 +704,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         suspended_handlers: Vec::new(),
         handler_pool: Vec::new(),
         srcref: heap.known().nil,
+        baseline_steps: std::ptr::null(),
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: Vec::new(),
