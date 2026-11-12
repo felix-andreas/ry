@@ -423,12 +423,12 @@ unsafe fn load(
             &fixed(),
             relocation,
             &mut decode,
-            &mut |memory| {
-                memory.copy_from_slice(image.pages());
+            &mut |memory, at| {
+                memory.copy_from_slice(&image.pages()[at..at + memory.len()]);
                 Ok(())
             },
-            &mut |memory| {
-                memory.copy_from_slice(image.large());
+            &mut |memory, at| {
+                memory.copy_from_slice(&image.large()[at..at + memory.len()]);
                 Ok(())
             },
         )

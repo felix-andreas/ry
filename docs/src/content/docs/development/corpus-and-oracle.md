@@ -283,9 +283,28 @@ a case:
 | GNU R at hand | `verify` | `record`, `RY_BLESS=1` | `recorded_outcomes_match_gnu_r` |
 |---|---|---|---|
 | same release and libraries | runs | runs | runs |
-| other BLAS or LAPACK | warns, runs | warns, runs | warns, runs |
+| other BLAS or LAPACK | warns, runs | warns, runs | warns, runs all but the library-dependent cases |
 | other release | refuses (exit 2) | refuses (exit 2) | skips, naming both builds |
 | no build file | warns, runs | writes the file | fails (bless writes it) |
+
+A case whose expected digits are those of the numerical libraries declares it in a leading
+`# oracle: library-dependent` line: matrix products, `lm`, `optim` and the other cases that print
+BLAS or LAPACK results to the last bit, where another library also moves an optimizer's iteration
+count and warnings. Only a GNU R on the recorded libraries can confirm those expectations, so
+`recorded_outcomes_match_gnu_r` skips them on other BLAS or LAPACK libraries and names each one
+it skips. The C math library and the compiler move results too, but the build file does not name
+them, so the cases that follow them carry the marker as well and are compared only where BLAS and
+LAPACK match too:
+
+- glibc's x86-64-v3 build, which CI's Ubuntu runner uses, changes `pgamma`, `fft` and `nlm` results.
+- A GNU R configured against glibc 2.41 or later calls the C library's `tanpi`, `sinpi` and
+  `cospi` instead of its own, which moves the last bit of the Cauchy quantiles
+  (`distributions__cauchy_quantiles`).
+- A complex sum of an NA part and a NaN part is NA or NaN depending on how the compiler ordered
+  the operands (`kernels__complex_na_nan_sums`).
+
+Keep such a computation in a small case of its own, so the larger case it came from is still
+compared everywhere.
 
 On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. To move the suite
 to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it

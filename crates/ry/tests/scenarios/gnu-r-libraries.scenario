@@ -19,6 +19,9 @@ file paths.R
 
 env HOME $ROOT/home
 env PATH $ROOT/gnu/bin
+unset R_LIBS
+unset R_LIBS_USER
+unset R_LIBS_SITE
 run ry run paths.R
 expect exit 0
 expect stdout "library ROOT/home/R/x86_64-pc-linux-gnu-library/4.5 \nlibrary ROOT/home/R/x86_64-pc-linux-gnu-library/4.0 \nlibrary ROOT/gnu/lib/R/site-library \n"

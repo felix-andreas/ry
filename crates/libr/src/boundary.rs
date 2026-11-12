@@ -111,6 +111,19 @@ impl Handout for Sexp {
     }
 }
 
+/// A result that C code may get as a `NULL` pointer, which is no object and needs no handle.
+impl Handout for Option<Sexp> {
+    fn as_sexp(self) -> Option<Sexp> {
+        self
+    }
+
+    fn hand_out(self, runtime: &mut Runtime) {
+        if let Some(object) = self {
+            object.hand_out(runtime);
+        }
+    }
+}
+
 /// A result that stays reachable through the API function's argument, such as a list cell's
 /// `CAR` or an attribute, so it needs no handle: it lives exactly as long as GNU R's would.
 #[derive(Clone, Copy)]

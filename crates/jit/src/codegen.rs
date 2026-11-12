@@ -28,7 +28,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{self, Arith, Op, baseline_layout},
+        bytecode::{self, Arith, Op, interp_layout},
         values,
     },
     rustc_hash::FxHashMap,
@@ -453,7 +453,7 @@ impl<'p> Translator<'p> {
             }
             Action::Srcref(srcref) => {
                 let srcref = self.builder.ins().iconst(I64, srcref.as_ptr() as i64);
-                let at = baseline_layout::SRCREF as i32 - baseline_layout::VISIBLE as i32;
+                let at = interp_layout::SRCREF as i32 - interp_layout::VISIBLE as i32;
                 self.builder.ins().store(flags(), srcref, self.visible, at);
             }
             Action::Constant { dst, value, ty } => {
@@ -482,10 +482,11 @@ impl<'p> Translator<'p> {
                 slot,
                 load,
                 forcing,
+                volatile,
             } => {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
+                    self.load_slot(position, &before, slot, ty, forcing, volatile, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.in_variables() {
@@ -523,7 +524,7 @@ impl<'p> Translator<'p> {
             }
             Action::GetFunSlot { dst, slot, load } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, false, None)?;
+                    self.load_slot(position, &before, slot, ty, false, false, None)?;
                 }
                 let value = self.load_slot_cell(slot);
                 self.store_register(dst, value);
@@ -730,7 +731,7 @@ impl<'p> Translator<'p> {
                 self.fill_edges()?;
                 return Ok(true);
             }
-            Action::BranchUnlessPrimitive { function, expected } => {
+            Action::BranchUnlessSame { function, expected } => {
                 let value = self.load_register(function);
                 let same =
                     self.builder
@@ -3275,6 +3276,7 @@ impl<'p> Translator<'p> {
         slot: usize,
         ty: Ty,
         forcing: bool,
+        volatile: bool,
         dst: Option<usize>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -3381,7 +3383,12 @@ impl<'p> Translator<'p> {
                 self.guard(fits, mismatch);
             }
         }
-        self.set_status(slot, merged_status);
+        if volatile {
+            let unloaded = self.builder.ins().iconst(I32, 0);
+            self.set_status(slot, unloaded);
+        } else {
+            self.set_status(slot, merged_status);
+        }
         match ty {
             Ty::Int | Ty::Lgl => {
                 let unboxed = self.unbox(value, ty);

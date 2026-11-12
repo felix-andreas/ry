@@ -11,9 +11,8 @@
 //! SSA with block arguments.
 
 mod lower;
-pub mod section;
 
-pub use lower::{Allocator, Error, FuncId, Module, ObjectModule, with_module};
+pub use lower::{Allocator, Error, FuncId, Module, with_module};
 use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -85,9 +84,6 @@ entities! {
     SigRef,
     /// A function the body calls directly.
     FuncRef,
-    /// A named address the code takes from its link table, which the loader fills when it maps
-    /// code written ahead of time (see [`section`]).
-    SymbolRef,
 }
 
 /// An integer comparison.
@@ -165,11 +161,15 @@ impl From<f64> for Ieee64 {
 
 /// How a function receives its arguments. `Host` is the platform's C convention, which every
 /// entry point the runtime calls uses; `Tail` is the convention compiled code calls itself with,
-/// which allows tail calls.
+/// which allows tail calls. A `Preserving` function saves every register it writes and returns
+/// nothing, so a call of it costs its caller no register: a value that is live across the call
+/// stays where it is. Rarely taken paths call the runtime through one, because the allocator
+/// otherwise keeps a value that is live across any call in memory, hot path included.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CallConv {
     Host,
     Tail,
+    Preserving,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -232,7 +232,6 @@ pub struct Function {
     slots: Vec<StackSlotData>,
     signatures: Vec<Signature>,
     functions: Vec<(FuncId, Signature)>,
-    symbols: Vec<Box<str>>,
     entry: Option<Block>,
     /// The arguments a branch passes for its target's variable parameters, by branch and target.
     variable_args: FxHashMap<(Inst, u8), SmallVec<[Value; 4]>>,
@@ -290,8 +289,6 @@ enum Op {
     /// A store of the value's low 16 bits when the flag is set.
     Store(bool, MemFlagsData, Value, Value, i32),
     StackAddr(Type, StackSlot, i32),
-    /// The address the link table holds for a symbol.
-    SymbolAddr(SymbolRef),
     StackLoad(Type, StackSlot, i32),
     StackStore(Value, StackSlot, i32),
     Convert(Convert, Type, Value),
@@ -387,7 +384,6 @@ impl Function {
             slots: Vec::new(),
             signatures: Vec::new(),
             functions: Vec::new(),
-            symbols: Vec::new(),
             entry: None,
             variable_args: FxHashMap::default(),
         }
@@ -605,20 +601,6 @@ impl Builder {
         let reference = FuncRef(self.function.functions.len() as u32);
         self.function.functions.push((id, signature));
         reference
-    }
-
-    /// Names an address the code takes from its link table, once per name.
-    pub fn import_symbol(&mut self, name: &str) -> SymbolRef {
-        if let Some(index) = self
-            .function
-            .symbols
-            .iter()
-            .position(|symbol| &**symbol == name)
-        {
-            return SymbolRef(index as u32);
-        }
-        self.function.symbols.push(name.into());
-        SymbolRef(self.function.symbols.len() as u32 - 1)
     }
 
     pub fn inst_results(&self, inst: Inst) -> &[Value] {
@@ -1055,11 +1037,6 @@ impl Ins<'_> {
 
     pub fn iconst(self, ty: Type, value: i64) -> Value {
         self.single(Op::Iconst(ty, value), ty)
-    }
-
-    /// The address the link table holds for `symbol`, a 64-bit value.
-    pub fn symbol_addr(self, symbol: SymbolRef) -> Value {
-        self.single(Op::SymbolAddr(symbol), Type::I64)
     }
 
     pub fn f64const(self, value: impl Into<Ieee64>) -> Value {
