@@ -645,8 +645,8 @@ pub const RECORD_UNBOXED_OFFSET: usize = std::mem::offset_of!(RecordObject, unbo
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
 
-/// What machine code reads and writes in an object header directly: the baseline tier's inline
-/// variable loads and stores (`crates/jit/src/baseline.rs`) depend on these.
+/// What machine code reads and writes in an object header directly: tier 1's inline variable
+/// loads and stores (`crates/jit/src/codegen.rs`) depend on these.
 pub mod header_layout {
     use super::Header;
     pub const KIND: usize = std::mem::offset_of!(Header, kind);
