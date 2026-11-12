@@ -70,14 +70,16 @@ pub struct RCall {
     /// current.
     pub function: Sexp,
     pub call: Sexp,
-    /// The environment the function is called from: the typed closure's, since compiled code
-    /// has no frame of its own.
+    /// The typed closure's environment, which the conversions run in.
     pub env: Sexp,
     pub arguments: SmallVec<[RArgument; 4]>,
     /// The `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r` call the result goes
     /// through and the type it gives, or `None` when the call is a statement whose value is
     /// unused.
     pub result: Option<(Conversion, Type)>,
+    /// Whether the call is `stop()`, which raises an error and never returns, so it cannot
+    /// change a variable a lazy argument reads before R would force it.
+    pub diverges: bool,
 }
 
 /// An argument of an [`RCall`]: a native value of `ty`, passed through `conversion` when the
@@ -313,12 +315,13 @@ struct Lowering<'c> {
     converted: Option<Local>,
 }
 
-/// Where typed code may call an R function: where the value is unused, or where a conversion
-/// gives it a ry type.
+/// Where typed code may call an R function: where the value is unused, where a conversion
+/// gives it a ry type, or as `stop()`, which never returns.
 #[derive(Clone, Copy)]
 enum RUse {
     Unused,
     Converted(Conversion),
+    Diverges,
 }
 
 /// An argument of a call, by name or position.
@@ -631,8 +634,27 @@ impl Lowering<'_> {
             "function" => return Err(Refusal::new("a function literal that escapes")),
             "<<-" => return Err(Refusal::new("a superassignment")),
             "stop" => {
-                // The interpreter raises the error, with its message and call.
-                self.builder.terminate(Terminator::Fail);
+                // R raises the error, with its message and the typed function's call, so code
+                // that has called R, and cannot run again, reports it as the interpreter would.
+                // A message typed code cannot pass to R gives up instead, and the interpreter
+                // raises it.
+                let raise = self.builder.block();
+                self.builder.terminate(Terminator::Jump(raise));
+                self.builder.switch_to(raise);
+                let checkpoint = self.checkpoint();
+                let raised = match resolve_function(head, self.env) {
+                    Some(speculation) => {
+                        let function = speculation.function;
+                        self.speculations.push(speculation);
+                        self.r_call(call, function, RUse::Diverges)
+                    }
+                    None => Err(Refusal::new("`stop` is not a function")),
+                };
+                if raised.is_ok() {
+                    self.builder.terminate(Terminator::Fail);
+                } else if !self.rewind(checkpoint, raise) {
+                    return raised.map(|_| None);
+                }
                 let unreachable = self.builder.block();
                 self.builder.switch_to(unreachable);
                 return Ok(None);
@@ -681,9 +703,10 @@ impl Lowering<'_> {
     unsafe fn r_call(&mut self, call: Sexp, function: Sexp, r_use: RUse) -> Result<Local, Refusal> {
         let name = || interp::deparse::deparse_first_line(call.car());
         let result = match r_use {
-            RUse::Unused => None,
+            RUse::Unused | RUse::Diverges => None,
             RUse::Converted(conversion) => Some((conversion, conversion_type(conversion)?)),
         };
+        let diverges = matches!(r_use, RUse::Diverges);
         let calls = self.r_calls.len();
         let mut arguments: SmallVec<[RArgument; 4]> = SmallVec::new();
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
@@ -735,6 +758,7 @@ impl Lowering<'_> {
             env: self.env,
             arguments,
             result,
+            diverges,
         });
         let site = self.r_calls.len() - 1;
         Ok(match result {
@@ -2922,19 +2946,7 @@ impl Lowering<'_> {
             // A shape only confirmed somewhere, which the code may never see, whose arm does not
             // lower (a field of another type than the annotation says, say) gives up for that
             // shape alone rather than for the whole function.
-            let checkpoint = (!exhaustive && case.is_some()).then(|| Checkpoint {
-                scopes: self.scopes.clone(),
-                loops: self.loops.len(),
-                inlined: self.inlined.clone(),
-                speculations: self.speculations.len(),
-                nesting: self.nesting,
-                control: self.control,
-                unusable: self.unusable.len(),
-                returned: self.returned,
-                constructed: self.constructed.len(),
-                r_calls: self.r_calls.len(),
-                blocks: self.builder.function.blocks.len(),
-            });
+            let checkpoint = (!exhaustive && case.is_some()).then(|| self.checkpoint());
             let completed = match (arm(self, case), checkpoint) {
                 (Err(refusal), Some(checkpoint)) => {
                     if !self.rewind(checkpoint, body) {
@@ -2987,6 +2999,22 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Fail);
         }
         Ok(result)
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            scopes: self.scopes.clone(),
+            loops: self.loops.len(),
+            inlined: self.inlined.clone(),
+            speculations: self.speculations.len(),
+            nesting: self.nesting,
+            control: self.control,
+            unusable: self.unusable.len(),
+            returned: self.returned,
+            constructed: self.constructed.len(),
+            r_calls: self.r_calls.len(),
+            blocks: self.builder.function.blocks.len(),
+        }
     }
 
     /// Forgets everything lowered since `checkpoint`, which an arm starting at block `body` took,

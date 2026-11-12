@@ -24,6 +24,12 @@ The quality bar is four things.
 
 ## Open: broken on main
 
+- The code image leaves out every closure that calls an inlined base wrapper (`paste`,
+  `sprintf`, the `vector` family): tier 0 compiles such a call to an `Op::Guard` whose constant is
+  the wrapper's closure, and `serialize::Encoder` encodes only the closures in `BASE_FUNCTIONS`
+  (`local`), so `Unencodable("a closure")`. `install-code-image` and `install-machine-code`
+  scenarios fail on it (`written=3` of 4, `written=4` of 5). Encode the guard's closure as a
+  base function by name, as `local` is.
 - `test_tiers` `fuzz_typed_record_natives_agree_with_tier_zero` fails in the full suite (an old
   object "lost its mark" in `Heap::write_barrier_slow`, seed 104 or 121 depending on the build)
   but passes alone, so it depends on heap state earlier seeds leave behind. It fails on main
@@ -103,7 +109,7 @@ left, in order of expected gain:
 
 - **Box conversion at the boundary.** A record or tag argument from R converts deeply into boxes on every call, and a box result converts back (`typed::to_box`, `typed::from_box`): typed `expr_tree` spends about 46 of its 48 ms converting the tree, against 1.7 ms to evaluate `evaluate(build(14, 8))` built natively. The end shape keeps a box beside the R record it came from (or makes the R record a view of the box), so a value that crosses twice converts once. Boxes are also never scalar-replaced: a record built and read in one function is still allocated. `Str.to_i64` and `Str.to_f64` parse twice (`Op::Parses`, then `Op::Parse`). The design's pools (`typed-runtime.md`, "Representations") are not built.
 - **List functions that box every item.** `List.reverse`, the take, drop and sublist family and `List.split_at` move packed items through `arrays::gather`, but most of the others (`List.sort_asc`, `List.map`, `List.keep_if`, `List.concat`, ...) still go through `list_elements`, which allocates one scalar per item of an `F64` or `I64` list. A million-item list pays about 60 MiB of transient scalars that way. The end shape is a packed path per item kind, as `gather` has.
-- **`stop()` after an R call in typed code loses its message.** `stop` lowers to a give-up, and code that has called R cannot be run again, so the call raises the typed core's "cannot run again" error instead of the user's message. The end shape lowers `stop(msg)` to a native error raise with the message and the call. `sales` runs its `DataFrame` parameter on the table engine and is listed in `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`.
+- **Typed `sales` runs in the interpreter.** Its `DataFrame` parameter runs on the table engine, and it is listed in `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`.
 - **JIT-compiled callers skip native entries.** With the JIT on, a caller compiled to machine code calls `isTRUE` and the other `NATIVE_ENTRIES` closures as full closures (a loop of 17,000 `isTRUE(x)` calls takes no native entry); tier 0 takes the entry. Route compiled calls of base closures through `base_fast_paths` as tier 0 does.
 - **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. `sales` and `vasicek` pay it.
