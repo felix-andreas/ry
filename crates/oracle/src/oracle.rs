@@ -541,11 +541,29 @@ struct CommandOutput {
 
 /// Runs `command` to completion, or kills it once `timeout` has passed. The pipes are drained
 /// on their own threads, because a child that fills a pipe nobody reads never exits.
+///
+/// The child starts with SIGINT and SIGQUIT at their defaults. A shell starts a background job
+/// (`&`) with both ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored
+/// SIGINT instead of installing its handler, so a case that interrupts itself with
+/// `tools::pskill` would never see the interrupt under a detached run.
 fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    // SAFETY: the closure runs between fork and exec, and calls only `signal`, which is
+    // async-signal-safe.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+            for signal in [libc::SIGINT, libc::SIGQUIT] {
+                if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
     let mut child = command.spawn()?;
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -981,29 +999,37 @@ fn collect_cases(path: &Path, cases: &mut Vec<PathBuf>) {
     }
 }
 
-/// Splits `cases` into those that can run here and those that cannot, each with the packages
-/// it needs and GNU R lacks. A case names its packages in a leading `# oracle: requires knitr,
+/// Splits `cases` into those that can run here and those that cannot, each with what it needs
+/// and this machine lacks. A case names its packages in a leading `# oracle: requires knitr,
 /// rmarkdown` comment, because without them it fails in an environment-specific way (a missing
-/// vignette engine reports a temporary path) rather than in a way two engines can agree on.
-/// When GNU R cannot list its packages, every case is kept.
+/// vignette engine reports a temporary path) rather than in a way two engines can agree on. A
+/// locale it switches to is a requirement too (`# oracle: requires locale en_US.ISO-8859-1`), so
+/// a machine that never generated it refuses the run by naming the locale instead of reporting a
+/// diff. When GNU R cannot list its packages, package requirements count as met.
 pub fn runnable_cases(
     cases: Vec<PathBuf>,
     installed: impl FnOnce() -> Option<Vec<String>>,
 ) -> (Vec<PathBuf>, Vec<(PathBuf, Vec<String>)>) {
     let required: Vec<Vec<String>> = cases.iter().map(|case| case_requirements(case)).collect();
-    let installed = match required.iter().any(|packages| !packages.is_empty()) {
+    let needs_packages = required
+        .iter()
+        .flatten()
+        .any(|requirement| !requirement.starts_with(LOCALE_REQUIREMENT));
+    let installed = match needs_packages {
         true => installed(),
         false => None,
     };
-    let Some(installed) = installed else {
-        return (cases, Vec::new());
-    };
     let mut runnable = Vec::new();
     let mut missing = Vec::new();
-    for (case, packages) in cases.into_iter().zip(required) {
-        let absent: Vec<String> = packages
+    for (case, requirements) in cases.into_iter().zip(required) {
+        let absent: Vec<String> = requirements
             .into_iter()
-            .filter(|package| !installed.iter().any(|name| name == package))
+            .filter(|requirement| match requirement.strip_prefix(LOCALE_REQUIREMENT) {
+                Some(locale) => !locale_installed(locale),
+                None => installed
+                    .as_ref()
+                    .is_some_and(|installed| !installed.iter().any(|name| name == requirement)),
+            })
             .collect();
         match absent.is_empty() {
             true => runnable.push(case),
@@ -1013,6 +1039,8 @@ pub fn runnable_cases(
     (runnable, missing)
 }
 
+const LOCALE_REQUIREMENT: &str = "locale ";
+
 fn case_requirements(case: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(case) else {
         return Vec::new();
@@ -1021,9 +1049,32 @@ fn case_requirements(case: &Path) -> Vec<String> {
         .take_while(|line| line.starts_with('#'))
         .filter_map(|line| line.strip_prefix("# oracle: requires "))
         .flat_map(|list| list.split(','))
-        .map(|package| package.trim().to_string())
-        .filter(|package| !package.is_empty())
+        .map(|requirement| requirement.trim().to_string())
+        .filter(|requirement| !requirement.is_empty())
         .collect()
+}
+
+/// Whether the C library can load `locale`. `newlocale` builds a locale object without touching
+/// this process's own locale, which a global `setlocale` would change under other threads.
+#[cfg(unix)]
+fn locale_installed(locale: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(locale) else {
+        return false;
+    };
+    // SAFETY: `name` is a valid C string for the call, and a non-null result is freed once.
+    unsafe {
+        let handle = libc::newlocale(libc::LC_CTYPE_MASK, name.as_ptr(), std::ptr::null_mut());
+        if handle.is_null() {
+            return false;
+        }
+        libc::freelocale(handle);
+        true
+    }
+}
+
+#[cfg(not(unix))]
+fn locale_installed(_locale: &str) -> bool {
+    false
 }
 
 /// The packages GNU R can load from the libraries [`library_environment`] gives every engine.

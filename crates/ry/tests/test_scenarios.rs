@@ -74,16 +74,14 @@ fn scenarios_hold() {
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
 /// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 2] = [
-    (
-        "sales",
-        "a `DataFrame` parameter, which the table engine runs",
-    ),
-    (
-        "vasicek",
-        "R's random number generator (`set.seed`, `stats::rnorm`)",
-    ),
-];
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 1] = [(
+    "sales",
+    "a `DataFrame` parameter, which the table engine runs",
+)];
+
+/// How a refusal that waits on the interpreter starts, as `typed::lower::AWAITING`
+/// spells it.
+const AWAITING: &str = "it waits on the interpreter to run `";
 
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
@@ -91,7 +89,8 @@ const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 /// A typed benchmark program that compiles natively has to stay native: a refusal that sends
 /// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
 /// time (500 times as much for `array_dot`). Each program runs once with
-/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
+/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter, and
+/// why.
 #[test]
 fn typed_benchmarks_run_natively() {
     if let Some(reason) =
@@ -153,28 +152,24 @@ fn typed_benchmarks_run_natively() {
             failures.push(format!("{name} failed:\n{stderr}"));
             continue;
         }
-        let interpreted: Vec<&str> = stderr
+        // Each fallback line names the function and gives the reason the native path declined.
+        // The first call of a function that converts what R returns, or calls `pkg::name` before
+        // the namespace is loaded, runs in the interpreter, which records the type or loads it.
+        let fallbacks: Vec<&str> = stderr
             .lines()
-            .filter_map(|line| {
-                line.strip_prefix("typed: `")?
-                    .strip_suffix("` runs in the interpreter")
+            .filter(|line| {
+                line.strip_prefix("typed: `")
+                    .and_then(|rest| rest.split_once("` runs in the interpreter: "))
+                    .is_some_and(|(function, reason)| {
+                        !TYPED_HARNESS_INTERPRETED.contains(&function)
+                            && !reason
+                                .split_once(": ")
+                                .is_some_and(|(_, why)| why.starts_with(AWAITING))
+                    })
             })
-            .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
             .collect();
-        if !interpreted.is_empty() {
-            let mut refusals: Vec<&str> = stderr
-                .lines()
-                .filter(|line| {
-                    line.starts_with("typed: no code") || line.starts_with("typed: refusing")
-                })
-                .collect();
-            refusals.sort_unstable();
-            refusals.dedup();
-            failures.push(format!(
-                "{name}: {} ran in the interpreter\n{}",
-                interpreted.join(", "),
-                refusals.join("\n")
-            ));
+        if !fallbacks.is_empty() {
+            failures.push(format!("{name}:\n{}", fallbacks.join("\n")));
         }
     }
     for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
@@ -411,6 +406,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         debugger: None,
         spawned: None,
         hide_gnu_r: false,
+        ignore_sigint: false,
         environment: BTreeMap::new(),
         library,
     };
@@ -1063,6 +1059,9 @@ struct Journey {
     spawned: Option<Spawned>,
     /// Set by `hide gnu-r`: later runs see no GNU R on `PATH` and no `R_HOME`.
     hide_gnu_r: bool,
+    /// Set by `ignore SIGINT`: later runs start with SIGINT ignored, as a background job of a
+    /// non-interactive shell does.
+    ignore_sigint: bool,
     /// Variables `env` set for later `run` steps.
     environment: BTreeMap<String, String>,
     /// The package library this scenario's R processes search ([`scenario_library`]).
@@ -1098,6 +1097,10 @@ impl Journey {
             ["requires", ..] => Ok(()),
             ["hide", "gnu-r"] => {
                 self.hide_gnu_r = true;
+                Ok(())
+            }
+            ["ignore", "SIGINT"] => {
+                self.ignore_sigint = true;
                 Ok(())
             }
             ["client", options @ ..] => {
@@ -1603,7 +1606,16 @@ impl Journey {
                     PathBuf::from(env!("CARGO_BIN_EXE_ry"))
                 };
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
-                let mut command = Command::new(executable);
+                // An ignored signal stays ignored across `exec`, so the shell hands it on.
+                let mut command = if self.ignore_sigint {
+                    let mut shell = Command::new("sh");
+                    shell
+                        .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+                        .arg(executable);
+                    shell
+                } else {
+                    Command::new(executable)
+                };
                 command
                     .args(arguments)
                     .current_dir(&self.root)
