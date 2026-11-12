@@ -1301,11 +1301,11 @@ impl Lowering<'_> {
                 } else {
                     value
                 };
-                let kinds: SmallVec<[Option<SexpType>; 4]> = arguments
+                let kinds: SmallVec<[Option<(SexpType, bool)>; 4]> = arguments
                     .iter()
-                    .map(|&argument| plain_storage(self.builder.ty(argument)))
+                    .map(|&argument| inline_storage(self.builder.ty(argument)))
                     .collect();
-                let result_kind = plain_storage(self.builder.ty(value));
+                let result_kind = inline_storage(self.builder.ty(value));
                 if !interp::annotations::admits_inline(definition, body, &kinds, result_kind) {
                     return Err(Refusal::new(
                         "a local function whose annotations reject its types",
@@ -1408,7 +1408,17 @@ impl Lowering<'_> {
                 let a = self.value(a)?;
                 let b = self.value(b)?;
                 let and = name == "&";
-                match (self.builder.ty(a), self.builder.ty(b)) {
+                let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+                let list = |ty: Type| matches!(ty, Type::Vector { array: true, .. });
+                let plain = |ty: Type| matches!(ty, Type::Vector { array: false, .. });
+                if (list(ta) || list(tb)) && (plain(ta) || plain(tb)) {
+                    return Err(Refusal::new("a logical operator on a list and an R vector"));
+                }
+                let result = Type::Vector {
+                    item: Item::Lgl,
+                    array: list(ta) || list(tb),
+                };
+                match (ta, tb) {
                     (Type::Lgl | Type::Bool, Type::Lgl | Type::Bool) => Ok(self
                         .builder
                         .emit(Type::Lgl, if and { Op::And(a, b) } else { Op::Or(a, b) })),
@@ -1424,9 +1434,7 @@ impl Lowering<'_> {
                     ) => {
                         let a = self.as_vector(a)?;
                         let b = self.as_vector(b)?;
-                        Ok(self
-                            .builder
-                            .emit(Type::vector(Item::Lgl), Op::VectorLogic(and, a, b)))
+                        Ok(self.builder.emit(result, Op::VectorLogic(and, a, b)))
                     }
                     _ => Err(Refusal::new(
                         "a logical operator on something other than logicals",
@@ -1470,6 +1478,54 @@ impl Lowering<'_> {
                 self.builder.terminate(Terminator::Jump(join));
                 self.builder.switch_to(join);
                 Ok(result)
+            }
+            "Set.from_list" => {
+                let [list] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Set.from_list`"));
+                };
+                let list = self.value(list)?;
+                match self.builder.ty(list) {
+                    Type::Vector {
+                        item: item @ (Item::I64 | Item::Str),
+                        array: true,
+                    } => Ok(self.builder.emit(Type::Set(item), Op::Unique(list))),
+                    _ => Err(Refusal::new(
+                        "a `Set.from_list` of something other than a list of integers or strings",
+                    )),
+                }
+            }
+            "Set.to_list" | "Set.len" => {
+                let [set] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed set function"));
+                };
+                let set = self.value(set)?;
+                let Type::Set(item) = self.builder.ty(set) else {
+                    return Err(Refusal::new("a set function of something other than a set"));
+                };
+                if name == "Set.len" {
+                    return Ok(self.builder.emit(Type::I64, Op::Length(set)));
+                }
+                // The set's items are already a list in first-insertion order.
+                let list = Type::Vector { item, array: true };
+                Ok(self.builder.emit(list, Op::Relabel(set, list)))
+            }
+            "List.sort_asc" | "List.sort_desc" => {
+                let [list] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed sort"));
+                };
+                let list = self.value(list)?;
+                let ty = self.builder.ty(list);
+                match ty {
+                    Type::Vector {
+                        item: Item::I64 | Item::Dbl,
+                        array: true,
+                    } => Ok(self
+                        .builder
+                        .emit(ty, Op::Sort(list, name == "List.sort_desc"))),
+                    _ => Err(Refusal::new(
+                        "a sort of something other than a list of numbers",
+                    )),
+                }
             }
             "List.len" => {
                 let [a] = arguments.exactly(1)?[..] else {
@@ -1975,8 +2031,24 @@ impl Lowering<'_> {
                 };
                 let vector = self.value(vector)?;
                 let index = self.value(index)?;
-                let index = self.integer_index(index)?;
                 let ty = self.builder.ty(vector);
+                if name == "["
+                    && matches!(
+                        self.builder.ty(index),
+                        Type::Vector {
+                            item: Item::Lgl,
+                            ..
+                        }
+                    )
+                {
+                    return match ty {
+                        Type::Vector { .. } => Ok(self.builder.emit(ty, Op::Select(vector, index))),
+                        _ => Err(Refusal::new(
+                            "a logical index into something other than a vector",
+                        )),
+                    };
+                }
+                let index = self.integer_index(index)?;
                 let item = ty
                     .items()
                     .ok_or(Refusal::new("an index into something other than a vector"))?;
@@ -3626,6 +3698,28 @@ impl Lowering<'_> {
 
     unsafe fn compare(&mut self, op: Compare, a: Local, b: Local) -> Result<Local, Refusal> {
         let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+        let i64_list = |ty: Type| {
+            matches!(
+                ty,
+                Type::Vector {
+                    item: Item::I64,
+                    ..
+                }
+            )
+        };
+        // A `List<I64>` compares with another or with a number as `I64`s, giving a
+        // `List<Bool>`.
+        if i64_list(ta) || i64_list(tb) {
+            let a = if i64_list(ta) { a } else { self.to_i64(a)? };
+            let b = if i64_list(tb) { b } else { self.to_i64(b)? };
+            let result = Type::Vector {
+                item: Item::Lgl,
+                array: true,
+            };
+            return Ok(self
+                .builder
+                .emit(result, Op::VectorCompare(op, Item::I64, a, b)));
+        }
         // A comparison with an `I64` converts the other side as arithmetic does, and its
         // logical is never `NA`.
         if ta == Type::I64 || tb == Type::I64 {
@@ -3879,15 +3973,13 @@ fn joined(a: Type, b: Type) -> Option<Type> {
     }
 }
 
-/// The R storage type of a scalar or plain vector of `ty`, `None` for an Array, a list or a
-/// value with no R storage.
-fn plain_storage(ty: Type) -> Option<SexpType> {
-    if let Type::Dict { .. } = ty {
-        return Some(SexpType::Record);
-    }
-    match crate::storage(ty)? {
-        (kind, false) if !matches!(ty, Type::List(_)) => Some(kind),
-        _ => None,
+/// The R storage type of `ty` and whether it is an Array, as an inlined local function's checks
+/// see it. `None` for a list of boxes or a value with no R storage.
+fn inline_storage(ty: Type) -> Option<(SexpType, bool)> {
+    match ty {
+        Type::Dict { .. } => Some((SexpType::Record, false)),
+        Type::List(_) => None,
+        _ => crate::storage(ty),
     }
 }
 
