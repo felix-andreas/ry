@@ -604,8 +604,17 @@ impl Writer<'_, '_> {
                 _ => false,
             };
             // A promise's attribute slot holds its compiled code, which is no part of the R object.
-            let has_attr = !matches!(kind, SexpType::Char | SexpType::Promise)
-                && object.attrib() != self.known.nil;
+            // A typed closure's signature lives in the session's registry, so the stream
+            // carries it as the first attribute, which the reader puts back into its registry.
+            let signature = if kind == SexpType::Closure {
+                interp::annotations::stream_signature(object)
+                    .map_err(|_| error("cannot write a typed function's signature"))?
+            } else {
+                None
+            };
+            let has_attr = signature.is_some()
+                || !matches!(kind, SexpType::Char | SexpType::Promise)
+                    && object.attrib() != self.known.nil;
             let mut levels = object.gp();
             if kind == SexpType::Char {
                 levels &= !CHARSXP_SESSION_BITS;
@@ -622,7 +631,9 @@ impl Writer<'_, '_> {
                 | SexpType::Promise
                 | SexpType::Dots => {
                     self.write_integer(flags as i32)?;
-                    if has_attr {
+                    if let Some(signature) = signature {
+                        self.write_signature(signature, object.attrib())?;
+                    } else if has_attr {
                         self.write_item(object.attrib())?;
                     }
                     if has_tag {
@@ -641,6 +652,19 @@ impl Writer<'_, '_> {
             }
             return Ok(());
         }
+    }
+
+    /// Writes a typed closure's attribute list: one cell that holds `signature` under
+    /// [`interp::annotations::STREAM_ATTRIBUTE`], then the closure's own attributes `rest`.
+    unsafe fn write_signature(&mut self, signature: Sexp, rest: Sexp) -> ApiResult<()> {
+        runtime().heap.root(signature);
+        let name = interp::values::install(interp::annotations::STREAM_ATTRIBUTE)
+            .map_err(|_| error("cannot write a typed function's signature"))?;
+        let flags = pack_flags(SexpType::Pairlist.code(), 0, false, false, true);
+        self.write_integer(flags as i32)?;
+        self.write_item(name)?;
+        self.write_item(signature)?;
+        self.write_item(rest)
     }
 
     /// Writes an ALTREP object as `ALTREP_SXP`: its class information, the state its class

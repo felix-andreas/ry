@@ -384,15 +384,19 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if depth == 0 {
-        state.references_used = 0;
-    }
     if !state.pending_closures.is_empty() {
         state
             .pending_closures
             .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
+    // An unwind to top level skips the releases of the calls it leaves, so their argument
+    // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 && state.references_used != 0 {
+        // SAFETY: `state` is the interpreter's own state, which `release_references` reads
+        // through `interp()`, and it is not used after this call.
+        unsafe { eval::release_references(0) };
+    }
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,

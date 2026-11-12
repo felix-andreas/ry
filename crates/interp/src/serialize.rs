@@ -541,6 +541,20 @@ impl Reader<'_> {
                 {
                     closures.push(object);
                 }
+                // A typed closure's stream carries its signature as the first attribute, which
+                // goes back into the registry and is no attribute of the closure in memory.
+                let mut attributes = attributes;
+                if object_kind == SexpType::Closure
+                    && attributes.kind() == SexpType::Pairlist
+                    && attributes.tag().kind() == SexpType::Symbol
+                    && values::symbol_name(attributes.tag())
+                        == crate::annotations::STREAM_ATTRIBUTE
+                {
+                    crate::heap().root(object);
+                    crate::heap().root(attributes);
+                    crate::annotations::restore_signature(object, attributes.car())?;
+                    attributes = attributes.cdr();
+                }
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
                 }

@@ -132,14 +132,6 @@ fn scenario_filter_rejects_unknown_names() {
     );
 }
 
-/// The typed benchmark programs whose kernels do not run on native code yet, with what the
-/// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
-/// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 1] = [(
-    "sales",
-    "a `DataFrame` parameter, which the table engine runs",
-)];
-
 /// How a refusal that waits on the interpreter starts, as `typed::lower::AWAITING`
 /// spells it.
 const AWAITING: &str = "it waits on the interpreter to run `";
@@ -147,11 +139,11 @@ const AWAITING: &str = "it waits on the interpreter to run `";
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 
-/// A typed benchmark program that compiles natively has to stay native: a refusal that sends
-/// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
-/// time (500 times as much for `array_dot`). Each program runs once with
-/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter, and
-/// why.
+/// Every `<name>.typed.R` in `tools/bench/kernels` and `tools/bench/applications` runs natively,
+/// and has to stay native: a refusal that sends the warm calls of a strict typed closure to the
+/// interpreter fails nothing and shows only as time (500 times as much for `array_dot`). Each
+/// program runs once with `RY_TYPED_LOG`, which names every typed function a call of falls back
+/// to the interpreter, and why.
 #[test]
 fn typed_benchmarks_run_natively() {
     if let Some(reason) =
@@ -188,12 +180,6 @@ fn typed_benchmarks_run_natively() {
     .expect("write ry.toml");
     let mut failures = Vec::new();
     for (name, path) in &programs {
-        if TYPED_BENCHMARKS_NOT_NATIVE
-            .iter()
-            .any(|(listed, _)| listed == name)
-        {
-            continue;
-        }
         let program = fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let script = directory.path().join(format!("{name}.R"));
@@ -220,13 +206,6 @@ fn typed_benchmarks_run_natively() {
             .collect();
         if !fallbacks.is_empty() {
             failures.push(format!("{name}:\n{}", fallbacks.join("\n")));
-        }
-    }
-    for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
-        if !programs.iter().any(|(name, _)| name == listed) {
-            failures.push(format!(
-                "{listed} is listed as not native but is not a benchmark"
-            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
