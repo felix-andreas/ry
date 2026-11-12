@@ -974,7 +974,7 @@ pub fn escape_invalid_bytes(bytes: &[u8]) -> Cow<'_, str> {
 }
 
 /// The private-use character a byte past ASCII travels as (see [`escape_invalid_bytes`]).
-fn stand_in(byte: u8) -> char {
+pub fn stand_in(byte: u8) -> char {
     char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}')
 }
 
