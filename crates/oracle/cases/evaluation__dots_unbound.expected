@@ -1,0 +1,28 @@
+[stdout]
+| [1] "Error in f(1, 2) : '...' used in an incorrect context\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in f(1, 2): '...' used in an incorrect context>
+| [1] "Error in g() : '...' used in an incorrect context\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in g(): '...' used in an incorrect context>
+| [1] "Error in h() : '...' used in an incorrect context\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in h(): '...' used in an incorrect context>
+| [1] "Error in eval(quote(sum(1, ...)), e) : '...' used in an incorrect context\n"
+| attr(,"class")
+| [1] "try-error"
+| attr(,"condition")
+| <simpleError in eval(quote(sum(1, ...)), e): '...' used in an incorrect context>
+| list()
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list()

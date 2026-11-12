@@ -2486,7 +2486,12 @@ unsafe fn do_axis(call: &NativeCall<'_>) -> R<Sexp> {
     } else {
         coerce_vector(at, SexpType::Real)?
     };
-    let label_count = length(labels);
+    // GNU R's `C_axis` coerces a call to an expression vector, which holds the call whole.
+    let label_count = if labels.kind() == SexpType::Language {
+        1
+    } else {
+        length(labels)
+    };
     let logical_labels = matches!(labels.kind(), SexpType::Logical | SexpType::Nil);
     if !logical_labels && label_count != length(result) {
         return Err(error(format!(
@@ -3132,7 +3137,12 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
     } else {
         values::as_integer_scalar(font_value)
     };
-    let sizes = with_started_plot(|device| {
+    // As in GNU R, only user coordinates need a plot; figure units and inches measure against
+    // the device's current layout.
+    let sizes = with_device(|device| {
+        if units == 1 && !device.started {
+            return Err(error("plot.new has not been called yet"));
+        }
         let pars = &device.pars;
         let font = if font >= 1 { font } else { pars.font };
         // The `cex` argument scales `par("cex")` rather than replacing it.
@@ -7203,7 +7213,11 @@ unsafe fn do_gray(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `col2rgb(col, alpha)`: an integer matrix with a column per colour.
 unsafe fn do_col2rgb(call: &NativeCall<'_>) -> R<Sexp> {
-    let colours = call.arg(0);
+    // As in GNU R, anything but numbers and strings (a list, a logical) is read as strings.
+    let colours = match call.arg(0).kind() {
+        SexpType::String | SexpType::Integer | SexpType::Real => call.arg(0),
+        _ => coerce_vector(call.arg(0), SexpType::String)?,
+    };
     let with_alpha = values::as_logical_scalar(call.arg(1)) == 1;
     let rows = if with_alpha { 4 } else { 3 };
     let count = length(colours);

@@ -1,0 +1,37 @@
+[stdout]
+| [1] 1 2 3 4
+| [1] 1 2 3 4
+| [1] 5 3 7 8
+| Error in m[c(1, NA, 3), 3] <- c(10L, 20L, 30L) : 
+|   NAs are not allowed in subscripted assignments
+| [1]  9 10 11 12
+| [1]  1  5  9 13 17 21
+| Error in m[c(1, NA), 4] <- 1:3 : 
+|   NAs are not allowed in subscripted assignments
+| Error in m[c(NA, NA), 4] <- integer(0) : replacement has length zero
+| , , 1
+| 
+|      [,1] [,2]
+| [1,]    1    3
+| [2,]    0    4
+| 
+| , , 2
+| 
+|      [,1] [,2]
+| [1,]    5    7
+| [2,]    0    8
+| 
+| Error in a[c(NA, 2), 1, ] <- c(0L, 9L) : 
+|   NAs are not allowed in subscripted assignments
+| List of 4
+|  $ : num 1
+|  $ : chr "x"
+|  $ : num 3
+|  $ : num 4
+|  - attr(*, "dim")= int [1:2] 2 2
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

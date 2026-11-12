@@ -1,0 +1,13 @@
+[stdout]
+| [1] "both"
+| [1] "both"       "outer only"
+| [1] "inner only"
+| character(0)
+| console too
+| [1] "console too"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "console too"

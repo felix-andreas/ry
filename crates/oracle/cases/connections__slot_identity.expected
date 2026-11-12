@@ -1,0 +1,13 @@
+[stdout]
+| [1] "externalptr"
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] "invalid connection"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

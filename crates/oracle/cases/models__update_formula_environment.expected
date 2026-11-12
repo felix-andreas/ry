@@ -1,0 +1,12 @@
+[stdout]
+| [1] "x ~ z"
+| [1] TRUE
+| [1] TRUE
+| [1] ".Environment"
+| y ~ x + z
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| y ~ x + z

@@ -715,6 +715,47 @@ fn edge_cases_gnu_r_accepts() {
         .call("rytest_setcdr_any", &[])
         .expect("SETCDR with a vector");
     assert_eq!(r.integers(tail), vec![2]);
+    let left = r.call("rytest_remove_dim", &[]).expect("remove dim");
+    assert_eq!(r.integers(left), vec![0], "removing dim drops dimnames");
+    let late = r
+        .call("rytest_dimnames_filled_late", &[])
+        .expect("dimnames filled after setAttrib");
+    assert_eq!(
+        r.strings(late),
+        vec![Some("c".to_owned()), Some("d".to_owned())]
+    );
+    let dim_names = r.call("rytest_named_dim", &[]).expect("a named dim");
+    assert_eq!(
+        r.strings(dim_names),
+        vec![Some("x".to_owned()), Some("y".to_owned())]
+    );
+    // GNU R reads a string up to its first NUL, so text trimmed in place reads shorter.
+    let trimmed = r
+        .call("rytest_trim_in_place", &[r.string(" m / s ")])
+        .expect("a string trimmed in place");
+    let false_value = r.data("R_FalseValue");
+    let substituted = r.eval_expression(r.call_expression(
+        ".Internal",
+        &[(
+            None,
+            r.call_expression(
+                "sub",
+                &[
+                    (None, r.string("$")),
+                    (None, r.string("!")),
+                    (None, trimmed),
+                    (None, false_value),
+                    (None, r.data("R_TrueValue")),
+                    (None, false_value),
+                    (None, false_value),
+                ],
+            ),
+        )],
+    ));
+    assert_eq!(
+        r.strings(substituted.expect("sub on a string trimmed in place")),
+        vec![Some("m / s!".to_owned())]
+    );
 
     let message = r.string("inner");
     let inner = r.call_expression(

@@ -6,6 +6,9 @@
 #   RY_CORPUS_DIR       output directory (default: <repo>/.corpus)
 #   RY_CORPUS_SNAPSHOT  Posit Package Manager snapshot date (default: pinned below)
 #   RY_CORPUS_NCPUS     parallel install jobs (default: 4)
+#   RY_CORPUS_ROOTS     the package list to install (default: tools/corpus/roots.txt, the benchmark
+#                       set, which also installs the GitHub remotes below); `just top-packages` passes
+#                       tools/corpus/top-packages.txt
 
 args <- commandArgs(trailingOnly = FALSE)
 script <- sub("^--file=", "", grep("^--file=", args, value = TRUE))
@@ -15,10 +18,14 @@ corpus_dir <- Sys.getenv("RY_CORPUS_DIR", file.path(repo_root, ".corpus"))
 snapshot <- Sys.getenv("RY_CORPUS_SNAPSHOT", "2025-03-01")
 ncpus <- as.integer(Sys.getenv("RY_CORPUS_NCPUS", "4"))
 
-# The benchmark dependency set from AGENTS.md, minus the GitHub remotes below.
-roots <- readLines(file.path(repo_root, "tools", "corpus", "roots.txt"))
+# The benchmark dependency set from AGENTS.md, minus the GitHub remotes below, unless
+# RY_CORPUS_ROOTS names another list.
+roots_file <- Sys.getenv("RY_CORPUS_ROOTS", "")
+roots <- readLines(if (nzchar(roots_file)) roots_file else file.path(repo_root, "tools", "corpus", "roots.txt"))
+roots <- trimws(sub("#.*", "", roots))
+roots <- roots[nzchar(roots)]
 # Packages the benchmark takes from GitHub: name, URL, ref (NA means the default branch).
-remotes <- list(
+remotes <- if (nzchar(roots_file)) list() else list(
   list(name = "esgtoolkit", url = "https://github.com/Techtonique/esgtoolkit", ref = "v1.0.0"),
   list(name = "loadfast", url = "https://github.com/finccam/loadfast", ref = NA)
 )
@@ -105,7 +112,7 @@ row <- function(package, role) {
   ok <- package %in% have
   data.frame(
     package = package, role = role, installed = ok,
-    version = if (ok) as.character(packageVersion(package, lib.loc = library_dir)) else "",
+    version = if (ok) as.character(packageVersion(package, lib.loc = c(library_dir, .Library))) else "",
     reason = if (ok) "" else reason_for(package)
   )
 }

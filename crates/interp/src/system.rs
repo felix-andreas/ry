@@ -22,6 +22,7 @@ use {
     smallvec::SmallVec,
     std::{
         borrow::Cow,
+        num::NonZeroU32,
         path::{Path, PathBuf},
         time::{Duration, Instant},
     },
@@ -3751,30 +3752,53 @@ unsafe fn do_gc_time(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `gctorture(on)`: with `on`, every allocation collects first, which turns a missing root into
-/// a crash where it happens. Returns the previous setting.
+/// a crash where it happens. Returns whether stress was on.
 unsafe fn do_gctorture(call: &Call<'_>) -> R<Sexp> {
-    let previous = set_gc_stress(values::as_logical_scalar(call.arg(0)) == 1);
-    scalar_bool(previous)
-}
-
-/// `gctorture2(step, wait, inhibit_release)`: any positive `step` turns the stress on, since the
-/// heap collects either before every allocation or by its normal policy.
-unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
-    let step = values::as_integer_scalar(call.arg(0));
-    let previous = set_gc_stress(step != NA_INTEGER && step > 0);
-    scalar_integer(i32::from(previous))
-}
-
-unsafe fn set_gc_stress(on: bool) -> bool {
-    let heap = crate::heap();
-    let previous = heap.policy().stress != GcStress::Off;
-    heap.update_policy(|policy| {
-        policy.stress = if on {
-            GcStress::EveryAllocation
-        } else {
-            GcStress::Off
+    let argument = call.arg(0);
+    let gap = if argument.kind() == SexpType::Logical {
+        match values::as_logical_scalar(argument) {
+            NA_LOGICAL => NA_INTEGER,
+            on => on,
         }
+    } else {
+        values::as_integer_scalar(argument)
+    };
+    let previous = set_gc_stress(gap, NA_INTEGER);
+    scalar_bool(previous > 0)
+}
+
+/// `gctorture2(step, wait, inhibit_release)`: collect before every `step`-th allocation, the
+/// first after `wait` allocations. Returns the previous step.
+unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
+    let gap = values::as_integer_scalar(call.arg(0));
+    let wait = values::as_integer_scalar(call.arg(1));
+    scalar_integer(set_gc_stress(gap, wait))
+}
+
+/// GNU R's `R_gc_torture`: a negative or missing gap leaves the setting alone, and zero turns
+/// stress off. Returns the previous gap.
+unsafe fn set_gc_stress(gap: i32, wait: i32) -> i32 {
+    let heap = crate::heap();
+    let policy = heap.policy();
+    let previous = match policy.stress {
+        GcStress::Off => 0,
+        _ => i32::try_from(policy.stress_gap.get()).unwrap_or(i32::MAX),
+    };
+    if gap == NA_INTEGER || gap < 0 {
+        return previous;
+    }
+    let Some(gap) = u32::try_from(gap).ok().and_then(NonZeroU32::new) else {
+        heap.update_policy(|policy| policy.stress = GcStress::Off);
+        return previous;
+    };
+    heap.update_policy(|policy| {
+        if policy.stress == GcStress::Off {
+            policy.stress = GcStress::EveryAllocation;
+        }
+        policy.stress_gap = gap;
     });
+    let wait = u32::try_from(wait).ok().and_then(NonZeroU32::new).unwrap_or(gap);
+    heap.delay_stress(wait);
     previous
 }
 

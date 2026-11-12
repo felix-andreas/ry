@@ -699,37 +699,45 @@ unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
+    if names.kind() != SexpType::String {
+        return Err(error("invalid first argument"));
+    }
     let env = environment_arg(call.arg(1), "envir")?;
     let modes = call.arg(2);
-    let if_not_found = call.arg(3);
-    let inherits = values::as_logical_scalar(call.arg(4)) == 1;
     let count = length(names);
+    if modes.kind() != SexpType::String || (length(modes) != 1 && length(modes) != count) {
+        return Err(error("wrong length for 'mode' argument"));
+    }
+    // GNU R takes any vector here and treats its elements as a list's, so `ifnotfound = NA`
+    // gives `NA` for every missing name.
+    let if_not_found = call.arg(3);
+    if !if_not_found.kind().is_vector() {
+        return Err(error("invalid 'ifnotfound' argument"));
+    }
+    let fallbacks = length(if_not_found);
+    if fallbacks != 1 && fallbacks != count {
+        return Err(error("wrong length for 'ifnotfound' argument"));
+    }
+    let if_not_found = crate::coerce::coerce_vector(if_not_found, SexpType::List)?;
+    let inherits = values::as_logical_scalar(call.arg(4)) == 1;
     let result = alloc(SexpType::List, count)?;
     for index in 0..count {
         let name = string_at(names, index)
             .map(|text| text.into_owned())
             .unwrap_or_default();
         let symbol = values::install(&name)?;
-        let mode = if length(modes) > 0 {
-            string_at(modes, index % length(modes))
-                .map(|text| text.into_owned())
-                .unwrap_or_else(|| "any".into())
-        } else {
-            "any".into()
-        };
+        let mode = string_at(modes, index % length(modes))
+            .map(|text| text.into_owned())
+            .unwrap_or_else(|| "any".into());
         let value = match lookup(symbol, env, &mode, inherits)? {
             Some(value) => value_of(value)?,
             None => {
-                if if_not_found.kind() == SexpType::List && length(if_not_found) > 0 {
-                    let fallback = if_not_found.element(index % length(if_not_found));
-                    if values::is_function(fallback) {
-                        let argument = scalar_string(&name)?;
-                        eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env()?)?
-                    } else {
-                        fallback
-                    }
+                let fallback = if_not_found.element(index % fallbacks);
+                if values::is_function(fallback) {
+                    let argument = scalar_string(&name)?;
+                    eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env()?)?
                 } else {
-                    return Err(error(format!("value for '{name}' not found")));
+                    fallback
                 }
             }
         };
@@ -744,6 +752,23 @@ unsafe fn do_exists(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(1), "envir")?;
     let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
+    if mode == "any" {
+        // As in GNU R, an active binding exists without its function being called.
+        let heap = crate::heap();
+        let mut frame = env;
+        while frame != empty_env() {
+            if let Some(cell) = heap.frame_cell(frame, symbol)
+                && (cell.has_gp(gp::ACTIVE_BINDING) || cell.cdr() != unbound())
+            {
+                return scalar_bool(true);
+            }
+            if !inherits {
+                break;
+            }
+            frame = frame.enclosure();
+        }
+        return scalar_bool(false);
+    }
     scalar_bool(lookup(symbol, env, &mode, inherits)?.is_some())
 }
 
@@ -2054,6 +2079,15 @@ unsafe fn rapply_one(
     how: &str,
     env: Sexp,
 ) -> R<Sexp> {
+    // GNU R walks `NULL` as an empty list, so `FUN` never sees it: replace mode keeps it and
+    // the other modes give an empty list.
+    if object == nil() {
+        return if how == "replace" {
+            Ok(nil())
+        } else {
+            alloc(SexpType::List, 0)
+        };
+    }
     if object.kind() == SexpType::List && !values::inherits(object, "data.frame")
         || object.kind() == SexpType::List
             && how != "unlist"
@@ -2065,9 +2099,15 @@ unsafe fn rapply_one(
             let value = rapply_one(object.element(index), function, classes, deflt, how, env)?;
             values::set_elt(result, index, value);
         }
-        let names = values::names(object);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
+        // As in GNU R, `how = "replace"` keeps every list's attributes, class included, and
+        // the other modes keep only the names.
+        if how == "replace" {
+            values::copy_attributes(object, result)?;
+        } else {
+            let names = values::names(object);
+            if names != nil() {
+                values::set_attr(result, symbols().names, names)?;
+            }
         }
         return Ok(result);
     }
@@ -2078,7 +2118,13 @@ unsafe fn rapply_one(
             || (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
     });
     if matches {
-        call_function(function, &eval::value_args(&[object]), env, nil())
+        // GNU R binds the element to `X` in the `rapply` closure's frame and evaluates
+        // `FUN(X, ...)` there, so the extra arguments reach `FUN`.
+        let x_symbol = values::install("X")?;
+        define(x_symbol, object, env)?;
+        let fun_call = values::call(function, &[x_symbol, symbols().dots])?;
+        crate::heap().root(fun_call);
+        eval::force_and_call(fun_call, 1, env)
     } else if how == "replace" {
         Ok(object)
     } else {
@@ -2088,16 +2134,27 @@ unsafe fn rapply_one(
 
 unsafe fn do_eapply(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "env")?;
-    let function = call.arg(1);
     let all = values::as_logical_scalar(call.arg(2)) == 1;
+    let use_names = values::as_logical_scalar(call.arg(3)) != 0;
     let bound = env_symbols(env, all, false);
     let result = alloc(SexpType::List, bound.len())?;
+    crate::heap().root(result);
+    // GNU R evaluates `FUN(quote(value), ...)` in the `eapply` closure's frame, so the extra
+    // arguments reach `FUN`.
+    let fun_symbol = values::install("FUN")?;
+    let quote_symbol = values::install("quote")?;
     for (index, &symbol) in bound.iter().enumerate() {
-        let value = value_of(find_var_in_frame(symbol, env)?)?;
-        let value = call_function(function, &eval::value_args(&[value]), call.env()?, nil())?;
+        let value = crate::scope(|| {
+            let value = value_of(find_var_in_frame(symbol, env)?)?;
+            let quoted = values::call(quote_symbol, &[value])?;
+            let fun_call = values::call(fun_symbol, &[quoted, symbols().dots])?;
+            eval::force_and_call(fun_call, 1, call.env()?)
+        })?;
         values::set_elt(result, index, value);
     }
-    values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
+    if use_names {
+        values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
+    }
     Ok(result)
 }
 

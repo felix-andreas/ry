@@ -1,0 +1,12 @@
+# vapply() with an array FUN.VALUE returns an array one rank higher, and takes row names from FUN.VALUE, else from the first result.
+fun <- function(x) matrix(x, nrow = 2L, ncol = 2L)
+str(vapply(1:3, fun, fun(double(1))))
+str(vapply(1:3, function(x) matrix(x, 2, 2, dimnames = list(c("a","b"), c("A","B"))), matrix(0, 2, 2)))
+str(vapply(c(a = 1, b = 2), function(x) c(x, x), c(u = 0, v = 0)))
+str(vapply(1:2, function(x) array(x, c(1, 2, 1)), array(0, c(1, 2, 1))))
+str(vapply(integer(0), fun, fun(double(1))))
+str(vapply(c(a=1,b=2), function(x) matrix(x,2,2), matrix(0,2,2)))
+str(vapply(c(a=1,b=2), function(x) c(p = x, q = x), c(0, 0)))
+str(vapply(c(a=1,b=2), function(x) c(p = x, q = x), c(0, 0), USE.NAMES = FALSE))
+str(vapply(1:2, function(x) matrix(x,2,2, dimnames = list(NULL, c("A","B"))), matrix(0,2,2)))
+str(vapply(c(a=1,b=2), function(x) x, c(z = 0)))
