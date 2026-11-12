@@ -492,6 +492,15 @@ the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it 
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
 
+Judge a change's peak RSS in three parts, because they behave differently. Anonymous memory and
+the start image's resident pages must not grow. The resident pages of `libR.so`'s code are not
+judged per change: a plain release build has no function ordering, so where the linker happens to
+place hot functions moves resident text by megabytes between two builds of nearly the same source
+(one change measured +2.6 MB of `libR.so` text with identical anonymous and image RSS). Judge the
+size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
+grow only by about what the change adds. Resident text is checked on the shipped layout
+(`tools/layout/optimize.sh`) when a release is cut.
+
 Two builds can share `target/base-r` in a comparison, because each loads only images its own
 name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
 [the architecture page](/development/architecture#the-start-up-image)). A build's first start
