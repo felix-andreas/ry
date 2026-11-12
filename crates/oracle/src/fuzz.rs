@@ -1398,3 +1398,174 @@ pub fn parse_data_program(seed: u64) -> String {
          cat(as.integer(attr(p, \"wholeSrcref\")), \"\\n\")\n"
     )
 }
+
+/// An R program for `seed` that calls `format` on random doubles under random `digits`,
+/// `nsmall`, `width`, `trim`, `na.encode`, `scientific` and `decimal.mark` arguments and random
+/// `scipen`, `OutDec` and `digits` options, printing each result (or its error) on a line of
+/// its own. The doubles are written as hexadecimal literals, so both engines format exactly the
+/// same bits; they mix random bit patterns, decimals near rounding ties, exact binary ties,
+/// subnormals and the extremes of the double range with NA, NaN, infinities and negative zero.
+pub fn format_numbers_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed ^ 0x666f_726d_6174_0000);
+    let mut text = format!("# format fuzz program, seed {seed}\n");
+    for line in 0..400 {
+        let count = [1, 1, 1, 2, 3, 5, 8][rng.below(7)];
+        let values: Vec<String> = (0..count).map(|_| fuzz_double(&mut rng)).collect();
+        let mut arguments = vec![format!("c({})", values.join(", "))];
+        // `digits = 0` is out of range and must fail the same way.
+        if rng.chance(3, 5) {
+            arguments.push(format!("digits = {}L", rng.below(23)));
+        }
+        if rng.chance(2, 5) {
+            arguments.push(format!("nsmall = {}L", rng.below(21)));
+        }
+        if rng.chance(1, 5) {
+            arguments.push(format!("width = {}L", rng.below(30)));
+        }
+        if rng.chance(1, 5) {
+            arguments.push("trim = TRUE".to_owned());
+        }
+        if rng.chance(1, 5) {
+            arguments.push("na.encode = FALSE".to_owned());
+        }
+        if rng.chance(1, 4) {
+            let scientific = match rng.below(4) {
+                0 => "TRUE".to_owned(),
+                1 => "FALSE".to_owned(),
+                2 => "NA".to_owned(),
+                _ => format!("{}L", rng.below(21) as i64 - 10),
+            };
+            arguments.push(format!("scientific = {scientific}"));
+        }
+        if rng.chance(3, 20) {
+            arguments.push("decimal.mark = \",\"".to_owned());
+        }
+        let mut options = Vec::new();
+        if rng.chance(3, 20) {
+            options.push(format!("scipen = {}", rng.below(20) as i64 - 9));
+        }
+        if rng.chance(1, 10) {
+            options.push("OutDec = \",\"".to_owned());
+        }
+        if rng.chance(3, 20) {
+            options.push(format!("digits = {}", 1 + rng.below(22)));
+        }
+        if !options.is_empty() {
+            text.push_str(&format!("options({})\n", options.join(", ")));
+        }
+        text.push_str(&format!(
+            "r <- tryCatch(format({}), error = function(e) paste(\"E:\", conditionMessage(e)))\n\
+             cat({line}L, encodeString(r, quote = '\"'), sep = \"|\"); cat(\"\\n\")\n",
+            arguments.join(", ")
+        ));
+        if !options.is_empty() {
+            text.push_str("options(scipen = 0, OutDec = \".\", digits = 7)\n");
+        }
+    }
+    text
+}
+
+/// One double as an R literal for [`format_numbers_program`].
+fn fuzz_double(rng: &mut SplitMix64) -> String {
+    let value = match rng.below(13) {
+        0 => {
+            return ["0", "-0", "NaN", "Inf", "-Inf", "NA_real_"][rng.below(6)].to_owned();
+        }
+        1 => f64::from_bits(rng.next_u64()),
+        2 => {
+            // A decimal of up to 16 digits, sometimes nudged one unit off it.
+            let digits = 1 + rng.below(16) as i32;
+            let low = 10u64.pow(digits as u32 - 1);
+            let mantissa = low + rng.next_u64() % (9 * low);
+            let exponent = rng.below(40) as i32 - 20 - digits + 1;
+            let value: f64 = format!("{mantissa}e{exponent}").parse().unwrap_or(0.0);
+            match rng.below(4) {
+                0 => f64::from_bits(value.to_bits() + 1),
+                1 => f64::from_bits(value.to_bits().saturating_sub(1)),
+                _ => value,
+            }
+        }
+        3 => {
+            // A decimal ending in 5, the tie of the digit before it.
+            let digits = 1 + rng.below(15) as u32;
+            let low = 10u64.pow(digits - 1);
+            let mantissa = (low + rng.next_u64() % (9 * low)) * 10 + 5;
+            let exponent = rng.below(16) as i32 - 8 - digits as i32;
+            format!("{mantissa}e{exponent}").parse().unwrap_or(0.0)
+        }
+        4 => {
+            // An exact binary tie for fixed notation: an odd multiple of a small power of two.
+            let numerator = (rng.next_u64() % 100_000) * 2 + 1;
+            numerator as f64 / f64::from(1u32 << (1 + rng.below(12)))
+        }
+        5 => [
+            1e15,
+            1e15 - 1.0,
+            1e16,
+            999_999_999_999_999.0,
+            9_999_999.5,
+            1e-15,
+            1e5,
+            1e-5,
+            0.1,
+            0.15,
+            1.0 / 3.0,
+            123_456.7,
+            1e-300,
+            5e-324,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            9.995,
+            0.095,
+            99.95,
+            1e22,
+            1e23,
+            1e27,
+            1e28,
+            4.0270798167452e-09,
+        ][rng.below(24)],
+        6 => {
+            // Spread over the whole exponent range, subnormals included.
+            let exponent = rng.below(2046) as i64 - 1074;
+            (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2f64.powi(exponent as i32 + 1)
+        }
+        7 => (rng.next_u64() % 2_000_000) as f64 - 1e6,
+        8 => {
+            // Just under a power of ten, where rounding adds a digit.
+            let power = 10f64.powi(rng.below(30) as i32 - 10);
+            power * (1.0 - (1 + rng.below(1000)) as f64 * 1e-7)
+        }
+        _ => {
+            let scale = 10f64.powi(rng.below(6) as i32);
+            (((rng.next_u64() % 2_000_000_000) as f64 - 1e9) / 1e6 * scale).round() / scale
+        }
+    };
+    if rng.chance(3, 10) {
+        hex_literal(-value)
+    } else {
+        hex_literal(value)
+    }
+}
+
+/// `value` as an R hexadecimal literal, which reads back as exactly the same bits.
+fn hex_literal(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-Inf" } else { "Inf" }.to_owned();
+    }
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    if value == 0.0 {
+        return format!("{sign}0");
+    }
+    let bits = value.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let fraction = bits & ((1 << 52) - 1);
+    let (lead, exponent) = if biased == 0 {
+        (0, -1022)
+    } else {
+        (1, biased - 1023)
+    };
+    format!("{sign}0x{lead}.{fraction:013x}p{exponent}")
+}

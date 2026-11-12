@@ -5,7 +5,10 @@
 //! Matching it bit for bit is what makes `mean(c(1:9, -1e300, 1e300))` exactly 0, as in GNU R,
 //! rather than the more accurate 45/11 that an error-tracking sum gives.
 
-use std::ops::{Add, AddAssign, Div, Mul, Sub};
+use std::{
+    cmp::Ordering,
+    ops::{Add, AddAssign, Div, Mul, Sub},
+};
 
 /// A value with a 64-bit significand and an unbounded exponent, rounded to nearest even after
 /// every operation the way x87 extended precision is. Infinities and NaN keep their double.
@@ -130,6 +133,57 @@ impl LongDouble {
         round_wide(negative, whole, 0)
     }
 
+    /// The nearest integer, ties to even, as `nearbyintl` gives it in the default rounding mode.
+    pub fn nearbyint(self) -> LongDouble {
+        let Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } = self.0
+        else {
+            return self;
+        };
+        if significand == 0 || exponent >= 0 {
+            return self;
+        }
+        let fraction_bits = exponent.unsigned_abs();
+        if fraction_bits > 64 {
+            // Below one half.
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        let wide = significand as u128;
+        let whole = wide >> fraction_bits;
+        let rest = wide & ((1u128 << fraction_bits) - 1);
+        let half = 1u128 << (fraction_bits - 1);
+        let rounded = if rest > half || (rest == half && whole & 1 == 1) {
+            whole + 1
+        } else {
+            whole
+        };
+        if rounded == 0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        round_wide(negative, rounded, 0)
+    }
+
+    /// A positive value from a significand with its top bit set and the power of two that
+    /// scales it, the layout of the x87 format's bytes.
+    pub const fn from_parts(significand: u64, exponent: i32) -> LongDouble {
+        LongDouble(Repr::Finite {
+            negative: false,
+            significand,
+            exponent,
+        })
+    }
+
     fn negate(self) -> LongDouble {
         match self.0 {
             Repr::Special(value) => LongDouble(Repr::Special(-value)),
@@ -143,6 +197,48 @@ impl LongDouble {
                 exponent,
             }),
         }
+    }
+}
+
+impl PartialEq for LongDouble {
+    fn eq(&self, other: &LongDouble) -> bool {
+        self.partial_cmp(other) == Some(Ordering::Equal)
+    }
+}
+
+impl PartialOrd for LongDouble {
+    fn partial_cmp(&self, other: &LongDouble) -> Option<Ordering> {
+        let (
+            Repr::Finite {
+                negative: left_negative,
+                significand: left,
+                exponent: left_exponent,
+            },
+            Repr::Finite {
+                negative: right_negative,
+                significand: right,
+                exponent: right_exponent,
+            },
+        ) = (self.0, other.0)
+        else {
+            return self.to_f64().partial_cmp(&other.to_f64());
+        };
+        let sign = |negative: bool, significand: u64| match (significand, negative) {
+            (0, _) => 0,
+            (_, true) => -1,
+            (_, false) => 1,
+        };
+        let (left_sign, right_sign) = (sign(left_negative, left), sign(right_negative, right));
+        if left_sign != right_sign || left_sign == 0 {
+            return Some(left_sign.cmp(&right_sign));
+        }
+        // Normalized significands make the exponent the leading key.
+        let magnitude = (left_exponent, left).cmp(&(right_exponent, right));
+        Some(if left_sign < 0 {
+            magnitude.reverse()
+        } else {
+            magnitude
+        })
     }
 }
 
@@ -1112,6 +1208,30 @@ mod tests {
         );
         let huge = add_all(LongDouble::ZERO, &[f64::MAX, f64::MAX]).finite();
         assert_eq!(huge.map(LongDouble::to_f64), Some(f64::INFINITY));
+    }
+
+    #[test]
+    fn nearbyint_rounds_ties_to_even() {
+        let round = |value: f64| LongDouble::from(value).nearbyint().to_f64();
+        assert_eq!(round(2.5), 2.0);
+        assert_eq!(round(3.5), 4.0);
+        assert_eq!(round(-2.5), -2.0);
+        assert_eq!(round(0.49999999999999994), 0.0);
+        assert_eq!(round(0.5), 0.0);
+        assert_eq!(round(1e300), 1e300);
+        let third = LongDouble::from(1.0) / LongDouble::from(3.0);
+        assert_eq!((third * LongDouble::from(3e18)).nearbyint().to_f64(), 1e18);
+    }
+
+    #[test]
+    fn comparisons_see_the_extended_significand() {
+        let one = LongDouble::from(1.0);
+        let tiny = LongDouble::from(2f64.powi(-60));
+        assert!(one < one + tiny);
+        assert!(one == one + LongDouble::from(2f64.powi(-70)));
+        assert!(LongDouble::from(-1.0) < LongDouble::ZERO);
+        assert!(LongDouble::from(-0.0) == LongDouble::ZERO);
+        assert!(LongDouble::from(-2.0) < LongDouble::from(-1.0));
     }
 
     #[test]
