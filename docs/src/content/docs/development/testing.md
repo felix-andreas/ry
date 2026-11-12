@@ -509,7 +509,11 @@ anonymous and image RSS. That change's extra resident pages held code the worklo
 analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
 size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
 grow only by about what the change adds. Resident text is checked on the shipped layout
-(`tools/layout/optimize.sh`) when a release is cut.
+(`tools/layout/optimize.sh`) when a release is cut. `tools/bench/bench.py` prints each program's
+peak in those parts (whole process, anonymous, start image and `libR.so` resident, sampled from
+`/proc/<pid>/smaps` every 20 ms) and the `.text` size of each build's `libR.so`. With
+`--baseline`, it also prints the paired ratio baseline / ry for each program and its geometric mean
+with a 95% interval, so a value above 1 means the build under test is faster.
 
 A change that allocates less can still raise anonymous peak RSS, because fewer collections change which heap pages fill before the next one. Such a rise is exempt only when all three of these hold, and the change's description shows each:
 
