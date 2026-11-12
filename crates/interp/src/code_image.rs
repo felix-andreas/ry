@@ -198,6 +198,8 @@ pub struct State {
     /// The runtime build images are stamped with; empty when the host named none, which turns
     /// images off.
     pub build: &'static str,
+    /// The package libraries this session named packages to reinstall in ([`note_foreign`]).
+    noted_libraries: Vec<PathBuf>,
 }
 
 /// The lazy-load databases this process fetched from, numbered in the order they were first
@@ -755,7 +757,10 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     }
     let file = match ImageFile::open(&path(database, build)) {
         Ok(file) => file,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+            note_foreign(database, build);
+            return Ok(None);
+        }
         Err(failure) => return Err(failure.to_string()),
     };
     let Some(stamp) = DatabaseStamp::of(database)? else {
@@ -796,6 +801,46 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
             native: Cell::new(native),
         })
     }))
+}
+
+/// Tells the user, once per package library and session, which packages there another build of
+/// ry installed, when `database` is one of them ([`rcmd::images::foreign_code_image`]): their code
+/// images load only into that build, so in this one their functions compile as they run until
+/// they are reinstalled. Upgrading ry or rebuilding its runtime does this to every installed package, and
+/// without the note it would only show as slowness.
+fn note_foreign(database: &str, build: &str) {
+    let database = Path::new(database);
+    // A library that cannot be read has no images to load either; the slow path is all there is.
+    if !rcmd::images::foreign_code_image(database, build).unwrap_or(false) {
+        return;
+    }
+    crate::image::report_unused(&format!(
+        "the code image of {} was written by another build of the runtime",
+        database.display()
+    ));
+    let Some(library) = database.ancestors().nth(3) else {
+        return;
+    };
+    let noted = &mut interp().code_image.noted_libraries;
+    if noted.iter().any(|path| path == library) {
+        return;
+    }
+    noted.push(library.to_path_buf());
+    let package = database
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let packages = rcmd::images::foreign_packages(library, build).unwrap_or_else(|_| vec![package]);
+    crate::write_console(
+        format!(
+            "ry: another build of ry installed these packages in {}, so their functions compile \
+             as they run, which is slower, until you reinstall them: {}\n",
+            library.display(),
+            packages.join(", ")
+        )
+        .as_bytes(),
+        true,
+    );
 }
 
 /// Why an image that reads fine does not apply to this process.

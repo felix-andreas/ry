@@ -269,7 +269,8 @@ and a start loads it instead of running base R's start-up code. On Linux an empt
 takes about 30 ms from the image and about 90 ms without it (`RY_IMAGE=0`). The image is written
 when ry is built, or when a ry build first starts over a base R tree that has none of its own, and
 never by a running session. Several ry builds can share one base R tree: each keeps its own images
-in it, and the tree keeps those of the four builds that wrote theirs most recently.
+in it, and the tree keeps those of the four builds that wrote theirs most recently, plus any build
+a running session uses.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
@@ -283,6 +284,7 @@ or `RY_METHODS_NATIVE`.
 | Variable | Effect |
 | --- | --- |
 | `RY_IMAGE` | `0` turns the image off: every start runs the slow way. |
+| `RY_IMAGE_LOG` | `1` prints `ry: image unused: <reason>` for each image a start or load could not use, and `ry: image written: ...` when a start writes its build's images. |
 
 ## load and server
 
@@ -378,9 +380,15 @@ session reads in place instead of inflating them. `--train tests`, `--train exam
 INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and
 the image then keeps the profile of that run, so a function that ran hot there is handed to the
 optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no
-image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
-or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
-the package to write a fresh one. The base packages (base, stats, utils, methods and the rest)
+image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image for other package sources
+is ignored, and a damaged one warns once and is ignored; reinstall the package to write a fresh
+one. A package installed by another ry build, such as the version you upgraded from, runs without
+its image, and the first such package a session loads from a library prints one note naming every
+package in that library to reinstall:
+
+```
+ry: another build of ry installed these packages in library, so their functions compile as they run, which is slower, until you reinstall them: one, two
+``` The base packages (base, stats, utils, methods and the rest)
 carry images that ry's own build writes, holding their uncompressed records but no code.
 
 The image also holds machine code for the package's numeric functions, compiled at install for

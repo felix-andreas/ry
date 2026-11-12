@@ -632,14 +632,23 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 - **Several builds per tree.** Builds never overwrite or remove each other's images while they
   are in use, so two builds compared on one tree both start fast. After writing its images, a
   build prunes the tree under the lock to the images of `images::KEPT_BUILDS` (4) builds: its own
-  and those of the three others whose newest image file is most recent, a build's images being
-  removed whole. A load does not touch a file, so the order is by when each build last wrote. Unkeyed
-  images (`ry-start.image`, `<package>.ryc`) belong to runtimes that predate the keying and are
-  left alone. One build's images take about 54 MiB in `target/base-r` (a 16 MiB start-up image and 38 MiB of code images).
+  and the three others that wrote theirs most recently, a build's images being removed whole. The
+  order comes from a ledger in the tree (`library/base/R/ry-builds`, one build per line, oldest
+  first), never from file times, and a build the ledger does not name counts as the oldest, in
+  name order. A running session holds a shared lock on its build's start-up image, and the pruner
+  removes a build only while it holds that file's exclusive lock, so a build in use is kept
+  however old it is. The ledger is rewritten through a temporary file and a rename, and the writes
+  and the prune all happen under `.start-image.lock`, so two builds starting at once take turns.
+  Unkeyed images (`ry-start.image`, `<package>.ryc`) belong to runtimes that predate the keying
+  and are left alone. One build's images take about 54 MiB in `target/base-r` (a 16 MiB start-up
+  image and 38 MiB of code images).
 - **One build per image.** The header carries the runtime's identity too (`RY_RUNTIME_ID`, a hash
   of the runtime's sources), and a loader skips an image whose header names another build, which
   `RY_IMAGE_LOG=1` reports. After a runtime edit, the new build's first start in a development
-  checkout writes its images beside the old build's.
+  checkout writes its images beside the old build's, which `RY_IMAGE_LOG=1` reports as
+  `ry: image written:`. Installed packages are not rebuilt: when a session finds a package whose
+  code image only another build wrote, it notes once per library and session which packages of
+  that library to reinstall (`note_foreign` in `crates/interp/src/code_image.rs`).
 - **The environment is read again on every start.** After the load, the start clears the options
   and runs the steps that read the process environment: the C-level options, `.Machine`,
   `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,

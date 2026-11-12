@@ -72,9 +72,11 @@ SHORT = 0.1
 # An interval reaching further than this from its median is too wide to quote.
 WIDE = 0.10
 PROGRAM_TIMEOUT = 300
-# The line ry prints on standard error under RY_IMAGE_LOG for each start-up or code image it could
-# not use (crates/interp/src/image.rs, `report_unused`).
+# The lines ry prints on standard error under RY_IMAGE_LOG for each start-up or code image it could
+# not use (crates/interp/src/image.rs, `report_unused`), and when it writes a build's images into a
+# base R tree (crates/rcmd/src/rcmd.rs, `refresh_start_image`).
 IMAGE_UNUSED = "ry: image unused: "
+IMAGE_WRITTEN = "ry: image written: "
 STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 
 
@@ -416,7 +418,8 @@ def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
         out, err = stdout.read(), stderr.read()
     if expired.is_set():
         return None, out, f"timed out after {timeout} s", seconds, usage.ru_maxrss / 1024
-    unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)] if check_images else []
+    unused = [line for line in err.splitlines()
+              if line.startswith((IMAGE_UNUSED, IMAGE_WRITTEN))] if check_images else []
     if unused:
         return None, out, f"started without an image it should load ({unused[0]})", seconds, usage.ru_maxrss / 1024
     return child.returncode, out, err, seconds, usage.ru_maxrss / 1024

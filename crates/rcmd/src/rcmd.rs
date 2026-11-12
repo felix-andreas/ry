@@ -569,6 +569,11 @@ exec "$cmd" $extra "$@"
 /// tree's packages, so without this every start in the home would quietly take the slow path.
 /// Other builds' images are left in place ([`images`]). A base without a manifest, such as a GNU R
 /// installation, has no images and is left as it is.
+///
+/// The process then holds a shared lock on its build's start-up image until it exits
+/// ([`images::hold_start_image`]), so another build's writer does not prune the images this
+/// process is about to load. The lock is taken before the image is checked, and a start that
+/// loses a race with a pruner finds the image gone and writes it again.
 fn refresh_start_image(base: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     type Current = unsafe extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
     if !base.join(base::MANIFEST).is_file() {
@@ -586,12 +591,34 @@ fn refresh_start_image(base: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     let image = images::start_image(base, &build);
     let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
         .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
-    rewrite_stale_image(
-        &image,
-        base,
-        || unsafe { current(path.as_ptr()) } == 1,
-        || base::write_start_image(base, rcmd, libr, None).map(drop),
-    )
+    let is_current = || unsafe { current(path.as_ptr()) } == 1;
+    // Each round either finds a current image under the lock or writes one, so only a pruner
+    // that removes the new image before this process locks it forces another round.
+    for _ in 0..3 {
+        if let Some(held) = images::hold_start_image(&image).map_err(io_error(&image))?
+            && is_current()
+        {
+            hold(held);
+            return Ok(());
+        }
+        rewrite_stale_image(&image, base, is_current, || {
+            if image_log() {
+                eprintln!(
+                    "ry: image written: the start-up and code images of build {build} into {}",
+                    base.display()
+                );
+            }
+            base::write_start_image(base, rcmd, libr, None).map(drop)
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether `RY_IMAGE_LOG` asks for a line on standard error about every image a start writes or
+/// cannot use (`interp::image::report_unused`), as `tools/bench/bench.py` does for every process
+/// it times.
+fn image_log() -> bool {
+    std::env::var_os("RY_IMAGE_LOG").is_some_and(|value| !value.is_empty())
 }
 
 /// Runs `write` when `is_current` says the start-up image at `image` is stale. A current image
@@ -655,6 +682,12 @@ pub fn runtime_home(libr: &Path, base: &Path) -> Result<PathBuf> {
     if is_ry_home(base) {
         if let Some(lock) = lock_home(base)? {
             hold(lock);
+        }
+        // A process the home started, such as a worker, keeps its build's images as its parent
+        // does ([`refresh_start_image`]).
+        let image = images::start_image(base, &front_end::runtime_identity(libr)?);
+        if let Some(held) = images::hold_start_image(&image).map_err(io_error(&image))? {
+            hold(held);
         }
         return Ok(base.to_path_buf());
     }
@@ -802,7 +835,8 @@ const LOCK_FILE: &str = ".lock";
 /// The name prefix of a home a pruner moved away to delete.
 const REMOVING: &str = ".removing-";
 
-/// The locks this process holds on the homes it uses, kept open until it exits.
+/// The locks this process holds on the homes and start-up images it uses, kept open until it
+/// exits.
 static HELD_HOMES: Mutex<Vec<File>> = Mutex::new(Vec::new());
 
 fn hold(lock: File) {
