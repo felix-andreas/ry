@@ -1946,9 +1946,10 @@ impl Lowering<'_> {
                 let a = self.value(a)?;
                 match self.builder.ty(a) {
                     Type::Lgl | Type::Bool => Ok(self.builder.emit(Type::Lgl, Op::Not(a))),
-                    Type::Vector {
+                    // `!` of a ry list is a ry list.
+                    ty @ Type::Vector {
                         item: Item::Lgl, ..
-                    } => Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorNot(a))),
+                    } => Ok(self.builder.emit(ty, Op::VectorNot(a))),
                     _ => Err(Refusal::new("a `!` of something other than logicals")),
                 }
             }
@@ -3119,6 +3120,26 @@ impl Lowering<'_> {
             _ => return Err(Refusal::new("a walk over something that is not a list")),
         };
         let callable = self.function_argument(function)?;
+        // Counting a list of logicals with the identity counts its true items, which the fusion
+        // pass can then compute from the comparisons that built the list without building it.
+        if counting
+            && ty
+                == (Type::Vector {
+                    item: Item::Lgl,
+                    array: true,
+                })
+            && let Callable::Inline(formals, body, _) = callable
+            && let [(name, _)] = rvalues::pairlist_items(formals)[..]
+            && body == name
+        {
+            return Ok(self.builder.emit(
+                Type::I64,
+                Op::CountTrue {
+                    program: SmallVec::new(),
+                    inputs: SmallVec::from_slice(&[list]),
+                },
+            ));
+        }
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty")? => {
                 // An empty dictionary's type is the one the step function declares for its state.
@@ -4740,9 +4761,13 @@ impl Lowering<'_> {
             (self.operand(a, item)?, self.operand(b, item)?)
         };
         if vectors {
-            Ok(self
-                .builder
-                .emit(Type::vector(Item::Lgl), Op::VectorCompare(op, item, a, b)))
+            // A comparison with a ry list is a ry list.
+            let list = |ty: Type| matches!(ty, Type::Vector { array: true, .. });
+            let result = Type::Vector {
+                item: Item::Lgl,
+                array: list(ta) || list(tb),
+            };
+            Ok(self.builder.emit(result, Op::VectorCompare(op, item, a, b)))
         } else {
             Ok(self.builder.emit(Type::Lgl, Op::Compare(op, item, a, b)))
         }

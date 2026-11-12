@@ -423,6 +423,276 @@ fn comparisons_and_logic_follow_r() {
     assert_eq!(live(), before);
 }
 
+/// A fused count against R's three-valued logic item by item: random comparisons of `I64` and
+/// double lists and scalars, combined with `&`, `|` and `!`, over lists that cross chunk
+/// boundaries, with `NA`, `NaN` and a length mismatch, which give up.
+#[test]
+fn fused_counts_follow_three_valued_logic() {
+    #[derive(Clone)]
+    enum Input {
+        Wholes(Vec<i64>),
+        Doubles(Vec<f64>),
+        Logicals(Vec<i32>),
+        Whole(i64),
+        Double(f64),
+        Logical(i32),
+    }
+    let mut rng = Rng::from_env();
+    let before = live();
+    for _ in 0..iterations(300) {
+        let length = [0, 1, 7, 128, 129, 300][rng.below(6)];
+        let mut inputs: Vec<Input> = Vec::new();
+        for _ in 0..2 + rng.below(5) {
+            let size = if rng.below(30) == 0 {
+                length + 1
+            } else {
+                length
+            };
+            inputs.push(match rng.below(6) {
+                0 => Input::Wholes((0..size).map(|_| rng.below(5) as i64 - 2).collect()),
+                1 => Input::Doubles(
+                    (0..size)
+                        .map(|_| match rng.below(40) {
+                            0 => f64::NAN,
+                            _ => rng.below(5) as f64 - 2.0,
+                        })
+                        .collect(),
+                ),
+                2 => Input::Logicals(
+                    (0..size)
+                        .map(|_| match rng.below(40) {
+                            0 => NA,
+                            _ => rng.below(2) as i32,
+                        })
+                        .collect(),
+                ),
+                3 => Input::Whole(rng.below(5) as i64 - 2),
+                4 => Input::Double(rng.below(5) as f64 - 2.0),
+                _ => Input::Logical([0, 1, 1, NA][rng.below(4)]),
+            });
+        }
+        let numbered = |want: fn(&Input) -> bool, rng: &mut Rng| {
+            let found: Vec<usize> = (0..inputs.len()).filter(|&i| want(&inputs[i])).collect();
+            (!found.is_empty()).then(|| found[rng.below(found.len())])
+        };
+        // Each step's lanes as `Option<bool>`, `None` for `NA`.
+        let mut program: Vec<u32> = Vec::new();
+        let mut lanes: Vec<Vec<Option<bool>>> = Vec::new();
+        let logical_lanes = |index: usize, lanes: &[Vec<Option<bool>>]| -> Vec<Option<bool>> {
+            if index >= inputs.len() {
+                return lanes[index - inputs.len()].clone();
+            }
+            let lane = |item: i32| (item != NA).then_some(item != 0);
+            match &inputs[index] {
+                Input::Logicals(items) => {
+                    items.iter().take(length).map(|&item| lane(item)).collect()
+                }
+                Input::Logical(item) => vec![lane(*item); length],
+                _ => unreachable!(),
+            }
+        };
+        for _ in 0..1 + rng.below(6) {
+            let logical_operand = |rng: &mut Rng, steps: usize| {
+                let input = numbered(
+                    |input| matches!(input, Input::Logicals(_) | Input::Logical(_)),
+                    rng,
+                );
+                match (input, steps) {
+                    (Some(input), 0) => Some(input),
+                    (Some(input), _) if rng.below(3) == 0 => Some(input),
+                    (_, 0) => None,
+                    _ => Some(inputs.len() + rng.below(steps)),
+                }
+            };
+            let choice = rng.below(4);
+            let op = rng.below(6) as u32;
+            if choice == 0 || lanes.is_empty() {
+                let wholes = rng.below(2) == 0;
+                let want: fn(&Input) -> bool = if wholes {
+                    |input| matches!(input, Input::Wholes(_) | Input::Whole(_))
+                } else {
+                    |input| matches!(input, Input::Doubles(_) | Input::Double(_))
+                };
+                let (Some(left), Some(right)) =
+                    (numbered(want, &mut rng), numbered(want, &mut rng))
+                else {
+                    continue;
+                };
+                let value = |index: usize, at: usize| match &inputs[index] {
+                    Input::Wholes(items) => items[at] as f64,
+                    Input::Whole(item) => *item as f64,
+                    Input::Doubles(items) => items[at],
+                    Input::Double(item) => *item,
+                    _ => unreachable!(),
+                };
+                let lists_fit = [left, right].iter().all(|&index| match &inputs[index] {
+                    Input::Wholes(items) => items.len() >= length,
+                    Input::Doubles(items) => items.len() >= length,
+                    _ => true,
+                });
+                if !lists_fit {
+                    continue;
+                }
+                let result = (0..length)
+                    .map(|at| {
+                        let (x, y) = (value(left, at), value(right, at));
+                        (!x.is_nan() && !y.is_nan()).then(|| match op {
+                            EQ => x == y,
+                            NE => x != y,
+                            LT => x < y,
+                            LE => x <= y,
+                            GT => x > y,
+                            _ => x >= y,
+                        })
+                    })
+                    .collect();
+                let base = if wholes { MASK_I64 } else { MASK_DBL };
+                program.push(base + op | (left as u32) << 8 | (right as u32) << 16);
+                lanes.push(result);
+                continue;
+            }
+            let (Some(left), Some(right)) = (
+                logical_operand(&mut rng, lanes.len()),
+                logical_operand(&mut rng, lanes.len()),
+            ) else {
+                continue;
+            };
+            let fits = |index: usize| match inputs.get(index) {
+                Some(Input::Logicals(items)) => items.len() >= length,
+                _ => true,
+            };
+            if !fits(left) || !fits(right) {
+                continue;
+            }
+            let (x, y) = (logical_lanes(left, &lanes), logical_lanes(right, &lanes));
+            let (code, result) = match choice {
+                1 => (
+                    MASK_AND,
+                    x.iter()
+                        .zip(&y)
+                        .map(|(&a, &b)| match (a, b) {
+                            (Some(false), _) | (_, Some(false)) => Some(false),
+                            (Some(true), Some(true)) => Some(true),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                2 => (
+                    MASK_OR,
+                    x.iter()
+                        .zip(&y)
+                        .map(|(&a, &b)| match (a, b) {
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            (Some(false), Some(false)) => Some(false),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => (MASK_NOT, x.iter().map(|&a| a.map(|a| !a)).collect()),
+            };
+            program.push(code | (left as u32) << 8 | (right as u32) << 16);
+            lanes.push(result);
+        }
+        if program.is_empty() {
+            continue;
+        }
+        // The runtime rejects an input no step reads, as the pass never builds one, so keep only
+        // the inputs the program reads and renumber its operands.
+        let operands = |step: u32| {
+            let mut found = vec![(step >> 8 & 0xFF) as usize];
+            if step & 0xFF != MASK_NOT {
+                found.push((step >> 16 & 0xFF) as usize);
+            }
+            found
+        };
+        let kept: Vec<usize> = (0..inputs.len())
+            .filter(|&index| program.iter().any(|&step| operands(step).contains(&index)))
+            .collect();
+        let renumber = |operand: usize| match kept.iter().position(|&index| index == operand) {
+            Some(position) => position as u32,
+            None => (kept.len() + operand - inputs.len()) as u32,
+        };
+        let program: Vec<u32> = program
+            .iter()
+            .map(|&step| {
+                let found = operands(step);
+                let right = found.get(1).map_or(0, |&operand| renumber(operand));
+                step & 0xFF | renumber(found[0]) << 8 | right << 16
+            })
+            .collect();
+        let inputs: Vec<Input> = kept.iter().map(|&index| inputs[index].clone()).collect();
+        // Lists that all have the odd length agree with each other, and the model's lanes have
+        // the usual length, so the case says nothing.
+        let odd = inputs.iter().all(|input| match input {
+            Input::Wholes(items) => items.len() != length,
+            Input::Doubles(items) => items.len() != length,
+            Input::Logicals(items) => items.len() != length,
+            _ => true,
+        });
+        if odd {
+            continue;
+        }
+        unsafe {
+            let words: Vec<u64> = inputs
+                .iter()
+                .map(|input| match input {
+                    Input::Wholes(items) => items
+                        .iter()
+                        .fold(ry_list_new(I64 as u32, 0), |list, &item| {
+                            ry_list_push(list, 1, item as u64, 0)
+                        }) as u64,
+                    Input::Doubles(items) => build(&Model::Dbl(items.clone())) as u64,
+                    Input::Logicals(items) => build(&Model::Lgl(items.clone())) as u64,
+                    Input::Whole(item) => *item as u64,
+                    Input::Double(item) => item.to_bits(),
+                    Input::Logical(item) => *item as u32 as u64,
+                })
+                .collect();
+            let lists = inputs
+                .iter()
+                .enumerate()
+                .fold(0u32, |lists, (index, input)| match input {
+                    Input::Wholes(_) | Input::Doubles(_) | Input::Logicals(_) => lists | 1 << index,
+                    _ => lists,
+                });
+            let lengths: Vec<usize> = inputs
+                .iter()
+                .filter_map(|input| match input {
+                    Input::Wholes(items) => Some(items.len()),
+                    Input::Doubles(items) => Some(items.len()),
+                    Input::Logicals(items) => Some(items.len()),
+                    _ => None,
+                })
+                .collect();
+            let last = &lanes[lanes.len() - 1];
+            let expected = if lengths.is_empty() || lengths.iter().any(|&found| found != length) {
+                None
+            } else if last.contains(&None) {
+                None
+            } else {
+                Some(last.iter().filter(|&&lane| lane == Some(true)).count() as i64)
+            };
+            let mut out = -1i64;
+            let status = ry_count_true(
+                program.as_ptr(),
+                program.len() as u32,
+                words.as_ptr(),
+                words.len() as u32,
+                lists,
+                &mut out,
+            );
+            let found = (status == 0).then_some(out);
+            assert_eq!(found, expected, "program {program:x?}, seed {}", rng.seed);
+            for (index, &word) in words.iter().enumerate() {
+                if lists & (1 << index) != 0 {
+                    ry_list_drop(word as *mut List);
+                }
+            }
+        }
+    }
+    assert_eq!(live(), before);
+}
+
 #[test]
 fn math_and_round_follow_r() {
     let before = live();
