@@ -426,8 +426,10 @@ unsafe fn resolve_s3(
         return Ok(None);
     };
     // The strings live in their symbols' rows, so the one allocation that is not kept anywhere
-    // comes last. `.Class` shares the class vector when it holds every class, as a method that
-    // modifies it copies it first.
+    // comes last. As in GNU R, `.Class` is the class vector itself when the first class has the
+    // method (a method that modifies it copies it first), `NULL` for the default method, and
+    // otherwise the remaining classes, which carry the whole vector as their `previous`
+    // attribute unless a group generic dispatched.
     let generic = name_string(generic)?;
     let group = if group == nil() {
         nil()
@@ -438,8 +440,14 @@ unsafe fn resolve_s3(
     let classes = if index == 0 {
         classes.mark_not_mutable();
         classes
+    } else if index >= length(classes) {
+        nil()
     } else {
-        class_suffix(classes, index)?
+        let suffix = class_suffix(classes, index)?;
+        if group == nil() {
+            values::set_attr(suffix, symbols().previous, classes)?;
+        }
+        suffix
     };
     let strings = MethodStrings {
         name,
