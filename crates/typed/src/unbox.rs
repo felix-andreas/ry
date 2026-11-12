@@ -68,14 +68,14 @@ fn unbox_once(function: &mut Function) -> bool {
     // The box each local is known to hold, named by the local its construction assigns: that
     // local itself, and every local assigned once as a copy of a local that holds the box.
     let mut boxes: Vec<u32> = vec![NONE; locals];
-    for slot in 0..locals {
+    for (slot, held) in boxes.iter_mut().enumerate() {
         let mut local = Local(slot as u32);
         // A chain of copies is at most as long as the locals are many. A longer walk is a cycle
         // of copies, which holds no box.
         for _ in 0..locals {
             match only_assignment(local) {
                 Some(Op::Construct(shape, _)) if has_box(*shape) => {
-                    boxes[slot] = local.0;
+                    *held = local.0;
                     break;
                 }
                 Some(&Op::Copy(source)) => local = source,
