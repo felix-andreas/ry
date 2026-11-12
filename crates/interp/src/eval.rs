@@ -1981,13 +1981,9 @@ pub unsafe fn apply_closure(
     {
         return Ok(value);
     }
-    if supplied.is_none() && crate::annotations::is_typed(function) {
-        force_typed_arguments(args)?;
-        if let Some(tier) = bytecode::tier() {
-            if let Some(value) = (tier.call)(function, args) {
-                return value;
-            }
-            crate::annotations::log_interpreted(call);
+    if crate::annotations::is_typed(function) {
+        if let Some(value) = try_native_typed(call, function, args, supplied)? {
+            return value;
         }
     }
     if let Some(frame) = bind_slots(call, function, args)? {
@@ -2004,6 +2000,33 @@ pub unsafe fn apply_closure(
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+}
+
+/// Runs a call of the typed closure `function` natively when the native tier takes it, and
+/// otherwise reports why it runs in the interpreter.
+unsafe fn try_native_typed(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Option<R<Sexp>>> {
+    if supplied.is_some() {
+        crate::annotations::log_interpreted_because(
+            call,
+            "it is a method that dispatch called, which the native tier does not take",
+        );
+        return Ok(None);
+    }
+    force_typed_arguments(args)?;
+    let Some(tier) = bytecode::tier() else {
+        crate::annotations::log_interpreted_because(call, "no native tier is loaded");
+        return Ok(None);
+    };
+    let value = (tier.call)(function, args);
+    if value.is_none() {
+        crate::annotations::log_interpreted(call);
+    }
+    Ok(value)
 }
 
 /// Forces, left to right, each argument promise that typed code wrote: a call from one typed
@@ -2063,13 +2086,9 @@ pub unsafe fn apply_closure_owning(
     {
         return Ok(value);
     }
-    if supplied.is_none() && crate::annotations::is_typed(function) {
-        force_typed_arguments(args)?;
-        if let Some(tier) = bytecode::tier() {
-            if let Some(value) = (tier.call)(function, args) {
-                return value;
-            }
-            crate::annotations::log_interpreted(call);
+    if crate::annotations::is_typed(function) {
+        if let Some(value) = try_native_typed(call, function, args, supplied)? {
+            return value;
         }
     }
     if let Some(frame) = bind_slots(call, function, args)? {
