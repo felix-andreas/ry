@@ -224,7 +224,8 @@ your code and no data. It lists:
   signalled, JIT compilations and deoptimizations, collections and the peak memory in use;
 - calls to closures of package namespaces other than base, and how many of them skipped the
   generic call protocol: the call ran natively or in a slot frame that never made its
-  environment, and no argument was a promise.
+  environment, and no argument was a promise;
+- slot frames turned into environments, by what asked for the environment.
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
