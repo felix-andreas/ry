@@ -1930,7 +1930,7 @@ The bits set in both integers.
 
 ```r ry run runtime=ry dput
 Num.bitwise_and(12, 10)
-#> 8L
+#> 8i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1588)
@@ -1959,7 +1959,7 @@ The bits set in either integer.
 
 ```r ry run runtime=ry dput
 Num.bitwise_or(12, 10)
-#> 14L
+#> 14i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1596)
@@ -1990,7 +1990,7 @@ operation.
 
 ```r ry run runtime=ry dput
 Num.bitwise_xor(12, 10)
-#> 6L
+#> 6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1606)
@@ -2019,7 +2019,7 @@ The integer with every bit flipped, which is `-number - 1`.
 
 ```r ry run runtime=ry dput
 Num.bitwise_not(5)
-#> -6L
+#> -6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1614)
@@ -2049,7 +2049,7 @@ Bits shifted past the top are lost, as in Roc.
 
 ```r ry run runtime=ry dput
 Num.shift_left_by(1, 4)
-#> 16L
+#> 16i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1623)
@@ -2078,7 +2078,7 @@ Shifts the bits right by `bits`, copying the sign bit in, so a negative number s
 
 ```r ry run runtime=ry dput
 Num.shift_right_by(-16, 2)
-#> -4L
+#> -4i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1631)
@@ -2107,7 +2107,7 @@ Shifts the bits right by `bits`, filling with zeros.
 
 ```r ry run runtime=ry dput
 Num.shift_right_zf_by(-16, 28)
-#> 15L
+#> 68719476735i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1639)
