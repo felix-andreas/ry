@@ -4509,11 +4509,8 @@ impl Compiler {
         self.emit(Op::Invisible, &[]);
     }
 
-    /// Whether a call of `primitive` with `args` can evaluate its subject first and, when the
-    /// subject is not an object, its other arguments as values, which is what a dispatch-or-eval
-    /// special such as `[` does. A formal among the other arguments may be missing, which the
-    /// special passes on as an empty argument but a register cannot hold, so it takes the
-    /// generic path.
+    /// Whether a call of `primitive` with `args` can evaluate its subject first, which is what a
+    /// dispatch-or-eval special such as `[` does.
     unsafe fn eager_subject(&self, primitive: Sexp, args: &[(Sexp, Sexp)]) -> R<bool> {
         if primitive.kind() != SexpType::Special
             || !eval::builtin_def(primitive)?.is_dispatch_or_eval()
@@ -4528,7 +4525,7 @@ impl Compiler {
                 && !may_modify_in_place(value)
                 && (value.kind() != SexpType::Symbol
                     || value == missing_arg()
-                    || (!self.formals.contains(&value) && eval::dot_dot_index(value).is_none()))
+                    || eval::dot_dot_index(value).is_none())
         };
         Ok(*subject != missing_arg()
             && *subject != symbols().dots
@@ -4538,6 +4535,11 @@ impl Compiler {
     /// A dispatch-or-eval special call: the subject evaluates first, an object dispatches with
     /// the other arguments as promises, and any other subject calls the special on values, the
     /// path the optimizing tier compiles.
+    ///
+    /// A formal among the other arguments may be missing, deeply so when it holds the caller's
+    /// promise of a missing argument, and the special then passes on an empty argument, which a
+    /// register cannot hold. Such a call evaluates only its subject here and leaves the rest to
+    /// [`Op::DispatchSubject`] for every subject, which reads the formal's slot.
     unsafe fn subject_call(
         &mut self,
         call: Sexp,
@@ -4572,6 +4574,21 @@ impl Compiler {
         } else {
             None
         };
+        let formal = args[1..]
+            .iter()
+            .any(|(_, value)| self.formals.contains(value));
+        if formal {
+            self.emit(Op::DispatchSubject, &[dst, function, call_constant, base]);
+            let dispatched = self.emit_patchable(Op::Jump, &[0]);
+            self.patch(generic);
+            self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+            self.patch(dispatched);
+            if let Some(read) = read {
+                self.patch(read);
+            }
+            self.release_to(mark);
+            return Ok(());
+        }
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
             if *value == missing_arg() {
@@ -9625,22 +9642,148 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let definition = eval::builtin_def(function)?;
-    let mut args = eval::Args::new();
-    let value = match dispatch::dispatch_evaluated_subject(
-        definition,
-        call,
-        function,
-        call.cdr(),
-        instruction.input(3),
-        state.env(Reify::Site("dispatch subject"))?,
-        &mut args,
-    )? {
+    let subject = instruction.input(3);
+    let value = match slot_subject_call(state, definition, call, function, subject)? {
         Some(value) => value,
-        None => call_builtin(definition, call, function, &args, *state.header)?,
+        None => {
+            let mut args = eval::Args::new();
+            match dispatch::dispatch_evaluated_subject(
+                definition,
+                call,
+                function,
+                call.cdr(),
+                subject,
+                state.env(Reify::Site("dispatch subject"))?,
+                &mut args,
+            )? {
+                Some(value) => value,
+                None => eval::call_builtin(definition, call, function, &args, *state.header)?,
+            }
+        }
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// A dispatch-or-eval special called from a slot frame once its subject evaluated to
+/// `subject`, when the slots answer every other argument: an empty argument, a constant, or a
+/// local holding a value or a promise. The order is GNU R's `DispatchOrEval`: an object subject
+/// looks for its method first, and only without one do the other arguments evaluate, a missing
+/// one passing on as an empty argument (`i` in `g <- function(i) f(x, i); g()`). The method
+/// lookup starts at the enclosure, which answers as the frame would because no local is named
+/// like a method of the generic, so the frame gets an environment only for a method to run in.
+///
+/// Dispatch is decided once the lookup finds no method, so the primitive runs without the second
+/// lookup [`call_builtin`] would make, as GNU R's subset primitives call their default code.
+///
+/// `None` sends the call to the environment's path: an argument the slots do not answer, an S4
+/// or frame subject, a local that could bind a method or make the frame a top environment, and
+/// forcing an argument that gave the frame its environment (the promises it forced stay forced,
+/// so nothing runs twice).
+unsafe fn slot_subject_call(
+    state: &Activation<'_, '_>,
+    definition: &'static BuiltinDef,
+    call: Sexp,
+    function: Sexp,
+    subject: Sexp,
+) -> R<Option<Sexp>> {
+    if !state.in_slots() {
+        return Ok(None);
+    }
+    let missing = missing_arg();
+    let arguments = call.cdr();
+    let mut cell = arguments.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        let fits = match expression.kind() {
+            _ if expression == missing => true,
+            SexpType::Symbol => {
+                expression != symbols().dots
+                    && eval::dot_dot_index(expression).is_none()
+                    && slot_named(state, expression).is_some_and(|slot| *slot != unbound())
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+            _ => true,
+        };
+        if !fits {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    if subject.is_object() {
+        if subject.has_gp(gp::S4_OBJECT)
+            || (definition.name == "[" && crate::frame::is_frame(subject))
+        {
+            return Ok(None);
+        }
+        let generic = definition.name.as_bytes();
+        let names = state.constants.element(SLOTS).element(1);
+        let shadows = names.slice::<Sexp>().iter().any(|&name| {
+            let name = name.car().bytes();
+            name == b".packageName"
+                || (name.len() > generic.len()
+                    && name.starts_with(generic)
+                    && name[generic.len()] == b'.')
+        });
+        if shadows {
+            return Ok(None);
+        }
+        if let Some(method) =
+            dispatch::subject_method(definition, subject, state.machine.enclosure())?
+        {
+            let env = state.env(Reify::Site("dispatch subject: method"))?;
+            return dispatch::apply_subject_method(call, method, subject, env).map(Some);
+        }
+    }
+    let heap = crate::heap();
+    let mut args = eval::Args::new();
+    heap.root(subject);
+    subject.increment_refcount();
+    args.push(Arg {
+        tag: arguments.tag(),
+        value: subject,
+    });
+    let mut collect = |args: &mut eval::Args| -> R<bool> {
+        let mut cell = arguments.cdr();
+        while cell.kind() == SexpType::Pairlist {
+            let expression = cell.car();
+            let value = if expression == missing {
+                missing
+            } else if expression.kind() == SexpType::Symbol {
+                let Some(slot) = slot_named(state, expression) else {
+                    panic!("a slot frame lost a slot it was checked to have");
+                };
+                let content = *slot;
+                if eval::value_is_missing(content)? {
+                    missing
+                } else {
+                    eval::value_of(content)?
+                }
+            } else {
+                expression
+            };
+            heap.root(value);
+            value.increment_refcount();
+            args.push(Arg {
+                tag: cell.tag(),
+                value,
+            });
+            if !state.in_slots() {
+                return Ok(false);
+            }
+            cell = cell.cdr();
+        }
+        Ok(true)
+    };
+    let collected = collect(&mut args);
+    for arg in &args {
+        arg.value.decrement_refcount();
+    }
+    if !collected? {
+        return Ok(None);
+    }
+    eval::call_builtin(definition, call, function, &args, nil()).map(Some)
 }
 
 #[inline(always)]
