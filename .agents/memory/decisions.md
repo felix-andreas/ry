@@ -6218,15 +6218,27 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     side exits on deferred strings, wrappers and package classes until an extern element reader
     (`ry_altrep_int_elt` and the real and string forms) lands behind its `OBJECT|ALTREP` guard. Arithmetic on a wrapper over attributed data materializes and therefore
     copies, where GNU R reads through the data pointer.
-  - *The JIT keeps a sequence's info in per-slot variables.* A slot holding an `IntSeq` or
-    `DblSeq` keeps its `(count, first, step)` in SSA variables (`remember_sequence`,
-    `sequence_of` in `crates/jit/src/codegen.rs`), reused only within the block
-    (`known_object`). Variables that live across blocks were measured and rejected: slot status
-    can be not-loaded at a loop head (on-stack-replacement entry), so `load_slot` merges there
-    and the ssa crate keeps the nontrivial block parameters, which never hoist. A compact read
-    inside a loop therefore still costs about 13 Ir more than a plain one (convolution about
-    1.09x, nbody about 1.01x main's Ir). Closing that gap needs loop-invariant hoisting or a
-    loaded slot status at loop heads.
+  - *The JIT reads a sequence's info from the object on every read.* `sequence_info` in
+    `crates/jit/src/codegen.rs` loads the info pointer and `(count, first, step)` from the
+    instance, with the scalar path of the representation check marked cold. Per-slot SSA
+    variables for the info were measured and rejected: slot status can be not-loaded at a loop
+    head (on-stack-replacement entry), so the variables become block parameters that cost more
+    than the reload. Speculating the representation in the slot guard and folding the bound check
+    into the index compare saved nothing measurable either. Within a chain of fall-through blocks
+    (`Plan::continues` in `crates/jit/src/analysis.rs`, a block whose only predecessor is the
+    fall-through from the block before it and which is not a loop head) `known_object` reuses a
+    sequence read already checked. The floor: a compact read is a flag test and branch, the info
+    pointer, three loads, a conversion, a multiply and an add, about 8 to 10 instructions more
+    than a plain load, and Cranelift does not hoist loop-invariant work. Convolution
+    (two reads per 157-instruction iteration) therefore runs at about 1.06 to 1.08x main's Ir and
+    nbody at about 1.01x. Expanding a compact sequence on its first compiled element read would
+    close the gap but diverges from GNU R, which keeps a sequence `(compact)` in `inspect` after a
+    compiled `a[i]` loop.
+  - *Only the user-visible `as.double` keeps a sequence compact.* The compact-preserving branch
+    sits in `as_type` (`crates/interp/src/coerce.rs`), not in `coerce_vector_quiet`. A builtin's
+    own coercion reads the elements immediately, and an expansion on that read allocates while the
+    builtin holds unrooted results: `complex(real = 1:2, imaginary = 3:4)` crashed under GC stress
+    when the branch sat in the shared coercion.
   - *A new compact sequence is not rooted.* The interpreter makes one for every `a:b` it
     evaluates, and a handle per sequence would pin each one until the enclosing call returned.
     `new_sequence` (`crates/libr/src/altrep.rs`) relies on the ALTREP allocation keeping its info
