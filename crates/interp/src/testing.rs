@@ -349,6 +349,124 @@ pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// A guarded call to a base builtin answers what a fresh lookup finds while its name is bound,
+/// rebound and unbound by every route a program has, and while its closure's environment is
+/// detached from the base frames and attached again. Each case binds a fresh name in base to
+/// `length`, so the name starts unbound everywhere else and the guard's cheap check (the name's
+/// `BOUND_ELSEWHERE` bit, the enclosure's `DETACHED` bit and the base value) is live until the
+/// first rebinding. Three closures call the name: one at top level, one nested in a function
+/// frame, and one whose environment the case moves around; a fourth function, already compiled,
+/// rebinds the name in its own frame after its nested closure ran. Every call runs compiled and
+/// must agree with the same call evaluated directly in the closure's environment.
+pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CASES: AtomicUsize = AtomicUsize::new(0);
+    syntax::testing::enable_invariants();
+    let name = format!("guarded_{}", CASES.fetch_add(1, Ordering::Relaxed));
+    let values = ["class", "length", "function(x) \"closure\"", "17"];
+    let targets = [
+        "globalenv()",
+        ".Internal(environment(shadow_g1))",
+        "shadow_e",
+    ];
+    let arguments = ["1:3", "NULL", "list(1, 2)", "\"a\""];
+    let setup = format!(
+        "{{ .Internal(assign(\"{name}\", length, baseenv(), FALSE))
+           shadow_g0 <- function(x) {name}(x)
+           shadow_maker <- function() function(x) {name}(x)
+           shadow_g1 <- shadow_maker()
+           shadow_e <- .Internal(new.env(TRUE, globalenv(), 29L))
+           shadow_g2 <- function(x) {name}(x)
+           environment(shadow_g2) <- shadow_e
+           shadow_rebinder <- function(v) {{ g <- function(x) {name}(x); g(1); {name} <- v; g }}
+           NULL }}"
+    );
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            assert_ne!(run(&setup), "error", "the setup fails: {setup}");
+            let mut log = vec![setup.clone()];
+            for step in 0..16 {
+                // Every closure runs compiled on the fast path before anything rebinds the name.
+                let choice = if step < 3 { 0 } else { entropy.below(17) };
+                let value = values[entropy.below(values.len())];
+                let target = targets[entropy.below(targets.len())];
+                let statement = match choice {
+                    0..=4 => {
+                        let closure = entropy.below(3);
+                        let argument = arguments[entropy.below(arguments.len())];
+                        let direct = run(&format!(
+                            ".Internal(eval(quote({name}({argument})), \
+                             .Internal(environment(shadow_g{closure})), NULL))"
+                        ));
+                        if step < 2 {
+                            assert_ne!(direct, "error", "the unshadowed call fails: {name}");
+                        }
+                        for call in 0..3 {
+                            let compiled = run(&format!("shadow_g{closure}({argument})"));
+                            assert_eq!(
+                                direct,
+                                compiled,
+                                "call {} of shadow_g{closure}({argument}) after:\n{}",
+                                call + 1,
+                                log.join("\n")
+                            );
+                        }
+                        continue;
+                    }
+                    5 => format!("{name} <- {value}"),
+                    6 => format!("(function() {name} <<- {value})()"),
+                    7 => format!(".Internal(assign(\"{name}\", {value}, {target}, FALSE))"),
+                    8 => format!("shadow_t <- {target}; shadow_t${name} <- {value}"),
+                    9 => format!("shadow_t <- {target}; shadow_t[[\"{name}\"]] <- {value}"),
+                    10 => format!(
+                        ".Internal(delayedAssign(\"{name}\", {value}, globalenv(), {target}))"
+                    ),
+                    11 => format!(
+                        ".Internal(makeActiveBinding(quote({name}), function() {value}, {target}))"
+                    ),
+                    12 => format!(".Internal(list2env(list({name} = {value}), {target}))"),
+                    13 => format!(".Internal(assign(\"{name}\", {value}, baseenv(), FALSE))"),
+                    14 => format!(".Internal(remove(\"{name}\", {target}, FALSE))"),
+                    15 => match entropy.below(5) {
+                        // A binding made while its frame was detached, which marks nothing until
+                        // the frame is attached; the closure's environment is that frame, or a
+                        // child made while it was still detached.
+                        3 | 4 => format!(
+                            "shadow_d <- .Internal(new.env(TRUE, emptyenv(), 29L)); \
+                             shadow_c <- .Internal(new.env(TRUE, shadow_d, 29L)); \
+                             .Internal(assign(\"{name}\", {value}, shadow_d, FALSE)); \
+                             .Internal(`parent.env<-`(shadow_d, globalenv())); \
+                             environment(shadow_g2) <- {}",
+                            if entropy.below(2) == 0 {
+                                "shadow_d"
+                            } else {
+                                "shadow_c"
+                            }
+                        ),
+                        // A detached environment, made detached or made and then reattached.
+                        0 => "environment(shadow_g2) <- \
+                              .Internal(new.env(TRUE, emptyenv(), 29L))"
+                            .to_owned(),
+                        1 => "shadow_d <- .Internal(new.env(TRUE, globalenv(), 29L)); \
+                              .Internal(`parent.env<-`(shadow_d, emptyenv())); \
+                              environment(shadow_g2) <- shadow_d"
+                            .to_owned(),
+                        _ => "environment(shadow_g2) <- shadow_e".to_owned(),
+                    },
+                    _ => format!("shadow_g1 <- shadow_rebinder({value})"),
+                };
+                run(&statement);
+                log.push(statement);
+            }
+            run(&format!(
+                "{{ .Internal(remove(c(\"{name}\", \"shadow_g0\", \"shadow_g1\", \"shadow_g2\", \
+                 \"shadow_maker\", \"shadow_e\", \"shadow_rebinder\"), globalenv(), FALSE)) }}"
+            ));
+        }
+    });
+}
+
 fn fused_expression(entropy: &mut impl Entropy, depth: usize) -> String {
     if depth == 0 || entropy.below(4) == 0 {
         let leaves = ["a", "b", "a", "b", "2", "1L", "0.5", "NA", "TRUE"];
@@ -1739,4 +1857,110 @@ fn rule(entropy: &mut impl Entropy) -> FillRule {
     } else {
         FillRule::EvenOdd
     }
+}
+
+/// Drives a [`FrameStack`](crate::FrameStack) through random pushes, pops and truncations and
+/// checks it against a vector of the live frames: every live frame reads back as pushed, and a
+/// popped frame's slot keeps no reference to its condition stack or `on.exit` list once the
+/// frame is gone, which the handler entry's reference count shows.
+pub fn check_frame_stack(entropy: &mut impl Entropy) {
+    use {
+        crate::{
+            Frame, FrameStack,
+            conditions::{Handler, HandlerStack},
+        },
+        std::rc::Rc,
+        thin_vec::ThinVec,
+    };
+    with_interpreter(|| {
+        let nil = values::nil();
+        let shared = Rc::new(Handler {
+            class: nil,
+            handler: nil,
+            calling: false,
+            calling_below: false,
+            parent_env: nil,
+            target: nil,
+            next: None,
+        });
+        let frame = |id: u32, handlers: HandlerStack, exits: usize| Frame {
+            call: nil,
+            function: nil,
+            env: nil,
+            sys_parent: nil,
+            slots: crate::NO_SLOTS,
+            missing: 0,
+            caller: 0,
+            pending: nil,
+            unforced: 0,
+            pending_shared: false,
+            inlined: false,
+            reified_by: crate::NOT_REIFIED,
+            args: id,
+            on_exit: (0..exits).map(|_| nil).collect::<ThinVec<_>>(),
+            handlers,
+            restarts: None,
+            srcref: nil,
+            method_vars: 0,
+            closures: 0,
+            handle_mark: 0,
+            previous_owner: 0,
+        };
+        let mut stack = FrameStack::new();
+        // Each live frame's id and whether it holds the shared handler entry.
+        let mut model: Vec<(u32, bool)> = Vec::new();
+        for id in 0..entropy.below(400) as u32 {
+            match entropy.below(6) {
+                0..=2 => {
+                    let holds = entropy.chance(1, 2);
+                    let handlers = holds.then(|| Rc::clone(&shared));
+                    let exits = if entropy.chance(1, 4) {
+                        entropy.below(3)
+                    } else {
+                        0
+                    };
+                    if entropy.chance(1, 2) {
+                        stack.push(frame(id, handlers, exits));
+                    } else {
+                        stack.push_with(|| frame(id, handlers, exits));
+                    }
+                    model.push((id, holds));
+                }
+                3 | 4 => {
+                    let popped = stack.pop();
+                    let expected = model.pop();
+                    match (popped, expected) {
+                        (None, None) => {}
+                        (Some((handlers, restarts)), Some((_, holds))) => {
+                            assert_eq!(
+                                handlers.is_some(),
+                                holds,
+                                "pop handed back the wrong stack"
+                            );
+                            assert!(restarts.is_none());
+                        }
+                        _ => panic!("pop disagrees with the model on whether a frame was live"),
+                    }
+                }
+                _ => {
+                    let depth = entropy.below(model.len() + 2);
+                    stack.truncate(depth);
+                    model.truncate(depth);
+                }
+            }
+            assert_eq!(stack.len(), model.len());
+            for (frame, &(id, holds)) in stack.iter().zip(&model) {
+                assert_eq!(frame.args, id);
+                assert_eq!(frame.handlers.is_some(), holds);
+            }
+            let holders = model.iter().filter(|&&(_, holds)| holds).count();
+            assert_eq!(
+                Rc::strong_count(&shared),
+                1 + holders,
+                "a popped frame's slot still holds its handler entry"
+            );
+        }
+        stack.clear();
+        assert_eq!(Rc::strong_count(&shared), 1);
+    });
 }

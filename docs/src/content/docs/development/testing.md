@@ -492,6 +492,40 @@ the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it 
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
 
+Judge a change's peak RSS in three parts, because they behave differently. Anonymous memory and
+the start image's resident pages must not grow. The resident pages of `libR.so`'s code are not
+judged per change. A plain release build has no function ordering, so where the linker happens to
+place hot functions decides which neighbouring code readahead and fault-around map in with them,
+and how far that moves depends on the change rather than its size. On the validation workload, a
+no-op exported function added to an otherwise unchanged build moved resident `libR.so` text by
+under 0.1 MB, while a change that grew `.text` by 5 KB moved it by +2.4 MB, with identical
+anonymous and image RSS. That change's extra resident pages held code the workload never runs (the
+analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
+size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
+grow only by about what the change adds. Resident text is checked on the shipped layout
+(`tools/layout/optimize.sh`) when a release is cut.
+
+Layout moves single-program wall time too, so judge a wall regression on one program by what
+callgrind counts. Run the program on both builds under `valgrind --tool=callgrind --cache-sim=yes
+--branch-sim=yes` and compare instructions (`Ir`), simulated branch mispredictions and simulated
+cache misses. A regression that shows in those counts is real. A wall regression without them
+blocks a change only when it reproduces on two layouts: the change's build, and the change's build
+plus a no-op exported function (the control), which shifts the code placed after it. The public
+suite's `lapply` program shows why. Three builds ran it in the same instruction count (within
+0.1%), yet its simulated indirect-branch mispredictions were 0.6M, 8.6M and 10.6M, and the no-op
+function alone made the difference between the last two. Wall time followed the layout: the
+8.6M build ran `lapply` about 25% slower than the 0.6M build.
+
+Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
+loads only into the runtime build that wrote it, and any other build silently ignores it, so that
+build starts on the slow path and runs the package without its compiled code. A start rewrites a
+stale start-up image and the base packages' images, but nothing rewrites the recommended packages'
+images except `just base-r`, or a package library's except reinstalling the package. Two builds
+that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
+therefore refuses to start when a binary under test would load a code image another build wrote, or
+when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
+`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it.
+
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
 the ratio ry / GNU R. The cases live in `tools/bench/internal/stdlib`: `ry.R` holds ry's side and `gnu.R`

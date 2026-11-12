@@ -28,6 +28,10 @@ under 0.1 s (a program whose GNU R time is that short is also left out of the ge
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
 typed program, with the refusal that `RY_TYPED_LOG` printed.
 
+Before anything runs, every ry under test must load only start-up and code images its own runtime
+build wrote, and two binaries must not share a base R tree; otherwise the run stops and names the
+stale files (`refuse_foreign_images`).
+
 Every suite checks before it runs that the corpus library holds each package its programs load, at
 the version lock.tsv pins (for the packages suite, every locked package), and stops with the list of
 missing ones. `--partial` runs anyway: the summary and results.json say the run is partial and name
@@ -52,6 +56,8 @@ import packages as corpus  # noqa: E402
 from evict import evict  # noqa: E402
 
 SUITES = ["public", "packages", "kernels", "applications"]
+# The suites whose programs may have a typed version, which the `ry typed` engine runs.
+TYPED_SUITES = ("public", "kernels", "applications")
 SCHEMA = 1
 # The fewest rounds a published run may have: fewer cannot separate a 10% change from noise on a
 # shared cloud machine, where one fixed C loop varies by about 25% between processes.
@@ -99,6 +105,7 @@ def main():
                      "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
     for binary in filter(None, [args.ry, args.baseline]):
         refuse_unreleased(binary)
+    refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
     manifests = {suite: load_suite(suite) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
@@ -135,7 +142,7 @@ def engines(args, suite):
     ry = [args.ry, "run", "--runtime", "ry"]
     table = [Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base),
              Engine("ry", "ry", ry, base)]
-    typed = suite in ("kernels", "applications")
+    typed = suite in TYPED_SUITES
     if typed:
         table.append(Engine("ry_typed", "ry typed", ry, base, typed=True))
     if args.jit_off:
@@ -154,7 +161,7 @@ def load_suite(suite):
         source = root / program["source"] if "source" in program else None
         if source is not None and not source.exists():
             sys.exit(f"error: {suite}/suite.toml names {program['source']}, which does not exist")
-        if suite in ("kernels", "applications"):
+        if suite in TYPED_SUITES:
             typed = source.with_name(f"{program['id']}.typed.R")
             if typed.exists() != ("typed_source" in program):
                 sys.exit(f"error: {suite}/suite.toml and the files disagree on whether {program['id']} has a typed version")
@@ -397,14 +404,22 @@ class WorkloadRunner:
 
 class PublicRunner:
     """Public programs: one run per process from the program's own directory, which prints
-    `<name> <checksum> <seconds>`; the time includes byte compilation and tier-up."""
+    `<name> <checksum> <seconds>`; the time includes byte compilation and tier-up. The typed
+    version runs from a copy in a strict-mode project, still from the program's own directory,
+    because some programs read sibling files by relative path."""
 
     def __init__(self, suite, args):
         self.network = []
+        self.work = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-public-"))
+        (self.work / "ry.toml").write_text(STRICT_CONFIG)
 
     def run(self, program, engine):
         source = root / program["source"]
-        status, out, err, _, peak = spawn(engine.command + [source.name], engine.env, cwd=source.parent)
+        script = source.name
+        if engine.typed:
+            script = self.work / f"{program['id']}.R"
+            script.write_text((root / program["typed_source"]).read_text())
+        status, out, err, _, peak = spawn(engine.command + [str(script)], engine.env, cwd=source.parent)
         stem = source.name.removesuffix(".R")
         lines = [line for line in out.splitlines() if line.startswith(stem + " ")]
         if status != 0 or not lines:
@@ -412,8 +427,24 @@ class PublicRunner:
         _, checksum, seconds = lines[-1].split()
         return {"seconds": float(seconds), "checksum": checksum, "peak_mib": round(peak, 1)}
 
+    def typed_refusal(self, program, engine):
+        """The refusals `RY_TYPED_LOG` reports for the typed program, or None. Measured once,
+        outside the timed rounds, since logging costs time."""
+        source = root / program["source"]
+        script = self.work / f"{program['id']}.R"
+        script.write_text((root / program["typed_source"]).read_text())
+        status, out, err, _, _ = spawn(engine.command + [str(script)], dict(engine.env, RY_TYPED_LOG="1"),
+                                       cwd=source.parent)
+        if status != 0:
+            sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
+        lines = [line.removeprefix("typed: ") for line in err.splitlines()
+                 if line.startswith("typed: ") and "compiled for" not in line]
+        return "; ".join(dict.fromkeys(lines)) or None
+
     def close(self):
-        pass
+        for path in sorted(self.work.rglob("*"), reverse=True):
+            path.rmdir() if path.is_dir() else path.unlink()
+        self.work.rmdir()
 
 
 class PackageRunner:
@@ -605,7 +636,7 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                 row["flags"].append({"kind": "wide_interval", "engine": engine.key})
             if not short:
                 included[engine.key].append(ratios)
-        if suite in ("kernels", "applications") and "typed_source" in program and not failures:
+        if suite in TYPED_SUITES and "typed_source" in program and not failures:
             typed = next(engine for engine in table if engine.typed)
             reason = runner.typed_refusal(program, typed)
             if reason:
@@ -660,6 +691,95 @@ def refuse_unreleased(binary):
     if re.search(r"\b[\w.-]+ build\b", version):
         sys.exit(f"error: {binary} is not a release build ({version}); benchmarks time release builds "
                  "only, so build it with `cargo build --release -p ry-lang -p libr`")
+
+
+def refuse_foreign_images(binaries):
+    """Exits when a ry under test would load a start-up or code image another build wrote, or when
+    two of them share one base R tree.
+
+    An image loads only into the runtime build that wrote it, and every other build ignores it, so
+    the packages it covers run without their compiled code and start-up takes the slow path, and a
+    comparison would credit that time to the code under test. Each binary runs once first, because a start rewrites a stale start-up image and the base
+    packages' images; the recommended packages' images are rewritten only by `just base-r`, and a
+    package library's only by reinstalling the package.
+    """
+    homes = {}
+    for binary in binaries:
+        identity = runtime_identity(binary)
+        home = base_tree(binary)
+        if identity is None or home is None:
+            # A release embeds its runtime and base R, whose images it wrote itself.
+            continue
+        if home in homes:
+            sys.exit(f"error: {homes[home]} and {binary} share the base R tree {home}, so each start "
+                     "of one rewrites the start-up image the other loads; give each build its own "
+                     "copy with `ry-rcmd start-image BASE --libr LIBR` and point RY_BASE_R at it")
+        homes[home] = binary
+        with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
+            script.write("invisible(NULL)\n")
+            script.flush()
+            subprocess.run([binary, "run", "--runtime", "ry", script.name], capture_output=True, timeout=600)
+        libraries = [home / "library", corpus.corpus / "library"]
+        libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
+                      for part in os.environ.get(variable, "").split(os.pathsep) if part]
+        images = [home / "library/base/R/ry-start.image"]
+        images += sorted({image for library in libraries if library.is_dir()
+                          for image in library.glob("*/R/*.ryc")})
+        stale = [image for image in images if image_writer(image) != identity]
+        if stale:
+            sys.exit(f"error: {binary} (runtime {identity}) would ignore these images, which another "
+                     "build wrote, and run that code without them; run `just base-r` for base R's "
+                     "packages and reinstall any other package with this build:\n"
+                     + "\n".join(f"  {image} ({image_writer(image) or 'unreadable'})" for image in stale))
+
+
+def runtime_identity(binary):
+    """The identity of the runtime library beside `binary`, which stamps every image it writes, or
+    None for a binary with no `libR` beside it."""
+    directory = pathlib.Path(binary).resolve().parent
+    library = next((directory / name for name in ("libR.so", "libR.dylib", "R.dll")
+                    if (directory / name).is_file()), None)
+    if library is None:
+        return None
+    import ctypes
+    function = ctypes.CDLL(str(library), mode=os.RTLD_LOCAL).ry_runtime_id
+    function.restype = ctypes.c_char_p
+    return function().decode()
+
+
+def base_tree(binary):
+    """The base R tree `rcmd::base::installed` finds for `binary`, or None for none."""
+    if os.environ.get("R_HOME"):
+        return pathlib.Path(os.environ["R_HOME"]).resolve()
+    if os.environ.get("RY_BASE_R"):
+        return pathlib.Path(os.environ["RY_BASE_R"]).resolve()
+    directory = pathlib.Path(binary).resolve().parent
+    candidates = [directory / "base-r", directory / "../lib/ry/base-r"]
+    target = next((ancestor for ancestor in [directory, *directory.parents]
+                   if (ancestor / "CACHEDIR.TAG").is_file()), None)
+    if target is not None and not directory.is_relative_to(target / "tmp"):
+        for ancestor in [directory, *directory.parents]:
+            candidates.append(ancestor / "base-r")
+            if ancestor == target:
+                break
+    return next((candidate.resolve() for candidate in candidates
+                 if (candidate / "library/base/R/base").is_file()), None)
+
+
+def image_writer(path):
+    """The runtime identity a start-up image (`RYSTART`) or code image (`RYCODE`) was written by,
+    read from its header, or None when the file is neither."""
+    try:
+        with open(path, "rb") as file:
+            header = file.read(4096)
+    except OSError:
+        return None
+    # A start-up image puts its header's length before the header, which opens with the identity.
+    offset = {b"RYSTART": 16, b"RYCODE\x00": 8}.get(header[:7])
+    if offset is None or len(header) < offset + 8:
+        return None
+    length = int.from_bytes(header[offset:offset + 8], "little")
+    return header[offset + 8:offset + 8 + length].decode(errors="replace")
 
 
 def metadata(args):

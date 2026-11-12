@@ -3,19 +3,19 @@
   "suite": "kernels",
   "name": "Numeric kernels (ours)",
   "meta": {
-    "date": "2026-11-11",
-    "ry_commit": "4d96a342bc28c2143046e3ab8c2996d64dd20a0c",
+    "date": "2026-11-12",
+    "ry_commit": "da560a9fe0368cf7f0dc4a8197cdbe13eb9d43fb",
     "too_short_seconds": 0.1,
     "gnu_r": {
       "version": "4.6.2",
-      "blas": "/usr/lib/x86_64-linux-gnu/blas/libblas.so.3.12.0"
+      "blas": "/opt/R/4.6.2/lib/R/lib/libRblas.so"
     },
     "machine": {
-      "cpu": "Intel(R) Xeon(R) Processor @ 2.30GHz",
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
       "cores": 4,
       "kernel": "Linux 6.18.44-fc-v378"
     },
-    "command": "tools/bench/bench.py public applications kernels --rounds 10 --samples /tmp/claude-0/-home-user-ry/2410cb03-e35c-50f9-8e51-b57b80a6b0c1/scratchpad/samples-rerecord --write",
+    "command": "tools/bench/bench.py kernels --write --rscript /opt/R/4.6.2/bin/Rscript",
     "rounds": 10,
     "extra_rounds": 10,
     "seed": 1
@@ -30,26 +30,26 @@
       "id": "array_dot",
       "display": "Dot product",
       "seconds": {
-        "gnu_r": 0.1555,
-        "ry": 0.028,
+        "gnu_r": 0.142,
+        "ry": 0.03,
         "ry_typed": 0.004
       },
       "ratio": {
         "ry": {
-          "median": 5.6197,
-          "low": 5.298,
-          "high": 5.7682
+          "median": 4.5409,
+          "low": 4.4333,
+          "high": 4.7
         },
         "ry_typed": {
-          "median": 37.625,
-          "low": 32.4,
-          "high": 39.875
+          "median": 33.625,
+          "low": 27.8,
+          "high": 35.25
         }
       },
       "peak_mib": {
-        "gnu_r": 100.5,
-        "ry": 118.6,
-        "ry_typed": 84.6
+        "gnu_r": 99.4,
+        "ry": 111.5,
+        "ry_typed": 77.7
       },
       "flags": [
         {
@@ -70,26 +70,26 @@
       "id": "array_filter",
       "display": "Counting filter",
       "seconds": {
-        "gnu_r": 0.12,
-        "ry": 0.022,
-        "ry_typed": 0.009
+        "gnu_r": 0.116,
+        "ry": 0.0255,
+        "ry_typed": 0.01
       },
       "ratio": {
         "ry": {
-          "median": 5.3864,
-          "low": 5.167,
-          "high": 5.5595
+          "median": 4.5685,
+          "low": 4.4267,
+          "high": 4.6469
         },
         "ry_typed": {
-          "median": 13.1667,
-          "low": 12.2475,
-          "high": 13.4444
+          "median": 11.55,
+          "low": 11.25,
+          "high": 11.75
         }
       },
       "peak_mib": {
-        "gnu_r": 100.5,
-        "ry": 112.8,
-        "ry_typed": 77.1
+        "gnu_r": 99.4,
+        "ry": 106.6,
+        "ry_typed": 70.1
       },
       "flags": [
         {
@@ -106,26 +106,26 @@
       "id": "array_map",
       "display": "Element map",
       "seconds": {
-        "gnu_r": 0.193,
-        "ry": 0.029,
+        "gnu_r": 0.1935,
+        "ry": 0.0335,
         "ry_typed": 0.008
       },
       "ratio": {
         "ry": {
-          "median": 6.6669,
-          "low": 6.5317,
-          "high": 6.7964
+          "median": 5.8091,
+          "low": 5.697,
+          "high": 6.0
         },
         "ry_typed": {
-          "median": 25.625,
-          "low": 24.0,
-          "high": 26.7857
+          "median": 24.125,
+          "low": 23.625,
+          "high": 25.375
         }
       },
       "peak_mib": {
-        "gnu_r": 123.4,
-        "ry": 101.6,
-        "ry_typed": 77.1
+        "gnu_r": 122.3,
+        "ry": 100.0,
+        "ry_typed": 70.1
       },
       "flags": [
         {
@@ -142,26 +142,26 @@
       "id": "array_sum",
       "display": "Element sum",
       "seconds": {
-        "gnu_r": 0.4,
-        "ry": 0.076,
-        "ry_typed": 0.045
+        "gnu_r": 0.354,
+        "ry": 0.0885,
+        "ry_typed": 0.05
       },
       "ratio": {
         "ry": {
-          "median": 5.2025,
-          "low": 5.0506,
-          "high": 5.3768
+          "median": 3.9663,
+          "low": 3.9376,
+          "high": 4.0276
         },
         "ry_typed": {
-          "median": 8.8941,
-          "low": 8.34,
-          "high": 9.216
+          "median": 7.06,
+          "low": 6.8735,
+          "high": 7.2041
         }
       },
       "peak_mib": {
-        "gnu_r": 100.4,
-        "ry": 116.0,
-        "ry_typed": 77.1
+        "gnu_r": 99.4,
+        "ry": 107.9,
+        "ry_typed": 70.4
       },
       "flags": [
         {
@@ -178,26 +178,26 @@
       "id": "closures",
       "display": "Closures and lapply",
       "seconds": {
-        "gnu_r": 0.491,
-        "ry": 0.15,
-        "ry_typed": 0.003
+        "gnu_r": 0.5475,
+        "ry": 0.1855,
+        "ry_typed": 0.004
       },
       "ratio": {
         "ry": {
-          "median": 3.2768,
-          "low": 3.1785,
-          "high": 3.4717
+          "median": 2.8777,
+          "low": 2.7635,
+          "high": 3.0599
         },
         "ry_typed": {
-          "median": 152.0,
-          "low": 118.25,
-          "high": 172.3333
+          "median": 152.75,
+          "low": 139.625,
+          "high": 172.6667
         }
       },
       "peak_mib": {
-        "gnu_r": 139.1,
-        "ry": 121.0,
-        "ry_typed": 58.1
+        "gnu_r": 137.8,
+        "ry": 122.1,
+        "ry_typed": 51.4
       },
       "flags": [
         {
@@ -214,26 +214,26 @@
       "id": "drawdown",
       "display": "Drawdown and volatility",
       "seconds": {
-        "gnu_r": 0.2095,
-        "ry": 0.023,
-        "ry_typed": 0.009
+        "gnu_r": 0.207,
+        "ry": 0.026,
+        "ry_typed": 0.006
       },
       "ratio": {
         "ry": {
-          "median": 9.3693,
-          "low": 9.1739,
-          "high": 9.5099
+          "median": 7.9423,
+          "low": 7.75,
+          "high": 8.28
         },
         "ry_typed": {
-          "median": 24.8264,
-          "low": 22.2,
-          "high": 27.0
+          "median": 34.5,
+          "low": 33.8333,
+          "high": 35.3333
         }
       },
       "peak_mib": {
-        "gnu_r": 92.7,
-        "ry": 134.6,
-        "ry_typed": 139.5
+        "gnu_r": 91.6,
+        "ry": 126.2,
+        "ry_typed": 131.5
       },
       "flags": [
         {
@@ -242,10 +242,6 @@
         },
         {
           "kind": "too_short",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
           "engine": "ry_typed"
         }
       ]
@@ -254,26 +250,26 @@
       "id": "fib",
       "display": "Recursive Fibonacci",
       "seconds": {
-        "gnu_r": 0.5,
+        "gnu_r": 0.5525,
         "ry": 0.006,
-        "ry_typed": 0.005
+        "ry_typed": 0.006
       },
       "ratio": {
         "ry": {
-          "median": 82.9405,
-          "low": 75.8333,
-          "high": 92.8333
+          "median": 91.4167,
+          "low": 84.3929,
+          "high": 93.4167
         },
         "ry_typed": {
-          "median": 93.9,
-          "low": 90.6167,
-          "high": 101.9
+          "median": 91.9167,
+          "low": 91.1667,
+          "high": 93.5833
         }
       },
       "peak_mib": {
-        "gnu_r": 70.4,
-        "ry": 48.6,
-        "ry_typed": 50.2
+        "gnu_r": 69.2,
+        "ry": 41.9,
+        "ry_typed": 43.2
       },
       "flags": [
         {
@@ -283,10 +279,6 @@
         {
           "kind": "too_short",
           "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
         }
       ]
     },
@@ -294,19 +286,19 @@
       "id": "integer_loop",
       "display": "Collatz chains",
       "seconds": {
-        "gnu_r": 0.4275,
-        "ry": 0.033
+        "gnu_r": 0.4355,
+        "ry": 0.038
       },
       "ratio": {
         "ry": {
-          "median": 12.875,
-          "low": 12.3589,
-          "high": 13.5734
+          "median": 11.6284,
+          "low": 11.1579,
+          "high": 11.9047
         }
       },
       "peak_mib": {
-        "gnu_r": 70.4,
-        "ry": 54.9
+        "gnu_r": 69.4,
+        "ry": 49.1
       },
       "flags": [
         {
@@ -319,19 +311,19 @@
       "id": "jackknife",
       "display": "Jackknife estimate",
       "seconds": {
-        "gnu_r": 0.3635,
-        "ry": 0.188
+        "gnu_r": 0.291,
+        "ry": 0.2265
       },
       "ratio": {
         "ry": {
-          "median": 1.8661,
-          "low": 1.8289,
-          "high": 1.9432
+          "median": 1.259,
+          "low": 1.2294,
+          "high": 1.3592
         }
       },
       "peak_mib": {
-        "gnu_r": 124.5,
-        "ry": 85.0
+        "gnu_r": 123.5,
+        "ry": 78.8
       },
       "flags": []
     },
@@ -339,59 +331,53 @@
       "id": "log_rank",
       "display": "Log-rank statistic",
       "seconds": {
-        "gnu_r": 0.262,
-        "ry": 0.19,
-        "ry_typed": 5.0
+        "gnu_r": 0.324,
+        "ry": 0.204,
+        "ry_typed": 0.2055
       },
       "ratio": {
         "ry": {
-          "median": 1.3632,
-          "low": 1.3028,
-          "high": 1.4919
+          "median": 1.5784,
+          "low": 1.554,
+          "high": 1.6533
         },
         "ry_typed": {
-          "median": 0.0524,
-          "low": 0.0516,
-          "high": 0.0576
+          "median": 1.5577,
+          "low": 1.5092,
+          "high": 1.6144
         }
       },
       "peak_mib": {
-        "gnu_r": 126.1,
-        "ry": 76.1,
-        "ry_typed": 115.4
+        "gnu_r": 125.1,
+        "ry": 69.5,
+        "ry_typed": 54.3
       },
-      "flags": [
-        {
-          "kind": "typed_refused",
-          "engine": "ry_typed",
-          "reason": "`log_rank` runs in the interpreter; `count` runs in the interpreter"
-        }
-      ]
+      "flags": []
     },
     {
       "id": "loop_sum",
       "display": "Counted loop sum",
       "seconds": {
-        "gnu_r": 0.162,
-        "ry": 0.021,
-        "ry_typed": 0.007
+        "gnu_r": 0.1595,
+        "ry": 0.026,
+        "ry_typed": 0.008
       },
       "ratio": {
         "ry": {
-          "median": 7.7143,
-          "low": 7.4913,
-          "high": 7.7857
+          "median": 6.1346,
+          "low": 5.9266,
+          "high": 6.3704
         },
         "ry_typed": {
-          "median": 23.1429,
-          "low": 21.8036,
-          "high": 24.2143
+          "median": 19.625,
+          "low": 17.8125,
+          "high": 20.1875
         }
       },
       "peak_mib": {
-        "gnu_r": 70.5,
-        "ry": 49.7,
-        "ry_typed": 50.3
+        "gnu_r": 69.3,
+        "ry": 42.8,
+        "ry_typed": 43.4
       },
       "flags": [
         {
@@ -408,19 +394,19 @@
       "id": "nested_loops",
       "display": "Pairwise distances",
       "seconds": {
-        "gnu_r": 0.134,
-        "ry": 0.026
+        "gnu_r": 0.127,
+        "ry": 0.03
       },
       "ratio": {
         "ry": {
-          "median": 5.151,
-          "low": 5.0769,
-          "high": 5.4169
+          "median": 4.1973,
+          "low": 4.0806,
+          "high": 4.3747
         }
       },
       "peak_mib": {
-        "gnu_r": 70.7,
-        "ry": 75.1
+        "gnu_r": 69.5,
+        "ry": 68.6
       },
       "flags": [
         {
@@ -433,19 +419,19 @@
       "id": "simulation",
       "display": "Path simulation",
       "seconds": {
-        "gnu_r": 0.364,
-        "ry": 0.121
+        "gnu_r": 0.3935,
+        "ry": 0.122
       },
       "ratio": {
         "ry": {
-          "median": 3.1671,
-          "low": 2.9339,
-          "high": 3.3567
+          "median": 3.2355,
+          "low": 3.1822,
+          "high": 3.3167
         }
       },
       "peak_mib": {
-        "gnu_r": 173.3,
-        "ry": 141.3
+        "gnu_r": 171.7,
+        "ry": 134.1
       },
       "flags": []
     },
@@ -453,32 +439,32 @@
       "id": "vasicek",
       "display": "Vasicek rate paths",
       "seconds": {
-        "gnu_r": 0.2185,
-        "ry": 0.12,
-        "ry_typed": 0.101
+        "gnu_r": 0.2525,
+        "ry": 0.127,
+        "ry_typed": 0.1205
       },
       "ratio": {
         "ry": {
-          "median": 1.9079,
-          "low": 1.7667,
-          "high": 1.985
+          "median": 1.9566,
+          "low": 1.888,
+          "high": 1.996
         },
         "ry_typed": {
-          "median": 2.1698,
-          "low": 2.0456,
-          "high": 2.2843
+          "median": 2.0778,
+          "low": 2.0079,
+          "high": 2.1345
         }
       },
       "peak_mib": {
-        "gnu_r": 161.3,
-        "ry": 96.6,
-        "ry_typed": 61.5
+        "gnu_r": 160.2,
+        "ry": 88.2,
+        "ry_typed": 53.7
       },
       "flags": [
         {
           "kind": "typed_refused",
           "engine": "ry_typed",
-          "reason": "`vasicek` runs in the interpreter"
+          "reason": "no code for [I64, I64, Dbl, Dbl, Dbl, Dbl, Dbl, I64]: it calls R's `set.seed`, which only the interpreter runs: call it outside the typed function and pass its result in; `vasicek` runs in the interpreter"
         }
       ]
     },
@@ -486,26 +472,26 @@
       "id": "vector_arith",
       "display": "Vector arithmetic",
       "seconds": {
-        "gnu_r": 0.153,
-        "ry": 0.053,
-        "ry_typed": 0.0495
+        "gnu_r": 0.1405,
+        "ry": 0.0545,
+        "ry_typed": 0.0515
       },
       "ratio": {
         "ry": {
-          "median": 2.8191,
-          "low": 2.6302,
-          "high": 3.0259
+          "median": 2.5888,
+          "low": 2.4997,
+          "high": 2.6667
         },
         "ry_typed": {
-          "median": 3.0821,
-          "low": 2.94,
-          "high": 3.3701
+          "median": 2.7399,
+          "low": 2.6288,
+          "high": 2.8481
         }
       },
       "peak_mib": {
-        "gnu_r": 139.0,
-        "ry": 78.8,
-        "ry_typed": 77.2
+        "gnu_r": 137.8,
+        "ry": 71.9,
+        "ry_typed": 70.0
       },
       "flags": [
         {
@@ -522,19 +508,19 @@
       "id": "vector_loop",
       "display": "Scale and shift",
       "seconds": {
-        "gnu_r": 0.2075,
-        "ry": 0.037
+        "gnu_r": 0.22,
+        "ry": 0.0315
       },
       "ratio": {
         "ry": {
-          "median": 5.8221,
-          "low": 5.6216,
-          "high": 6.0382
+          "median": 6.9081,
+          "low": 6.7626,
+          "high": 7.2258
         }
       },
       "peak_mib": {
-        "gnu_r": 171.7,
-        "ry": 192.2
+        "gnu_r": 170.4,
+        "ry": 186.0
       },
       "flags": [
         {
@@ -546,15 +532,15 @@
   ],
   "geomean": {
     "ry": {
-      "median": 5.2616,
-      "low": 5.1931,
-      "high": 5.327,
+      "median": 4.7505,
+      "low": 4.7082,
+      "high": 4.7933,
       "programs": 16
     },
     "ry_typed": {
-      "median": 11.1299,
-      "low": 10.7805,
-      "high": 11.3614,
+      "median": 14.4132,
+      "low": 14.1084,
+      "high": 14.6175,
       "programs": 11
     }
   }
