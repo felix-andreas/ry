@@ -732,20 +732,17 @@ pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
     let unbound = unbound();
-    let live = mark as usize..state.references_used as usize;
-    for (&reference, &target) in state
-        .references
-        .get(live.clone())
-        .unwrap_or(&[])
-        .iter()
-        .zip(state.reference_targets.get(live).unwrap_or(&[]))
-    {
+    for index in mark as usize..state.references_used as usize {
+        let reference = state.references[index];
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
         }
+        // Only an environment or code reference changes the other fields, and forcing one
+        // clears its tag again, so the attribute is compared with the target on its own.
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
         }
+        let target = state.reference_targets[index];
         if reference.attrib() != target {
             heap.set_attrib(reference, target);
         }
@@ -1981,10 +1978,10 @@ pub unsafe fn apply_closure(
     {
         return Ok(value);
     }
-    if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
-            return value;
-        }
+    if crate::annotations::is_typed(function)
+        && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
+    {
+        return value;
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -2092,10 +2089,10 @@ pub unsafe fn apply_closure_owning(
     {
         return Ok(value);
     }
-    if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
-            return value;
-        }
+    if crate::annotations::is_typed(function)
+        && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
+    {
+        return value;
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -3719,7 +3716,9 @@ unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> 
 /// error that `try()` can catch, reported against the closure's call as in GNU R.
 fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
     match result {
-        Err(Unwind::Jump(jump)) if matches!(jump, Jump::Break { env: target } | Jump::Next { env: target } if target == env) => {
+        Err(Unwind::Jump(Jump::Break { env: target } | Jump::Next { env: target }))
+            if target == env =>
+        {
             Err(error_in(
                 call,
                 "no loop for break/next, jumping to top level",
