@@ -38,6 +38,7 @@ use {
         },
     },
     heap::{
+        HeapError,
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
         records::{Fields, Layout, NativeKind},
     },
@@ -2468,6 +2469,15 @@ unsafe fn str_repeat(call: &Call<'_>) -> R<Sexp> {
     let [string, times] = arguments(call, ["string", "count"])?;
     let string = text(call, "string", string)?;
     let times = count(call, "count", times)?;
+    // A result past R's limit on a string's bytes fails before it is built, which would
+    // otherwise ask for gigabytes only to give them back.
+    if string
+        .len()
+        .checked_mul(times)
+        .is_none_or(|total| total > i32::MAX as usize)
+    {
+        return Err(HeapError::StringTooLong.into());
+    }
     scalar_string(&string.repeat(times))
 }
 
