@@ -499,7 +499,9 @@ class PackageRunner:
                 sys.exit(f"error: {name} ships no tests; drop it from packages/suite.toml")
             self.unpacked[name] = unpacked
         kind, tests = self.unpacked[name]
-        env = dict(engine.env, TESTTHAT_CPUS="1", _R_CHECK_FORCE_SUGGESTS_="false")
+        # A package whose DESCRIPTION asks for parallel tests would otherwise run them in a
+        # testthat worker process, outside the measured process and with its own start-up.
+        env = dict(engine.env, TESTTHAT_PARALLEL="false", TESTTHAT_CPUS="1", _R_CHECK_FORCE_SUGGESTS_="false")
         env.pop("NOT_CRAN", None)
         for variable in ("http_proxy", "https_proxy", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
             env[variable] = self.proxy.url
