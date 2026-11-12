@@ -819,7 +819,12 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         };
         activity::count(Counter::JitEntries);
         let running = activity::enter(Activity::Compiled, 0);
-        let result: *mut Header = (compiled.entry)(&mut activation);
+        let activation_address: *mut Activation = &mut activation;
+        let pending = std::ptr::addr_of!((*activation_address).pending);
+        interp().held_unwinds.push(pending);
+        let result: *mut Header = (compiled.entry)(activation_address);
+        let held = interp().held_unwinds.pop();
+        debug_assert_eq!(held, Some(pending), "compiled code entries nest");
         drop(running);
         if let Some(payload) = activation.panic.take() {
             resume_unwind(payload);

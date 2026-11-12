@@ -22,7 +22,7 @@ use {
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
         eval, heap,
         standard_library::{self, CompiledKey},
-        unwind::{Jump, R, Unwind, error},
+        unwind::{R, Unwind, error},
         values,
     },
     smallvec::SmallVec,
@@ -444,21 +444,9 @@ unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     value
 }
 
-/// Parks `unwind` as the activation's pending unwind. The activation is no root, and the exit
-/// that hands the unwind to tier 0 still allocates (boxing registers, writing slots back), so
-/// the handle stack keeps what the unwind carries alive: the value an exiting handler returns
-/// to `tryCatch`, for one, exists nowhere else.
+/// Holds `unwind` until compiled code hands the activation back. The collector traces it there
+/// through [`interp::Interp::held_unwinds`].
 fn park(activation: &mut Activation, unwind: Unwind) {
-    let heap = heap();
-    match &unwind {
-        Unwind::Error(failure) => heap.root(failure.call),
-        Unwind::Interrupt | Unwind::Jump(Jump::TopLevel) => {}
-        Unwind::Jump(Jump::Return { env, value }) => {
-            heap.root(*env);
-            heap.root(*value);
-        }
-        Unwind::Jump(Jump::Break { env } | Jump::Next { env }) => heap.root(*env),
-    }
     activation.pending = Some(unwind);
 }
 

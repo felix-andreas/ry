@@ -3372,11 +3372,6 @@ const ELEMENT_OPS: &[&str] = &[
     "y <- p$bb",
 ];
 
-/// A compiled element operation must never cost more instructions than tier 0's handler for the
-/// same shape. The machine has no hardware counters to read, so each shape runs in a child of
-/// this test binary under cachegrind, which counts instructions exactly; the cost of one
-/// iteration is the difference between two loop lengths, which cancels startup. Without
-/// valgrind the test has nothing to measure with and passes with a note.
 #[test]
 fn a_body_at_a_dead_bodys_address_runs_its_own_code() {
     // Compiled code is found through the body it was compiled from, by the body's address. Once
@@ -3422,6 +3417,11 @@ fn a_parked_return_value_survives_its_exit() {
     });
 }
 
+/// A compiled element operation must never cost more instructions than tier 0's handler for the
+/// same shape. The machine has no hardware counters to read, so each shape runs in a child of
+/// this test binary under cachegrind, which counts instructions exactly; the cost of one
+/// iteration is the difference between two loop lengths, which cancels startup. Without
+/// valgrind the test has nothing to measure with and passes with a note.
 #[test]
 fn element_ops_cost_no_more_than_tier_zero() {
     const NAME: &str = "element_ops_cost_no_more_than_tier_zero";
