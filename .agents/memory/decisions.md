@@ -6058,6 +6058,73 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   Rust against 11.6 GB from R on the 1e8 joins). The driver sums an answer's integer columns
   value by value, because a cast to doubles holds 0.8 GB beside a 1e8-row answer.
 
+## The global allocator's large blocks ask for huge pages
+
+- **Previous shape.** `heap::large::Mapped` gave every block of 1 MB or more a fresh anonymous
+  mapping on 4 KiB pages. A table query allocates buffers as long as its columns and frees them
+  when it returns, so every query paid a page fault per 4 KiB of every buffer: from the Rust
+  driver at 1e7 rows in a build without LTO, group-by q1 took 0.106 s against 0.024 s on
+  mimalloc's reused pages, and the 1e8 group-by took 32.2 s from R.
+- **Target shape.** `Mapped::alloc` and `Mapped::realloc` call `advise_huge`, which asks for
+  transparent huge pages (`MADV_HUGEPAGE`) on a mapping of 2 MiB or more. The advice is a no-op
+  on a kernel without transparent huge pages. `MappedPool`, which serves large R vectors, does
+  not ask: it resizes kept mappings, and the huge-page measurement on the subset loop
+  ("Collections run on GNU R's schedule") stands for it.
+- **Rejected: a pool of freed mappings inside `Mapped`.** It would reuse touched pages, which is
+  faster still on a query whose buffers are as large as the table (group-by q10 at 1e7 in the
+  same build: 0.43 s on reused pages against 0.73 s on fresh huge pages), but it keeps memory
+  resident between
+  queries, and the 1e8 joins have about 3 GB to spare. It stays in `backlog.md`.
+- **Impact.** Group-by q1 at 1e7 rows in that build is 0.028 s (0.014 s in a release build), and
+  the 1e8 group-by is 15.5 s from R against data.table's 59.3 s, at the same 8.5 GB peak as
+  before. On the R-vector cases of `runtime_peak_memory_stays_near_gnu_r` the advice adds 3 to
+  5 MB of peak (data.table's `dt[v > 0.5]` loop: 370 MB with it, 365 MB with transparent huge
+  pages disabled for the process, GNU R 341 MB).
+
+## Group-bys and joins run on ry's kernels, not Polars' streaming engine
+
+- **Question.** Polars' streaming engine runs a plan in morsels and can spill, so it was the
+  candidate for fitting db-benchmark's 1e8 joins and group-by in 15 GB without ry's own kernels
+  (`crates/table/src/group.rs`, `join.rs`) and without the allocator work.
+- **Measurement.** `db_benchmark --polars-streaming` (`crates/table/benches/db_benchmark.rs`) runs
+  each question as a plain Polars plan on the streaming engine over the tables ry's reader
+  built, with factor columns replaced by their codes, in the same process and allocator as the
+  kernels. Faster of two runs, seconds, 4 threads, 15 GB:
+
+  | 1e8 rows | ry kernels | Polars 0.55 streaming |
+  | --- | ---: | ---: |
+  | group-by q1 | 0.17 | 0.11 |
+  | group-by q2 | 0.18 | 0.91 |
+  | group-by q3 | 1.25 | 1.47 |
+  | group-by q4 | 0.82 | 0.22 |
+  | group-by q5 | 1.32 | 1.30 |
+  | group-by q6 | 0.86 | 2.59 |
+  | group-by q7 | 0.62 | 1.80 |
+  | group-by q8 | 2.08 | 7.82 |
+  | group-by q9 | 0.40 | 1.44 |
+  | group-by q10 | 6.32 | out of memory |
+  | group-by peak | 8.5 GB | over 14.2 GB |
+  | join q1 | 0.71 | 0.64 |
+  | join q2 | 0.84 | 1.02 |
+  | join q3 | 1.29 | 1.07 |
+  | join q4 | 0.76 | 0.80 |
+  | join q5 | 5.60 | out of memory |
+  | join peak | 11.9 GB | over 14.2 GB |
+
+  At 1e7 rows, where everything fits, streaming peaks at 2.10 GB against 1.15 GB on the group-by
+  and 2.64 GB against 1.77 GB on the joins, and takes 1.80 s against 1.28 s and 1.47 s against
+  0.67 s in total.
+- **Decision.** The kernels stay. Streaming runs out of memory on exactly the two questions the
+  15 GB budget is about (the group-by with nearly one group per row and the join of two 1e8-row
+  tables), and it is slower on eight of the thirteen questions it finishes at 1e8, by up to four
+  times (group-by q2, q8 and q9).
+- **What streaming does better**, kept as work for the kernels (`backlog.md`, "Open: DataFrame"):
+  group-by q4 (three double means over 100 groups), where ry adds doubles in row order as
+  data.table does and Polars sums per morsel, and group-by q1 and join q1 and q3 by 10 to 35%.
+  Group-by q5 is a tie.
+- **Impact.** No engine switch and no second execution path; the `streaming` feature of Polars is
+  a dev-dependency of `crates/table` for the bench driver alone.
+
 ## A load holds back S4 definitions and caches its index across processes
 
 - **Deferred S4** (`loader::deferred_s4`, `.ry_force_s4` in `runtime.R`). Previously every top-level
@@ -6805,7 +6872,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Target shape.**
   - `GcPolicy::heap_limit` bounds all of the heap's bytes (old, young small, young large). A large allocation past it, or a minor collection that leaves less than a fifth of `min_heap_limit` (64 MB, GNU R's `R_VSIZE`) free, runs a major collection (GNU R's `R_MinFreeFrac` escalation). After a major one, `HeapGrowth::next_limit` applies GNU R's `AdjustHeapSize` fractions, and the limit never sits closer than that fifth to the need, or every following minor collection would escalate. `HeapGrowth::from_environment` reads `R_GC_MEM_GROW`, `R_GC_GROWFRAC`, `R_GC_GROWINCRFRAC` and `R_GC_VGROWINCRFRAC` with GNU R's presets and ranges (user docs: `reference/cli.md`, "Memory").
   - The small-object trigger is half the old *small* bytes (`old_small_bytes` and `old_large_bytes` are counted apart), as GNU R's cons-cell trigger ignores vector memory. Counting old large vectors let a session holding 300 MB of vectors pile up 150 MB of small garbage (vapply over a 1e6 list: 230 MB peak, now 112 MB, GNU R 58 MB).
-  - Vectors of at least `large::MAPPED_BYTES` (1 MB) get an anonymous mapping each, unmapped when they die (`crates/heap/src/large.rs`). `MappedPool` keeps freed mappings up to the vector limit ("Two old generations" below) and resizes them with `mremap`; when no kept mapping is long enough it grows the longest and unmaps the rest, so the pool never holds memory idle while pages are added; otherwise up to its limit stays resident while idle. It is a pool of address space (the allocation pools the performance principles call for), not a cache of derived data: nothing in it can go stale, and the redesign that would remove it is fewer large temporaries, not a faster lookup. A sixteenth of the limit cost the subset loop 4.2 s of system time against 2.2 s; `MADV_HUGEPAGE` raised it to 9.9 s (huge-page zeroing and compaction) and was rejected.
+  - Vectors of at least `large::MAPPED_BYTES` (1 MB) get an anonymous mapping each, unmapped when they die (`crates/heap/src/large.rs`). `MappedPool` keeps freed mappings up to the vector limit ("Two old generations" below) and resizes them with `mremap`; when no kept mapping is long enough it grows the longest and unmaps the rest, so the pool never holds memory idle while pages are added; otherwise up to its limit stays resident while idle. It is a pool of address space (the allocation pools the performance principles call for), not a cache of derived data: nothing in it can go stale, and the redesign that would remove it is fewer large temporaries, not a faster lookup. A sixteenth of the limit cost the subset loop 4.2 s of system time against 2.2 s; `MADV_HUGEPAGE` raised it to 9.9 s (huge-page zeroing and compaction) and was rejected for the pool; the global allocator's blocks do ask for huge pages ("The global allocator's large blocks ask for huge pages").
   - libR's global allocator is `heap::large::Mapped<MiMalloc>`: blocks of 1 MB and more are mapped the same way, so a builtin's scratch buffer goes back to the kernel instead of staying in mimalloc where the mapped vectors cannot reuse it (`sample(x)` on 2e7 doubles: 305 MB peak with mapped vectors alone, 229 MB with the allocator, GNU R 229 MB). Growing such a block is an `mremap`, not a copy.
   - `rep`, `rep.int` and `rep_len` stream positions (`RepPlan` in `crates/interp/src/arith.rs`, `subset::select_positions`), and a plain vector's negative subscripts stream through a keep mask (`gather_kept` in `crates/interp/src/subset.rs`: `x[-(1:10)]` on 2e7 doubles, 305 MB peak, now 171 MB, GNU R 229 MB).
 - **Impact.** Peaks against GNU R 4.3.3: rep 242/239 MB, the subset loop 1386/1386 MB, data.table's `dt[v > 0.5]` loop 329/330 MB (`runtime_peak_memory_stays_near_gnu_r` in `crates/ry/tests/test_perf.rs`). The subset loop takes about 18 s against 17-19 s before and GNU R's 28.6 s. On the generated 60,000-line suites the collector's share grows from 0.44-0.58 s to 0.68-0.82 s of 20-28 s suites. `R_GC_MEM_GROW=0` costs far more on ry than on GNU R (finbench: 66 majors and 4.8 s in the collector against GNU R's 1.6 s), because GNU R's second old generation frees promoted temporaries without a full mark and ry has one old generation (`backlog.md`, "Open: collector throughput on the benchmark suites").

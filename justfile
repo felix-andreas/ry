@@ -174,8 +174,8 @@ bench-stdlib filter="" n="1e6" *args:
     python3 -I tools/bench/internal/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
 
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
-# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
-# (`--joins-only` runs the join questions alone).
+# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table1e8 --rows 1e8 --groupby-only`
+# (`--joins-only` runs the join questions alone). A limited run needs its markers on the page first.
 bench-table dir *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/internal/table/report.py {{ dir }} --write {{ args }}

@@ -1596,76 +1596,61 @@ data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a t
 generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
-`ry run` beat data.table under GNU R on every question, and all three runs give the
-same checksums. Each cell is the faster of two runs, in seconds, and the last row is each engine's
-peak resident memory over the whole run. The last column is the same engine driven from Rust,
-without R.
+`ry run` beat data.table under GNU R on every group-by and join question and on two of the three
+`:=` loops, and all three runs give the same checksums. The loop that updates 1% of the rows is
+the exception. data.table builds an index on `id4` during the first pass and afterwards writes
+only the matching rows, in place, while a `:=` on a row subset of a DataFrame computes a whole
+new column on every pass. Each cell is the faster of two runs, in seconds, and the last row is
+each engine's peak resident memory over the whole run, which is the loop that adds 100 columns.
+The last column is the same engine driven from Rust, without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.172 | 0.034 | 0.026 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.204 | 0.035 | 0.024 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.252 | 0.105 | 0.112 |
-| groupby q4: three means by `id4` | 0.391 | 0.145 | 0.125 |
-| groupby q5: three sums by `id6` | 0.376 | 0.126 | 0.126 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.637 | 0.151 | 0.158 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.727 | 0.068 | 0.065 |
-| groupby q8: the two largest `v3` by `id6` | 0.753 | 0.291 | 0.241 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.871 | 0.081 | 0.081 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.998 | 0.671 | 0.558 |
-| `:=` on a whole column, 100 times | 5.432 | 0.301 | 0.296 |
-| `:=` on 1% of rows, 100 times | 3.722 | 0.915 | 0.872 |
-| `:=` adding a column, 100 times | 5.865 | 1.074 | 0.770 |
-| join q1: small, on `id1` | 0.340 | 0.129 | 0.102 |
-| join q2: medium, on `id2` | 0.469 | 0.142 | 0.113 |
-| join q3: medium, left, on `id2` | 0.623 | 0.149 | 0.138 |
-| join q4: medium, on factor `id5` | 0.446 | 0.135 | 0.113 |
-| join q5: big, on `id3` | 3.592 | 0.889 | 0.832 |
-| keyed rolling join | 0.137 | 0.100 | 0.109 |
-| total | 27.01 | 5.54 | 4.86 |
-| peak memory (GB) | 6.9 | 8.0 | 7.6 |
+| groupby q1: `sum(v1)` by `id1` | 0.129 | 0.028 | 0.019 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.151 | 0.025 | 0.020 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.222 | 0.077 | 0.074 |
+| groupby q4: three means by `id4` | 0.160 | 0.088 | 0.088 |
+| groupby q5: three sums by `id6` | 0.266 | 0.084 | 0.090 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.798 | 0.092 | 0.121 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.484 | 0.048 | 0.037 |
+| groupby q8: the two largest `v3` by `id6` | 1.486 | 0.160 | 0.163 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.624 | 0.076 | 0.054 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.502 | 0.666 | 0.637 |
+| `:=` on a whole column, 100 times | 3.727 | 0.789 | 0.675 |
+| `:=` on 1% of rows, 100 times | 0.467 | 2.148 | 0.703 |
+| `:=` adding a column, 100 times | 4.498 | 0.848 | 0.911 |
+| join q1: small, on `id1` | 0.444 | 0.070 | 0.082 |
+| join q2: medium, on `id2` | 0.553 | 0.074 | 0.096 |
+| join q3: medium, left, on `id2` | 0.642 | 0.101 | 0.126 |
+| join q4: medium, on factor `id5` | 0.558 | 0.083 | 0.103 |
+| join q5: big, on `id3` | 3.537 | 0.373 | 0.426 |
+| keyed rolling join | 0.119 | 0.084 | 0.072 |
+| total | 20.37 | 5.91 | 4.50 |
+| peak memory (GB) | 7.7 | 8.4 | 4.8 |
 <!-- /bench-table:1e7 -->
 
-At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
-group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
-machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At both
-sizes the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
-The R script reads only the answer's numeric columns back into R for its checksum (`DataFrame.schema`
-picks them), because reading q10's six key columns as R vectors would add about 1 GB at 5e7 rows.
-
-<!-- bench-table:5e7-groupby -->
-| Question | data.table | ry, from R | ry, from Rust |
-|---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.762 | 0.152 | 0.132 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.919 | 0.167 | 0.164 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.284 | 0.618 | 0.608 |
-| groupby q4: three means by `id4` | 1.683 | 0.609 | 0.577 |
-| groupby q5: three sums by `id6` | 1.356 | 0.636 | 0.680 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.222 | 0.673 | 0.863 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 5.120 | 0.470 | 0.480 |
-| groupby q8: the two largest `v3` by `id6` | 3.233 | 1.659 | 1.576 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.072 | 0.311 | 0.309 |
-| groupby q10: `sum(v3)`, count by all six ids | 10.177 | 4.036 | 4.100 |
-| total | 30.83 | 9.33 | 9.49 |
-| peak memory (GB) | 6.6 | 6.1 | 5.9 |
-<!-- /bench-table:5e7-groupby -->
+At db-benchmark's 5 GB size (1e8 rows) the table holds the ten group-by questions alone,
+because the `:=` loop that adds 100 columns needs more than this machine's 15 GB. The peak is
+q10, whose answer has nearly one group per row. The R script's checksum sums an answer's numeric
+columns in the engine (`DataFrame.select` of one `Expr.sum` per column), because reading a
+1e8-row column back as an R vector would copy it.
 
 <!-- bench-table:1e8-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 1.538 | 0.302 | 0.292 |
-| groupby q2: `sum(v1)` by `id1, id2` | 1.990 | 0.293 | 0.301 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 2.906 | 2.519 | 1.573 |
-| groupby q4: three means by `id4` | 3.602 | 1.214 | 1.168 |
-| groupby q5: three sums by `id6` | 2.741 | 1.836 | 1.539 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.343 | 1.533 | 1.617 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 11.334 | 1.188 | 1.163 |
-| groupby q8: the two largest `v3` by `id6` | 7.691 | 4.108 | 3.491 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 4.513 | 0.708 | 0.536 |
-| groupby q10: `sum(v3)`, count by all six ids | 23.561 | 8.722 | 9.131 |
-| total | 69.22 | 22.42 | 20.81 |
-| peak memory (GB) | 13.7 | 13.4 | 12.6 |
+| groupby q1: `sum(v1)` by `id1` | 1.377 | 0.155 | 0.171 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.784 | 0.161 | 0.175 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.672 | 1.163 | 1.248 |
+| groupby q4: three means by `id4` | 1.934 | 0.803 | 0.823 |
+| groupby q5: three sums by `id6` | 2.031 | 1.197 | 1.315 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 8.981 | 0.749 | 0.856 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 6.051 | 0.879 | 0.624 |
+| groupby q8: the two largest `v3` by `id6` | 14.803 | 2.422 | 2.081 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.864 | 0.484 | 0.398 |
+| groupby q10: `sum(v3)`, count by all six ids | 17.754 | 7.456 | 6.315 |
+| total | 59.25 | 15.47 | 14.01 |
+| peak memory (GB) | 12.5 | 8.5 | 8.5 |
 <!-- /bench-table:1e8-groupby -->
 
 The join questions are measured separately at db-benchmark's 5 GB size
@@ -1677,12 +1662,12 @@ answer: the kernel stops it at 14.2 GB resident.
 <!-- bench-table:1e8-joins -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| join q1: small, on `id1` | out of memory | 1.318 | 1.333 |
-| join q2: medium, on `id2` | out of memory | 1.536 | 1.564 |
-| join q3: medium, left, on `id2` | out of memory | 1.791 | 1.832 |
-| join q4: medium, on factor `id5` | out of memory | 1.719 | 1.432 |
-| join q5: big, on `id3` | out of memory | 9.215 | 8.844 |
-| total | out of memory | 15.58 | 15.00 |
+| join q1: small, on `id1` | out of memory | 0.676 | 0.707 |
+| join q2: medium, on `id2` | out of memory | 0.691 | 0.841 |
+| join q3: medium, left, on `id2` | out of memory | 1.021 | 1.293 |
+| join q4: medium, on factor `id5` | out of memory | 0.721 | 0.764 |
+| join q5: big, on `id3` | out of memory | 4.954 | 5.597 |
+| total | out of memory | 8.06 | 9.20 |
 | peak memory (GB) | over 14.2 | 11.6 | 11.9 |
 <!-- /bench-table:1e8-joins -->
 

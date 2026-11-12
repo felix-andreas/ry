@@ -2673,7 +2673,7 @@ The end-to-end guard rests on the corpus suites.
   five db-benchmark joins peak at 11.6 GB from R and 11.9 GB from Rust, and data.table is killed
   at 14.2 GB before its first answer (`development/design/r-runtime.md`, section 7;
   `tests/test_memory.rs` in `crates/table` pins the bytes per row). What remains, largest first:
-  - **q5 takes 9 s where q1 to q4 take 1.3 to 1.8 s.** It buckets `join_big`'s 1e8 rows over a
+  - **q5 takes 5 s where q1 to q4 take 0.7 to 1.0 s.** It buckets `join_big`'s 1e8 rows over a
     key range of 2e8 and gathers 13 columns for 9e7 output rows through random row indices. Not
     profiled yet. Candidates: partition both sides by the key's high bits so each partition's
     buckets fit the cache, and gather the built side's columns in bucket order.
@@ -2683,18 +2683,18 @@ The end-to-end guard rests on the corpus suites.
     factor columns of a file finish in parallel. A partition whose labels all fit a view inline
     could turn its views into keys in place, and a column with few levels could keep u8 or u16
     codes from the first slice on instead of narrowing at the end.
-- **Under `ry run`, a frame passed through two closures outlives `rm()` and `gc()`** (interpreter,
-  not `crates/table`). With `report <- function(question, answer) cat(question, checksum(answer))`
-  and a loop of `answer <- DataFrame.join(x, y, on = "id2"); report("q", answer); rm(answer);
-  gc()`, resident memory after the `gc()` is one answer higher from about the fourth iteration
-  on (0.87 GB, then 1.25 to 1.33 GB with 1e7-row inputs), and stays one answer higher without
-  growing. Calling `checksum(answer)` directly in the loop body frees every answer, and so does
-  the nested shape with a plain numeric vector in place of the frame. It appears once the
-  closures are compiled to bytecode, which points at a reference the bytecode tier keeps for a
-  promise or an argument slot of the outer closure (candidates read without a conclusion:
-  `call_do_call`'s `heap.root(target_call)`, and handle release only after rooting instructions
-  in `crates/interp/src/bytecode.rs`). `tools/bench/internal/table/ry.R` avoids the shape. At
-  1e8 rows the stale answer was 4.5 GB and the kernel killed the run.
+- **`:=` on a row subset loses to data.table.** db-benchmark's loop
+  `for (step in 1:100) x[id4 == step, v1 := v1 + 1L]` at 1e7 rows takes 2.1 s from R and 0.70 s
+  from the Rust driver against data.table's 0.47 s. `assign_filtered` in
+  `crates/table/src/query.rs` runs it as a Polars plan (filter, then a left join on a row index,
+  then `when/then`), which builds a new column and a join's scratch on every pass, while
+  data.table answers `id4 == step` from an automatic index and writes the matching rows in
+  place. The target shape is a kernel that evaluates the filter to a mask and the value on the
+  selected rows alone, and writes into the column's buffer when the column is uniquely held.
+  The gap between R and the Rust driver is system time and varies between runs (0.8 to 3.7 s
+  over 100 passes): the R process faults each pass's buffers in afresh, and with transparent
+  huge pages disabled for the process the loop takes 3.1 s. Find out why the driver does not pay
+  it before choosing between the in-place kernel alone and a pool of freed mappings.
 - **An aggregate over a filter that keeps no rows gives one row.** `x[v > 5, .(s = sum(v))]`
   with no matching row prints one row with `s = 0`; data.table gives a table with no rows (and
   `x[v > 5, sum(v)]` gives `0` in both). The verb form, `DataFrame.filter` then
@@ -2709,13 +2709,22 @@ The end-to-end guard rests on the corpus suites.
   so an Enum read from Parquet with a non-alphabetical order is reordered.
 - **A text column is joined from its slices at the end**, which copies its strings once
   (`Builder::Text`); building the final `Utf8View` buffers directly would avoid it.
-- **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
-  a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
-  the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
-  at 6.7 GB peak with the default delay and 91 s at 8.1 GB with the delay set to never. libR sets it
-  to 1e9 ms, so pages return only at `gc()` (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory until `gc()`"), because
-  refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
-  Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
+- **Where Polars' streaming engine is faster than the kernels** (`decisions.md`, "Group-bys and
+  joins run on ry's kernels, not Polars' streaming engine"; `db_benchmark --polars-streaming`
+  reproduces it). At 1e8 rows group-by q4 takes 0.82 s against 0.22 s: three double means over
+  100 groups go through `dense_by_code` in `crates/table/src/group.rs`, where every thread scans
+  all row codes for its own code range so that doubles are added in row order as data.table
+  adds them. A blocked or pairwise sum whose result does not depend on the thread count would
+  let the per-thread dense states serve doubles too; decide first whether bit-equality with
+  data.table's sums is worth the scan. Group-by q10 at 1e7 rows (0.65 s against 0.54 s) pays the
+  same scan. Join q3 (the left join) takes 1.29 s against 1.07 s.
+- **A query's large buffers are faulted in afresh each time.** The global allocator maps every
+  block of 1 MB or more and unmaps it when freed (`heap::large::Mapped`), on huge pages, so a
+  query pays one fault per 2 MiB instead of per 4 KiB. A pool of freed mappings would reuse
+  touched pages (group-by q10 at 1e7 rows without LTO: 0.43 s against 0.73 s) but keeps memory
+  resident between queries, and the 1e8 joins have about 3 GB to spare (`decisions.md`, "The
+  global allocator's large blocks ask for huge pages"). Keeping scratch small (the grouped
+  median) and a per-query arena are the alternatives.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`, so
   `lubridate::floor_date` runs on R vectors in the `trials` module), no `cast`, `n_unique`,
   `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,

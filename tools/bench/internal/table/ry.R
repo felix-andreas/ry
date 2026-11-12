@@ -28,18 +28,21 @@ checksum <- function(answer) {
   sum(as.numeric(unlist(as.list(sums))))
 }
 
+report <- function(question, run, seconds, answer) {
+  rows <- if (is.DataFrame(answer)) nrow(answer) else length(answer)
+  cols <- if (is.DataFrame(answer)) ncol(answer) else 1L
+  cat(sprintf("%s\t%d\t%.4f\t%d\t%d\t%.6e\n", question, run, seconds, rows, cols, checksum(answer)))
+}
+
 time_question <- function(question, expr) {
   expr <- substitute(expr)
   for (run in 1:2) {
+    # The previous answer is collected before the clock starts, so two answers never share
+    # memory. At 1e8 rows a join's answer is 4.5 GB.
+    gc()
     seconds <- system.time(answer <- eval(expr, parent.frame()))[["elapsed"]]
-    rows <- if (is.DataFrame(answer)) nrow(answer) else length(answer)
-    cols <- if (is.DataFrame(answer)) ncol(answer) else 1L
-    total <- checksum(answer)
-    # The answer is freed before the next run starts, so two answers never share memory. At 1e8
-    # rows a join's answer is 4.5 GB.
+    report(question, run, seconds, answer)
     rm(answer)
-    invisible(gc())
-    cat(sprintf("%s\t%d\t%.4f\t%d\t%d\t%.6e\n", question, run, seconds, rows, cols, total))
   }
 }
 
