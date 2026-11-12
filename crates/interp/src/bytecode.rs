@@ -165,7 +165,19 @@ pub struct Tier {
     /// Called before a typed closure gets a frame, with its arguments matched by position or by
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
-    pub call: unsafe fn(function: Sexp, args: &[crate::builtins::Arg]) -> Option<R<Sexp>>,
+    pub call: unsafe fn(&TypedCall<'_>) -> Option<R<Sexp>>,
+}
+
+/// A call of a typed closure that [`Tier::call`] may run natively. Native code has no frame, so
+/// it pushes one from these only around an R call it makes.
+#[derive(Clone, Copy)]
+pub struct TypedCall<'a> {
+    pub call: Sexp,
+    pub function: Sexp,
+    pub args: &'a [crate::builtins::Arg],
+    /// The environment the call was made from, or `NULL` for a slot frame's caller, as
+    /// [`crate::interp::Frame::sys_parent`] holds it.
+    pub sys_parent: Sexp,
 }
 
 /// How the optimizing tier hands an activation back to the interpreter.

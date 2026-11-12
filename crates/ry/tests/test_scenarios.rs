@@ -30,6 +30,7 @@ use {
         },
         time::{Duration, Instant},
     },
+    syntax::testing::cargo_build,
 };
 
 #[test]
@@ -406,6 +407,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         debugger: None,
         spawned: None,
         hide_gnu_r: false,
+        ignore_sigint: false,
         environment: BTreeMap::new(),
         library,
     };
@@ -910,23 +912,21 @@ fn which(program: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The directory of the `ry` under test, which the helper binaries are built beside.
+fn profile_directory() -> Result<&'static Path, String> {
+    Path::new(env!("CARGO_BIN_EXE_ry"))
+        .parent()
+        .ok_or_else(|| "the ry binary has no directory".to_owned())
+}
+
 /// ry's `libR.so`, built first: `cargo test` of this package does not build libr, and `ry run`
 /// loads the copy beside the binary, which only `cargo build` refreshes.
 fn libr_path() -> Result<&'static PathBuf, String> {
     static LIBR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     LIBR.get_or_init(|| {
-        let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
-            .parent()
-            .ok_or("the ry binary has no directory")?;
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-q", "-p", "libr"]);
-        if profile_directory
-            .file_name()
-            .is_some_and(|name| name == "release")
-        {
-            build.arg("--release");
-        }
-        let status = build
+        let profile_directory = profile_directory()?;
+        let status = cargo_build(profile_directory)
+            .args(["-p", "libr"])
             .status()
             .map_err(|error| format!("building libr: {error}"))?;
         if !status.success() {
@@ -944,19 +944,10 @@ fn r_home() -> Result<&'static PathBuf, String> {
     static HOME: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     HOME.get_or_init(|| {
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scenario-r-home");
-        let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
-            .parent()
-            .ok_or("the ry binary has no directory")?;
+        let profile_directory = profile_directory()?;
         // `ry-rcmd` is another package's binary, so cargo test does not build it.
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
-        if profile_directory
-            .file_name()
-            .is_some_and(|name| name == "release")
-        {
-            build.arg("--release");
-        }
-        let status = build
+        let status = cargo_build(profile_directory)
+            .args(["-p", "rcmd", "--bin", "ry-rcmd"])
             .status()
             .map_err(|error| format!("building ry-rcmd: {error}"))?;
         if !status.success() {
@@ -993,19 +984,10 @@ fn single_ry() -> Result<&'static PathBuf, String> {
     SINGLE
         .get_or_init(|| {
             let libr = libr_path()?;
-            let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
-                .parent()
-                .ok_or("the ry binary has no directory")?;
-            let release = profile_directory
-                .file_name()
-                .is_some_and(|name| name == "release");
             let base = ry_base().ok_or("ry's base R is not built; build it with `just base-r`")?;
             let build = |embed: Option<(&Path, &Path)>| -> Result<(), String> {
-                let mut command = Command::new(env!("CARGO"));
-                command.args(["build", "-q", "-p", "ry-lang", "--bin", "ry"]);
-                if release {
-                    command.arg("--release");
-                }
+                let mut command = cargo_build(profile_directory()?);
+                command.args(["-p", "ry-lang", "--bin", "ry"]);
                 match embed {
                     Some((library, base)) => command
                         .env("RY_EMBED_RUNTIME", library)
@@ -1058,6 +1040,9 @@ struct Journey {
     spawned: Option<Spawned>,
     /// Set by `hide gnu-r`: later runs see no GNU R on `PATH` and no `R_HOME`.
     hide_gnu_r: bool,
+    /// Set by `ignore SIGINT`: later runs start with SIGINT ignored, as a background job of a
+    /// non-interactive shell does.
+    ignore_sigint: bool,
     /// Variables `env` set for later `run` steps.
     environment: BTreeMap<String, String>,
     /// The package library this scenario's R processes search ([`scenario_library`]).
@@ -1093,6 +1078,10 @@ impl Journey {
             ["requires", ..] => Ok(()),
             ["hide", "gnu-r"] => {
                 self.hide_gnu_r = true;
+                Ok(())
+            }
+            ["ignore", "SIGINT"] => {
+                self.ignore_sigint = true;
                 Ok(())
             }
             ["client", options @ ..] => {
@@ -1598,7 +1587,16 @@ impl Journey {
                     PathBuf::from(env!("CARGO_BIN_EXE_ry"))
                 };
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
-                let mut command = Command::new(executable);
+                // An ignored signal stays ignored across `exec`, so the shell hands it on.
+                let mut command = if self.ignore_sigint {
+                    let mut shell = Command::new("sh");
+                    shell
+                        .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+                        .arg(executable);
+                    shell
+                } else {
+                    Command::new(executable)
+                };
                 command
                     .args(arguments)
                     .current_dir(&self.root)

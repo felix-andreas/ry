@@ -106,8 +106,11 @@ def measured_sentence(suites):
     kernels = sorted({(meta["machine"].get("kernel") or "an unknown OS").split()[0] for meta in metas})
     rounds = sorted({meta["rounds"] for meta in metas})
     count = str(rounds[0]) if len(rounds) == 1 else f"{rounds[0]} to {rounds[-1]}"
+    # A suite recorded on a release archive names it; one recorded on a local build names nothing.
+    tags = sorted({meta["release"]["tag"] for meta in metas if meta.get("release")})
+    build = f" of the ry {' and '.join(tags)} release archive{'s' if len(tags) > 1 else ''}" if tags else ""
     return (f"Each number is the geometric-mean speed-up over GNU R {' and '.join(versions)} (above 1x is faster), "
-            f"from {count} paired rounds on {' and '.join(kernels)}.")
+            f"from {count} paired rounds{build} on {' and '.join(kernels)}.")
 
 def mixed_machines(suites):
     """A warning when the suites were measured on different machines (CPU model or kernel) or against
