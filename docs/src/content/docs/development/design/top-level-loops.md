@@ -1,0 +1,80 @@
+---
+title: Compiled top-level loops
+description: "Compiling the for, while and repeat loops the tree walker evaluates in the global environment, and what broadening that to other environments would take"
+---
+
+`s <- 0; for (i in 1:1e7) s <- s + i` written at top level runs in ry's tree walker, because only
+closure bodies compile. GNU R compiles every loop it evaluates in the global environment before
+running it, so the same line took 2.71 s on ry against 0.47 s on GNU R (release build, 1e7, one
+busy machine; relative only). The same loop inside a closure compiles and takes 0.09 s.
+
+## The rule
+
+A `for`, `while` or `repeat` that the tree walker evaluates compiles when all of these hold:
+
+- the loop's environment is the global environment, which is GNU R's own condition
+  (`R_GlobalEnv == rho` in `eval.c`'s `do_for`, `do_while` and `do_repeat`);
+- no debugger session is active;
+- the loop does not call `return` outside a function it defines;
+- a `for` loop's sequence is a vector (not a record or `I64`) with at least
+  `LOOP_COMPILE_ITERATIONS` elements, or a `while` or `repeat` loop has run that many iterations
+  in the tree walker.
+
+Otherwise the tree walker runs it, as for every loop inside a function that the compiler rejected.
+
+## How the compiled loop runs
+
+- The entry point is `bytecode::run_loop(call, sequence, env)`, called from `do_for`, `do_while` and
+  `do_repeat`.
+- `for` compiles after evaluating its sequence, with the evaluated value in place of the sequence
+  expression, so the sequence is evaluated once. `ForInit` coerces a factor and steps a compact
+  sequence without expanding it, as in a closure.
+- `while` and `repeat` keep all their state in the environment, so after
+  `LOOP_COMPILE_ITERATIONS` iterations the compiled loop starts again from the condition (`while`)
+  or the body (`repeat`), which is exactly where the tree walker stands between two iterations.
+- The loop compiles with no local symbols, so every variable read and write goes to the
+  environment's bindings. Code called from the loop, `get()`, `exists()` and active bindings see
+  every assignment at once, and the loop variable keeps its last value afterwards.
+- The code runs through `run` like a closure body, with a frame-less closure as `function` (no
+  formals, the loop as its body, the environment as its enclosure), and no call frame is pushed.
+  `parent.frame()`, `sys.call()` and the calls that conditions report are therefore those of the
+  tree walker.
+- A closure's frame restores `interp().srcref` on leaving. This activation has none, so
+  `run_loop` saves and restores it.
+- Ops that index `interp().frames[slot_owner]` (`on.exit`, `missing` and the argument shortcuts of
+  slot frames) all run only in slot frames, so environment-backed code never reaches them, and
+  `on.exit` or `missing()` in a top-level loop behave as in the tree walker.
+- The `for`, `while` or `repeat` special's `LoopContext` stays pushed while the compiled loop runs,
+  so a `break` from `tryCatch(break)` or `eval(quote(break))` is found as before, and the compiled
+  loop catches it at its own loop target.
+- The code lives for one evaluation of the loop and is dropped after it. There is no table from
+  calls to code, and no marker on the call for a loop the compiler rejected: a language object's gp
+  bits are serialized, so a marker would change `serialize()` and `digest()` of a quoted loop. GNU R
+  also retries each time.
+- The optimizing tier never sees this code. Its `TIER_STATE` is `profile::TIER_OFF`, which entry
+  scheduling skips and `back_edge` turns into a reset of the back-edge counter, so no baseline or
+  tier-1 code is compiled and no feedback is recorded. The tier's frames and resume points assume a
+  call frame, and in the global environment every closure call, active binding and `<<-` from a
+  callee writes the loop's variables, so a compiled global could not stay in a register across any
+  call.
+
+## Open questions
+
+- **Other environments.** GNU R compiles no loop in an `eval()`, `local()` or `test_that`
+  environment, and two differences show why broadening is a separate, measured step. In
+  `f <- function() { eval(quote(for (i in 1:200) if (i == 200) on.exit(cat("exit f\n")))); cat("body f\n") }`
+  the `on.exit` attaches to `eval`'s frame, so GNU R prints `exit f` before `body f`; and
+  `g <- function(x) { local({ for (i in 1:200) r <- missing(x) }); r }` raises
+  "'missing(x)' did not find an argument". Each needs an oracle case before the rule widens. The
+  testthat suite's gain would come from that step.
+- **The optimizing tier.** Deoptimization and OSR need no call frame, only the bytecode `Machine`,
+  whose header register must hold the global environment and whose `enclosure()` the epoch checks
+  key on. What the tier lacks is a rule for variables: its planner takes its locals from
+  `local_symbols` of the body and holds them in SSA across calls, which is unsound when any callee
+  can write them through `<<-`, `assign()` or an active binding. Enabling it needs a "global frame"
+  flag under which no symbol is local and every variable is re-read after each call, a thorough
+  validity check at loop entry, the body rooted for the loop's lifetime, and pending unwinds
+  pushed on `Interp::held_unwinds` when the entry bypasses `jit::run`.
+- **`return` in a top-level loop.** GNU R's compiled loop treats `return(1)` as leaving the loop,
+  so `for (i in 1:100) if (i == 3) return(1); cat(i)` prints `3`, where ry's tree walker raises "no
+  function to return from". Such loops stay in the tree walker, which keeps today's behavior.
