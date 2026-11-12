@@ -256,6 +256,11 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 - **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
 
+## Open: a dense id for interned strings (strings track)
+
+- S3 method lookup walks the calling function frames below the top environment on every dispatch, by name (`method_scope` and `lookup_in_scope` in `crates/interp/src/dispatch.rs`, about 260 and 180 instructions per call). It is most of the dispatch cost left in the validation workload, where `format()` dispatches from inside `vapply`. Closure frames in fixed slots could answer "no binding of this name in any function frame" without hashing, which belongs to the closure-frame work, not to dispatch (`decisions.md`, "S3 methods are found through one row per method symbol").
+- S3 dispatch maps each (generic, class) pair to its `generic.class` symbol through a hash map keyed by the generic's symbol and the class `CHARSXP` (`MethodCache::names` in `crates/interp/src/dispatch.rs`, about 69 instructions per lookup, 0.7% of the objects workload). A dense id per interned `CHARSXP`, stored in the string, would let that become an index, and would serve every other table keyed by an interned string. Interning the class as a symbol instead costs more than the hash (`decisions.md`, "S3 methods are found through one row per method symbol").
+
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/internal/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
@@ -1095,7 +1100,7 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
   interned it, and made `.Generic` with `mk_char`: `mk_char`, `install_char`, `method_symbol`,
   `char_str` and their mallocs were about 7.5% of `timeseries`. `MethodCache::names` maps the
   symbol pair to the name.
-- **The method cache flushed on every collection.** Now a GC root, keyed only on the binding epoch.
+- **The method cache flushed on every collection.** The S3 method rows are GC roots, valid under each method symbol's lookup stamp.
 - **`.Call` interned four control-argument names per call** (0.5% of `timeseries`).
 - **Tier-0 dispatch** is one loop over op words that carry their operand count, lookup sites
   keep slot hints into the frame, function lookups skip frames that cannot bind the symbol, and
