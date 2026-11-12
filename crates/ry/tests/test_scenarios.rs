@@ -411,6 +411,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         debugger: None,
         spawned: None,
         hide_gnu_r: false,
+        ignore_sigint: false,
         environment: BTreeMap::new(),
         library,
     };
@@ -1063,6 +1064,9 @@ struct Journey {
     spawned: Option<Spawned>,
     /// Set by `hide gnu-r`: later runs see no GNU R on `PATH` and no `R_HOME`.
     hide_gnu_r: bool,
+    /// Set by `ignore SIGINT`: later runs start with SIGINT ignored, as a background job of a
+    /// non-interactive shell does.
+    ignore_sigint: bool,
     /// Variables `env` set for later `run` steps.
     environment: BTreeMap<String, String>,
     /// The package library this scenario's R processes search ([`scenario_library`]).
@@ -1098,6 +1102,10 @@ impl Journey {
             ["requires", ..] => Ok(()),
             ["hide", "gnu-r"] => {
                 self.hide_gnu_r = true;
+                Ok(())
+            }
+            ["ignore", "SIGINT"] => {
+                self.ignore_sigint = true;
                 Ok(())
             }
             ["client", options @ ..] => {
@@ -1603,7 +1611,16 @@ impl Journey {
                     PathBuf::from(env!("CARGO_BIN_EXE_ry"))
                 };
                 // A private cache keeps verdicts ry remembers between runs inside the scenario.
-                let mut command = Command::new(executable);
+                // An ignored signal stays ignored across `exec`, so the shell hands it on.
+                let mut command = if self.ignore_sigint {
+                    let mut shell = Command::new("sh");
+                    shell
+                        .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+                        .arg(executable);
+                    shell
+                } else {
+                    Command::new(executable)
+                };
                 command
                     .args(arguments)
                     .current_dir(&self.root)
