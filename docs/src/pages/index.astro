@@ -1,6 +1,6 @@
 ---
 import Venn from "../components/Venn.astro";
-import { formatRatio, measuredSuites, mixedMachines, suiteSpeeds } from "../lib/benchmarks";
+import { formatRatio, gnuRSuites, mixedMachines, suiteSpeeds } from "../lib/benchmarks";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -166,7 +166,7 @@ Str.join_with(loud, " ")`,
 const speeds = suiteSpeeds();
 const speedScale = Math.log(1 + Math.max(1, ...speeds.flatMap((row) => [row.ry?.median ?? 0, row.typed?.median ?? 0])));
 const speedWidth = (speedup: number) => Math.log(1 + speedup) / speedScale;
-const gnuRVersions = [...new Set(measuredSuites().map((suite) => suite.results?.meta.gnuR.version))].sort().join(" and ");
+const gnuRVersions = [...new Set(gnuRSuites().map((suite) => suite.results?.meta.gnuR?.version))].sort().join(" and ");
 
 const migrationTabs: Sample[] = [
     {

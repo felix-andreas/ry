@@ -457,8 +457,10 @@ user-facing wording and the diagnostic codes follow the native-types contract.
 
 ## Measuring against the bar
 
-- **Rust references.** Each typed benchmark program has a Rust twin in `tools/climb/rust/`, and
-  `just climb` reports the typed time against it.
+- **Rust references.** Each typed benchmark program has a Rust twin in `tools/bench/typed/`. The
+  `typed` benchmark suite (`just bench typed`) times the two side by side, checks that they print
+  the same checksum, and reports typed ry's time over Rust's per program with its geometric mean.
+  `just climb` reports the same mean as one of its scores.
 - **Three runs per program.** Every typed benchmark program, every typed oracle program and every
   program the fuzzer generates (records, tags, lists, strings, dicts, closures) runs three ways: in
   the interpreter with annotations checked, compiled, and compiled with every annotation erased,

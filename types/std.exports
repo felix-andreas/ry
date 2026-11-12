@@ -139,6 +139,7 @@ Num.div_checked
 Num.div_trunc
 Num.div_trunc_checked
 Num.e
+Num.exp
 Num.floor
 Num.from_r
 Num.infinity_f64

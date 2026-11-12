@@ -9379,6 +9379,19 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** Typed knucleotide runs natively in about 0.04 s, against about 0.5 s untyped, with the same checksum.
 - **Pinned by** `typed-sort-with.scenario`, the sort and string cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs`, and `comparisons_and_logic_follow_r` in `crates/typed/tests/test_values.rs`.
 
+## The typed suite scores typed ry against Rust
+
+- **Previous shape.** The only measure of typed ry against Rust was the speed score of `just climb` (`tools/climb/run.py`), which timed Rust twins kept in `tools/climb/rust/` with a statistic of its own: each twin printed the best of three warm runs, while `tools/bench/harness.typed.R` printed the median of five. The score was unpublished, three twins had drifted from the sizes of their typed programs, and nothing compared their checksums in the published runner.
+- **Target shape.** `tools/bench/typed/` is a suite like the others: a `suite.toml` that names each program's `typed_source` (the file the kernels or applications suite owns) and `rust_source`, the twins, and `harness.rs`, which every twin includes and which prints the typed harness's line (`name checksum median min cold`, repeat count from `RY_BENCH_REPEAT`). `bench.py` runs it with Rust as the baseline and typed ry as the measured engine, needs `rustc` and no GNU R, and fails a program whose checksums differ. The climb loads `bench.py` and times through the same runner, so one copy of the twins and one statistic exist.
+- **A results file names its baseline and the direction of its ratios.** `baseline` is `gnu_r` or `rust`, and `ratio_kind` is `speedup` (baseline time over engine time) or `slowdown` (engine time over baseline time). A typed-over-Rust ratio is a time, where lower is faster, so the renderers keep it out of every table, chart and sentence of speed-ups over GNU R and give it a paragraph and a section of its own. A file without the two keys reads as `gnu_r` and `speedup`.
+- **Why `rustc -O` on one file.** `-O` is optimization level 3, the level of cargo's release profile, with no target-CPU flag, so a twin is built as a released Rust program is, and a single file needs no cargo project or lockfile per program. The flags and the compiler version are stored in `meta.rust`.
+- **The too-short floor is per suite.** Both harnesses time warm runs inside the process, so start-up is outside the time and a run of a few milliseconds is stable. The typed suite's floor is 0.1 ms on Rust (`RUST_SHORT`), against 0.1 s on GNU R elsewhere, and is stored as `meta.too_short_seconds`. The program sizes stay those of the kernels and applications suites, which share the typed files.
+- **The typed harness reads `Sys.time()`.** `proc.time()`, which `harness.R` reads, is a millisecond clock, which is too coarse beside a Rust program that finishes in under a millisecond, and the harness prints six decimals for the same reason.
+- **No peak memory.** `wait4` reports a child's peak resident set no lower than the runner's own at the fork, and a Rust twin needs less than a Python process, so the suite stores no `peak_mib` and its section has no memory table.
+- **`--any-build`.** `bench.py` refuses a binary that is not a release build, because its numbers are not publishable. The flag lifts the refusal for a local look (`just bench typed --ry target/iterate/ry --any-build`); `--write` still requires `--release`.
+- **Impact.** "Typed ry is N times Rust" is a number `bench.py` computes and the renderers display, with the same checksum gate, paired rounds and intervals as every other suite.
+- **Pinned by** `TypedSuite` and `BuildProfile` in `tools/bench/test_bench.py`.
+
 ## Compiled code calls an active binding at every read
 
 - **Previous shape.** `jit_load` read a variable through `bytecode::load_variable`, which calls an active binding's function, and the analysis then marked the slot loaded, so later reads in the same activation reused that one value. A loop of 2000 reads of a binding called it 3 times in `RY_JIT=force`, against 2001 in tier 0.
@@ -9408,8 +9421,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Arguments cross as for any R call.** An `I64` reaches a table function through `Num.to_r`, as the checker requires (`Expr.col("units") >= least` with an `I64` is a `type-mismatch`), so the lowerer has no table-only argument rule.
 - **Columns are R vectors.** `table$name` and `table[["name"]]` compile to a call of base `[[` and are legal only where an R call's value is (inside `List.from_r` and the other conversions, or as an unused statement), because a column is an R vector that typed code cannot hold. `table[...]` is refused with a message that names the verbs.
 - **Rooting.** A table result lives in a machine word the collector does not scan, so `ry_call_r` roots it on the handle stack, and the outermost `typed::call` releases its mark. A loop that makes a table per iteration therefore holds every one of them until the typed call returns.
-- **Impact.** `sales.typed.R` is the full pipeline in typed code (filter, with_columns, group_by, agg, sort, then a typed weighted sum of the totals). Correctness: the table engine runs the same closures as from R, so results are the interpreter's. Analysis is unaffected.
-- **Pinned by** `typed-table-values.scenario` and `test_scenarios::typed_benchmarks_run_natively`.
+- **Impact.** A table pipeline (filter, with_columns, group_by, agg, sort) compiles as typed code and can feed a typed computation. Correctness: the table engine runs the same closures as from R, so results are the interpreter's. Analysis is unaffected. The typed `sales` benchmark does not use it (see "The typed `sales` benchmark is written over `Dict`").
+- **Pinned by** `typed-table-values.scenario`.
 
 ## A serialized typed closure carries its signature
 
@@ -9417,3 +9430,111 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** The registry stays the one source of truth in memory. The stream carries a copy: the writer (`libr::serialize`) gives a typed closure one extra first attribute, `annotations::STREAM_ATTRIBUTE`, holding the masks, texts and names, and the reader (`interp::serialize`) takes it off and registers it (`annotations::restore_signature`), so a closure in memory never has the attribute. Another R reads such a stream as a closure with one unknown attribute.
 - **A typed function may call a sibling that is not loaded yet.** `typed::lower::resolve_function` forces a lazy-load promise of any package (recognized by `serialize::lazy_record_header`), not only base's, because such a promise only reads the function from the package database. Before, a typed function whose first call found a sibling still unloaded was refused for good.
 - **Impact.** Installed typed packages check, convert and compile as the same code does in a script, which install-time compilation of typed closures needs: it reads the declared types. Pinned by the scenario `install-typed-package`.
+
+## A record or tag that stays in its function has no box
+
+- **Previous shape.** Every `Op::Construct` of a shape with fields allocated a box, also when the function only read fields back out of it. `orders` built an order record, a priced line and a tag per item and ran at about 19 times its Rust twin's time; the backlog listed "boxes are never scalar-replaced".
+- **Target shape.** `typed::unbox` (`crates/typed/src/unbox.rs`) runs after lowering and before fusion and ownership insertion. It removes a box that one instruction builds when every use of it, through copies, is a field read (`Op::Field` of the built shape) or a shape read (`Op::ShapeOf`). The construction becomes one copy per field into fresh locals, a field read becomes a copy of that local, and a shape read becomes the shape's constant. Because it runs before ownership insertion, no count operation ever exists for a removed box.
+- **Why a dominance rule and not SSA.** The IR's locals are variables that may be assigned again. A read may be replaced only where it is certain to see the latest construction: every instruction on the chain (the construction and each copy) is the only assignment of its local and dominates the instructions that read that local. On any path from one run of the construction to the read, nothing can then assign a chain local in between, because a second run of an assigning instruction would have to pass the construction again. The field values are snapshotted into fresh locals at the construction, so assigning a variable the box was built from afterwards changes nothing. Converting the IR to SSA would also work but would change every pass after it; the rule needs only the dominator tree (Cooper, Harvey and Kennedy's algorithm in `Dominators`).
+- **What keeps a box.** Any other use: an argument, a list item, a field of a box that is itself kept, the result, a branch condition, a variable with a second assignment (a record built on both arms of an `if`, or rebuilt each time round a loop and carried over), a read the construction does not dominate, or a field read whose result type is not the type of the value stored (`fits` allows equal types, a `Bool` read as its logical, and a tag of a known union read as a tag of any union).
+- **Nested boxes** go in a later round: once the outer box is gone, the inner one's only uses are copies and reads. `MAX_ROUNDS` is 4.
+- **Impact.** With the inlining below, `orders` runs at about 2.3 times its Rust twin's time on the iterate build (from about 19). Correctness rests on the dominance argument above and is pinned by `crates/typed/tests/test_unbox.rs` (hand-built IR for each keeping rule) and `typed-records-unboxed.scenario`.
+
+## A small typed function is lowered into its caller
+
+- **Previous shape.** A call of a typed function from typed code was always `Op::CallTyped`, a native call with the callee compiled on its own. A record the callee returned crossed the call as a box, so nothing could remove it, and the caller's loop paid a call per item.
+- **Target shape.** `Lowering::inline`, which already lowered local functions and function literals into their callers, takes the callee's storage rule as a parameter and also serves top-level typed functions (`crate::storage`, so an argument meets the callee's annotation exactly as at a separate call). The call site in `lower.rs` inlines when the callee is another function of the same environment, is not already being inlined (`inlining`), sits at most `MAX_TYPED_INLINE_DEPTH` (4) levels deep, takes exactly the arguments passed, cannot end invisibly (`tail_invisible`), and has a small body: at most `MAX_INLINE_CALLS` (48) calls and operators, no `return` and no call of itself (`small_body`).
+- **Why at lowering and not on the IR.** The lowerer types values by flow, so an inlined body is specialized to the argument types at this site for free, and its constructions land in the caller where `typed::unbox` can remove them. An IR inliner would need the callee's IR for the same argument types first and a renaming of locals and blocks, for the same result.
+- **A callee that cannot be inlined is called.** An inlined body is lowered under the caller's rules, which can refuse something a separate function may do (a body whose result is a call of R, for one). `lower::lower` therefore runs twice at most: when the first pass refuses inside an inlined typed callee, the second pass (`lower_calling`) lowers that callee as an `Op::CallTyped` and inlines the rest as before.
+- **What a user can see.** `RY_TYPED_LOG` prints no "compiled for" line for a function that was only ever inlined.
+- **Pinned by** `typed-record-list-fields.scenario` (the callee is compiled into its caller) and `typed-calls-stay-native.scenario`.
+
+## A typed loop over a held list counts a position and reads without a range check
+
+- **Previous shape.** `for (x in xs)`, `List.walk`, `List.map` and the other inlined list functions kept an `I32` index, widened it per item and read through the checked item load.
+- **Target shape.** `positions` and `count_up` in `crates/typed/src/lower.rs` open a loop whose `I64` counter runs from 1 to a length read once before the loop, and `next_position` leaves when the counter equals the end before it steps, so the step cannot overflow and needs no check. The body reads with `Op::ItemAt(list, counter)`, a load with no range check. That is sound because the loop reads a local the lowerer made for the loop (a copy that holds its own reference for the whole loop), not the user's variable, so the list's length cannot change while the loop runs.
+- **`List.walk` over `List.range`** counts from the start to the end and builds no list.
+- **Impact.** The array kernels' loops are a compare, a load and an add per item.
+
+## A typed free calls a register-preserving entry
+
+- **Previous shape.** Dropping the last reference called the free routine in the host's calling convention. The call is on a cold path, but the register allocator must assume a host call clobbers every caller-saved register, so each value live across a drop lived in a stack slot on the hot path too.
+- **Target shape.** The backend compiles one thunk per free routine in Cranelift's preserve-all convention (`CallConv::Preserving` in `crates/ssa`) and calls that. The thunk saves what the host routine may clobber, so a loop's accumulator and counter stay in registers.
+- **Why not inline the count test only.** The test was already inline; the spills came from the call's convention, not from its frequency.
+
+## Fused list kernels are compiled per CPU feature level and clear no buffers
+
+- **Previous shape.** `values::ry_count_true` and `values::ry_elementwise` were compiled once for baseline x86-64 (SSE2), which has no 64-bit integer compare and works on two doubles at a time. The arithmetic kernel's loops read slices built inside the function, which the compiler could not prove apart, and stayed scalar. Both kernels declared their chunk buffers as zeroed arrays, so each call cleared up to 36 KB before it read an item; in `log_rank`, which counts over 16,000 items a thousand times, the clearing was a sixth of the kernel's instructions.
+- **Target shape.**
+  - The count kernel's body is `#[inline(always)] count_true`, compiled twice: `count_true_avx2` carries `#[target_feature(enable = "avx2")]`, and `ry_count_true` picks it when `is_x86_feature_detected!("avx2")` says so. Its helpers (`operand`, `compare_lanes`) are `#[inline(always)]` too, because a function without the attribute is not compiled with the caller's features.
+  - The arithmetic kernel calls one step function per program step and chunk through a pointer chosen once per call (`Step<T>`: `step_dbl_avx2` or `step_dbl_baseline`, and the same pair for `I64`). The slices are parameters of the step, so they are known not to overlap and every operator's loop is vector code, with the `NaN` or overflow test folded into the same loop. The last step of a program that gives a list writes into the list, with no copy.
+  - `Rows` holds the chunk buffers uninitialized. A kernel fills the rows of its scalar inputs, clears only the rows its program's steps write, and reads no other row.
+- **Why not `-C target-cpu`.** A released binary must run on any x86-64 machine, so the feature level is chosen at run time, per kernel. `crates/interp/src/vector_math.rs` does the same.
+- **Why two shapes of dispatch.** A call per step and chunk of 128 items costs nothing beside the chunk, and keeps one copy of the kernel's control code. The count kernel has the other shape, its whole body compiled twice; moving it to step functions is a cleanup, not a speed-up.
+- **Impact.** On the iterate build, `log_rank` runs at about 3.5 times its Rust twin's time (from about 8) and `vector_arith` at about 1.9 (from about 2.6). The remaining cost is in the backlog ("Typed ry against Rust").
+- **Pinned by** `fused_counts_follow_three_valued_logic` and `fused_arithmetic_agrees_with_one_item_at_a_time` in `crates/typed/tests/test_values.rs`, and the `typed-mask-counts` scenario.
+
+## `Dict.update` probes once and builds no `Result`
+
+- **Previous shape.** `Dict.update(dict, key, f)` lowered to a lookup that built `:Ok(value)` or `:Err(:Missing)` as a box, a call of `f` whose answer was a second box, and an insert or a removal that hashed and probed again. A loop that totals per key paid three hashes and two allocations per item.
+- **Target shape.** The lowerer emits `Op::DictFind` (the key's position, or -1), branches on it, and lowers `f` once per branch when `f` is inline (a function literal, a local function or a small typed function): the found branch reads the value with `Op::DictAt`, applies `f` to `:Ok(value)` and stores with `Op::DictPut`, which writes at the known position, and the absent branch applies `f` to `:Err(:Missing)` and stores with `Op::DictInsert`. Each branch's `Result` is built and read inside one function, so `typed::unbox` removes it. A typed closure that is called, not inlined, keeps one joined lookup result and one call (`lower::dict_update`, `store_update`).
+- **Why two copies of the callback.** One copy at a join would see a `Result` assigned on two paths, which the unboxing pass keeps as a box. Two copies cost compile time in proportion to the callback's size, which is small where it is inline at all (`MAX_INLINE_CALLS`).
+- **`ry_dict_put` falls back to an insert** when the dict is shared, static or the position is -1, so `Op::DictPut` is correct wherever `Op::DictInsert` is.
+- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` (inline and called callbacks that insert, replace and remove) and `test_values`.
+
+## The typed `sales` benchmark is written over `Dict`
+
+- **Previous shape.** `sales.typed.R` ran a DataFrame pipeline (five eager table verbs and a group-by on a string column), while its Rust twin made one pass over three slices with a `HashMap`. The ratio between them measured the table engine and the R call protocol, not typed ry.
+- **Target shape.** A typed benchmark program and its Rust twin do the same work in the same data model (the mandate's "written entirely in ry's own types"). `sales.typed.R` takes one `List` per column and totals revenue per region in a `Dict<Str, F64>` through `Dict.update`; `tools/bench/typed/sales.rs` does the same with a `HashMap<&str, f64>`. Both weight the regions in alphabetical order, so the checksum is the plain R program's.
+- **What it still measures beyond the loop.** The three column lists are held by untyped code, so each call converts the `List<Str>` argument to a native list and scans the numeric ones (`typed::type_of`); the Rust twin borrows its slices. That boundary cost is part of the ratio on purpose, and `backlog.md` tracks removing it.
+
+## Short strings are built and hashed as two words
+
+- **Target shape.** A string of at most 15 bytes is two machine words with its bytes inline. `values::str_from_bytes` assembles those words from two fixed-size reads that overlap (two 8-byte reads for 8 to 15 bytes, two 4-byte reads for 4 to 7, three byte reads below), with no `memcpy` call, and `values::key_hash` hashes an inline string key by mixing its two words instead of walking its bytes. Equal inline strings have equal words, because the bytes past the length are zero, so the hash agrees with equality. The crate is little-endian only (`compile_error!` otherwise), which the word layout relies on.
+- **A CHARSXP known to be UTF-8 is not validated again.** `typed::usable_string` accepts a string whose `VALID_UTF8` flag is set (interning sets it) and validates the bytes only without the flag.
+- **Pinned by** `test_values::strings_switch_to_heap_past_fifteen_bytes`, which checks the exact words for every length from 0 to 15.
+
+## The typed log reports each compilation's own time
+
+- **Why.** Compile time is part of typed ry's performance bar (single-pass, Roc-class, far below `rustc`), so an optimization has to be weighed against what it costs to compile, and the cost has to be visible.
+- **Target shape.** With `RY_TYPED_LOG=1`, `typed: compiled for [...] -> ... in N us` gives the time of that function alone: the time of a callee compiled during the caller's compilation is subtracted (`typed::NESTED_COMPILE`), and a compilation that ends in a refusal logs `typed: refused [...] after N us`, so the lines of a run sum to its total compile time. No clock is read without the log. The typed suite sums both kinds of line per program into `compile_seconds` beside `rustc`'s time for the twin (`tools/bench/bench.py`, `typed_log` and `RustRunner.compile_seconds`), and the benchmarks page shows them as the suite's "Compile time" table.
+
+## One thread-local holds every typed allocation pool
+
+- **Previous shape.** The typed runtime's free lists, large size classes and live-object counter were separate thread-locals, so one allocation read thread-local storage several times, and in `libR.so` each read is a call of `__tls_get_addr`.
+- **Target shape.** `values::Pools` is one thread-local struct holding the free stacks, the large classes and `live`. `object_alloc` and `object_free` resolve it once and pass it down (`block_alloc_in`, `block_free_in`).
+- **Impact.** One thread-local resolution per allocation or free. Its cost still shows in `team_scores` (`ry_box_new` is about 84 instructions), and the next step is in the backlog ("Typed ry against Rust").
+
+## `Str.split_on` with a one-byte separator scans a word at a time
+
+- **Target shape.** `ry_str_split` with a one-byte separator counts the separators first and cuts second, and both passes read the text eight bytes at a time: `values::separators_in_word` XORs the word with the separator repeated in every byte and marks the zero bytes with the carry-free test `!(((d & 0x7f..) + 0x7f..) | d | 0x7f..)`, which sets exactly the high bit of each matching byte. A tail shorter than eight bytes is read through `str_from_bytes`, never past the text. The result list is allocated once at its final length, and each field of at most 15 bytes is built inline by `str_from_bytes` with no allocation.
+- **Why not `memchr`.** Fields in delimited records are short, so a call per separator costs more than the scan; the word loop has no call.
+- **`box_free` walks set bits.** A box's `objects` and `strings` masks say which words hold a reference. `box_free` visits only those words (`trailing_zeros`, clear the lowest bit) instead of testing every word of the box.
+- **Pinned by** the sweep in `test_values::string_functions_follow_r_and_the_standard_library` (every length from 0 to 40 with separators at eight strides, against Rust's `split`).
+
+## A branch on a comparison of two doubles compares once
+
+- **Previous shape.** `if (x > y)` on `F64` lowered to `Op::Compare`, which built a three-valued logical (an unordered test, a select of `NA`), and `Op::Truth`, which tested it for `NA` and again for truth. The loop body of a filter spent most of its instructions there.
+- **Target shape.** `backend::emit_block` recognizes a block that ends in `Compare(op, Dbl, a, b)`, `Truth` of that result and a `Branch` on the truth, and emits the ordered comparison as the branch itself. An ordered comparison that holds proves neither operand is NaN, so the unordered test runs only on the path where it does not hold; `!=` holds for unordered operands, so there the unordered test comes first. The compare's and the truth's locals are still set (to the same 0 or 1), because later blocks may read them.
+- **Compile cost.** A slice pattern on the block's last two instructions, no extra pass.
+- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` (all six operators on both sides, and `0 / 0` compared with `!=` and `<`, where the interpreter answers).
+
+## `List.count_if` with a comparison predicate counts over the whole list
+
+- **Previous shape.** `List.count_if(xs, function(item: F64) -> Bool item > 0.5)` lowered to a loop that called the inlined predicate per item, with an interrupt poll, a data-pointer reload and an `NA` test each time, while `List.count_if(xs > 0.5, function(b) b)` ran the chunked count kernel. The natural spelling was the slow one.
+- **Target shape.** In `Lowerer::walk`, a `count_if` over a `List<F64>` whose predicate is an inline one-parameter function that only compares its item with numbers (`Lowerer::compares_item`: `== != < <= > >=` with the item on one side and a double literal or an `F64` local on the other, joined by `&`, `|`, `!` and parentheses) lowers the predicate's body once with the parameter bound to the list. The body then is the list comparison, and the count is `Op::CountTrue` over its mask, which `typed::fusion` turns into one kernel call. Any other predicate keeps the per-item loop.
+- **Why only `List<F64>` and only comparisons.** Binding the list to the item's name is sound only where every operation on the item means the same elementwise. Comparisons and the logical connectives do; arithmetic on an `I64` item is checked per item and may fail, and a predicate with a call or a `match` has no list form. An `I64` parameter over `List<I64>` is left out because the declared-`I64` lowering of the body differs from a list comparison; add it when a program needs it.
+- **The count kernel tallies a single comparison directly.** `values::count_true` with a one-step program adds the comparison's answers as it compares (`tally_compared`), with no lane written per item, and the general path tallies a chunk's lanes in a byte (a chunk is 128 items, a true lane is 2), so the tally adds whole vectors of lanes.
+- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` (a literal, a local and both operand orders, connectives, a named local predicate, a shadowed name, the empty list, and a computing predicate on the loop path) and `test_values::fused_counts_follow_three_valued_logic`.
+
+## The typed `array_filter` benchmark counts with `List.count_if`
+
+- **Why.** A typed benchmark program and its Rust twin are both written the way the language's users would write them and do the same work. The Rust twin counts with `filter` and `count`, which `rustc` vectorizes; a typed element loop with a float accumulator measured the float-add chain against that, not the language. `array_filter.typed.R` counts with `List.count_if` and a comparison predicate, the same shape as the twin.
+- **What an element loop costs.** A typed loop that tests each item and adds to an `F64` total is bound by the add chain and the per-item poll, about three times the vectorized count. Typed ry has no autovectorizer and does not get one (compile time is single-pass), so whole-list operations are the fast spelling, as in the standard library's other list functions.
+
+## Shapes are confirmed after lowering, and machine code is generated once
+
+- **Previous shape.** `typed::compile` ran the whole pipeline (lowering, unboxing, fusion, ownership, Cranelift) and confirmed the shapes the code constructs afterwards. A function that constructs a shape nobody confirmed yet and also matches over any tag then held a stale epoch, so the pipeline ran a second time and the first machine code was thrown away. Every program that builds its own records or tags and reads a tag out of a record paid a double compilation (`orders`, `team_scores`, `expr_tree`).
+- **Target shape.** `compile` lowers (`lower_settled`), confirms `Lowered::constructed`, and lowers again only if a `match` over any tag saw an older epoch. `generate` runs the rest of the pipeline once, on the lowering that settled. A lowering is a small part of a compilation, so the repeat is cheap.
+- **Confirming before the code exists is safe.** A confirmed shape only adds a case to matches over any tag. If the backend then refuses the function, later matches test for a shape nothing constructs, which costs a comparison and changes no answer.
+- **Impact.** `orders` compiles in about 1.5 ms where it took 2.4 ms, and every typed benchmark program generates code once per compiled function (`RY_SSA_DUMP=1` prints one `function Tail` per `typed: compiled` line).

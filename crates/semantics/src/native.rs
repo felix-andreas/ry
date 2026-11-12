@@ -472,6 +472,7 @@ pub const COMPILED_STD: &[&str] = &[
     "Num.bitwise_or",
     "Num.bitwise_xor",
     "Num.compare",
+    "Num.exp",
     "Num.is_nan",
     "Num.max",
     "Num.min",

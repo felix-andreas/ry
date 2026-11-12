@@ -24,7 +24,7 @@ typed_source = "tools/bench/kernels/array_dot.typed.R"
 [[programs]]
 id = "array_filter"
 display = "Counting filter"
-summary = "An element loop over a million doubles counting those above one half: indexing and comparison in a loop."
+summary = "An element loop over a million doubles counting those above one half: indexing and comparison in a loop. The typed program counts with `List.count_if`."
 source = "tools/bench/kernels/array_filter.R"
 typed_source = "tools/bench/kernels/array_filter.typed.R"
 
