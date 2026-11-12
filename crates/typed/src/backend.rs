@@ -1334,6 +1334,21 @@ impl Emitter<'_> {
                 let short = self.builder.ins().band_imm_u(shifted, 0x7F);
                 SmallVec::from_slice(&[self.builder.ins().select(inline, short, x[1])])
             }
+            Op::DictLen(dict) => {
+                let pointer = self.one(*dict)?;
+                let length = self.call_words(address!(values::ry_dict_len), I64, &[pointer]);
+                SmallVec::from_slice(&[length])
+            }
+            Op::DictKeys(dict) | Op::DictValues(dict) => {
+                let pointer = self.one(*dict)?;
+                let function = if matches!(inst.op, Op::DictKeys(_)) {
+                    address!(values::ry_dict_keys)
+                } else {
+                    address!(values::ry_dict_values)
+                };
+                let list = self.call_words(function, I64, &[pointer]);
+                SmallVec::from_slice(&[list])
+            }
             Op::ToUtf8(a) => {
                 let x = self.get(*a)?;
                 let list = self.call_words(address!(values::ry_str_to_utf8), I64, &[x[0], x[1]]);
