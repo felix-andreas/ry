@@ -77,7 +77,9 @@ fresh measurements: five ranked levers (declared types that pay on whole program
 loop, an optimizing tier judged by the calls it removes, native kernels for base R's data-frame layer,
 and all cores for ry-owned kernels), what to stop, and the measurement that would kill each lever. It
 argues that untyped R should be planned around 3x GNU R, and that the order-of-magnitude goals belong
-to typed code and the development loop.
+to typed code and the development loop. A section on the native backend measures Cranelift against a
+direct emitter, copy-and-patch and LLVM, and recommends keeping Cranelift and shrinking the IR ry
+feeds it.
 
 ### [Packages and R versions in the runtime](/development/design/packaging/)
 
