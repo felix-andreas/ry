@@ -65,7 +65,13 @@ illegal dependency unrepresentable.
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library.
+  `DataFrame` and the standard library. A `for`, `while` or `repeat` loop in the global
+  environment compiles to tier 0 only once it is known to run at least
+  `bytecode::LOOP_COMPILE_ITERATIONS` (16) iterations: a `for` over at least 16 elements compiles
+  before its first iteration, and a `while` or `repeat` compiles after its 16th. Compiling a small
+  loop costs about what 9 interpreted iterations would, so 16 pays it back with margin, and a
+  shorter top-level loop runs in the AST evaluator
+  ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -79,10 +85,18 @@ illegal dependency unrepresentable.
   view an R vector's data or own their items, dictionaries, and records, tuples and tags in
   counted boxes whose *shape* (layout plus field types) the code knows. A tag type is a union of
   shapes, and a `match` over one branches on the box's shape. `jit`'s `native::call` is the only
-  caller, and a call that does not compile, or fails while it runs, goes back to the interpreter
-  unchanged. It
-  depends on `heap` and `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and
-  `RY_TYPED_DUMP=1` prints the Cranelift IR.
+  caller, and a call that does not compile, or gives up while it runs, goes back to the
+  interpreter unchanged. Typed code calls an R function from native code when the call is a
+  statement or the argument of a `*.from_r` conversion; the arguments arrive as forced promises
+  of the code written in the call, and the conversion's result type comes from the type the
+  interpreter saw it give, so the first call of such a function runs interpreted. Code that has
+  called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
+  `interp`. `RY_TYPED_LOG=1` prints each compilation with the time it took
+  (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone), each refused
+  compilation with its time (`typed: refused [Str] after 85 us`), so the lines of a run add up to
+  its whole compile time, and each typed call that runs in the interpreter with the reason the
+  native path declined it. `RY_TYPED_DUMP=1` prints the Cranelift
+  IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
   data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
@@ -622,7 +636,7 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   (start-up has already forced some bindings, so forcing bindings would miss their records), and
   writes the images (`R/<package>.ryc`, `R/sysdata.ryc`) with the uncompressed records alone, so those fetches read them in place
   instead of inflating them. They hold no compiled or machine code: for untrained base code,
-  decoding it and mapping a native section cost more than compiling the closures a session
+  decoding it costs more than compiling the closures a session
   calls. They are written for the same build as the start image.
 - **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
   runtime's sources), and an image of another build is skipped silently, so a development
@@ -647,7 +661,10 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   large section (`fill_from` in `crates/interp/src/image.rs`; Windows reads them instead): nothing
   is decoded or patched per object, a page start-up never writes stays shared through the page
   cache by every process that loads the image, and a page is copied when it is first written.
-  The objects carry their tenured bits, so no minor or intermediate collection traces them and a
+  The file stores only the pages that hold an object, back to back. An empty page between them
+  (left where compaction emptied a page below an environment or symbol that cannot move) is
+  untouched zeroed memory in the loader, so it costs neither file bytes nor memory until an
+  allocation claims it. The objects carry their tenured bits, so no minor or intermediate collection traces them and a
   major collection's marking leaves their headers alone.
 - **Base R's closures arrive compiled.** Just before writing, the writer compiles afresh every
   closure bound in base's namespace and the six default namespaces

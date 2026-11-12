@@ -589,6 +589,16 @@ const PRINTS: &[(&str, &str)] = &[
         "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); [List.len(p), List.len(holder[[1]])] }",
         "[2i64, 1i64]\n",
     ),
+    // A ry list grows in place too, in its items' own storage, with the literal conversion and
+    // the item checks of a fresh one.
+    (
+        "{ p <- [1i64]; q <- p; for (i in 1:9) p <- List.append(p, i); holder <- list(p); p <- List.append(p, 0); [List.len(p), List.len(q), List.len(holder[[1]]), List.sum(p)] }",
+        "[11i64, 1i64, 10i64, 46i64]\n",
+    ),
+    (
+        "{ p <- [0.5]; for (i in 1:5) p <- List.append(p, 2); grown_words <- [\"a\"]; for (w in c(\"b\", \"c\")) grown_words <- List.append(grown_words, w); r <- [(a = 1i64,)]; r <- List.append(r, (a = 2i64,)); list(List.to_r(p), List.to_r(grown_words), r) }",
+        "[[1]]\n[1] 0.5 2.0 2.0 2.0 2.0 2.0\n\n[[2]]\n[1] \"a\" \"b\" \"c\"\n\n[[3]]\n[(a = 1i64,), (a = 2i64,)]\n\n",
+    ),
     (
         "{ p <- list(1L, 2L); q <- p; p <- List.set(p, 1L, 9L); c(p[[1]], q[[1]]) }",
         "[1] 9 1\n",
@@ -728,6 +738,18 @@ const PRINTS: &[(&str, &str)] = &[
         "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_r(p) }",
         "[1] 1 2 3 4 5 6\n",
     ),
+    (
+        "{ p <- List.with_capacity(4L); p <- List.append(p, 1i64); List.sum(List.append(p, 2i64)) }",
+        "3i64\n",
+    ),
+    (
+        "{ p <- List.append(List.with_capacity(2L), (x = 1, y = 2)); List.append(p, (x = 3, y = 4)) }",
+        "[(x = 1, y = 2), (x = 3, y = 4)]\n",
+    ),
+    (
+        "List.sum(.ry_items(List.reserve(List.with_capacity(2L), 8L), \"F64\"))",
+        "[1] 0\n",
+    ),
     ("List.to_r(List.reserve(xs, 100L))", "[1] 3 1 2\n"),
     (
         "{ p <- list(1L, 2L); q <- p; p <- List.swap(p, 1L, 2L); c(List.to_r(p), List.to_r(q)) }",
@@ -812,6 +834,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("typeof(Num.pow_int(2L, 0L))", "[1] \"integer\"\n"),
     ("Num.sqrt(16L)", "[1] 4\n"),
     ("Num.log(1)", "[1] 0\n"),
+    ("c(Num.exp(0), Num.log(Num.exp(2)))", "[1] 1 2\n"),
     (
         "c(Num.asin(1) * 2, Num.acos(-1))",
         "[1] 3.141593 3.141593\n",
@@ -958,6 +981,10 @@ const ERRORS: &[(&str, &str)] = &[
     (
         "Dict.get(d, 1L)",
         "the dict's keys are character, and this one is integer; a collection holds one type",
+    ),
+    (
+        "{ p <- [1i64]; p <- List.append(p, 2i64); List.append(p, 2.5) }",
+        "`List.append()` received a list, so its result must be one too: 2.5 does not fit I64, the type of the list's other items",
     ),
     (
         "Set.contains(s, \"a\")",
@@ -1168,7 +1195,15 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "Str.from_utf16(list(70000L))",
-        "`units` must be a list of numbers from 0 to 65535",
+        "`units` must hold numbers from 0 to 65535, but item 1 is 70000",
+    ),
+    (
+        "Str.from_utf8_lossy(list(104L, 256L))",
+        "`bytes` must hold numbers from 0 to 255, but item 2 is 256",
+    ),
+    (
+        "List.take_first(list(1L), -1L)",
+        "`count` must be zero or more, not -1",
     ),
 ];
 
@@ -1465,6 +1500,8 @@ fn standard_library_at_runtime() {
             }
         }
         failures.extend(move_undo_failures());
+        failures.extend(slot_move_undo_failures());
+        failures.extend(in_place_growth_failures());
         failures.extend(named_argument_failures());
         failures.extend(collection_model_failures());
         assert!(
@@ -1502,6 +1539,17 @@ unsafe fn move_undo_failures() -> Vec<String> {
             "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
             "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
             "[1] 1 2 2\n",
+        ),
+        // An Array's replaced items are read out for the journal and stored back.
+        (
+            "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; moved_xs <- [1.5, 2.5]; frame <<- environment(); moved_xs <- bad(moved_xs, 5) }; f() }",
+            "List.to_r(frame$moved_xs)",
+            "[1] 1.5 2.5\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs <- List.append(xs, v); xs <- List.set(xs, 3L, v); xs <- List.swap(xs, 1L, 3L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; moved_ys <- [1i64, 2i64, 3i64]; moved_ys <- List.append(moved_ys, 4i64); frame <- environment(); moved_ys <- bad(moved_ys, 9) }",
+            "frame$moved_ys",
+            "[1i64, 2i64, 3i64, 4i64]\n",
         ),
         // Base replacements change a moved list in place without the journal, so the move ends
         // before them and the caller keeps its value.
@@ -1541,6 +1589,97 @@ unsafe fn move_undo_failures() -> Vec<String> {
             failures.push(format!(
                 "`{check}` after `{failing}`\n  printed  {printed:?}\n  expected {expected:?}"
             ));
+        }
+    }
+    failures
+}
+
+/// The cases of [`move_undo_failures`] from a frame that keeps its slots: nothing calls
+/// `environment()`, so the move takes the value out of the caller's slot. `on.exit` reads the
+/// slot once the failure has unwound the helper.
+unsafe fn slot_move_undo_failures() -> Vec<String> {
+    let cases = [
+        (
+            "{ bad <- function(m, k) { m <- Dict.insert(m, k, 1); m <- Dict.insert(m, 1L, 1) }; f <- function() { m <- Dict.single(\"z\", 0); on.exit(saved <<- m); m <- bad(m, \"a\") }; f() }",
+            "Dict.from_list([(\"z\", 0)])\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { xs <- [1.5, 2.5]; on.exit(saved <<- xs); xs <- bad(xs, 5) }; f() }",
+            "[1.5, 2.5]\n",
+        ),
+        (
+            "{ bad <- function(s, k) { s <- Set.insert(s, k); s <- Set.insert(s, \"x\") }; f <- function() { s <- Set.from_list(list(1L, 2L)); on.exit(saved <<- s); s <- bad(s, 3L) }; f() }",
+            "Set.from_list([1L, 2L])\n",
+        ),
+        (
+            "{ f <- function() { r <- (n = 1, values = [1i64]); on.exit(saved <<- r); r <- (..r, values = List.append(r$values, \"x\")) }; f() }",
+            "(n = 1, values = [1i64])\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (failing, expected) in cases {
+        // SAFETY: the interpreter is installed.
+        let reported = unsafe { printed(failing) };
+        if !reported.contains("one type") {
+            failures.push(format!(
+                "`{failing}`\n  reported {reported:?}\n  expected a type error"
+            ));
+        }
+        // SAFETY: as above.
+        let printed = unsafe { printed("saved") };
+        if printed != expected {
+            failures.push(format!(
+                "`saved` after `{failing}`\n  printed  {printed:?}\n  expected {expected:?}"
+            ));
+        }
+    }
+    failures
+}
+
+/// A loop inside a function that grows a collection through a helper, or a record's `List`
+/// field through an update, does constant work per step: the helper takes the caller's value as
+/// a move and updates it in place, and the update reuses the field's list. The heap's count of
+/// allocated bytes measures the work deterministically. Doubling the steps must about double it,
+/// which a copy per step would quadruple, and 2e6 steps must stay within a fixed budget per step.
+unsafe fn in_place_growth_failures() -> Vec<String> {
+    let setup = "{
+        add_item <- function(xs, i) List.append(xs, i)
+        add_key <- function(d, i) Dict.insert(d, i, i)
+        add_element <- function(s, i) { s <- Set.insert(s, i); s }
+        grow_list <- function(n) { xs <- list(); for (i in seq_len(n)) xs <- add_item(xs, i); List.len(xs) }
+        grow_dict <- function(n) { d <- Dict.empty(); for (i in seq_len(n)) d <- add_key(d, i); Dict.len(d) }
+        grow_set <- function(n) { s <- Set.empty(); for (i in seq_len(n)) s <- add_element(s, i); Set.len(s) }
+        grow_field <- function(n) { r <- (name = \"a\", values = [0i64]); for (i in seq_len(n)) r <- (..r, values = List.append(r$values, 1i64)); List.len(r$values) - 1i64 }
+    }";
+    let mut failures = Vec::new();
+    // SAFETY: the interpreter is installed.
+    if let Err(failure) = unsafe { evaluate(setup) } {
+        return vec![format!("the growth setup failed: {failure}")];
+    }
+    let allocated = |code: &str| -> Result<u64, String> {
+        let before = interp::heap().allocated_ever();
+        // SAFETY: the interpreter is installed.
+        unsafe { evaluate(code) }?;
+        Ok(interp::heap().allocated_ever() - before)
+    };
+    for grow in ["grow_list", "grow_dict", "grow_set", "grow_field"] {
+        let measured = (|| -> Result<(), String> {
+            let small = allocated(&format!("{grow}(20000L)"))?;
+            let large = allocated(&format!("{grow}(40000L)"))?;
+            if large as f64 > 2.6 * small as f64 {
+                return Err(format!(
+                    "allocated {small} bytes for 20000 steps and {large} for 40000"
+                ));
+            }
+            let steps = 2_000_000u64;
+            let total = allocated(&format!("{grow}(2000000L)"))?;
+            if total > 1024 * steps {
+                return Err(format!("allocated {total} bytes for {steps} steps"));
+            }
+            Ok(())
+        })();
+        if let Err(failure) = measured {
+            failures.push(format!("`{grow}` is not linear: {failure}"));
         }
     }
     failures

@@ -360,7 +360,10 @@ against values read from data.table, `test_lazy.rs` there checks the Polars-styl
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
-without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
+without R. The optimizer cases `test_numerics.rs` holds bit for bit are skipped, with a message,
+where they cannot match: against a fresh GNU R that does not call the reference BLAS, and, for the
+trust-region case, where the C library's `hypot` rounds differently from the recording's (its
+`hypot` case fingerprints it). `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
 extreme arguments. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
@@ -445,18 +448,20 @@ engine, because a failure there reproduces on every host. A beta release require
 empty, intermittent entries included.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
-a case needs a package that is not installed (a case names its packages in a leading
-`# oracle: requires` comment). It lists each such case and exits 1. Install the packages into the
-corpus library with `just corpus`, which the oracle searches by itself ([Corpus and
-oracle](/development/corpus-and-oracle)). For a deliberately partial local run, `--allow-skips`
-skips those cases and marks every summary line `PARTIAL`:
+a case needs a package that is not installed or a locale that is not generated. A case names them
+in a leading `# oracle: requires` comment: packages by name (`# oracle: requires knitr, rmarkdown`)
+and a locale it switches to as `# oracle: requires locale en_US.ISO-8859-1`. The run lists each
+such case and exits 1. Install the packages into the corpus library with `just corpus`, which the
+oracle searches by itself ([Corpus and oracle](/development/corpus-and-oracle)), and generate the
+locales with `sudo tools/dev-setup.sh` (or `tools/oracle-locales.sh` alone). For a deliberately
+partial local run, `--allow-skips` skips those cases and marks every summary line `PARTIAL`:
 
 ```
 skip    cases/datatable__fread.R: needs bit64
 skip    cases/packages__xts_keeps_source_rownames.R: needs xts
 ok      cases/arith__complex_math.R
 ok      cases/base__match_arg_native.R
-PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package)
+PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package or locale)
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
@@ -487,10 +492,62 @@ Compare peak RSS between two builds only from the same page-cache state. A fresh
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
 build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
 `python3 tools/bench/evict.py RY...` evicts every file each build reads at run time, recursively:
-the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory and
-the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
+the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory, the
+homes `R_HOME` lists (a path list, so one call covers a separate home per build) and the `R_LIBS`
+libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
+
+Judge a change's peak RSS in three parts, because they behave differently. Anonymous memory and
+the start image's resident pages must not grow. The resident pages of `libR.so`'s code are not
+judged per change. A plain release build has no function ordering, so where the linker happens to
+place hot functions decides which neighbouring code readahead and fault-around map in with them,
+and how far that moves depends on the change rather than its size. On the validation workload, a
+no-op exported function added to an otherwise unchanged build moved resident `libR.so` text by
+under 0.1 MB, while a change that grew `.text` by 5 KB moved it by +2.4 MB, with identical
+anonymous and image RSS. That change's extra resident pages held code the workload never runs (the
+analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
+size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
+grow only by about what the change adds. Resident text is checked on the shipped layout
+(`tools/layout/optimize.sh`) when a release is cut.
+
+A change that allocates less can still raise anonymous peak RSS, because fewer collections change which heap pages fill before the next one. Such a rise is exempt only when all three of these hold, and the change's description shows each:
+
+- `RY_GC_LOG` gives the same peak old-generation bytes (the last column) on both builds;
+- `valgrind --tool=massif` gives the same malloc peak, and with `--pages-as-heap=yes` the same mapped size;
+- a control that puts the missing allocations back, such as one throwaway `c(1, 2)` per loop iteration, closes the gap.
+
+`formatC()`'s direct kernel call met all three: report's VmHWM rose by about 1 MB, all of it in one GC arena, and the control closed it to about 0.1 MB.
+
+Layout moves single-program wall time too, and with it callgrind's simulated branch mispredictions
+and cache misses. Only the instruction count (`Ir`) holds still. So judge a regression on one
+program by `Ir` from `valgrind --tool=callgrind --cache-sim=yes --branch-sim=yes` on both builds:
+a rise in `Ir` is real. A wall regression, or a rise in simulated mispredictions or cache misses,
+without a rise in `Ir` blocks a change only when it reproduces on two layouts: the change's build,
+and the change's build plus a no-op exported function (the control), which shifts the code placed
+after it. On the public suite's `lapply` program, one source built several ways gave:
+
+| `libR` layout | `Ir` | Indirect mispredictions | Conditional mispredictions | I1 misses |
+| --- | ---: | ---: | ---: | ---: |
+| plain release | 6,650.6M | 8.6M | 16.6M | 69.4M |
+| plain release + control | 6,650.6M | 10.6M | 12.2M | 68.3M |
+| functions and blocks aligned | 6,645.4M | 10.6M | 14.5M | 23.4M |
+| aligned + control | 6,645.4M | 8.6M | 16.1M | 27.8M |
+| PGO and BOLT | 5,256.3M | 0.54M | 29.2M | 2.75M |
+| PGO and BOLT + control, same profile | 5,256.3M | 0.55M | 28.7M | 2.74M |
+| PGO and BOLT + control, own profile | 5,256.3M | 5.45M | 24.2M | 2.76M |
+
+Wall time can follow these counts: a build with 8.6M indirect mispredictions ran `lapply` about
+25% slower than one with 0.6M at the same `Ir`. Two layouts were tried as a way to take the noise
+out of benchmark builds, and neither does. Aligning functions to 64 bytes and blocks to 32
+(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) grows
+`libR.so`'s `.text` by 24 MB (27%), and the control swings the counts as far as before. The
+shipped layout (`tools/layout/optimize.sh`, applied to `libR` for this table) holds still under
+the control only when both builds reuse one training profile. A build that trains its own
+profile, as every release does, gets a different function order and the swing returns. The builds
+that judge a change therefore stay plain release builds, and the control is the test for a layout
+effect. The published suites measure the shipped layout itself: they are recorded on the release
+archive (`bench.py --release`, see [Benchmarks](/benchmarks/#how-it-was-measured)).
 
 Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
 loads only into the runtime build that wrote it, and any other build silently ignores it, so that
@@ -500,7 +557,9 @@ images except `just base-r`, or a package library's except reinstalling the pack
 that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
 therefore refuses to start when a binary under test would load a code image another build wrote, or
 when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
-`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it.
+`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it. A release archive
+under `--release` extracts its runtime and base R into a cache directory of its own, so it loads
+the images it shipped, and any image in a package library that another build wrote stops the run.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
@@ -768,6 +827,17 @@ disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user jou
 `crates/ry/tests/scenarios/`. [Robustness](/development/robustness/) documents both, including the
 scenario format and the replay variables.
 
+`native_diagnostics_agree_with_the_typed_core` in the same file holds the strict-mode
+[native function](/reference/type-system#native-functions) findings to what the native compiler
+does. It checks each program of a corpus in strict mode, runs it with `RY_TYPED_LOG=1`, and fails
+when a function without a `native` or `interpreted` finding runs in the interpreter. The corpus is
+the typed benchmark programs, the friendly climb programs, and `crates/ry/tests/native/*.R`, where a
+program's header states what it shows: `# blocked: f, g` names the functions that must get a
+finding, and `# boundary: h` the ones with an R type in their signature. Add a program there for a
+construct the compiler gains or the checker starts to report. The test also fails when no natively
+running function of the corpus calls a standard library function that
+`semantics::native::COMPILED_STD` lists as compiled.
+
 ## Incrementality
 
 A fixture checks what an edit produces, but not how much work it took to get there.
@@ -813,7 +883,12 @@ what `just perf` uses. The `iterate` profile keeps `opt-level = 3` but drops cro
 uses 16 codegen units ([Build profiles](/development#build-profiles)). Plain `cargo test --release` builds
 with the release profile's fat LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS
 and takes 30 minutes on four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and
-11 minutes without it. A budget measured under `cargo test-release` can differ from a release
+11 minutes without it. A test that needs another package's binary (`libR.so`, `ry-rcmd`) builds it
+with `syntax::testing::cargo_build`, a `cargo build` in the profile the test runs in, so it lands
+beside that `ry`. The helper drops the variables cargo sets for the test (`CARGO_PKG_NAME`,
+`OUT_DIR` and so on): build scripts such as ring's rerun when those change, so a nested `cargo
+build` that inherits them rebuilds most of the dependency tree, and the next plain build rebuilds
+it back. A budget measured under `cargo test-release` can differ from a release
 binary's, so a number you quote comes from a release build. Debug builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which
 keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
 

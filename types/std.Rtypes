@@ -1060,7 +1060,8 @@ Str.from_utf32_lossy : fn(code_points: List<I64>) -> Str
 #' failure as a tag where R would return `NA`, `NaN` or `Inf` with a warning; its unchecked twin
 #' (`Num.add` beside `Num.add_checked`) stops with an error in that case. A `NaN` result, such as
 #' `Inf - Inf` or `Num.sin(Inf)`, is `:Err(:Undefined)` from a checked operation and an error from
-#' any other. The bit operations take integers as 32-bit two's complement.
+#' any other. The bit operations work on an `I64`'s 64-bit two's complement, and on an R number's
+#' 32 bits when no argument is an `I64`.
 # Num
 
 #' The number as text, with up to 15 significant digits.
@@ -1553,6 +1554,14 @@ Num.sqrt : fn(number: F64) -> F64
 #' ```
 Num.log : fn(number: F64) -> F64
 
+#' The number e raised to `number`: the exponential function, which is the inverse of `Num.log`.
+#'
+#' ```r dput
+#' Num.exp(0)
+#' #> 1
+#' ```
+Num.exp : fn(number: F64) -> F64
+
 #' The arcsine in radians. A number outside -1 to 1 is an error.
 #'
 #' ```r dput
@@ -1578,11 +1587,11 @@ Num.acos : fn(number: F64) -> F64
 #' ```
 Num.is_nan : fn(number: F64) -> Bool
 
-#' The bits set in both integers, in 32-bit two's complement.
+#' The bits set in both integers.
 #'
 #' ```r dput
 #' Num.bitwise_and(12, 10)
-#' #> 8L
+#' #> 8i64
 #' ```
 Num.bitwise_and : fn(first: I64, second: I64) -> I64
 
@@ -1590,16 +1599,17 @@ Num.bitwise_and : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.bitwise_or(12, 10)
-#' #> 14L
+#' #> 14i64
 #' ```
 Num.bitwise_or : fn(first: I64, second: I64) -> I64
 
-#' The bits set in exactly one of the integers. A result whose bit pattern is -2147483648 is an
-#' error, because R uses that value for `NA`; the same holds for every bit operation.
+#' The bits set in exactly one of the integers. On R numbers, a result whose bit pattern is
+#' -2147483648 is an error, because R uses that value for `NA`; the same holds for every bit
+#' operation.
 #'
 #' ```r dput
 #' Num.bitwise_xor(12, 10)
-#' #> 6L
+#' #> 6i64
 #' ```
 Num.bitwise_xor : fn(first: I64, second: I64) -> I64
 
@@ -1607,15 +1617,16 @@ Num.bitwise_xor : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.bitwise_not(5)
-#' #> -6L
+#' #> -6i64
 #' ```
 Num.bitwise_not : fn(number: I64) -> I64
 
-#' Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
+#' Shifts the bits left by `bits`, from 0 to 63 for an `I64` and from 0 to 31 for an R number.
+#' Bits shifted past the top are lost, as in Roc.
 #'
 #' ```r dput
 #' Num.shift_left_by(1, 4)
-#' #> 16L
+#' #> 16i64
 #' ```
 Num.shift_left_by : fn(number: I64, bits: I64) -> I64
 
@@ -1623,7 +1634,7 @@ Num.shift_left_by : fn(number: I64, bits: I64) -> I64
 #'
 #' ```r dput
 #' Num.shift_right_by(-16, 2)
-#' #> -4L
+#' #> -4i64
 #' ```
 Num.shift_right_by : fn(number: I64, bits: I64) -> I64
 
@@ -1631,7 +1642,7 @@ Num.shift_right_by : fn(number: I64, bits: I64) -> I64
 #'
 #' ```r dput
 #' Num.shift_right_zf_by(-16, 28)
-#' #> 15L
+#' #> 68719476735i64
 #' ```
 Num.shift_right_zf_by : fn(number: I64, bits: I64) -> I64
 

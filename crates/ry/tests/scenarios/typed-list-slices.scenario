@@ -1,0 +1,59 @@
+# Typed code slices, swaps and concatenates lists natively, with the interpreter's clamping:
+# a count past the end takes what is there, and a negative count is an error. A function may
+# return a record early.
+
+requires ry-runtime
+
+file lists.R
+| total <- function(xs: List<I64>) -> I64 List.sum(xs)
+| slices <- function(n: I64) -> List<I64> {
+|   xs <- List.range(1, n)
+|   [total(List.sublist(xs, 2, 2)), total(List.sublist(xs, 4, 10)), List.len(List.sublist(xs, 9, 1)),
+|    total(List.take_first(xs, 2)), total(List.take_last(xs, 2)), total(List.drop_first(xs, 4)),
+|    total(List.drop_last(xs, 1)), total(List.take_first(xs, 99))]
+| }
+| swapped <- function(n: I64) -> List<I64> {
+|   xs <- List.range(1, n)
+|   xs <- List.swap(xs, 1, n)
+|   List.swap(xs, 2, 99)
+| }
+| words <- function(a: Str) -> List<Str> List.swap(List.concat([a, "b"], ["c", a]), 1, 2)
+| empty <- function(n: I64) -> List<Bool> [List.is_empty(List.range(1, n)), List.is_empty(List.drop_first(List.range(1, n), n))]
+| grow <- function(n: I64) -> I64 {
+|   out <- []
+|   for (i in List.range(1, n)) out <- List.concat(out, [i, i])
+|   List.len(out)
+| }
+| records <- function(n: I64) -> F64 {
+|   ps <- []
+|   for (i in List.range(1, n)) ps <- List.concat(ps, [(x = Num.to_f64(i),)])
+|   ps <- List.drop_last(List.swap(ps, 1, 2), 1)
+|   ps[[1]]$x + Num.to_f64(List.len(ps))
+| }
+| none <- function(n: I64) -> List<F64> List.repeat(1.5f64, n)
+| first_big <- function(xs: List<I64>) -> Record{at: I64, value: I64} {
+|   for (i in List.range(1, List.len(xs))) {
+|     if (xs[[i]] > 2) return((at = i, value = xs[[i]]))
+|   }
+|   (at = 0, value = 0)
+| }
+| bad <- function(n: I64) -> List<I64> List.take_first(List.range(1, 3), n)
+| print(slices(5))
+| print(swapped(4))
+| print(words("a"))
+| print(empty(3))
+| print(grow(1000))
+| print(records(4))
+| print(identical(none(0), List.repeat(1.5, 0)))
+| five <- List.range(1, 5)
+| print(first_big(five)$at)
+| print(tryCatch(bad(-1), error = function(e) conditionMessage(e)))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry lists.R
+expect exit 0
+expect stdout "[5i64, 9i64, 0i64, 3i64, 9i64, 5i64, 10i64, 15i64]\n[4i64, 2i64, 3i64, 1i64]\n[\"b\", \"a\", \"c\", \"a\"]\n[FALSE, TRUE]\n2000i64\n[1] 5\n[1] TRUE\n3i64\n[1] \"`count` must be zero or more, not -1\""
+expect stderr "typed: compiled for [Str] -> Vector { item: Str, array: true }"
+expect stderr "typed: compiled for [I64] -> Dbl"
+expect stderr "typed: compiled for [Vector { item: I64, array: true }] -> Record"
+expect stderr "typed: `bad` runs in the interpreter: its native code stopped"

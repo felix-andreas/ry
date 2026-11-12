@@ -332,7 +332,7 @@ struct Selection {
 }
 
 /// The cases under `paths` that can run, given the packages `installed` lists; each case that
-/// needs a missing package is reported as skipped.
+/// needs a missing package or locale is reported as skipped.
 fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -> Selection {
     let paths = if paths.is_empty() {
         vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")]
@@ -349,8 +349,12 @@ fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -
         found.extend(cases);
     }
     let (runnable, missing) = runnable_cases(found, installed);
-    for (case, packages) in &missing {
-        println!("skip    {}: needs {}", case.display(), packages.join(", "));
+    for (case, requirements) in &missing {
+        println!(
+            "skip    {}: needs {}",
+            case.display(),
+            requirements.join(", ")
+        );
     }
     Selection {
         runnable,
@@ -550,9 +554,10 @@ fn compare(
     };
     if selection.missing > 0 && !allow_skips {
         eprintln!(
-            "{} need packages that are not installed (listed above), so the run would not cover \
-             the suite. Install them into the corpus library (`just corpus`) or set R_LIBS to a \
-             library that has them; pass --allow-skips for a partial run.",
+            "{} need packages or locales that are not installed (listed above), so the run would \
+             not cover the suite. Install packages into the corpus library (`just corpus`) or set \
+             R_LIBS to a library that has them, and generate locales with `sudo \
+             tools/dev-setup.sh`; pass --allow-skips for a partial run.",
             plural(selection.missing, "case", "cases")
         );
         return ExitCode::FAILURE;
@@ -691,7 +696,7 @@ fn compare(
         if skipped > 0 {
             let mut reasons = Vec::new();
             if selection.missing > 0 {
-                reasons.push(format!("{} missing a package", selection.missing));
+                reasons.push(format!("{} missing a package or locale", selection.missing));
             }
             if !crashed.is_empty() {
                 reasons.push(plural(crashed.len(), "GNU R crash", "GNU R crashes"));
@@ -989,7 +994,7 @@ fn summarize(total: usize, failures: usize, missing: usize, crashed: &[&Path]) -
     if missing + crashed.len() > 0 {
         let mut reasons = Vec::new();
         if missing > 0 {
-            reasons.push(plural(missing, "missing package", "missing packages"));
+            reasons.push(format!("{missing} missing a package or locale"));
         }
         if !crashed.is_empty() {
             reasons.push(plural(crashed.len(), "GNU R crash", "GNU R crashes"));

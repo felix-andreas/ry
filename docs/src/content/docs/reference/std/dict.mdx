@@ -71,7 +71,7 @@ Dict.empty()
 #> Dict.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1805)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1816)
 
 ## `Dict.with_capacity`
 
@@ -101,7 +101,7 @@ Dict.capacity(Dict.insert(Dict.with_capacity(64), "a", 1))
 #> 64i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1814)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1825)
 
 ## `Dict.single`
 
@@ -130,7 +130,7 @@ Dict.single("a", 1)
 #> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1822)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1833)
 
 ## `Dict.from_list`
 
@@ -159,7 +159,7 @@ Dict.from_list([("a", 1), ("b", 2), ("a", 3)])
 #> Dict.from_list([("a", 3), ("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1830)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1841)
 
 ## `Dict.to_list`
 
@@ -188,7 +188,7 @@ Dict.to_list(Dict.from_list([("a", 1), ("b", 2)]))
 #> [("a", 1), ("b", 2)]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1838)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1849)
 
 ## `Dict.len`
 
@@ -217,7 +217,7 @@ Dict.len(Dict.single("a", 1))
 #> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1846)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1857)
 
 ## `Dict.is_empty`
 
@@ -246,7 +246,7 @@ Dict.is_empty(Dict.empty())
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1854)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1865)
 
 ## `Dict.get`
 
@@ -275,7 +275,7 @@ Dict.get(Dict.single("a", 1), "a")
 #> :Ok(1)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1862)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1873)
 
 ## `Dict.contains`
 
@@ -304,7 +304,7 @@ Dict.contains(Dict.single("a", 1), "b")
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1870)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1881)
 
 ## `Dict.insert`
 
@@ -333,7 +333,7 @@ Dict.insert(Dict.single("a", 1), "b", 2)
 #> Dict.from_list([("a", 1), ("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1878)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1889)
 
 ## `Dict.remove`
 
@@ -362,7 +362,7 @@ Dict.remove(Dict.from_list([("a", 1), ("b", 2)]), "a")
 #> Dict.from_list([("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1886)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1897)
 
 ## `Dict.update`
 
@@ -392,7 +392,7 @@ Dict.update(Dict.single("hits", 1), "hits", function(r) :Ok(Result.with_default(
 #> Dict.from_list([("hits", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1895)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1906)
 
 ## `Dict.keys`
 
@@ -421,7 +421,7 @@ Dict.keys(Dict.from_list([("a", 1), ("b", 2)]))
 #> ["a", "b"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1903)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1914)
 
 ## `Dict.values`
 
@@ -450,7 +450,7 @@ Dict.values(Dict.from_list([("a", 1), ("b", 2)]))
 #> [1, 2]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1911)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1922)
 
 ## `Dict.walk`
 
@@ -479,7 +479,7 @@ Dict.walk(Dict.from_list([("a", 1), ("b", 2)]), 0, function(total, k, v) total +
 #> 3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1919)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1930)
 
 ## `Dict.walk_until`
 
@@ -508,7 +508,7 @@ Dict.walk_until(Dict.from_list([("a", 1), ("b", 5), ("c", 2)]), 0, function(tota
 #> 1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1927)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1938)
 
 ## `Dict.map`
 
@@ -537,7 +537,7 @@ Dict.map(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v * 10)
 #> Dict.from_list([("a", 10), ("b", 20)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1935)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1946)
 
 ## `Dict.join_map`
 
@@ -566,7 +566,7 @@ Dict.join_map(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) Dict.single(v
 #> Dict.from_list([(1, "a"), (2, "b")])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1943)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1954)
 
 ## `Dict.keep_if`
 
@@ -595,7 +595,7 @@ Dict.keep_if(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v > 1)
 #> Dict.from_list([("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1951)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1962)
 
 ## `Dict.drop_if`
 
@@ -624,7 +624,7 @@ Dict.drop_if(Dict.from_list([("a", 1), ("b", 2)]), function(k, v) v > 1)
 #> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1959)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1970)
 
 ## `Dict.insert_all`
 
@@ -653,7 +653,7 @@ Dict.insert_all(Dict.single("a", 1), Dict.from_list([("a", 5), ("b", 2)]))
 #> Dict.from_list([("a", 5), ("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1967)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1978)
 
 ## `Dict.keep_shared`
 
@@ -682,7 +682,7 @@ Dict.keep_shared(Dict.from_list([("a", 1), ("b", 2)]), Dict.from_list([("a", 1),
 #> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1975)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1986)
 
 ## `Dict.remove_all`
 
@@ -711,7 +711,7 @@ Dict.remove_all(Dict.from_list([("a", 1), ("b", 2)]), Dict.single("a", 0))
 #> Dict.from_list([("b", 2)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1983)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1994)
 
 ## `Dict.reserve`
 
@@ -740,7 +740,7 @@ Dict.reserve(Dict.single("a", 1), 1000)
 #> Dict.from_list([("a", 1)])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1991)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2002)
 
 ## `Dict.capacity`
 
@@ -769,7 +769,7 @@ Dict.capacity(Dict.reserve(Dict.single("a", 1), 9))
 #> 10i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1999)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2010)
 
 ## `Dict.release_excess_capacity`
 
@@ -799,7 +799,7 @@ Dict.capacity(Dict.release_excess_capacity(Dict.reserve(Dict.single("a", 1), 9))
 #> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2008)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2019)
 
 ## `Dict.clear`
 
@@ -828,4 +828,4 @@ Dict.clear(Dict.single("a", 1))
 #> Dict.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2016)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2027)

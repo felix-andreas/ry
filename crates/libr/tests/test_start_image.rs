@@ -47,6 +47,7 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
     );
     let identity_end = IDENTITY_OFFSET + identity_length as usize;
 
+    #[allow(clippy::type_complexity)]
     let stale_variants: [(&str, fn(&mut Vec<u8>)); 2] = [
         ("another build's", |bytes| bytes[IDENTITY_OFFSET] ^= 1),
         ("an older format's", |bytes| bytes[7] -= 1),
@@ -102,10 +103,18 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
 /// Runs a script in the home's `Rscript` and returns its stdout and stderr. With `touches`, the
 /// session records the image objects it touches there, which it does only when it started from
 /// the image.
+///
+/// A start that sources a profile never loads the image, so the session runs in the home's
+/// directory with `HOME` pointing there too, away from the user's `~/.Rprofile` (CI's
+/// `setup-r` writes one) and any `./.Rprofile`.
 fn rscript(home: &Path, touches: Option<&Path>) -> (String, String) {
     let mut command = Command::new(home.join("bin/Rscript"));
     command
         .args(["-e", "cat(sum(1:10), is.function(stats::lm), '\\n')"])
+        .current_dir(home)
+        .env("HOME", home)
+        .env_remove("R_PROFILE")
+        .env_remove("R_PROFILE_USER")
         .env_remove("R_HOME")
         .env_remove("RY_IMAGE")
         .env_remove("R_LIBS")
@@ -129,14 +138,8 @@ fn rscript(home: &Path, touches: Option<&Path>) -> (String, String) {
 /// `ry-rcmd`, another package's binary, built here for the profile the test runs in.
 fn ry_rcmd() -> PathBuf {
     let profile_directory = profile_directory();
-    let mut build = Command::new(env!("CARGO"));
-    build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
-    if profile_directory
-        .file_name()
-        .is_some_and(|name| name == "release")
-    {
-        build.arg("--release");
-    }
+    let mut build = syntax::testing::cargo_build(&profile_directory);
+    build.args(["-p", "rcmd", "--bin", "ry-rcmd"]);
     run(&mut build);
     profile_directory.join("ry-rcmd")
 }

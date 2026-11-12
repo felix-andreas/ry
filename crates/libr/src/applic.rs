@@ -24,7 +24,7 @@ use {
         utils::format_real_vector,
     },
     interp::{
-        arith::find_interval,
+        arith::{find_interval, pretty},
         format::format_g,
         random,
         stats_lbfgsb::{self as lbfgsb, Bound, minimize},
@@ -1157,147 +1157,24 @@ pub unsafe extern "C" fn R_pretty(
     eps_correction: c_int,
     return_bounds: c_int,
 ) -> f64 {
-    // Unit counts within this fraction of an integer count as that integer.
-    const SNAP: f64 = 1e-10;
-    // The largest cell kept is the largest double over this factor, so that rounding the
-    // cell up to the next nice unit cannot overflow.
-    const HEADROOM: f64 = 1.25;
-    let high_bias = *high_u_fact;
-    let five_bias = *high_u_fact.add(1);
-    let smallest_factor = *high_u_fact.add(2);
-    let divisions = *ndiv;
-    let range = *up - *lo;
-    // A range that ends at zero is padded away from zero only, as GNU R does.
-    let starts_at_zero = *lo == 0.0 && *up != 0.0;
-    let ends_at_zero = *up == 0.0 && *lo != 0.0;
-    let mut cell;
-    let small;
-    if range == 0.0 && *up == 0.0 {
-        cell = 1.0;
-        small = true;
-    } else {
-        cell = lo.read().abs().max(up.read().abs());
-        // A range this narrow next to the magnitudes is rounding noise, not data.
-        let bias = if five_bias >= 1.5 * high_bias + 0.5 {
-            1.0 / (1.0 + high_bias)
-        } else {
-            1.5 / (1.0 + five_bias)
-        };
-        let noise = (1.0 + bias) * f64::from(divisions.max(1)) * f64::EPSILON;
-        small = range < cell * noise * 3.0;
+    let factors = [*high_u_fact, *high_u_fact.add(1), *high_u_fact.add(2)];
+    let result = pretty(
+        *lo,
+        *up,
+        *ndiv,
+        min_n,
+        shrink_sml,
+        factors,
+        eps_correction,
+        return_bounds != 0,
+    );
+    for message in result.warnings {
+        warn(message);
     }
-    if small {
-        if cell > 10.0 {
-            cell = 9.0 + cell / 10.0;
-        }
-        cell *= shrink_sml;
-        if min_n > 1 {
-            cell /= f64::from(min_n);
-        }
-    } else {
-        cell = range;
-        if range.is_infinite() {
-            if divisions > 1 {
-                // The range overflows, its parts do not.
-                cell = *up / f64::from(divisions) - *lo / f64::from(divisions);
-            } else {
-                warn(format!(
-                    "R_pretty(): infinite range; *ndiv={divisions}, should have ndiv >= 2"
-                ));
-            }
-        } else if divisions > 1 {
-            cell /= f64::from(divisions);
-        }
-    }
-    let mut smallest_cell = smallest_factor * f64::MIN_POSITIVE;
-    if smallest_cell == 0.0 {
-        smallest_cell = f64::MIN_POSITIVE;
-    }
-    if cell < smallest_cell {
-        warn(format!(
-            "R_pretty(): very small range 'cell'={}, corrected to {}",
-            format_g(cell),
-            format_g(smallest_cell)
-        ));
-        cell = smallest_cell;
-    } else if cell > f64::MAX / HEADROOM {
-        warn(format!(
-            "R_pretty(): very large range 'cell'={}, corrected to {}",
-            format_g(cell),
-            format_g(f64::MAX / HEADROOM)
-        ));
-        cell = f64::MAX / HEADROOM;
-    }
-    let base = 10f64.powf(cell.log10().floor());
-    let mut unit = base;
-    let two = 2.0 * base;
-    if two - cell < high_bias * (cell - unit) {
-        unit = two;
-        let five = 5.0 * base;
-        if five - cell < five_bias * (cell - unit) {
-            unit = five;
-            let ten = 10.0 * base;
-            if ten - cell < high_bias * (cell - unit) {
-                unit = ten;
-            }
-        }
-    }
-    let mut start = (*lo / unit + SNAP).floor();
-    let mut end = (*up / unit - SNAP).ceil();
-    if eps_correction != 0 && (eps_correction > 1 || !small) {
-        *lo = if *lo != 0.0 {
-            *lo * (1.0 - f64::EPSILON)
-        } else {
-            -f64::MIN_POSITIVE
-        };
-        *up = if *up != 0.0 {
-            *up * (1.0 + f64::EPSILON)
-        } else {
-            f64::MIN_POSITIVE
-        };
-    }
-    while start * unit > *lo + SNAP * unit {
-        start -= 1.0;
-    }
-    while end * unit < *up - SNAP * unit {
-        end += 1.0;
-    }
-    // Near the ends of the double range a covering count can overflow; step back inside.
-    while !(start * unit).is_finite() {
-        start += 1.0;
-    }
-    while !(end * unit).is_finite() {
-        end -= 1.0;
-    }
-    let mut cells = (0.5 + end - start) as c_int;
-    if cells < min_n {
-        let missing = min_n - cells;
-        if starts_at_zero {
-            end += f64::from(missing);
-        } else if ends_at_zero {
-            start -= f64::from(missing);
-        } else if start >= 0.0 {
-            end += f64::from(missing / 2);
-            start -= f64::from(missing / 2 + missing % 2);
-        } else {
-            start -= f64::from(missing / 2);
-            end += f64::from(missing / 2 + missing % 2);
-        }
-        cells = min_n;
-    }
-    *ndiv = cells;
-    if return_bounds != 0 {
-        if start * unit < *lo {
-            *lo = start * unit;
-        }
-        if end * unit > *up {
-            *up = end * unit;
-        }
-    } else {
-        *lo = start;
-        *up = end;
-    }
-    unit
+    *lo = result.low;
+    *up = result.high;
+    *ndiv = result.count;
+    result.unit
 }
 
 // UNCMIN, the engine of nlm(), lives in `interp::stats_nlm`; `optif9` and `fdhess` adapt it to

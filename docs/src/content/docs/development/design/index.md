@@ -70,6 +70,17 @@ What Roc, Bend, goose and Vx do best in memory management, compilation, typing a
 which of their ideas the R runtime adopts or rejects given that R's C API must keep working. It is
 written as an Open Knowledge Format v0.2 concept document, with sources in its frontmatter.
 
+### [The big levers](/development/design/big-levers/)
+
+An independent review of the plan against published results of other language implementations and
+fresh measurements: five ranked levers (declared types that pay on whole programs, the edit-to-result
+loop, an optimizing tier judged by the calls it removes, native kernels for base R's data-frame layer,
+and all cores for ry-owned kernels), what to stop, and the measurement that would kill each lever. It
+argues that untyped R should be planned around 3x GNU R, and that the order-of-magnitude goals belong
+to typed code and the development loop. A section on the native backend measures Cranelift against a
+direct emitter, copy-and-patch and LLVM, and recommends keeping Cranelift and shrinking the IR ry
+feeds it.
+
 ### [Packages and R versions in the runtime](/development/design/packaging/)
 
 How packages install into ry's runtime (prebuilt GNU R 4.6 binaries load unchanged through the
@@ -97,3 +108,9 @@ How typed ry runs close to Rust's speed: a typed core IR compiled ahead of time 
 types, Rust-like layouts for numbers, strings, lists, records and tags, direct calls with no
 environment, native values freed by compiler-inserted reference counts with in-place reuse, and
 conversion only at the R boundary. It builds to the runtime contract of the native-types design.
+
+### [Compiled top-level loops](/development/design/top-level-loops/)
+
+Which loops the tree walker evaluates in the global environment compile, how they run on the
+environment's bindings without a call frame, and what compiling loops in `eval()`, `local()` and
+`test_that` environments would take.

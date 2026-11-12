@@ -38,6 +38,7 @@ use {
         },
     },
     heap::{
+        HeapError,
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
         records::{Fields, Layout, NativeKind},
     },
@@ -332,6 +333,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.pow_int", num_pow_int),
     library("Num.sqrt", num_sqrt),
     library("Num.log", num_log),
+    library("Num.exp", num_exp),
     library("Num.asin", num_asin),
     library("Num.acos", num_acos),
     library("Num.is_nan", num_is_nan),
@@ -836,7 +838,8 @@ unsafe fn whole(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
 
 unsafe fn count(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usize> {
     let number = whole(call, parameter, value)?;
-    usize::try_from(number).map_err(|_| wrong(call, parameter, "zero or more", value))
+    usize::try_from(number)
+        .map_err(|_| call.error(format!("`{parameter}` must be zero or more, not {number}")))
 }
 
 /// A length-one string that is not `NA`.
@@ -1145,11 +1148,10 @@ unsafe fn list_get(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
     let [list, index, value] = arguments(call, ["list", "index", "value"])?;
-    if owned_list(call, list) {
+    if owned_for(call, list, value) {
         let index = whole(call, "index", index)?;
         if let Some(at) = position(index, length(list)) {
-            crate::moves::replacing(list, at, list.element(at));
-            crate::heap().set_element(list, at, value);
+            replace_owned(list, at, value)?;
         }
         return Ok(list);
     }
@@ -1179,9 +1181,8 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     let value = value?;
     // Ownership is checked after the callback, which may have stored the list somewhere. A
     // callback that returns the list itself must not store it inside itself.
-    if value != list && owned_list(call, list) {
-        crate::moves::replacing(list, at, list.element(at));
-        crate::heap().set_element(list, at, value);
+    if value != list && owned_for(call, list, value) {
+        replace_owned(list, at, value)?;
         return Ok(list);
     }
     let mut items = list_slice(list, 0, count)?;
@@ -1191,8 +1192,8 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_append(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
-    if owned_list(call, list) {
-        return extend_in_place(list, &[value]);
+    if let Some(grown) = append_owned(call, list, &[value])? {
+        return Ok(grown);
     }
     let mut items = list_elements(call, "list", list)?;
     items.push(value);
@@ -1208,9 +1209,11 @@ unsafe fn list_prepend(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_concat(call: &Call<'_>) -> R<Sexp> {
     let [first, second] = arguments(call, ["first", "second"])?;
-    if owned_list(call, first) {
+    if owned_collection_list(call, first) {
         let added = list_elements(call, "second", second)?;
-        return extend_in_place(first, &added);
+        if let Some(grown) = append_owned(call, first, &added)? {
+            return Ok(grown);
+        }
     }
     let mut items = list_elements(call, "first", first)?;
     items.extend(list_elements(call, "second", second)?);
@@ -2202,15 +2205,23 @@ unsafe fn list_swap(call: &Call<'_>) -> R<Sexp> {
     let [list, first, second] = arguments(call, ["list", "first", "second"])?;
     let first = whole(call, "first", first)?;
     let second = whole(call, "second", second)?;
-    if owned_list(call, list) {
+    if owned_collection_list(call, list) {
         let count = length(list);
         if let (Some(left), Some(right)) = (position(first, count), position(second, count)) {
-            let (left_value, right_value) = (list.element(left), list.element(right));
-            crate::moves::replacing(list, left, left_value);
-            crate::moves::replacing(list, right, right_value);
-            let heap = crate::heap();
-            heap.set_element(list, left, right_value);
-            heap.set_element(list, right, left_value);
+            if list.is_array() {
+                if crate::moves::tracking() {
+                    crate::moves::replacing(list, left, arrays::item(list, left)?);
+                    crate::moves::replacing(list, right, arrays::item(list, right)?);
+                }
+                arrays::swap_items(list, left, right);
+            } else {
+                let (left_value, right_value) = (list.element(left), list.element(right));
+                crate::moves::replacing(list, left, left_value);
+                crate::moves::replacing(list, right, right_value);
+                let heap = crate::heap();
+                heap.set_element(list, left, right_value);
+                heap.set_element(list, right, left_value);
+            }
         }
         return Ok(list);
     }
@@ -2305,12 +2316,11 @@ unsafe fn list_split_on_list(call: &Call<'_>) -> R<Sexp> {
 unsafe fn list_append_if_ok(call: &Call<'_>) -> R<Sexp> {
     let [list, result] = arguments(call, ["list", "result"])?;
     let (is_ok, value) = result_parts(call, "result", result)?;
-    if owned_list(call, list) {
-        return if is_ok {
-            extend_in_place(list, &[value])
-        } else {
-            Ok(list)
-        };
+    if !is_ok && owned_collection_list(call, list) {
+        return Ok(list);
+    }
+    if is_ok && let Some(grown) = append_owned(call, list, &[value])? {
+        return Ok(grown);
     }
     let mut items = list_elements(call, "list", list)?;
     if is_ok {
@@ -2336,8 +2346,8 @@ unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
     for &byte in string.as_bytes() {
         bytes.push(numbers::alloc(i64::from(byte))?);
     }
-    if owned_list(call, list) {
-        return extend_in_place(list, &bytes);
+    if let Some(grown) = append_owned(call, list, &bytes)? {
+        return Ok(grown);
     }
     let mut items = list_elements(call, "list", list)?;
     items.extend(bytes);
@@ -2347,15 +2357,30 @@ unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
 unsafe fn list_with_capacity(call: &Call<'_>) -> R<Sexp> {
     let [capacity] = arguments(call, ["capacity"])?;
     let capacity = count(call, "capacity", capacity)?;
-    resizable(SexpType::List, 0, capacity)
+    Ok(arrays::finish(resizable(SexpType::Logical, 0, capacity)?))
 }
 
 unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
     let [list, spare] = arguments(call, ["list", "spare"])?;
     let spare = count(call, "spare", spare)?;
-    // An Array is never grown in place, so reserving room in one has nothing to do.
+    // An Array the call does not own is copied by its next update anyway.
     if list.is_array() {
-        return Ok(list);
+        if length(list) == 0 {
+            let room = spare.max(if crate::heap().is_resizable(list) {
+                list.capacity() as usize
+            } else {
+                0
+            });
+            return Ok(arrays::finish(resizable(SexpType::Logical, 0, room)?));
+        }
+        if !owned_array(call, list) {
+            return Ok(list);
+        }
+        let needed = length(list).saturating_add(spare);
+        if crate::heap().is_resizable(list) && needed <= list.capacity() as usize {
+            return Ok(list);
+        }
+        return Ok(arrays::finish(with_capacity(list, needed)?));
     }
     let items = list_elements(call, "list", list)?;
     let needed = items.len().saturating_add(spare);
@@ -2444,6 +2469,15 @@ unsafe fn str_repeat(call: &Call<'_>) -> R<Sexp> {
     let [string, times] = arguments(call, ["string", "count"])?;
     let string = text(call, "string", string)?;
     let times = count(call, "count", times)?;
+    // A result past R's limit on a string's bytes fails before it is built, which would
+    // otherwise ask for gigabytes only to give them back.
+    if string
+        .len()
+        .checked_mul(times)
+        .is_none_or(|total| total > i32::MAX as usize)
+    {
+        return Err(HeapError::StringTooLong.into());
+    }
     scalar_string(&string.repeat(times))
 }
 
@@ -2579,17 +2613,15 @@ unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
 /// The bytes of a list of numbers from 0 to 255.
 unsafe fn utf8_bytes(call: &Call<'_>, bytes: Sexp) -> R<Vec<u8>> {
     let mut decoded = Vec::new();
-    for item in list_elements(call, "bytes", bytes)? {
+    for (position, item) in list_elements(call, "bytes", bytes)?.into_iter().enumerate() {
         let byte = whole(call, "bytes", item)?;
         match u8::try_from(byte) {
             Ok(byte) => decoded.push(byte),
             Err(_) => {
-                return Err(wrong(
-                    call,
-                    "bytes",
-                    "a list of numbers from 0 to 255",
-                    item,
-                ));
+                return Err(call.error(format!(
+                    "`bytes` must hold numbers from 0 to 255, but item {} is {byte}",
+                    position + 1
+                )));
             }
         }
     }
@@ -2686,16 +2718,15 @@ unsafe fn str_from_utf16_lossy(call: &Call<'_>) -> R<Sexp> {
 /// The code units of a list of numbers from 0 to 65535.
 unsafe fn utf16_units(call: &Call<'_>, units: Sexp) -> R<Vec<u16>> {
     let mut decoded = Vec::new();
-    for item in list_elements(call, "units", units)? {
-        match u16::try_from(whole(call, "units", item)?) {
+    for (position, item) in list_elements(call, "units", units)?.into_iter().enumerate() {
+        let unit = whole(call, "units", item)?;
+        match u16::try_from(unit) {
             Ok(unit) => decoded.push(unit),
             Err(_) => {
-                return Err(wrong(
-                    call,
-                    "units",
-                    "a list of numbers from 0 to 65535",
-                    item,
-                ));
+                return Err(call.error(format!(
+                    "`units` must hold numbers from 0 to 65535, but item {} is {unit}",
+                    position + 1
+                )));
             }
         }
     }
@@ -3404,6 +3435,13 @@ unsafe fn num_log(call: &Call<'_>) -> R<Sexp> {
     scalar_real(value.ln())
 }
 
+unsafe fn num_exp(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
+    real_function(call, f64::exp)
+}
+
 /// An inverse sine or cosine, whose argument must lie in `[-1, 1]`.
 unsafe fn inverse_trigonometric(call: &Call<'_>, function: fn(f64) -> f64) -> R<Sexp> {
     let value = one_number(call)?.as_double();
@@ -3464,8 +3502,12 @@ unsafe fn bits_value(call: &Call<'_>, value: i32) -> R<Sexp> {
     scalar_integer(value)
 }
 
-/// A bitwise operation on two integers' two's-complement bits.
+/// A bitwise operation on two integers' two's-complement bits: 64 of them when either is an
+/// `I64`, otherwise the 32 of an R integer.
 unsafe fn bitwise(call: &Call<'_>, operation: fn(i32, i32) -> i32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [first, second] = arguments(call, ["first", "second"])?;
     let first = integer_argument(call, "first", first)?;
     let second = integer_argument(call, "second", second)?;
@@ -3485,12 +3527,19 @@ unsafe fn num_bitwise_xor(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn num_bitwise_not(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number] = arguments(call, ["number"])?;
     bits_value(call, !integer_argument(call, "number", number)?)
 }
 
-/// Shifts an integer's bits by `bits`, from 0 to 31.
+/// Shifts an integer's bits by `bits`: from 0 to 63 when either is an `I64`, otherwise from 0 to
+/// 31.
 unsafe fn shift(call: &Call<'_>, operation: fn(i32, u32) -> i32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number, bits] = arguments(call, ["number", "bits"])?;
     let number = integer_argument(call, "number", number)?;
     let bits = whole(call, "bits", bits)?;
@@ -3603,26 +3652,90 @@ unsafe fn owned_list(call: &Call<'_>, list: Sexp) -> bool {
     list.kind() == SexpType::List && !list.is_array() && list.attrib() == nil() && owned(call, list)
 }
 
-/// Appends `items` to an owned list, within its capacity when it has room and otherwise in a
-/// resizable copy with twice the room, so repeated appends cost amortized constant time.
-unsafe fn extend_in_place(list: Sexp, items: &[Sexp]) -> R<Sexp> {
+/// Whether the call owns a non-empty Array, which it may then update in place. An empty Array
+/// is stored as `logical` until its first item decides its type, so it is rebuilt instead.
+unsafe fn owned_array(call: &Call<'_>, list: Sexp) -> bool {
+    list.is_array() && length(list) > 0 && owned(call, list)
+}
+
+/// Whether the call owns a plain list ([`owned_list`]) or a non-empty Array ([`owned_array`]).
+unsafe fn owned_collection_list(call: &Call<'_>, list: Sexp) -> bool {
+    owned_list(call, list) || owned_array(call, list)
+}
+
+/// Whether the call may store `value` into `list` in place: it owns the list, and `value` fits
+/// the list's item type when the list is an Array.
+unsafe fn owned_for(call: &Call<'_>, list: Sexp, value: Sexp) -> bool {
+    owned_list(call, list) || (owned_array(call, list) && arrays::holds_item(list, value))
+}
+
+/// `items` appended in place to a list or Array the call owns, within its capacity when it has
+/// room and otherwise in a resizable copy with twice the room, so repeated appends cost
+/// amortized constant time. `None` when the call does not own `list`, or when an item does not
+/// fit an Array's item type: the caller then builds a new list, which reports that item.
+unsafe fn append_owned(call: &Call<'_>, list: Sexp, items: &[Sexp]) -> R<Option<Sexp>> {
+    let array = list.is_array();
     let heap = crate::heap();
+    if array && length(list) == 0 {
+        // An empty Array is stored as `logical` until its first items decide its storage, so
+        // they go into a new Array that keeps the room `List.with_capacity` set aside.
+        if !heap.is_resizable(list) || list.capacity() as usize <= items.len() {
+            return Ok(None);
+        }
+        let Ok(first) = arrays::from_items(items)? else {
+            return Ok(None);
+        };
+        return Ok(Some(arrays::finish(with_capacity(
+            first,
+            list.capacity() as usize,
+        )?)));
+    }
+    let owned = if array {
+        owned_array(call, list) && items.iter().all(|&item| arrays::holds_item(list, item))
+    } else {
+        owned_list(call, list)
+    };
+    if !owned {
+        return Ok(None);
+    }
     let count = length(list);
     let needed = count + items.len();
     let list = if heap.is_resizable(list) && needed <= list.capacity() as usize {
         list
     } else {
-        with_capacity(list, needed.max(count * 2).max(4))?
+        let grown = with_capacity(list, needed.max(count * 2).max(4))?;
+        // A copy drops the Array bit, which the grown list must carry again.
+        if array { arrays::finish(grown) } else { grown }
     };
     heap.resize_vector(list, needed as isize)?;
     for (offset, &item) in items.iter().enumerate() {
-        heap.set_element(list, count + offset, item);
+        if array {
+            arrays::store_item(list, item, count + offset);
+        } else {
+            heap.set_element(list, count + offset, item);
+        }
     }
-    Ok(list)
+    Ok(Some(list))
+}
+
+/// Replaces item `at` of a list or Array that [`owned_for`] accepted with `value`, recording the
+/// old item for a move in progress. An Array's old item is read out as a fresh value only while
+/// a move needs it.
+unsafe fn replace_owned(list: Sexp, at: usize, value: Sexp) -> R<()> {
+    if list.is_array() {
+        if crate::moves::tracking() {
+            crate::moves::replacing(list, at, arrays::item(list, at)?);
+        }
+        arrays::store_item(list, value, at);
+    } else {
+        crate::moves::replacing(list, at, list.element(at));
+        crate::heap().set_element(list, at, value);
+    }
+    Ok(())
 }
 
 /// A fresh resizable vector of `kind` with room for `capacity` elements and length `count`.
-unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
+pub(crate) unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
     let heap = crate::heap();
     let vector = heap.alloc_resizable_vector(kind, capacity.max(count) as isize)?;
     heap.root(vector);
@@ -3630,7 +3743,7 @@ unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
     Ok(vector)
 }
 
-/// A resizable copy of the atomic vector or list `vector` with room for `capacity` elements.
+/// A resizable copy of the atomic vector, `I64` vector or list `vector` with room for `capacity` elements.
 unsafe fn with_capacity(vector: Sexp, capacity: usize) -> R<Sexp> {
     let count = length(vector);
     let grown = resizable(vector.kind(), count, capacity)?;
@@ -3641,6 +3754,9 @@ unsafe fn with_capacity(vector: Sexp, capacity: usize) -> R<Sexp> {
         SexpType::Integer | SexpType::Logical => grown
             .slice_mut::<i32>()
             .copy_from_slice(values::ints(vector)),
+        SexpType::I64 => grown
+            .slice_mut::<i64>()
+            .copy_from_slice(vector.slice::<i64>()),
         _ => {
             for index in 0..count {
                 crate::heap().set_element(grown, index, vector.element(index));

@@ -264,6 +264,35 @@ for `sqrt(Num.to_r(n))`. An `F64`, `Bool` or `Str` shares R's representation and
 [Crossing between R and ry scalars](/reference/type-system#crossing-between-r-and-ry-scalars) has
 the rules.
 
+A `DataFrame` is the one R-side value a typed function holds: it is opaque there, and the function
+passes it to the table API and reads a column back with `List.from_r(table$column)`.
+[Tables in typed code](/reference/type-system#tables-in-typed-code) has the rules.
+
+In strict mode the checker enforces the boundary. A function whose signature is written entirely in
+ry types is a native function, which is compiled to machine code, and its body may hold only ry
+values. An R function's result is converted right where it returns, or the call stands as a
+statement of its own:
+
+```r
+label_width <- function(label: Str) -> I64 {
+  width <- nchar(label)
+  Num.from_r(width)
+}
+print(label_width("native"))
+```
+
+```text ry check typing strict
+native
+
+  x `nchar` is an R function, and a native function holds only ry values, so its result cannot be
+    used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+```
+
+A function with an R type in its signature, such as `function(path: character) -> F64`, is a
+boundary function: it may mix R values and ry values freely, and the interpreter runs it when it
+has to. Legitimate ry that the native compiler does not compile yet, such as `try`, gets a warning
+with the code `interpreted` that names the construct. [Native functions](/reference/type-system#native-functions) has the full rule.
+
 ## Where to go next
 
 - [Standard library](/reference/standard-library): `Result`, `List`, `Str`, `Num`, `Bool`, `Dict`

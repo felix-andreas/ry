@@ -309,6 +309,37 @@ impl Generator {
                 self.rng.below(9)
             ));
         }
+        if self.rng.chance(1, 2) {
+            // Methods change between calls of one site, in the order a package and a user
+            // session change them: a global mask and its removal, a registration, a frame-local
+            // method, and a global mask over the registered method.
+            let target = ["circle", "square", "shape"][self.rng.below(3)];
+            let call = format!("area{k}(object{k})");
+            let mut steps = [
+                format!("area{k}.{target} <- function(s, ...) \"masked {target}\""),
+                format!("rm(area{k}.{target})"),
+                format!(
+                    "registerS3method(\"area{k}\", \"{target}\", function(s, ...) \"registered {target}\")"
+                ),
+                format!(
+                    "local{k} <- function(s) {{ area{k}.{target} <- function(s, ...) \"frame {target}\"; area{k}(s) }}\nprint(local{k}(object{k}))"
+                ),
+                format!("area{k}.{target} <- function(s, ...) \"global {target}\""),
+                format!("rm(area{k}.{target})"),
+            ];
+            if self.rng.chance(1, 2) {
+                steps[..3].rotate_right(1);
+            }
+            let line = self.guarded(&call);
+            text.push_str(&format!("for (i in 1:2) {line}\n"));
+            for step in steps {
+                text.push_str(&step);
+                text.push('\n');
+                let line = self.guarded(&call);
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
         text
     }
 
@@ -1035,7 +1066,8 @@ pub fn trace_back_program(seed: u64) -> String {
 
 const TRACE_PREAMBLE: &str = r#"if (!requireNamespace("rlang", quietly = TRUE)) {
     cat("rlang is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 body_only <- body(rlang:::trace_back)
 if (identical(body_only[[1]], as.name("{")) && length(body_only) == 3L &&
@@ -1262,7 +1294,8 @@ pub fn native_helpers_program(seed: u64) -> String {
 
 const NATIVE_HELPERS_PREAMBLE: &str = r#"if (!requireNamespace("withr", quietly = TRUE) || format(packageVersion("withr")) != "3.0.3") {
     cat("withr 3.0.3 is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 r_body <- function(f) {
     code <- body(f)
@@ -1366,4 +1399,266 @@ pub fn parse_data_program(seed: u64) -> String {
          for (ref in attr(p, \"srcref\")) cat(as.integer(ref), \"\\n\")\n\
          cat(as.integer(attr(p, \"wholeSrcref\")), \"\\n\")\n"
     )
+}
+
+/// An R program for `seed` that calls `format` on random doubles under random `digits`,
+/// `nsmall`, `width`, `trim`, `na.encode`, `scientific` and `decimal.mark` arguments and random
+/// `scipen`, `OutDec` and `digits` options, printing each result (or its error) on a line of
+/// its own. The doubles are written as hexadecimal literals, so both engines format exactly the
+/// same bits; they mix random bit patterns, decimals near rounding ties, exact binary ties,
+/// subnormals and the extremes of the double range with NA, NaN, infinities and negative zero.
+pub fn format_numbers_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed ^ 0x666f_726d_6174_0000);
+    let mut text = format!("# format fuzz program, seed {seed}\n");
+    for line in 0..400 {
+        let count = [1, 1, 1, 2, 3, 5, 8][rng.below(7)];
+        let values: Vec<String> = (0..count).map(|_| fuzz_double(&mut rng)).collect();
+        let mut arguments = vec![format!("c({})", values.join(", "))];
+        // `digits = 0` is out of range and must fail the same way.
+        if rng.chance(3, 5) {
+            arguments.push(format!("digits = {}L", rng.below(23)));
+        }
+        if rng.chance(2, 5) {
+            arguments.push(format!("nsmall = {}L", rng.below(21)));
+        }
+        if rng.chance(1, 5) {
+            arguments.push(format!("width = {}L", rng.below(30)));
+        }
+        if rng.chance(1, 5) {
+            arguments.push("trim = TRUE".to_owned());
+        }
+        if rng.chance(1, 5) {
+            arguments.push("na.encode = FALSE".to_owned());
+        }
+        if rng.chance(1, 4) {
+            let scientific = match rng.below(4) {
+                0 => "TRUE".to_owned(),
+                1 => "FALSE".to_owned(),
+                2 => "NA".to_owned(),
+                _ => format!("{}L", rng.below(21) as i64 - 10),
+            };
+            arguments.push(format!("scientific = {scientific}"));
+        }
+        if rng.chance(3, 20) {
+            arguments.push("decimal.mark = \",\"".to_owned());
+        }
+        let mut options = Vec::new();
+        if rng.chance(3, 20) {
+            options.push(format!("scipen = {}", rng.below(20) as i64 - 9));
+        }
+        if rng.chance(1, 10) {
+            options.push("OutDec = \",\"".to_owned());
+        }
+        if rng.chance(3, 20) {
+            options.push(format!("digits = {}", 1 + rng.below(22)));
+        }
+        if !options.is_empty() {
+            text.push_str(&format!("options({})\n", options.join(", ")));
+        }
+        text.push_str(&format!(
+            "r <- tryCatch(format({}), error = function(e) paste(\"E:\", conditionMessage(e)))\n\
+             cat({line}L, encodeString(r, quote = '\"'), sep = \"|\"); cat(\"\\n\")\n",
+            arguments.join(", ")
+        ));
+        if !options.is_empty() {
+            text.push_str("options(scipen = 0, OutDec = \".\", digits = 7)\n");
+        }
+    }
+    text
+}
+
+/// One double as an R literal for [`format_numbers_program`].
+fn fuzz_double(rng: &mut SplitMix64) -> String {
+    let value = match rng.below(13) {
+        0 => {
+            return ["0", "-0", "NaN", "Inf", "-Inf", "NA_real_"][rng.below(6)].to_owned();
+        }
+        1 => f64::from_bits(rng.next_u64()),
+        2 => {
+            // A decimal of up to 16 digits, sometimes nudged one unit off it.
+            let digits = 1 + rng.below(16) as i32;
+            let low = 10u64.pow(digits as u32 - 1);
+            let mantissa = low + rng.next_u64() % (9 * low);
+            let exponent = rng.below(40) as i32 - 20 - digits + 1;
+            let value: f64 = format!("{mantissa}e{exponent}").parse().unwrap_or(0.0);
+            match rng.below(4) {
+                0 => f64::from_bits(value.to_bits() + 1),
+                1 => f64::from_bits(value.to_bits().saturating_sub(1)),
+                _ => value,
+            }
+        }
+        3 => {
+            // A decimal ending in 5, the tie of the digit before it.
+            let digits = 1 + rng.below(15) as u32;
+            let low = 10u64.pow(digits - 1);
+            let mantissa = (low + rng.next_u64() % (9 * low)) * 10 + 5;
+            let exponent = rng.below(16) as i32 - 8 - digits as i32;
+            format!("{mantissa}e{exponent}").parse().unwrap_or(0.0)
+        }
+        4 => {
+            // An exact binary tie for fixed notation: an odd multiple of a small power of two.
+            let numerator = (rng.next_u64() % 100_000) * 2 + 1;
+            numerator as f64 / f64::from(1u32 << (1 + rng.below(12)))
+        }
+        5 => [
+            1e15,
+            1e15 - 1.0,
+            1e16,
+            999_999_999_999_999.0,
+            9_999_999.5,
+            1e-15,
+            1e5,
+            1e-5,
+            0.1,
+            0.15,
+            1.0 / 3.0,
+            123_456.7,
+            1e-300,
+            5e-324,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            9.995,
+            0.095,
+            99.95,
+            1e22,
+            1e23,
+            1e27,
+            1e28,
+            4.0270798167452e-09,
+        ][rng.below(24)],
+        6 => {
+            // Spread over the whole exponent range, subnormals included.
+            let exponent = rng.below(2046) as i64 - 1074;
+            (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2f64.powi(exponent as i32 + 1)
+        }
+        7 => (rng.next_u64() % 2_000_000) as f64 - 1e6,
+        8 => {
+            // Just under a power of ten, where rounding adds a digit.
+            let power = 10f64.powi(rng.below(30) as i32 - 10);
+            power * (1.0 - (1 + rng.below(1000)) as f64 * 1e-7)
+        }
+        _ => {
+            let scale = 10f64.powi(rng.below(6) as i32);
+            (((rng.next_u64() % 2_000_000_000) as f64 - 1e9) / 1e6 * scale).round() / scale
+        }
+    };
+    if rng.chance(3, 10) {
+        hex_literal(-value)
+    } else {
+        hex_literal(value)
+    }
+}
+
+/// `value` as an R hexadecimal literal, which reads back as exactly the same bits.
+fn hex_literal(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-Inf" } else { "Inf" }.to_owned();
+    }
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    if value == 0.0 {
+        return format!("{sign}0");
+    }
+    let bits = value.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let fraction = bits & ((1 << 52) - 1);
+    let (lead, exponent) = if biased == 0 {
+        (0, -1022)
+    } else {
+        (1, biased - 1023)
+    };
+    format!("{sign}0x{lead}.{fraction:013x}p{exponent}")
+}
+
+/// An R program for `seed` that calls `sprintf` with random format strings on random arguments,
+/// printing each result (or its error, and any warning) on a line of its own. A format mixes
+/// literal text, `%%` and conversions with random flags, widths, precisions, `*` widths and
+/// precisions, and `n$` references; the arguments are doubles from [`fuzz_double`], integers,
+/// logicals and strings, with NA, of lengths that recycle and lengths that do not.
+pub fn sprintf_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed ^ 0x7370_7269_6e74_6600);
+    let mut text = format!(
+        "# sprintf fuzz program, seed {seed}\n\
+         show <- function(line, expr) {{\n\
+         \x20 warned <- NULL\n\
+         \x20 r <- withCallingHandlers(\n\
+         \x20   tryCatch(expr, error = function(e) paste(\"E:\", conditionMessage(e))),\n\
+         \x20   warning = function(w) {{ warned <<- conditionMessage(w); invokeRestart(\"muffleWarning\") }})\n\
+         \x20 cat(line, encodeString(r, quote = '\"'), if (!is.null(warned)) paste(\"W:\", warned), sep = \"|\"); cat(\"\\n\")\n\
+         }}\n"
+    );
+    for line in 0..300 {
+        let count = 1 + rng.below(3);
+        let kinds: Vec<usize> = (0..count).map(|_| rng.below(4)).collect();
+        let mut format = String::new();
+        let mut arguments = Vec::new();
+        let positional = rng.chance(1, 8);
+        for (position, &kind) in kinds.iter().enumerate() {
+            if rng.chance(1, 2) {
+                format.push_str(["x", "a b", "=", "%%", "[", "é"][rng.below(6)]);
+            }
+            format.push('%');
+            if positional {
+                format.push_str(&format!("{}$", position + 1));
+            }
+            for flag in ["-", "+", " ", "0", "#"] {
+                if rng.chance(1, 6) {
+                    format.push_str(flag);
+                }
+            }
+            let star_width = !positional && rng.chance(1, 10);
+            if star_width {
+                format.push('*');
+                arguments.push(format!("{}L", rng.below(25) as i64 - 8));
+            } else if rng.chance(1, 3) {
+                format.push_str(&rng.below(25).to_string());
+            }
+            if !positional && !star_width && rng.chance(1, 12) {
+                format.push_str(".*");
+                arguments.push(format!("{}L", rng.below(18) as i64 - 2));
+            } else if rng.chance(1, 2) {
+                format.push_str(&format!(".{}", rng.below(18)));
+            }
+            let letters: &[&str] = match kind {
+                0 => &["f", "e", "E", "g", "G", "s", "f", "g", "d"],
+                1 => &["d", "i", "x", "X", "o", "s", "d"],
+                2 => &["d", "i", "s"],
+                _ => &["s", "s", "d"],
+            };
+            format.push_str(letters[rng.below(letters.len())]);
+            let length = [1, 1, 1, 2, 3][rng.below(5)];
+            let values: Vec<String> = (0..length)
+                .map(|_| match kind {
+                    0 => fuzz_double(&mut rng),
+                    1 => match rng.below(6) {
+                        0 => "NA_integer_".to_owned(),
+                        1 => "-2147483647L".to_owned(),
+                        _ => format!("{}L", (rng.next_u64() % 2_000_001) as i64 - 1_000_000),
+                    },
+                    2 => ["TRUE", "FALSE", "NA"][rng.below(3)].to_owned(),
+                    _ => ["\"a\"", "\"\"", "NA_character_", "\"héllo\"", "\"ab cd\""][rng.below(5)]
+                        .to_owned(),
+                })
+                .collect();
+            arguments.push(format!("c({})", values.join(", ")));
+        }
+        if rng.chance(1, 2) {
+            format.push_str([";", " end", "%%", "\\t"][rng.below(4)]);
+        }
+        let format = if rng.chance(1, 10) {
+            format!("c(\"{format}\", \"<{format}>\")")
+        } else {
+            format!("\"{format}\"")
+        };
+        if rng.chance(1, 20) {
+            arguments.push("1".to_owned());
+        }
+        text.push_str(&format!(
+            "show({line}L, sprintf({format}, {}))\n",
+            arguments.join(", ")
+        ));
+    }
+    text
 }

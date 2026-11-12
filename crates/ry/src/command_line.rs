@@ -168,8 +168,8 @@ pub enum Command {
     ///
     /// The package loads as with `ry load`, and the files in `tests/testthat` run as with
     /// `devtools::test()`. The exit status is 0 when every test passed and 1 when one failed.
-    /// With `--watch`, every edit reloads only what changed and reruns the tests it can affect
-    /// first, then the rest.
+    /// With `--jobs`, the files run in that many worker processes. With `--watch`, every edit
+    /// reloads only what changed and reruns the tests it can affect first, then the rest.
     Test {
         /// The package, or any path inside it
         #[arg(default_value = ".")]
@@ -177,6 +177,11 @@ pub enum Command {
         /// Run only the test files whose names match this regular expression
         #[arg(long)]
         filter: Option<String>,
+        /// Run the test files in N worker processes, or in this process with 1. Without it, a
+        /// package whose DESCRIPTION sets `Config/testthat/parallel: true` gets one worker per
+        /// core, and any other package runs in this process
+        #[arg(long, short = 'j', value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        jobs: Option<u32>,
         /// A testthat reporter by name, such as `progress`, `summary` or `junit`
         #[arg(long)]
         reporter: Option<String>,
@@ -244,11 +249,6 @@ pub enum Command {
         /// writing it, so that code that ran hot starts optimized in every session
         #[arg(long, value_name = "WORKLOAD")]
         train: Option<String>,
-        /// List the package's functions that stay in the interpreter, largest first, with what
-        /// kept each from machine code, and for those that compiled, the lookups and argument
-        /// tests their code checks
-        #[arg(long)]
-        explain: bool,
         /// `gnu-r` installs with GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,

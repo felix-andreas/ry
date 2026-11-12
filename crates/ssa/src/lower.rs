@@ -19,8 +19,7 @@ use {
     },
     cranelift_frontend::{FunctionBuilder, FunctionBuilderContext},
     cranelift_jit::{JITBuilder, JITModule},
-    cranelift_module::{Linkage, Module as _, default_libcall_names},
-    cranelift_object::{ObjectBuilder, ObjectModule as ClifObjectModule},
+    cranelift_module::{Module as _, default_libcall_names},
     smallvec::SmallVec,
     std::cell::RefCell,
 };
@@ -37,31 +36,59 @@ pub struct Module {
     builder_context: FunctionBuilderContext,
 }
 
-thread_local! {
-    /// The session's modules. One is enough; a compilation that starts while another holds the
-    /// module, as when the optimizing tier compiles a typed callee, takes a second one.
-    static MODULES: RefCell<Vec<Module>> = const { RefCell::new(Vec::new()) };
+/// The register allocator a module compiles with. Cranelift fixes it per module, so each
+/// allocator has its own pool of modules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Allocator {
+    /// One linear pass. Its code spills more, which costs little in code that mostly calls
+    /// runtime helpers, and its compile time grows linearly with the function, where the
+    /// backtracking allocator's grows faster: on a 38,000-instruction body it takes 17 ms
+    /// against 100 ms.
+    SinglePass,
+    /// The backtracking allocator, for code whose speed rests on keeping values in registers.
+    Backtracking,
 }
 
-/// Runs `f` with a code module, creating one on first use.
-pub fn with_module<T, E: From<Error>>(f: impl FnOnce(&mut Module) -> Result<T, E>) -> Result<T, E> {
-    let taken = MODULES.with_borrow_mut(Vec::pop);
+thread_local! {
+    /// The session's modules, one pool per allocator. One module per pool is enough; a
+    /// compilation that starts while another holds the module, as when the optimizing tier
+    /// compiles a typed callee, takes a second one.
+    static MODULES: [RefCell<Vec<Module>>; 2] = const {
+        [RefCell::new(Vec::new()), RefCell::new(Vec::new())]
+    };
+}
+
+/// Runs `f` with a code module that allocates registers with `allocator`, creating one on
+/// first use.
+pub fn with_module<T, E: From<Error>>(
+    allocator: Allocator,
+    f: impl FnOnce(&mut Module) -> Result<T, E>,
+) -> Result<T, E> {
+    let pool = allocator as usize;
+    let taken = MODULES.with(|pools| pools[pool].borrow_mut().pop());
     let mut module = match taken {
         Some(module) => module,
-        None => Module::new()?,
+        None => Module::new(allocator)?,
     };
     let result = f(&mut module);
-    MODULES.with_borrow_mut(|modules| modules.push(module));
+    MODULES.with(|pools| pools[pool].borrow_mut().push(module));
     result
 }
 
 impl Module {
-    fn new() -> Result<Self, Error> {
+    fn new(allocator: Allocator) -> Result<Self, Error> {
         let mut flags = settings::builder();
         let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
             flags.set("opt_level", "speed")?;
             flags.set("use_colocated_libcalls", "false")?;
             flags.set("is_pic", "false")?;
+            flags.set(
+                "regalloc_algorithm",
+                match allocator {
+                    Allocator::SinglePass => "single_pass",
+                    Allocator::Backtracking => "backtracking",
+                },
+            )?;
             // The verifier rechecks every function and costs as much as the rest of compilation,
             // so only debug builds, where the tests run, pay for it.
             flags.set(
@@ -102,9 +129,6 @@ impl Module {
         if dump {
             eprintln!("{function}");
         }
-        if !function.symbols.is_empty() {
-            return Err(Error("code for this process addresses nothing by name"));
-        }
         self.jit.clear_context(&mut self.context);
         self.context.func.signature = self.signature(&function.signature);
         lower(
@@ -116,6 +140,7 @@ impl Module {
         if dump {
             eprintln!("{}", self.context.func.display());
         }
+        self.context.set_disasm(dump);
         if let Err(failure) = self.jit.define_function(id, &mut self.context) {
             if dump {
                 eprintln!("{failure:?}");
@@ -123,10 +148,11 @@ impl Module {
             self.jit.clear_context(&mut self.context);
             return Err(Error("Cranelift rejected the function"));
         }
-        let size = self
-            .context
-            .compiled_code()
-            .map_or(0, |code| code.code_info().total_size);
+        let compiled = self.context.compiled_code();
+        if let Some(assembly) = compiled.and_then(|code| code.vcode.as_ref()) {
+            eprintln!("{assembly}");
+        }
+        let size = compiled.map_or(0, |code| code.code_info().total_size);
         self.jit.clear_context(&mut self.context);
         Ok(size)
     }
@@ -144,109 +170,7 @@ impl Module {
     }
 
     fn signature(&self, signature: &Signature) -> clif::Signature {
-        let call_conv = match signature.call_conv {
-            CallConv::Host => self.jit.isa().default_call_conv(),
-            CallConv::Tail => ClifCallConv::Tail,
-        };
-        clif_signature(signature, call_conv)
-    }
-}
-
-/// Where code written ahead of time is compiled: a relocatable object for the host's
-/// architecture at a fixed baseline of CPU features, linked into a [`section::Code`] that the
-/// loader maps from a file. Code built here never calls by absolute address: it calls the
-/// module's own functions relative to itself and takes every outside address from its link
-/// table, which [`Builder::import_symbol`] names.
-///
-/// [`section::Code`]: crate::section::Code
-/// [`Builder::import_symbol`]: crate::Builder::import_symbol
-pub struct ObjectModule {
-    object: ClifObjectModule,
-    context: Context,
-    builder_context: FunctionBuilderContext,
-    names: Vec<Box<str>>,
-}
-
-impl ObjectModule {
-    pub fn new() -> Result<Self, Error> {
-        let mut flags = settings::builder();
-        let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
-            flags.set("opt_level", "speed")?;
-            flags.set("is_pic", "true")?;
-            flags.set(
-                "enable_verifier",
-                if cfg!(debug_assertions) {
-                    "true"
-                } else {
-                    "false"
-                },
-            )?;
-            Ok(())
-        };
-        configure(&mut flags).map_err(|_| Error("Cranelift rejected the settings"))?;
-        let isa = crate::section::isa_builder()?
-            .finish(settings::Flags::new(flags))
-            .map_err(|_| Error("Cranelift could not configure the target"))?;
-        let builder = ObjectBuilder::new(isa, "ry", default_libcall_names())
-            .map_err(|_| Error("Cranelift could not start an object"))?;
-        let object = ClifObjectModule::new(builder);
-        let context = object.make_context();
-        Ok(Self {
-            object,
-            context,
-            builder_context: FunctionBuilderContext::new(),
-            names: Vec::new(),
-        })
-    }
-
-    /// Declares a function the section exports under `name`, so bodies can call it before it is
-    /// defined.
-    pub fn declare(&mut self, name: &str, signature: &Signature) -> Result<FuncId, Error> {
-        let call_conv = match signature.call_conv {
-            CallConv::Host => self.object.isa().default_call_conv(),
-            CallConv::Tail => ClifCallConv::Tail,
-        };
-        let id = self
-            .object
-            .declare_function(name, Linkage::Export, &clif_signature(signature, call_conv))
-            .map_err(|_| Error("Cranelift rejected the function declaration"))?;
-        self.names.push(name.into());
-        Ok(id)
-    }
-
-    /// Compiles `function` as the body of `id` and returns the size of its machine code.
-    pub fn define(&mut self, id: FuncId, function: &Function) -> Result<u32, Error> {
-        self.object.clear_context(&mut self.context);
-        let call_conv = match function.signature.call_conv {
-            CallConv::Host => self.object.isa().default_call_conv(),
-            CallConv::Tail => ClifCallConv::Tail,
-        };
-        self.context.func.signature = clif_signature(&function.signature, call_conv);
-        lower(
-            function,
-            &mut self.object,
-            &mut self.context.func,
-            &mut self.builder_context,
-        )?;
-        let defined = self.object.define_function(id, &mut self.context);
-        let size = self
-            .context
-            .compiled_code()
-            .map_or(0, |code| code.code_info().total_size);
-        self.object.clear_context(&mut self.context);
-        defined.map_err(|_| Error("Cranelift rejected the function"))?;
-        Ok(size)
-    }
-
-    /// Links every defined function into one block of code and its link table. `known` says
-    /// whether the loader will be able to resolve a symbol.
-    pub fn finish(self, known: &dyn Fn(&str) -> bool) -> Result<crate::section::Code, Error> {
-        let names = self.names;
-        let product = self.object.finish();
-        let bytes = product
-            .emit()
-            .map_err(|_| Error("Cranelift could not write the object"))?;
-        crate::section::link(&bytes, &names, known)
+        clif_signature(signature, self.jit.isa().default_call_conv())
     }
 }
 
@@ -256,8 +180,13 @@ impl From<Error> for &'static str {
     }
 }
 
-fn clif_signature(signature: &Signature, call_conv: ClifCallConv) -> clif::Signature {
-    let mut lowered = clif::Signature::new(call_conv);
+/// `signature` for Cranelift, where `host` is the platform's C convention.
+fn clif_signature(signature: &Signature, host: ClifCallConv) -> clif::Signature {
+    let mut lowered = clif::Signature::new(match signature.call_conv {
+        CallConv::Host => host,
+        CallConv::Tail => ClifCallConv::Tail,
+        CallConv::Preserving => ClifCallConv::PreserveAll,
+    });
     lowered.params.extend(
         signature
             .params
@@ -338,26 +267,13 @@ fn lower(
         .iter()
         .map(|&(id, _)| module.declare_func_in_func(id, lowered))
         .collect();
-    let mut symbols: Vec<clif::GlobalValue> = Vec::with_capacity(function.symbols.len());
-    for name in &function.symbols {
-        let data = module
-            .declare_data(name, Linkage::Import, false, false)
-            .map_err(|_| Error("Cranelift rejected a symbol"))?;
-        symbols.push(module.declare_data_in_func(data, lowered));
-    }
     let host = module.isa().default_call_conv();
     let config = module.isa().frontend_config();
     let mut builder = FunctionBuilder::new(lowered, builder_context);
     let signatures: Vec<clif::SigRef> = function
         .signatures
         .iter()
-        .map(|signature| {
-            let call_conv = match signature.call_conv {
-                CallConv::Host => host,
-                CallConv::Tail => ClifCallConv::Tail,
-            };
-            builder.import_signature(clif_signature(signature, call_conv))
-        })
+        .map(|signature| builder.import_signature(clif_signature(signature, host)))
         .collect();
     let slots: Vec<clif::StackSlot> = function
         .slots
@@ -417,7 +333,7 @@ fn lower(
             let Some(&op) = function.ops.get(inst.index()) else {
                 continue;
             };
-            lowering.inst(inst, op, &functions, &signatures, &slots, &symbols)?;
+            lowering.inst(inst, op, &functions, &signatures, &slots)?;
         }
     }
     lowering.builder.seal_all_blocks();
@@ -500,7 +416,6 @@ impl Lowering<'_, '_> {
         functions: &[clif::FuncRef],
         signatures: &[clif::SigRef],
         slots: &[clif::StackSlot],
-        symbols: &[clif::GlobalValue],
     ) -> Result<(), Error> {
         let slot = |slot: super::StackSlot| {
             slots
@@ -523,6 +438,9 @@ impl Lowering<'_, '_> {
                     Binary::Band => ins.band(left, right),
                     Binary::Bor => ins.bor(left, right),
                     Binary::Bxor => ins.bxor(left, right),
+                    Binary::Ishl => ins.ishl(left, right),
+                    Binary::Sshr => ins.sshr(left, right),
+                    Binary::Ushr => ins.ushr(left, right),
                     Binary::Smin => ins.smin(left, right),
                     Binary::Smax => ins.smax(left, right),
                     Binary::Fadd => ins.fadd(left, right),
@@ -606,13 +524,6 @@ impl Lowering<'_, '_> {
                         .store(flags(memory), value, address, offset);
                 }
                 return Ok(());
-            }
-            Op::SymbolAddr(symbol) => {
-                let symbol = symbols
-                    .get(symbol.index())
-                    .copied()
-                    .ok_or(Error("an unknown symbol"))?;
-                self.builder.ins().symbol_value(clif::types::I64, symbol)
             }
             Op::StackAddr(ty, stack, offset) => {
                 self.builder

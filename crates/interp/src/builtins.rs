@@ -146,6 +146,9 @@ pub struct BuiltinDef {
     /// `x <- f(x, ...)` offers it through [`Call::reusable`]: set by
     /// [`BuiltinDef::reusing_first_argument`].
     pub reuses_first_argument: bool,
+    /// Whether the internal is a fast-path prologue (`base_fast_paths.rs`), which a compiled
+    /// body calls through [`crate::bytecode::Op::Prologue`]: set by [`BuiltinDef::prologue`].
+    pub prologue: bool,
     /// Derived from the fields above by [`register`].
     pub checks: Checks,
     pub function: BuiltinFn,
@@ -238,6 +241,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         keep_missing: false,
         accepts_native: false,
         reuses_first_argument: false,
+        prologue: false,
         checks: Checks::UNDERIVED,
         function,
         unary: None,
@@ -269,6 +273,15 @@ pub const fn internal_special(name: &'static str, arity: i32, function: BuiltinF
 }
 
 impl BuiltinDef {
+    /// Marks a fast-path prologue, which sets the visibility of the call it finishes itself.
+    pub const fn prologue(self) -> BuiltinDef {
+        BuiltinDef {
+            prologue: true,
+            visibility: Visibility::Keep,
+            ..self
+        }
+    }
+
     pub const fn invisible(self) -> BuiltinDef {
         BuiltinDef {
             visibility: Visibility::Off,
@@ -352,6 +365,7 @@ impl BuiltinDef {
             name: self.name,
             kind: self.kind,
             arity: self.arity,
+            prologue: self.prologue,
             visibility: self.visibility,
             generic: self.generic,
             keep_missing: self.keep_missing,

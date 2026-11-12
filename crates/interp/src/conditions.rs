@@ -6,6 +6,7 @@
 
 use {
     crate::{
+        Interp,
         builtins::{BuiltinDef, Call, internal},
         deparse, eval, interp,
         unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
@@ -19,7 +20,7 @@ use {
         activity::{self, Counter},
         object::{NA_INTEGER, Sexp, SexpType},
     },
-    std::{rc::Rc, sync::atomic::Ordering},
+    std::{cell::Cell, rc::Rc, sync::atomic::Ordering},
 };
 
 pub type HandlerStack = Option<Rc<Handler>>;
@@ -66,8 +67,19 @@ pub fn new_handler(handler: Handler) -> Rc<Handler> {
 
 /// Makes `saved` the handler stack again, as a frame exit does, and keeps the entries above it
 /// that nothing else holds for [`new_handler`] to reuse.
+#[inline(always)]
 pub fn restore_handlers(saved: HandlerStack) {
     let state = interp();
+    // Most calls establish no handler, so the stack to restore is the one in place, and every
+    // closure call returns through here.
+    if ptr_eq(&state.handlers, &saved) {
+        return;
+    }
+    replace_handlers(state, saved);
+}
+
+#[inline(never)]
+fn replace_handlers(state: &mut Interp, saved: HandlerStack) {
     let mut released = std::mem::replace(&mut state.handlers, saved);
     while let Some(mut entry) = released
         && state.handler_pool.len() < HANDLER_POOL_SIZE
@@ -78,6 +90,14 @@ pub fn restore_handlers(saved: HandlerStack) {
         };
         released = handler.next.take();
         state.handler_pool.push(entry);
+    }
+}
+
+fn ptr_eq(left: &HandlerStack, right: &HandlerStack) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -221,9 +241,7 @@ pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Unwind::Jump(caught)) if matches!(caught, Jump::Return { env, .. } if env == target) => {
-            Ok(None)
-        }
+        Err(Unwind::Jump(Jump::Return { env, .. })) if env == target => Ok(None),
         Err(unwind) => Err(unwind),
     }
 }
@@ -490,11 +508,22 @@ pub unsafe fn format_error(call: Sexp, message: &str) -> String {
     }
 }
 
+thread_local! {
+    static WARNINGS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many warnings native code has raised through [`warning_call`], which tells typed code
+/// whether an R call it treats as free of effects did something a second run would repeat.
+pub fn warnings_raised() -> u64 {
+    WARNINGS.get()
+}
+
 /// Signals a warning from a builtin through `.signalSimpleWarning(message, base::quote(call))`,
 /// whose `.dfltWarn` defers or prints it per `options(warn)`. GNU R takes this route even with no
 /// warning handler established, and the frames it pushes are observable: rlang recognises a
 /// warning promoted to an error by finding `.signalSimpleWarning` on the stack.
 pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
+    WARNINGS.set(WARNINGS.get() + 1);
     let call = resolve_call(call);
     let message = message.into();
     let hook = values::install(".signalSimpleWarning")?;

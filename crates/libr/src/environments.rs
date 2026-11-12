@@ -144,12 +144,9 @@ pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> ApiResult<Sexp> {
     )))
 }
 
-unsafe fn get_var(
-    symbol: Sexp,
-    env: Sexp,
-    inherits: bool,
-    if_not_found: Option<Sexp>,
-) -> ApiResult<Sexp> {
+/// The value `symbol` is bound to in `env`, or along its enclosures with `inherits`, with a
+/// promise forced, and `None` when nothing binds it.
+unsafe fn get_var(symbol: Sexp, env: Sexp, inherits: bool) -> ApiResult<Option<Sexp>> {
     let runtime = runtime();
     let known = *runtime.heap.known();
     if symbol.kind() != SexpType::Symbol {
@@ -162,10 +159,7 @@ unsafe fn get_var(
         frame_lookup(env, symbol)?
     };
     if value == known.unbound {
-        return match if_not_found {
-            Some(fallback) => Ok(fallback),
-            None => Err(error(format!("object '{}' not found", symbol_name(symbol)))),
-        };
+        return Ok(None);
     }
     if value == known.missing_arg {
         return Err(error(format!(
@@ -174,9 +168,9 @@ unsafe fn get_var(
         )));
     }
     if value.kind() == SexpType::Promise {
-        return force_promise(value);
+        return force_promise(value).map(Some);
     }
-    Ok(value)
+    Ok(Some(value))
 }
 
 #[unsafe(no_mangle)]
@@ -319,17 +313,22 @@ pub unsafe extern "C" fn R_HasFancyBindings(env: Sexp) -> Rboolean {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_getVar(symbol: Sexp, env: Sexp, inherits: Rboolean) -> Sexp {
-    enter(|| get_var(symbol, env, inherits != 0, None))
+    enter(|| {
+        get_var(symbol, env, inherits != 0)?
+            .ok_or_else(|| error(format!("object '{}' not found", symbol_name(symbol))))
+    })
 }
 
+/// `if_not_found` comes back as it is when nothing binds `symbol`. It may be a C `NULL`, which
+/// is how Rcpp's `Environment` asks whether a binding exists, so it is not an object here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_getVarEx(
     symbol: Sexp,
     env: Sexp,
     inherits: Rboolean,
-    if_not_found: Sexp,
-) -> Sexp {
-    enter(|| get_var(symbol, env, inherits != 0, Some(if_not_found)))
+    if_not_found: Option<Sexp>,
+) -> Option<Sexp> {
+    enter(|| Ok(get_var(symbol, env, inherits != 0)?.or(if_not_found)))
 }
 
 #[unsafe(no_mangle)]
@@ -442,7 +441,6 @@ pub unsafe extern "C" fn R_LockBinding(symbol: Sexp, env: Sexp) {
 pub unsafe extern "C" fn R_unLockBinding(symbol: Sexp, env: Sexp) {
     enter(|| {
         binding(symbol, env)?.set_gp_bits(gp::BINDING_LOCKED, false);
-        interp::code_image::invalidate_checks();
         Ok(())
     })
 }
@@ -710,7 +708,7 @@ pub unsafe extern "C" fn R_DelayedBindingEnvironment(symbol: Sexp, env: Sexp) ->
                 &[BindingType::Delayed],
                 "R_DelayedBindingEnvironment",
             )?;
-            Ok(interp::eval::promise_env(innermost_promise(promise))?)
+            interp::eval::promise_env(innermost_promise(promise))
         },
     )
 }
@@ -1012,7 +1010,7 @@ pub unsafe extern "C" fn R_DotDelayedExpression(index: c_int, env: Sexp) -> Sexp
 pub unsafe extern "C" fn R_DotDelayedEnvironment(index: c_int, env: Sexp) -> Sexp {
     enter(|| {
         let promise = dot_promise(index, env, DotType::Delayed, "R_DotDelayedEnvironment")?;
-        Ok(interp::eval::promise_env(promise)?)
+        interp::eval::promise_env(promise)
     })
 }
 

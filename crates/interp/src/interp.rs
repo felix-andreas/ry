@@ -25,6 +25,21 @@
 // what keeps its state in registers between instructions. The toolchain is a pinned nightly.
 #![feature(explicit_tail_calls)]
 #![allow(incomplete_features)]
+// Numeric ports (loess, splines, fft, linpack) keep the reference algorithms' index-based loops and
+// literal constants so they stay comparable line by line with the C and Fortran originals, and the
+// byte-level readers keep explicit chunk sizes.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::excessive_precision,
+    clippy::explicit_counter_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::assign_op_pattern,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::type_complexity
+)]
 
 pub mod annotations;
 pub mod apply_results;
@@ -130,6 +145,7 @@ use {
     },
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
+    thin_vec::ThinVec,
 };
 
 /// One closure call: GNU R's function context.
@@ -176,8 +192,9 @@ pub struct Frame {
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
     pub args: u32,
-    /// `on.exit` expressions, in the order they run.
-    pub on_exit: Vec<Sexp>,
+    /// `on.exit` expressions, in the order they run. A thin vector is one word and allocates
+    /// nothing while empty, which keeps the frame small enough to copy without a `memcpy` call.
+    pub on_exit: ThinVec<Sexp>,
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
@@ -187,7 +204,7 @@ pub struct Frame {
     /// frame's start.
     pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
-    pub closures: usize,
+    pub closures: u32,
     /// The handle stack's height when the frame is pushed: [`eval::leave`] releases what the
     /// call rooted, its default promises included, down to it.
     pub handle_mark: u32,
@@ -201,6 +218,126 @@ impl Frame {
     /// environment itself if the frame reifies.
     pub unsafe fn owns(&self, env: Sexp) -> bool {
         self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
+    }
+}
+
+// A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
+// few vector moves; above that it becomes a `memcpy` call on every call.
+const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
+
+/// The frames of the closure calls in progress, innermost last. A frame is written into its slot
+/// and popped by lowering the depth, so a call never moves one out: a slot above the depth stays
+/// allocated and owns nothing, because popping takes its `on.exit` list and condition stacks,
+/// and the next call writes over it. Reads see the live frames as a slice.
+pub struct FrameStack {
+    slots: Vec<Frame>,
+    /// How many slots hold live frames; never more than `slots.len()`.
+    depth: usize,
+}
+
+impl FrameStack {
+    pub const fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    pub fn push(&mut self, frame: Frame) {
+        self.push_with(|| frame);
+    }
+
+    /// Pushes the frame `build` makes. The slot is found first, so the frame is built in it
+    /// rather than on the stack and copied.
+    #[inline(always)]
+    pub fn push_with(&mut self, build: impl FnOnce() -> Frame) {
+        match self.slots.get_mut(self.depth) {
+            // A slot above the depth owns nothing, so it is overwritten without being dropped.
+            Some(slot) => unsafe { std::ptr::write(slot, build()) },
+            None => self.slots.push(build()),
+        }
+        self.depth += 1;
+    }
+
+    /// Pops the top frame and hands back its condition stacks; read its other fields first. The
+    /// frame's slot is left in place for the next call to write over.
+    #[inline(always)]
+    pub fn pop(&mut self) -> Option<(HandlerStack, RestartStack)> {
+        let depth = self.depth.checked_sub(1)?;
+        let frame = self.slots.get_mut(depth)?;
+        self.depth = depth;
+        if !frame.on_exit.is_empty() {
+            frame.on_exit = ThinVec::new();
+        }
+        Some((frame.handlers.take(), frame.restarts.take()))
+    }
+
+    /// Keeps the first `depth` frames, releasing what the others own.
+    pub fn truncate(&mut self, depth: usize) {
+        if depth >= self.depth {
+            return;
+        }
+        if let Some(popped) = self.slots.get_mut(depth..self.depth) {
+            for frame in popped {
+                release(frame);
+            }
+        }
+        self.depth = depth;
+    }
+
+    pub fn clear(&mut self) {
+        self.truncate(0);
+    }
+}
+
+impl Default for FrameStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Drops what a popped frame owns, leaving only plain values in its slot.
+#[inline(always)]
+fn release(frame: &mut Frame) {
+    if !frame.on_exit.is_empty() {
+        frame.on_exit = ThinVec::new();
+    }
+    frame.handlers = None;
+    frame.restarts = None;
+}
+
+impl std::ops::Deref for FrameStack {
+    type Target = [Frame];
+
+    #[inline(always)]
+    fn deref(&self) -> &[Frame] {
+        // `depth` never exceeds `slots.len()`.
+        unsafe { self.slots.get_unchecked(..self.depth) }
+    }
+}
+
+impl std::ops::DerefMut for FrameStack {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Frame] {
+        unsafe { self.slots.get_unchecked_mut(..self.depth) }
+    }
+}
+
+impl<'a> IntoIterator for &'a FrameStack {
+    type Item = &'a Frame;
+    type IntoIter = std::slice::Iter<'a, Frame>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut FrameStack {
+    type Item = &'a mut Frame;
+    type IntoIter = std::slice::IterMut<'a, Frame>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -247,15 +384,19 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if depth == 0 {
-        state.references_used = 0;
-    }
     if !state.pending_closures.is_empty() {
         state
             .pending_closures
             .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
+    // An unwind to top level skips the releases of the calls it leaves, so their argument
+    // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 && state.references_used != 0 {
+        // SAFETY: `state` is the interpreter's own state, which `release_references` reads
+        // through `interp()`, and it is not used after this call.
+        unsafe { eval::release_references(0) };
+    }
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,
@@ -288,6 +429,9 @@ pub struct Hooks {
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
     pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
+    /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
+    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -323,6 +467,14 @@ pub struct Hooks {
 /// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
 pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
+/// The summaries an ALTREP class may answer for its vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AltrepSummary {
+    Sum,
+    Min,
+    Max,
+}
+
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,10 +485,17 @@ pub enum TaskCallbackRoutine {
 }
 
 pub struct Interp {
-    pub frames: Vec<Frame>,
+    pub frames: FrameStack,
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// How many times an active binding's function has run to read its value. Compiled code
+    /// compares it around a variable load to learn that the load called a binding, which it
+    /// must then call again at every later read rather than reuse the value.
+    pub active_binding_reads: u64,
+    /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
+    /// which [`crate::base_fast_paths::finish`] answers by clearing it.
+    pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
     /// The dispatch variables of every method slot frame, back to back in frame order (see
@@ -478,6 +637,12 @@ pub struct Interp {
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
+    /// The unwinds running native frames hold for tier 0 to raise: each running JIT
+    /// activation's pending unwind, pushed when compiled code is entered and popped when it
+    /// returns. A frame between the failure and the raise allocates (a deoptimization boxes
+    /// registers and flushes slots), and an exiting handler's result rides in the unwind as the
+    /// value of a `return`, reachable from nothing else.
+    pub held_unwinds: Vec<*const Option<Unwind>>,
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
@@ -562,8 +727,10 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let symbols = values::Symbols::install(heap);
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
-        frames: Vec::new(),
+        frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        active_binding_reads: 0,
+        prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),
@@ -619,6 +786,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         object_systems: true,
         prelude: true,
         parked_unwind: None,
+        held_unwinds: Vec::new(),
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
         calls_ever: 0,
         #[cfg(unix)]
@@ -650,6 +818,7 @@ pub fn default_hooks() -> Hooks {
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_summary: |_, _, _| Ok(None),
         defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
@@ -780,6 +949,11 @@ impl RootSource for InterpRoots {
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
             }
+            for &held in &interp.held_unwinds {
+                if let Some(unwind) = &*held {
+                    crate::unwind::trace_unwind(unwind, marker);
+                }
+            }
             for value in interp.returned_values.iter().flatten() {
                 marker.mark(*value);
             }
@@ -807,8 +981,7 @@ impl RootSource for InterpRoots {
         // SAFETY: as for `trace`.
         unsafe {
             let state = interp();
-            state.bytecode.call_plans.clear_dead(liveness);
-            state.method_cache.clear_dead(liveness);
+            state.bytecode.clear_dead(liveness);
         }
     }
 }

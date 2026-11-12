@@ -57,7 +57,7 @@ pub fn intern(layout: u32, fields: &[Item]) -> Option<u32> {
                     strings |= 1 << words.min(31);
                     words += 2;
                 }
-                Item::Record(_) | Item::Tag(_) => {
+                Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
                     objects |= 1 << words.min(31);
                     words += 1;
                 }
@@ -79,6 +79,28 @@ pub fn intern(layout: u32, fields: &[Item]) -> Option<u32> {
         shapes.constants.push(0);
         shapes.ids.insert((layout, fields), id);
         Some(id)
+    })
+}
+
+/// The id of a ry list of `item`s, as [`Item::Array`] holds it.
+pub fn array_of(item: Item) -> u32 {
+    let item = normal(item);
+    SHAPES.with_borrow_mut(|shapes| {
+        if let Some(&id) = shapes.array_ids.get(&item) {
+            return id;
+        }
+        let id = shapes.arrays.len() as u32;
+        shapes.arrays.push(item);
+        shapes.array_ids.insert(item, id);
+        id
+    })
+}
+
+/// The items of the ry lists [`Item::Array`]`(id)` stands for.
+pub fn array_item(id: u32) -> Item {
+    SHAPES.with_borrow(|shapes| match shapes.arrays.get(id as usize) {
+        Some(&item) => item,
+        None => panic!("list item type {id} was never interned"),
     })
 }
 
@@ -197,13 +219,17 @@ struct Shapes {
     union_ids: FxHashMap<SmallVec<[u32; 4]>, u32>,
     confirmed: Vec<u64>,
     epoch: u64,
+    /// The item types of the ry lists [`Item::Array`] ids stand for.
+    arrays: Vec<Item>,
+    array_ids: FxHashMap<Item, u32>,
 }
 
 thread_local! {
     static SHAPES: RefCell<Shapes> = RefCell::new(Shapes::default());
 }
 
-/// A field's item as a shape records it: any tag, whatever union it came from.
+/// A field's item as a shape records it: any tag, whatever union it came from, also as the item
+/// of a list. Items of an interned list are already normal.
 fn normal(item: Item) -> Item {
     match item {
         Item::Tag(_) => Item::Tag(ANY),
