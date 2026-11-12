@@ -1,3 +1,4 @@
+# oracle: library-dependent
 fit <- lm(dist ~ speed, data = cars)
 print(summary(fit))
 print(anova(fit))
