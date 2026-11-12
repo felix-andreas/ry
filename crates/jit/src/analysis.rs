@@ -551,6 +551,9 @@ pub enum Effect {
     /// a read may run), or a calling handler is established, since a warning runs the handler;
     /// in each case it is opaque.
     PureUnlessObserved,
+    /// [`Effect::PureUnlessObserved`], where an object among the elements of a list in one of
+    /// the registers counts too, as `paste` converts each element with `as.character`.
+    PureUnlessElementsObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
 }
@@ -1541,6 +1544,25 @@ unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<Sm
     Some(hints)
 }
 
+/// Internals that base closures wrap as their whole body ([`Op::Internal`]) and that read only
+/// their arguments: apart from a warning, they run R code only to dispatch `as.character`,
+/// `mtfrm` or a group generic on an object among their arguments or a list argument's elements.
+const PURE_INTERNALS: &[&str] = &[
+    "paste",
+    "paste0",
+    "nchar",
+    "startsWith",
+    "endsWith",
+    "strsplit",
+    "sprintf",
+    "match",
+    "strtoi",
+    "identical",
+    "vector",
+    "rep_len",
+    "rep.int",
+];
+
 /// The base builtins that run no R code given plain arguments, so calling them leaves the
 /// frame's variables alone. Internal generics among them dispatch on objects, which is why calls
 /// check their boxed arguments first.
@@ -2436,16 +2458,7 @@ impl<'a> Builder<'a> {
             ),
             // An active binding or a frame on the search path may run arbitrary code.
             Op::SuperAssign => self.opaque_step(state, None, &[], Effect::Opaque),
-            // An inlined internal may run R code, as `match` does through `mtfrm` on an object.
-            Op::Internal => {
-                let objects = self.slice(operand(3)..operand(3) + operand(4));
-                self.opaque_step(
-                    state,
-                    Some((operand(0), self.feedback_at(inst.pc))),
-                    objects,
-                    Effect::Opaque,
-                )
-            }
+            Op::Internal => self.internal(&inst, state)?,
             Op::Replace => {
                 let value = match state.registers[operand(5) + operand(6) - 1] {
                     Ty::Bottom => Ty::Boxed,
@@ -3761,7 +3774,7 @@ impl<'a> Builder<'a> {
             Effect::Pure => {}
             // Only a call that dispatches or warns into a handler writes the variables back and
             // forgets them.
-            Effect::PureUnlessObserved => {
+            Effect::PureUnlessObserved | Effect::PureUnlessElementsObserved => {
                 for slot in &mut state.slots {
                     slot.status |= status::NOT_LOADED;
                 }
@@ -4040,6 +4053,49 @@ impl<'a> Builder<'a> {
             ));
         }
         Ok(self.fast_step(state, Some((dst, feedback)), &[], Effect::Opaque, fast))
+    }
+
+    /// An inlined base internal ([`Op::Internal`]). One of [`PURE_INTERNALS`] runs no R code
+    /// unless an argument, or an element of a list argument, is an object, an ALTREP vector or
+    /// an environment, or a calling handler is established; any other internal may run R code,
+    /// as `lapply` runs its callback.
+    unsafe fn internal(
+        &mut self,
+        inst: &Inst<'a>,
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
+        let operand = |index: usize| inst.operand(index);
+        let (dst, first, count) = (operand(0), operand(3), operand(4));
+        let args = self.slice(first..first + count);
+        let (definition, _) = bytecode::internal_at(operand(2) as u32)
+            .map_err(|_| Refusal("an internal without a definition"))?;
+        if !PURE_INTERNALS.contains(&definition.name) {
+            let feedback = self.feedback_at(inst.pc);
+            return Ok(self.opaque_step(state, Some((dst, feedback)), args, Effect::Opaque));
+        }
+        let types: SmallVec<[Ty; 4]> = args
+            .iter()
+            .map(|&register| state.registers[register])
+            .collect();
+        let feedback = if self.never_ran(inst.pc) {
+            builtin_result(definition.name, &types).unwrap_or(Ty::Boxed)
+        } else {
+            self.feedback_at(inst.pc)
+        };
+        let objects = self.slice(
+            args.iter()
+                .copied()
+                .filter(|&register| {
+                    let ty = state.registers[register];
+                    !ty.is_plain() || ty == Ty::List
+                }),
+        );
+        Ok(self.opaque_step(
+            state,
+            Some((dst, feedback)),
+            objects,
+            Effect::PureUnlessElementsObserved,
+        ))
     }
 
     /// Whether `function` is effect-free (see `interp::effects`), so a direct call may bind its

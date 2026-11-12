@@ -1235,7 +1235,7 @@ impl<'p> Translator<'p> {
                 self.flush_all(before, failed);
                 self.builder.ins().iconst(I32, 1)
             }
-            Effect::PureUnlessObserved => {
+            Effect::PureUnlessObserved | Effect::PureUnlessElementsObserved => {
                 let mut any = self
                     .call(
                         runtime::jit_handlers_present as *const () as usize,
@@ -1246,6 +1246,18 @@ impl<'p> Translator<'p> {
                     .ok_or(Refusal("a helper without a result"))?;
                 for &register in objects {
                     let value = self.load_register(register);
+                    if effect == Effect::PureUnlessElementsObserved {
+                        let observed = self
+                            .call(
+                                runtime::jit_elements_observed as *const () as usize,
+                                &[I64],
+                                Some(I32),
+                                &[value],
+                            )
+                            .ok_or(Refusal("a helper without a result"))?;
+                        any = self.builder.ins().bor(any, observed);
+                        continue;
+                    }
                     let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
                     let observed = self
                         .builder
@@ -1286,7 +1298,7 @@ impl<'p> Translator<'p> {
         match effect {
             Effect::Pure => {}
             Effect::Opaque => self.forget_slots(before),
-            Effect::PureUnlessObserved => {
+            Effect::PureUnlessObserved | Effect::PureUnlessElementsObserved => {
                 let forgetting = self.builder.create_block();
                 let joined = self.builder.create_block();
                 self.builder.set_cold_block(forgetting);

@@ -939,6 +939,35 @@ fn direct_call_arguments_agree_with_tier_zero() {
 }
 
 #[test]
+fn pure_internals_write_back_before_dispatching_on_an_object() {
+    // `paste0` and `match` inlined from base leave the frame's variables unwritten unless an
+    // argument, or an element of the list `paste0` builds from its `...`, is an object. Their
+    // `as.character` and `mtfrm` methods then read the loop's `s` through `dynGet`, which must
+    // see every value tier 0 would.
+    const CASES: &[&str] = &[
+        "f <- function() { s <- 0; for (i in 1:30) { s <- s + i; out <- paste0(\"a\", i, nchar(out0)) }; c(s, out) }; f()",
+        "f <- function() { s <- 0; sp <- structure(1, class = \"spy\"); for (i in 1:30) { s <- s + i; out <- paste0(\"a\", sp) }; s }; f(); seen",
+        "f <- function() { s <- 0; sp <- structure(1, class = \"spy\"); for (i in 1:30) { s <- s + i; m <- match(sp, \"spy\") }; m }; f(); seen",
+        "f <- function() { s <- 0; for (i in 1:30) { s <- s + i; l <- list(1, if (i == 20) structure(2, class = \"spy\") else 2); out <- paste(l) }; s }; f(); seen",
+    ];
+    with_interpreter(|| unsafe {
+        run("out0 <- \"abc\"
+             as.character.spy <- function(x, ...) { seen <<- c(seen, dynGet(\"s\", ifnotfound = NA)); \"spy\" }
+             mtfrm.spy <- function(x) { seen <<- c(seen, -dynGet(\"s\", ifnotfound = NA)); \"spy\" }");
+        for case in CASES {
+            jit::install_mode(Mode::Off);
+            run("seen <- NULL");
+            let reference = run(case);
+            jit::install_mode(Mode::Force);
+            run("seen <- NULL");
+            let compiled = run(case);
+            jit::install_mode(Mode::Off);
+            assert_eq!(reference, compiled, "{case}");
+        }
+    });
+}
+
+#[test]
 fn closures_from_one_site_share_code_but_not_lookups() {
     // Each call of `make` makes a new closure from one `function` expression, so the closures
     // share one compiled body. Code whose functions all live in long-lived environments runs

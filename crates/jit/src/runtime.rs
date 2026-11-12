@@ -1694,6 +1694,21 @@ pub extern "C" fn jit_handlers_present() -> i32 {
     interp::interp().handlers.is_some() as i32
 }
 
+/// Whether `value`, or an element of `value` when it is a plain list, is an object, an ALTREP
+/// vector or an environment, which an internal converting its arguments element by element may
+/// run R code on.
+pub unsafe extern "C" fn jit_elements_observed(value: Sexp) -> i32 {
+    unsafe {
+        let observed = |value: Sexp| {
+            value.is_object() || value.is_altrep() || value.kind() == SexpType::Environment
+        };
+        let deep = observed(value)
+            || value.kind() == SexpType::List
+                && (0..value.length() as usize).any(|index| observed(value.element(index)));
+        i32::from(deep)
+    }
+}
+
 /// How many closure calls may still nest before R's expression depth limit, which a native
 /// function call counts down instead of pushing frames.
 pub extern "C" fn jit_depth_budget() -> i64 {
