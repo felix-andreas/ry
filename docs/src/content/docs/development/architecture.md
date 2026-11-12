@@ -92,9 +92,10 @@ illegal dependency unrepresentable.
   interpreter saw it give, so the first call of such a function runs interpreted. Code that has
   called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
   `interp`. `RY_TYPED_LOG=1` prints each compilation with the time it took
-  (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone, so the lines of a
-  run add up to its whole compile time), each refusal, and each typed call that runs in the
-  interpreter with the reason the native path declined it. `RY_TYPED_DUMP=1` prints the Cranelift
+  (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone), each refused
+  compilation with its time (`typed: refused [Str] after 85 us`), so the lines of a run add up to
+  its whole compile time, and each typed call that runs in the interpreter with the reason the
+  native path declined it. `RY_TYPED_DUMP=1` prints the Cranelift
   IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and

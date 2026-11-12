@@ -9447,7 +9447,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - The arithmetic kernel calls one step function per program step and chunk through a pointer chosen once per call (`Step<T>`: `step_dbl_avx2` or `step_dbl_baseline`, and the same pair for `I64`). The slices are parameters of the step, so they are known not to overlap and every operator's loop is vector code, with the `NaN` or overflow test folded into the same loop. The last step of a program that gives a list writes into the list, with no copy.
   - `Rows` holds the chunk buffers uninitialized. A kernel fills the rows of its scalar inputs, clears only the rows its program's steps write, and reads no other row.
 - **Why not `-C target-cpu`.** A released binary must run on any x86-64 machine, so the feature level is chosen at run time, per kernel. `crates/interp/src/vector_math.rs` does the same.
-- **Why two shapes of dispatch.** A call per step and chunk of 128 items costs nothing beside the chunk, and keeps one copy of the kernel's control code. The count kernel predates it and compiles its whole body twice; moving it to step functions is a cleanup, not a speed-up.
+- **Why two shapes of dispatch.** A call per step and chunk of 128 items costs nothing beside the chunk, and keeps one copy of the kernel's control code. The count kernel has the other shape, its whole body compiled twice; moving it to step functions is a cleanup, not a speed-up.
 - **Impact.** On the iterate build, `log_rank` runs at about 3.5 times its Rust twin's time (from about 8) and `vector_arith` at about 1.9 (from about 2.6). The remaining cost is in the backlog ("Typed ry against Rust").
 - **Pinned by** `fused_counts_follow_three_valued_logic` and `fused_arithmetic_agrees_with_one_item_at_a_time` in `crates/typed/tests/test_values.rs`, and the `typed-mask-counts` scenario.
 
@@ -9474,7 +9474,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## The typed log reports each compilation's own time
 
 - **Why.** Compile time is part of typed ry's performance bar (single-pass, Roc-class, far below `rustc`), so an optimization has to be weighed against what it costs to compile, and the cost has to be visible.
-- **Target shape.** With `RY_TYPED_LOG=1`, `typed: compiled for [...] -> ... in N us` gives the time of that function alone: the time of a callee compiled during the caller's compilation is subtracted (`typed::NESTED_COMPILE`), so the lines of a run sum to its total compile time. No clock is read without the log. The typed suite sums the lines per program into `compile_seconds` beside `rustc`'s time for the twin (`tools/bench/bench.py`, `typed_log` and `RustRunner.compile_seconds`), and the benchmarks page shows them as the suite's "Compile time" table.
+- **Target shape.** With `RY_TYPED_LOG=1`, `typed: compiled for [...] -> ... in N us` gives the time of that function alone: the time of a callee compiled during the caller's compilation is subtracted (`typed::NESTED_COMPILE`), and a compilation that ends in a refusal logs `typed: refused [...] after N us`, so the lines of a run sum to its total compile time. No clock is read without the log. The typed suite sums both kinds of line per program into `compile_seconds` beside `rustc`'s time for the twin (`tools/bench/bench.py`, `typed_log` and `RustRunner.compile_seconds`), and the benchmarks page shows them as the suite's "Compile time" table.
 
 ## One thread-local holds every typed allocation pool
 
@@ -9482,7 +9482,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** `values::Pools` is one thread-local struct holding the free stacks, the large classes and `live`. `object_alloc` and `object_free` resolve it once and pass it down (`block_alloc_in`, `block_free_in`).
 - **Impact.** One thread-local resolution per allocation or free. Its cost still shows in `team_scores` (`ry_box_new` is about 84 instructions), and the next step is in the backlog ("Typed ry against Rust").
 
-## `Str.split` on one byte scans a word at a time
+## `Str.split_on` with a one-byte separator scans a word at a time
 
 - **Target shape.** `ry_str_split` with a one-byte separator counts the separators first and cuts second, and both passes read the text eight bytes at a time: `values::separators_in_word` XORs the word with the separator repeated in every byte and marks the zero bytes with the carry-free test `!(((d & 0x7f..) + 0x7f..) | d | 0x7f..)`, which sets exactly the high bit of each matching byte. A tail shorter than eight bytes is read through `str_from_bytes`, never past the text. The result list is allocated once at its final length, and each field of at most 15 bytes is built inline by `str_from_bytes` with no allocation.
 - **Why not `memchr`.** Fields in delimited records are short, so a call per separator costs more than the scan; the word loop has no call.
@@ -9506,7 +9506,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## The typed `array_filter` benchmark counts with `List.count_if`
 
-- **Why.** A typed benchmark program and its Rust twin are both written the way the language's users would write them and do the same work. The Rust twin counts with `filter` and `count`, which `rustc` vectorizes; a typed element loop with a float accumulator measured the float-add chain against that, not the language. `array_filter.typed.R` now counts with `List.count_if` and a comparison predicate, the same shape as the twin.
+- **Why.** A typed benchmark program and its Rust twin are both written the way the language's users would write them and do the same work. The Rust twin counts with `filter` and `count`, which `rustc` vectorizes; a typed element loop with a float accumulator measured the float-add chain against that, not the language. `array_filter.typed.R` counts with `List.count_if` and a comparison predicate, the same shape as the twin.
 - **What an element loop costs.** A typed loop that tests each item and adds to an `F64` total is bound by the add chain and the per-item poll, about three times the vectorized count. Typed ry has no autovectorizer and does not get one (compile time is single-pass), so whole-list operations are the fast spelling, as in the standard library's other list functions.
 
 ## Shapes are confirmed after lowering, and machine code is generated once

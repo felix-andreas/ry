@@ -1629,6 +1629,8 @@ impl Lowering<'_> {
     /// counter has reached `end`, so the step never passes it and cannot overflow.
     fn count_up(&mut self, start: Local, end: Local) -> Positions {
         let counter = self.builder.emit(Type::I64, Op::Copy(start));
+        // The bound is read once: `end` may be a variable the body assigns.
+        let end = self.builder.emit(Type::I64, Op::Copy(end));
         let empty = self
             .builder
             .emit(Type::Bool, Op::Compare(Compare::Lt, Item::I64, end, start));
@@ -3678,6 +3680,14 @@ impl Lowering<'_> {
             && let [(name, _)] = rvalues::pairlist_items(formals)[..]
             && interp::annotations::declared_i64(formals, body).0.first() != Some(&true)
             && self.compares_item(body, name)
+            // The predicate's annotations must admit an `F64` item and a `Bool` answer, as they
+            // must when it is inlined per item; otherwise the loop below refuses the call.
+            && interp::annotations::admits_inline(
+                formals,
+                body,
+                &[inline_storage(Type::Dbl)],
+                inline_storage(Type::Lgl),
+            )
             && let Some(list) = list
         {
             let mut scope = Scope::default();

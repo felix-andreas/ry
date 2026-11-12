@@ -3433,6 +3433,16 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
              List.count_if(x, counts) + List.count_if(x, function(v: F64) -> Bool v * 2 > 1) }",
             &["{ a <- [0.25, 0.5, 2, 3]; FUNCTION(a) }"],
         ),
+        // A count whose whole mask is one logical step has no comparison in it.
+        (
+            "function(a: List<Bool>, b: List<Bool>) -> I64 \
+             List.count_if(!a, function(v) v) * 100i64 + List.count_if(a & b, function(v) v) * 10i64 \
+             + List.count_if(a | b, function(v) v)",
+            &[
+                "{ a <- [TRUE, TRUE, FALSE, TRUE]; b <- [TRUE, FALSE, FALSE, TRUE]; FUNCTION(a, b) }",
+                "{ a <- [TRUE, TRUE]; b <- [FALSE, FALSE]; FUNCTION(a, b) }",
+            ],
+        ),
         // The item's name in the predicate hides an outer local of the same name.
         (
             "function(x: List<F64>, v: F64) -> I64 List.count_if(x, function(v: F64) -> Bool v <= 2)",

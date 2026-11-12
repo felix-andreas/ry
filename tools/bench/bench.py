@@ -32,7 +32,7 @@ typed program, with the refusal that `RY_TYPED_LOG` printed.
 
 The typed suite also stores each program's `compile_seconds`: what `rustc` took to compile the Rust
 twin, and what the typed core took to compile the typed program, which is the sum of the times in
-the `compiled for ... in N us` lines of that same `RY_TYPED_LOG` run.
+the `compiled for ... in N us` and `refused ... after N us` lines of that same `RY_TYPED_LOG` run.
 
 The published numbers measure the official release archive itself, so `--write` takes
 `--release ARCHIVE`, the Linux x86_64 archive of a tagged release (`ry-x86_64-unknown-linux-gnu.tar.gz`).
@@ -96,8 +96,7 @@ PUBLISHED_ROUNDS = 10
 # Below this many seconds a time mostly measures start-up and the timer.
 SHORT = 0.1
 # The same floor for the typed suite. Both of its harnesses time a warm run inside the process, so
-# start-up is not in the time, and the coarser clock (the typed harness reads the wall clock as a
-# double of seconds since 1970) resolves a quarter of a microsecond: 0.1 ms is 400 of its ticks.
+# start-up is not in the time, and both print it to the microsecond: 0.1 ms is 100 of those steps.
 RUST_SHORT = 0.0001
 # An interval reaching further than this from its median is too wide to quote.
 WIDE = 0.10
@@ -107,7 +106,7 @@ STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 # compiles on its next call, so the line is not a refusal.
 AWAITING = "it waits on the interpreter to run `"
 # A `RY_TYPED_LOG` line for a function the typed core compiled ends with the time that took.
-COMPILED = re.compile(r"compiled for .* in (?P<microseconds>\d+) us$")
+COMPILED = re.compile(r"(?:compiled for .* in|refused .* after) (?P<microseconds>\d+) us$")
 
 
 def main():
@@ -524,7 +523,8 @@ class WorkloadRunner:
     def typed_log(self, text, engine):
         """What `RY_TYPED_LOG` reports for one run of a typed source under the harness: the refusal
         lines, and the seconds the typed core spent compiling, summed over its `compiled for ... in
-        N us` lines. Measured outside the timed rounds, since logging costs time."""
+        N us` and `refused ... after N us` lines. Measured outside the timed rounds, since logging
+        costs time."""
         script = self.work / "typed" / "refusals.R"
         script.write_text(self.typed_harness + "\n" + text)
         env = dict(engine.env, RY_TYPED_LOG="1", RY_BENCH_REPEAT="1")
@@ -533,7 +533,7 @@ class WorkloadRunner:
             sys.exit(f"error: the typed log run failed: {failure_reason(out, err)}")
         lines = [line for line in err.splitlines() if line.startswith("typed: ") and AWAITING not in line]
         microseconds = sum(int(match["microseconds"]) for match in map(COMPILED.search, lines) if match)
-        return [line for line in lines if "compiled for" not in line], microseconds / 1e6
+        return [line for line in lines if not COMPILED.search(line)], microseconds / 1e6
 
     def typed_refusal(self, program, engine):
         """The refusals the typed program logs beyond those of the harness alone, or None."""
@@ -563,6 +563,10 @@ class RustRunner(WorkloadRunner):
     def run(self, program, engine):
         if engine.key != "rust":
             return super().run(program, engine)
+        return self.reported(program, *spawn([str(self.binary(program))], engine.env, cwd=self.work))
+
+    def binary(self, program):
+        """The compiled Rust twin, built on first use and timed as it is built."""
         name = program["id"]
         if name not in self.binaries:
             binary = self.work / f"rust-{name}"
@@ -573,12 +577,14 @@ class RustRunner(WorkloadRunner):
                 sys.exit(f"error: rustc does not compile {program['rust_source']}:\n{built.stderr}")
             self.rust_compile[name] = time.monotonic() - started
             self.binaries[name] = binary
-        return self.reported(program, *spawn([str(self.binaries[name])], engine.env, cwd=self.work))
+        return self.binaries[name]
 
     def compile_seconds(self, program):
         """What each engine spent compiling the program: `rustc` on the Rust twin, one process from
         start to finish, and the typed core on the typed program, summed over the functions it
-        compiled in the log run. Neither is part of a timed round."""
+        compiled in the log run. Neither is part of a timed round, and a run resumed from stored
+        samples times no round at all, so the twin is compiled here when no round compiled it."""
+        self.binary(program)
         times = {"rust": self.rust_compile.get(program["id"]), "ry_typed": self.typed_compile.get(program["id"])}
         return {key: round(seconds, 6) for key, seconds in times.items() if seconds is not None}
 
@@ -626,7 +632,7 @@ class PublicRunner:
         if status != 0:
             sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
         lines = [line.removeprefix("typed: ") for line in err.splitlines()
-                 if line.startswith("typed: ") and "compiled for" not in line and AWAITING not in line]
+                 if line.startswith("typed: ") and not COMPILED.search(line) and AWAITING not in line]
         return "; ".join(dict.fromkeys(lines)) or None
 
     def close(self):
@@ -891,13 +897,15 @@ def print_table(results, table):
         print(f"\nGeometric mean of {ratio_label(results, key)} over {mean['programs']} programs: "
               f"{mean['median']:.2f}x (95% interval {mean['low']:.2f} to {mean['high']:.2f})")
     compiled = [row for row in results["programs"] if row.get("compile_seconds")]
-    if compiled:
-        print("\n| program | " + " | ".join(f"{results['engines'][key]}, compile" for key in keys) + " |")
-        print("| --- |" + " ---: |" * len(keys))
+    # Only the engines whose compile time was measured get a column: a `--baseline` build has none.
+    timed = [key for key in keys if any(key in row["compile_seconds"] for row in compiled)]
+    if timed:
+        print("\n| program | " + " | ".join(f"{results['engines'][key]}, compile" for key in timed) + " |")
+        print("| --- |" + " ---: |" * len(timed))
         for row in compiled:
-            print(f"| {row['display']} | " + " | ".join(compile_time(row["compile_seconds"].get(key)) for key in keys) + " |")
-        totals = [sum(row["compile_seconds"].get(key, 0) for row in compiled) for key in keys]
-        print(f"| total | " + " | ".join(compile_time(total) for total in totals) + " |")
+            print(f"| {row['display']} | " + " | ".join(compile_time(row["compile_seconds"].get(key)) for key in timed) + " |")
+        totals = [sum(row["compile_seconds"].get(key, 0) for row in compiled) for key in timed]
+        print("| total | " + " | ".join(compile_time(total) for total in totals) + " |")
 
 
 def compile_time(seconds):

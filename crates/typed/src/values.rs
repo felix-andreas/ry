@@ -1201,7 +1201,9 @@ unsafe fn count_true(
         }
         // A count of one comparison, the common case, is tallied as the items are compared,
         // which vectorizes to a compare and a subtraction with no lane written per item.
-        if let [encoded] = *program {
+        if let [encoded] = *program
+            && encoded & 0xFF <= MASK_DBL + GE
+        {
             let code = encoded & 0xFF;
             let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
             let (trues, missing) = if code >= MASK_DBL {

@@ -675,7 +675,11 @@ fn fused_counts_follow_three_valued_logic() {
             };
             let choice = rng.below(4);
             let op = rng.below(6) as u32;
-            if choice == 0 || lanes.is_empty() {
+            // A program may open with a logical step over logical inputs alone.
+            let logical_inputs = inputs
+                .iter()
+                .any(|input| matches!(input, Input::Logicals(_) | Input::Logical(_)));
+            if choice == 0 || (lanes.is_empty() && !logical_inputs) {
                 let wholes = rng.below(2) == 0;
                 let want: fn(&Input) -> bool = if wholes {
                     |input| matches!(input, Input::Wholes(_) | Input::Whole(_))

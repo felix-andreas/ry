@@ -81,8 +81,7 @@ export type Suite = {
   results?: Results;
 };
 
-// The baseline of a results file that names none: every suite compared ry with GNU R, as a
-// speed-up, before a results file said so.
+// The baseline of a results file that names none is GNU R, and its ratios are speed-ups.
 const gnuR = 'gnu_r';
 
 export function baselineOf(suite: Suite): string {

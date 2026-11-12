@@ -315,8 +315,8 @@ unsafe fn compiled_or_refusal(
         ));
     }
     // The clock is read only for the log. A function's time leaves out the callees compiled
-    // while it was lowered, which log their own, so the logged times add up to the time the
-    // session spent compiling.
+    // while it was lowered, which log their own, and a refused compilation logs its time too, so
+    // the logged times add up to the time the session spent compiling.
     let started = interp::annotations::typed_logging().then(Instant::now);
     let outer = NESTED_COMPILE.replace(Duration::ZERO);
     let result = compile(function, params);
@@ -336,6 +336,9 @@ unsafe fn compiled_or_refusal(
             Ok(&*Box::leak(Box::new(compiled)))
         }
         Err(refusal) => {
+            if started.is_some() {
+                eprintln!("typed: refused {params:?} after {} us", own.as_micros());
+            }
             decline(|| format!("no code for {params:?}: {}", refusal.0));
             Err(refusal)
         }
