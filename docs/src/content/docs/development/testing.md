@@ -494,9 +494,13 @@ leaves the `.ryc` images cached.
 
 Judge a change's peak RSS in three parts, because they behave differently. Anonymous memory and
 the start image's resident pages must not grow. The resident pages of `libR.so`'s code are not
-judged per change: a plain release build has no function ordering, so where the linker happens to
-place hot functions moves resident text by megabytes between two builds of nearly the same source
-(one change measured +2.6 MB of `libR.so` text with identical anonymous and image RSS). Judge the
+judged per change. A plain release build has no function ordering, so where the linker happens to
+place hot functions decides which neighbouring code readahead and fault-around map in with them,
+and how far that moves depends on the change rather than its size. On the validation workload, a
+no-op exported function added to an otherwise unchanged build moved resident `libR.so` text by
+under 0.1 MB, while a change that grew `.text` by 5 KB moved it by +2.4 MB, with identical
+anonymous and image RSS. That change's extra resident pages held code the workload never runs (the
+analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
 size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
 grow only by about what the change adds. Resident text is checked on the shipped layout
 (`tools/layout/optimize.sh`) when a release is cut.

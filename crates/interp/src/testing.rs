@@ -1865,3 +1865,109 @@ fn rule(entropy: &mut impl Entropy) -> FillRule {
         FillRule::EvenOdd
     }
 }
+
+/// Drives a [`FrameStack`](crate::FrameStack) through random pushes, pops and truncations and
+/// checks it against a vector of the live frames: every live frame reads back as pushed, and a
+/// popped frame's slot keeps no reference to its condition stack or `on.exit` list once the
+/// frame is gone, which the handler entry's reference count shows.
+pub fn check_frame_stack(entropy: &mut impl Entropy) {
+    use {
+        crate::{
+            Frame, FrameStack,
+            conditions::{Handler, HandlerStack},
+        },
+        std::rc::Rc,
+        thin_vec::ThinVec,
+    };
+    with_interpreter(|| {
+        let nil = values::nil();
+        let shared = Rc::new(Handler {
+            class: nil,
+            handler: nil,
+            calling: false,
+            calling_below: false,
+            parent_env: nil,
+            target: nil,
+            next: None,
+        });
+        let frame = |id: u32, handlers: HandlerStack, exits: usize| Frame {
+            call: nil,
+            function: nil,
+            env: nil,
+            sys_parent: nil,
+            slots: crate::NO_SLOTS,
+            missing: 0,
+            caller: 0,
+            pending: nil,
+            unforced: 0,
+            pending_shared: false,
+            inlined: false,
+            reified_by: crate::NOT_REIFIED,
+            args: id,
+            on_exit: (0..exits).map(|_| nil).collect::<ThinVec<_>>(),
+            handlers,
+            restarts: None,
+            srcref: nil,
+            method_vars: 0,
+            closures: 0,
+            handle_mark: 0,
+            previous_owner: 0,
+        };
+        let mut stack = FrameStack::new();
+        // Each live frame's id and whether it holds the shared handler entry.
+        let mut model: Vec<(u32, bool)> = Vec::new();
+        for id in 0..entropy.below(400) as u32 {
+            match entropy.below(6) {
+                0..=2 => {
+                    let holds = entropy.chance(1, 2);
+                    let handlers = holds.then(|| Rc::clone(&shared));
+                    let exits = if entropy.chance(1, 4) {
+                        entropy.below(3)
+                    } else {
+                        0
+                    };
+                    if entropy.chance(1, 2) {
+                        stack.push(frame(id, handlers, exits));
+                    } else {
+                        stack.push_with(|| frame(id, handlers, exits));
+                    }
+                    model.push((id, holds));
+                }
+                3 | 4 => {
+                    let popped = stack.pop();
+                    let expected = model.pop();
+                    match (popped, expected) {
+                        (None, None) => {}
+                        (Some((handlers, restarts)), Some((_, holds))) => {
+                            assert_eq!(
+                                handlers.is_some(),
+                                holds,
+                                "pop handed back the wrong stack"
+                            );
+                            assert!(restarts.is_none());
+                        }
+                        _ => panic!("pop disagrees with the model on whether a frame was live"),
+                    }
+                }
+                _ => {
+                    let depth = entropy.below(model.len() + 2);
+                    stack.truncate(depth);
+                    model.truncate(depth);
+                }
+            }
+            assert_eq!(stack.len(), model.len());
+            for (frame, &(id, holds)) in stack.iter().zip(&model) {
+                assert_eq!(frame.args, id);
+                assert_eq!(frame.handlers.is_some(), holds);
+            }
+            let holders = model.iter().filter(|&&(_, holds)| holds).count();
+            assert_eq!(
+                Rc::strong_count(&shared),
+                1 + holders,
+                "a popped frame's slot still holds its handler entry"
+            );
+        }
+        stack.clear();
+        assert_eq!(Rc::strong_count(&shared), 1);
+    });
+}
