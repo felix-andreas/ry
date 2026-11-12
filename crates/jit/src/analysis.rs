@@ -954,7 +954,7 @@ pub enum Action<'a> {
     BranchUnlessBuiltin {
         function: usize,
     },
-    BranchUnlessPrimitive {
+    BranchUnlessSame {
         function: usize,
         expected: Sexp,
     },
@@ -1311,7 +1311,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SetVar
             | Op::GetFun
             | Op::BranchUnlessBuiltin
-            | Op::BranchUnlessPrimitive
+            | Op::BranchUnlessSame
             | Op::BranchIfObject
             | Op::Ast
             | Op::Guard
@@ -2220,7 +2220,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             },
-            Op::BranchUnlessPrimitive => {
+            Op::BranchUnlessSame => {
                 let expected = self.constant(operand(1));
                 match state.registers[operand(0)] {
                     Ty::Fun(function) if function == expected => Action::FallThrough,
@@ -2230,7 +2230,7 @@ impl<'a> Builder<'a> {
                     }
                     _ => {
                         self.push_edge(operand(2), state);
-                        Action::BranchUnlessPrimitive {
+                        Action::BranchUnlessSame {
                             function: operand(0),
                             expected,
                         }
@@ -4428,7 +4428,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::Move => smallvec![operand(1)],
         Op::BoundEval | Op::Internal => (operand(3)..operand(3) + operand(4)).collect(),
         Op::MatchCondition | Op::SwitchArm => smallvec![operand(1)],
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+        Op::BranchUnlessBuiltin | Op::BranchUnlessSame | Op::BranchIfObject => {
             smallvec![operand(0)]
         }
         Op::DispatchSubject => smallvec![operand(1), operand(3)],
@@ -4451,7 +4451,7 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
         Op::Item => Some(inst.operand(4)),
-        Op::BranchUnlessPrimitive => Some(inst.operand(2)),
+        Op::BranchUnlessSame => Some(inst.operand(2)),
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
         Op::Guard => Some(inst.operand(4)),
@@ -4467,7 +4467,7 @@ fn ends_block(op: Op) -> bool {
             | Op::Resume
             | Op::JumpUnless
             | Op::BranchUnlessBuiltin
-            | Op::BranchUnlessPrimitive
+            | Op::BranchUnlessSame
             | Op::BranchIfObject
             | Op::MatchShape
             | Op::MatchTag
@@ -4506,7 +4506,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             }
         }
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+        Op::BranchUnlessBuiltin | Op::BranchUnlessSame | Op::BranchIfObject => {
             gen_(operand(0), live)
         }
         Op::DispatchSubject => {

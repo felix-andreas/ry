@@ -975,6 +975,26 @@ pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
     Ok(())
 }
 
+/// Whether two `CHARSXP`s hold the same text. The string cache interns each text once per
+/// encoding, and ASCII text always unmarked, so two distinct cached ASCII strings differ and only
+/// strings that may differ in encoding need their text compared.
+#[inline]
+pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
+    if left == right {
+        return true;
+    }
+    let na = na_string();
+    if left == na || right == na {
+        return false;
+    }
+    let interned_ascii = gp::ASCII | gp::CACHED;
+    if left.gp() & interned_ascii == interned_ascii && right.gp() & interned_ascii == interned_ascii
+    {
+        return false;
+    }
+    char_str(left) == char_str(right)
+}
+
 /// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
 /// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
 #[inline]

@@ -1,3 +1,4 @@
+# oracle: library-dependent
 tt <- terms(y ~ a*b + log(z) + offset(w) - 1, specials="log")
 pa <- function(x) for (n in names(attributes(x))) { cat("--", n, "\n"); print(attr(x, n)) }
 pa(tt)
