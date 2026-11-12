@@ -1656,6 +1656,7 @@ impl<'p> Translator<'p> {
                 | Action::GetFun { .. }
                 | Action::Step { dst: Some(_), .. }
                 | Action::Srcref(_)
+                | Action::FallThrough
                 | Action::Skip => {}
                 _ => return None,
             }
