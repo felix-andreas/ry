@@ -128,7 +128,6 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 - **Not compiled natively; the whole function runs in the interpreter:**
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity` (fasta);
   - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
@@ -137,7 +136,6 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
   - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
   - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
 - **Nominal items do not fit an empty list.** `children <- []` then `List.append(children, @Tree(...))` is "expected `T`, found `Tree`", and `children: List<Tree> <- []` is "expected `List<Tree>`, found `List<T>`". A recursive `alias` is refused instead, with a message that prints an enormous expanded type. This blocks a typed awfy `storage`.
-- **Interpreted `List.with_capacity` plus record appends returns an R `list`,** which then fails the declared `List<Record{...}>` return check.
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
 - **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
 
@@ -607,9 +605,6 @@ protects construction but nothing after it.
   environment on its first run (`op_call_rebinding` falls back to `eval::rebind_call`), so the
   rest of the call runs on the environment path. It stays linear; updating through the slot
   would keep the frame's slots. Helper moves already work from slots (`moves::Binding::Slot`).
-- With the JIT on, `Dict.len(d)` after a loop inside a function returns an R number, not an
-  `I64`: `f <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.len(d) }` prints
-  `[1] 0` for `f(100000L)` and `0i64` for `f(3L)` or with `RY_JIT=off`.
 - Under GNU R (`ry load`, `crates/ry/src/load.rs`), `std::List.map` fails with R's "there is no
   package called 'std'" instead of the explanation bare names get, bare names are stubbed whatever
   `[check] prelude` says, and the stub message calls every `ry.exports` name (DataFrame, Arrays) part

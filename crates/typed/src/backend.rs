@@ -884,6 +884,22 @@ impl Emitter<'_> {
                 let list = self.call_words(address!(values::ry_list_new), I64, &[kind, count]);
                 SmallVec::from_slice(&[list])
             }
+            Op::EmptyList(item, capacity) => {
+                let capacity = self.one(*capacity)?;
+                let negative = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::SignedLessThan, capacity, 0);
+                self.fail_if(negative, &inst.fail_drops)?;
+                let kind = self.iconst(kind(*item));
+                let capacity = self.wide(capacity);
+                let list = self.call_words(
+                    address!(values::ry_list_with_capacity),
+                    I64,
+                    &[kind, capacity],
+                );
+                SmallVec::from_slice(&[list])
+            }
             Op::SeqLen(count) => {
                 let count = self.one(*count)?;
                 let negative = self
