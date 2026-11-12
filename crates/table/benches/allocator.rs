@@ -2,8 +2,8 @@
 //! behavior. `libR` (`crates/libr/src/libr.rs`) declares this allocator with these two defaults:
 //! a block of a megabyte or more gets a mapping of its own, which goes back to the kernel when
 //! the block is freed, and mimalloc serves the smaller blocks and keeps their freed pages for
-//! reuse. With every block from mimalloc, a freed column stayed resident beside the next one,
-//! and at 1e8 rows the driver ran out of memory on questions the same engine answers from R.
+//! reuse. With every block from mimalloc, a freed column would stay resident beside the next one,
+//! and the driver's peak memory would not be the one `ry run` has.
 
 #[global_allocator]
 static ALLOCATOR: heap::large::Mapped<mimalloc::MiMalloc> = heap::large::Mapped(mimalloc::MiMalloc);

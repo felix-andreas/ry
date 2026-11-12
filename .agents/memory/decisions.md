@@ -4722,9 +4722,10 @@ check` releases its trees once, and memoized records are compact" below).
   `join_x` from fitting next to `join_big` in 15 GB.
 - **Target shape.** `crates/table/src/factor.rs`: a factor is a Polars extension type
   (`ry.factor`, feature `dtype-extension`) whose storage is a dense zero-based code column
-  (u8, u16 or u32 by level count) and whose dtype holds one `Arc<Levels>`: a `Utf8ViewArray` of
-  labels in R's order plus a lazily built label-to-code hash index. Extension series filter,
-  take, sort, group and append through their storage, and `to_physical_repr` gives the codes, so
+  (u8, u16 or u32 by level count) and whose dtype holds one `Arc<Levels>`, the labels in R's
+  order (see "A factor's level table is front-coded in byte order, with no hash index").
+  Extension series filter, take, sort, group and append through their storage, and
+  `to_physical_repr` gives the codes, so
   `kernel::Codes::of` and the row encoder need no factor case. Casting an extension column is
   refused by Polars, so every conversion goes through `factor::cast`, `factor::text` or their
   lazy forms `cast_expr`/`text_expr` (Polars `map` UDFs).
@@ -4738,9 +4739,65 @@ check` releases its trees once, and memoized records are compact" below).
   whose prefix ties, remaps the codes in parallel, and turns the arenas into the label buffers
   without copying a byte. `NA` never enters the levels, so the whole-column text re-read is gone.
 - **Joins.** `join::factor_codes` translates one side's codes into the other's levels through
-  `Levels::position`; identical level tables (the same `Arc`) translate by identity.
-- **Impact.** One source of truth for a column's levels, about 16 bytes of view plus the label
-  bytes per level, and no second interning pass.
+  `Levels::translation`; identical level tables (the same `Arc`) translate by identity.
+- **Impact.** One source of truth for a column's levels and no second interning pass.
+
+## A factor's level table is front-coded in byte order, with no hash index
+
+- **Previous shape.** `Levels` held a `Utf8ViewArray` (a 16-byte view per label, plus a byte
+  buffer for labels over 12 bytes) and a hash index from label to code that the first lookup
+  built. The views were a second copy of what the sorted order already says: db-benchmark's
+  `id6` labels are `id1`..`id100000000`, and neighbors in byte order share all but the last
+  byte or two. At 1e8 rows `join_x` has 63.2 million `id6` levels, so the views alone were
+  1.0 GB of a 3.9 GB table, and the index, once a join or a recode built it, was derived state
+  that could not be shared between tables.
+- **Target shape.** `Levels` in `crates/table/src/factor.rs` stores the labels sorted by bytes
+  and front-coded in blocks of 16. An entry is a header byte (four bits for the bytes shared
+  with the previous label, four for the bytes that follow, 15 meaning a LEB128 length follows),
+  then the rest bytes. A block's first entry shares nothing, and `blocks` holds each block's
+  byte offset. A reader builds levels in byte order, so a code is a rank. A table whose code
+  order is not byte order (`factor(levels = ...)`, a level union) adds `Order`, two `u32`
+  arrays between code and rank.
+- **Lookups.** `position` binary-searches the block heads and scans one block, so there is no
+  hash index to build, hold or keep in sync. `translation` maps one table's codes into another
+  with a merge of two cursors, which replaces one hash lookup per level in a factor join and in
+  `recode`. `text` decodes a whole table in parallel when the column has at least a sixteenth as
+  many rows as levels and seeks per row otherwise, so printing ten rows of a table with 63
+  million levels decodes ten blocks.
+- **Build.** `Interner::finish` still sorts one 16-byte key per level, then encodes runs of
+  blocks in parallel and joins the pieces. Runs of tied 12-byte prefixes sort in parallel.
+- **Impact.** In `tests/test_memory.rs`, `join_x` holds 32 bytes per row where it held 39; the
+  budgets there pin it. One source of truth for label to code, and less memory for every
+  factor with sorted, similar labels. Labels that share nothing cost their bytes plus a byte
+  and a half each (the header, and a sixteenth of a block offset).
+
+## Equality joins bucket one side by dense codes of its own key range
+
+- **Previous shape.** `join.rs` coded both sides' keys over the union of their value ranges,
+  chose the bucketed side afterwards, and refused any code space above 2^27 to the Polars hash
+  join. db-benchmark's q5 at 1e8 rows joins on `id3` over a range of 2e8, so it fell back, and
+  the hash join's tables did not fit beside the inputs in 15 GB. The bucket index was one
+  `Vec<u32>` per side with a separate start array, built on one thread.
+- **Target shape.** The bucketed side is chosen from the row counts before any key is coded
+  (`i` when it has at most 65,536 rows and no more than `x`, otherwise `x`, which is the right
+  table of `DataFrame.join`), and keys are coded against that side's range alone, so a key of the other side outside the range gets a code no built row
+  has. `indexable` admits a range up to eight times the rows below 2^27 codes and up to twice
+  the rows above. `Buckets` is two flat arrays (`bounds`, `rows`), filled by tasks that each own
+  a share of the code range. `scan_i` counts matches per chunk, prefix-sums and writes the row
+  pairs in parallel, and `assemble` gathers one side's columns, frees that side's row indices,
+  then gathers the other.
+- **Impact.** Every db-benchmark join at 1e8 rows runs in the kernel. The transient memory of a
+  join is the bucket index and one side's row indices; `tests/test_memory.rs` pins it.
+
+## A query without `by` aggregates in the kernel as one group
+
+- **Previous shape.** `DataFrame.select(sum(...))` and `x[, sum(v)]` went to Polars, where a
+  double sum materialized a cumulative sum of the column and an integer sum cast it to 64 bits:
+  0.8 GB of scratch per column at 1e8 rows.
+- **Target shape.** `group.rs` runs such a query through the aggregate kernel as a single group
+  with no row codes (`whole`), so a sum reads the column's chunks in place.
+- **Impact.** The benchmark's checksum (`tools/bench/internal/table/ry.R`) asks the engine for
+  the sums instead of converting an answer's columns to R vectors, which copied the answer.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 
@@ -5965,9 +6022,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Previous shape.** `db_benchmark` used glibc malloc and answered joins through the data.table
   `x[i]` IR, while `ry run` used libR's mimalloc and lazy `Plan`s, so "ry from Rust" (9.2 s at
   1e7) lost to "ry from R" (6.3 s) for reasons that had nothing to do with the API.
-- **Target shape.** `benches/allocator.rs` installs mimalloc with libR's settings (eager commit
-  off, purge delay -1) as the global allocator, and the joins run the same `Plan`s as `ry.R`. The
-  driver now measures the engine with no R in the way: 4.9 s against 5.5 s from R at 1e7.
+- **Target shape.** `benches/allocator.rs` installs the allocator libR declares
+  (`heap::large::Mapped` over mimalloc, eager commit off, purge delay 1e9 ms) as the global
+  allocator, and the joins run the same `Plan`s as `ry.R`. A block of a megabyte or more gets its
+  own mapping and returns to the kernel when freed, as under `ry run`, so the driver's peak
+  resident memory is the engine's and not that of freed columns mimalloc keeps (11.9 GB from
+  Rust against 11.6 GB from R on the 1e8 joins). The driver sums an answer's integer columns
+  value by value, because a cast to doubles holds 0.8 GB beside a 1e8-row answer.
 
 ## A load holds back S4 definitions and caches its index across processes
 

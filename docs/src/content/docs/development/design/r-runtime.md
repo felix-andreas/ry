@@ -1668,21 +1668,50 @@ picks them), because reading q10's six key columns as R vectors would add about 
 | peak memory (GB) | 13.7 | 13.4 | 12.6 |
 <!-- /bench-table:1e8-groupby -->
 
-The join questions are measured separately (`just bench-table 2e7 --joins-only`), because their
-inputs are larger than the group-by file. At 2e7 rows ry answers the five joins in 3.7 s from R
-(3.1 s from Rust) against data.table's 22.3 s, but peaks at 11.6 GB against 5.2 GB. Nearly all of
-that memory is reading the CSVs: `join_x` alone takes 4.9 GB, because every distinct `id4`..`id6`
-string becomes a factor level and a Polars Enum spends about 135 bytes per level (it stores each
-level twice, in a string array and in a hash map). At 1e8 rows neither engine fits the inputs in
-15 GB: data.table and ry both run out of memory reading `join_x` with factors, and ry reading the
-key columns as text loads `join_x` at an 11.7 GB peak but cannot then load `join_big`. Closing that
-gap needs a factor type outside Polars (integer codes plus one level array) and a text reader that
-does not hold the parsed chunks and the final columns at once; `backlog.md` tracks both.
+The join questions are measured separately at db-benchmark's 5 GB size
+(`just bench-table <dir> --rows 1e8 --joins-only`), because their inputs are twice the group-by
+file: `join_x` and `join_big` are 5.1 GB of CSV each, and `join_x` has 63.2 million distinct `id6`
+strings. ry answers all five joins within 12 GB. data.table runs out of memory before its first
+answer: the kernel stops it at 14.2 GB resident.
+
+<!-- bench-table:1e8-joins -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| join q1: small, on `id1` | out of memory | 1.318 | 1.333 |
+| join q2: medium, on `id2` | out of memory | 1.536 | 1.564 |
+| join q3: medium, left, on `id2` | out of memory | 1.791 | 1.832 |
+| join q4: medium, on factor `id5` | out of memory | 1.719 | 1.432 |
+| join q5: big, on `id3` | out of memory | 9.215 | 8.844 |
+| total | out of memory | 15.58 | 15.00 |
+| peak memory (GB) | over 14.2 | 11.6 | 11.9 |
+<!-- /bench-table:1e8-joins -->
+
+Three choices keep the joins inside the machine:
+
+- **A factor is a code column plus one level table**
+  (`crates/table/src/factor.rs`). The table stores its labels sorted by bytes and front-coded in
+  blocks of 16: each label records how many bytes it shares with the label before it, then the
+  rest. Looking a label up is a binary search over the blocks' first labels and a scan of one
+  block, so there is no hash index. In `tests/test_memory.rs`, a table shaped like `join_x` holds
+  32 bytes per row, its seven columns' values and level tables together.
+- **A join buckets one side's rows by a dense code of the key**, coded over that side's value
+  range alone (`crates/table/src/join.rs`). The bucketed side is the right table of
+  `DataFrame.join`, unless the left table has at most 65,536 rows and no more than the right. The
+  bucket index is two flat arrays, the probe counts its matches before it writes them, and the
+  answer's columns are gathered one side at a time.
+- **A block of a megabyte or more has a mapping of its own**, which returns to the kernel when
+  the block is freed (`heap::large::Mapped`), so the reader's and a join's scratch memory does
+  not stay resident beside the next answer. A mapping of 2 MiB or more asks for huge pages,
+  because a query maps its buffers afresh and would otherwise take a page fault per 4 KiB.
+
+`tests/test_memory.rs` in `crates/table` pins the bytes per row that the reader, each join
+question and the grouped sums allocate at their peak and hold afterwards, so a buffer that scales
+with the rows and outlives its use fails a test.
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
-same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R
-calls around it.
+same allocator as libR (mimalloc for small blocks, a mapping of its own for each large one), so it
+measures the engine without the R calls around it.
 
 `tools/bench/internal/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
 rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the

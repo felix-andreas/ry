@@ -2643,44 +2643,44 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Top priority: the db-benchmark joins do not fit 1e8 rows in 15 GB.** The factor type outside
-  Polars and the code-building reader are in (`decisions.md`, "Factors are ry's own codes plus
-  one level table, outside Polars"), and at 1e7 the joins beat data.table on every question. At 1e8 both
-  data.table and ry run out of memory (`tools/bench/internal/table/report.py` records it as "out of
-  memory"). Measured for ry, with libR's mimalloc settings:
-  - Reading `join_x` (5.1 GB, 63.2 million `id6` levels) peaks at 7.35 GB against 3.9 GB live:
-    2.9 GB of columns plus about 1.0 GB of level views. `join_big` is the same size, and q5's
-    answer is about 4.9 GB, so x, big and one answer already need about 12.7 GB.
-  - The transients are the u32 codes a low-cardinality column holds until it narrows (`id4`:
-    0.4 GB, then 0.1 GB as u8), the interner's hash tables, `finish`'s keys and rank array beside
-    the old views, and the per-slice Polars frames. libR never purges freed memory
-    (`PURGE_DELAY=-1`), so they stay resident; `mi_collect(true)` with purging switched on
-    briefly freed little at 2e7 (2.04 GB resident against about 0.87 GB live), which points at
-    pages held in the rayon threads' heaps.
-  - Next: give the reader's large transients an allocator that maps and unmaps whole regions
-    (std's `Allocator` on the pinned nightly; hashbrown takes it with its `nightly` feature),
-    keep a column's codes narrow while its level count allows, and sum the checksum in
-    `tools/bench/internal/table/ry.R` per chunk rather than converting a whole column. Then run
-    `report.py DIR --rows 1e8 --joins-only` and the 1e8 group-by, write the tables with
-    `--write`, and update `development/design/r-runtime.md` section 7, whose 1e8 join prose
-    says neither engine fits.
+- **The 1e8 joins fit, with about 3 GB to spare; what would widen the margin.** At 1e8 rows the
+  five db-benchmark joins peak at 11.6 GB from R and 11.9 GB from Rust, and data.table is killed
+  at 14.2 GB before its first answer (`development/design/r-runtime.md`, section 7;
+  `tests/test_memory.rs` in `crates/table` pins the bytes per row). What remains, largest first:
+  - **q5 takes 9 s where q1 to q4 take 1.3 to 1.8 s.** It buckets `join_big`'s 1e8 rows over a
+    key range of 2e8 and gathers 13 columns for 9e7 output rows through random row indices. Not
+    profiled yet. Candidates: partition both sides by the key's high bits so each partition's
+    buckets fit the cache, and gather the built side's columns in bucket order.
+  - **The reader's peak is about 2.5 times what the table holds** (86 against 32 bytes per row
+    for `join_x` in `test_memory.rs`). During `Interner::finish` a factor column holds its u32
+    codes, one 16-byte view and one 16-byte sort key per level, and a rank per level, and the
+    factor columns of a file finish in parallel. A partition whose labels all fit a view inline
+    could turn its views into keys in place, and a column with few levels could keep u8 or u16
+    codes from the first slice on instead of narrowing at the end.
+- **Under `ry run`, a frame passed through two closures outlives `rm()` and `gc()`** (interpreter,
+  not `crates/table`). With `report <- function(question, answer) cat(question, checksum(answer))`
+  and a loop of `answer <- DataFrame.join(x, y, on = "id2"); report("q", answer); rm(answer);
+  gc()`, resident memory after the `gc()` is one answer higher from about the fourth iteration
+  on (0.87 GB, then 1.25 to 1.33 GB with 1e7-row inputs), and stays one answer higher without
+  growing. Calling `checksum(answer)` directly in the loop body frees every answer, and so does
+  the nested shape with a plain numeric vector in place of the frame. It appears once the
+  closures are compiled to bytecode, which points at a reference the bytecode tier keeps for a
+  promise or an argument slot of the outer closure (candidates read without a conclusion:
+  `call_do_call`'s `heap.root(target_call)`, and handle release only after rooting instructions
+  in `crates/interp/src/bytecode.rs`). `tools/bench/internal/table/ry.R` avoids the shape. At
+  1e8 rows the stale answer was 4.5 GB and the kernel killed the run.
+- **An aggregate over a filter that keeps no rows gives one row.** `x[v > 5, .(s = sum(v))]`
+  with no matching row prints one row with `s = 0`; data.table gives a table with no rows (and
+  `x[v > 5, sum(v)]` gives `0` in both). The verb form, `DataFrame.filter` then
+  `DataFrame.select(Expr.sum(...))`, gives one row as Polars does, which is right for the verbs,
+  so the fix belongs to the `[` path alone.
 - **`ry migrate data-table` checks a name's uses in the current file only** (`uses_are_safe` in
   `crates/ide/src/migrate.rs`). A top-level `sales <- fread(...)` in one file that another file
   queries with `sales[, z := 1]` is rewritten, which breaks the other file. The safety check
   should see every file of the project that can read the name.
-- **A factor whose labels share their first 12 bytes sorts serially** (`Interner::finish` in
-  `crates/table/src/factor.rs`). Labels such as `customer_00001234` or ISO timestamps form one
-  run of tied prefixes, which is re-sorted on one thread through indirect label lookups. Sorting
-  such a run in parallel, or keying on the bytes after the common prefix, would fix it.
 - **A Polars `Enum` converted to a factor loses its level order** (`convert` in
   `crates/table/src/table.rs`): it goes through `from_strings`, which sorts the levels by bytes,
   so an Enum read from Parquet with a non-alphabetical order is reordered.
-- **A factor column with a missing value costs a second whole-file parse.** The sliced reader
-  (`read_sliced` in `crates/table/src/io.rs`) parses a factor column straight into codes, but a
-  `Categorical` reads an empty field as `NA` where `fread` reads `""`, so a column with any
-  missing value is read again as text, unsliced, which faults the released file back in and
-  holds a full string column. Parsing such a column as text within the sliced pass, once a slice
-  shows a null, would keep the peak at one slice.
 - **A text column is joined from its slices at the end**, which copies its strings once
   (`Builder::Text`); building the final `Utf8View` buffers directly would avoid it.
 - **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
@@ -2690,17 +2690,6 @@ The end-to-end guard rests on the corpus suites.
   to 1e9 ms, so pages return only at `gc()` (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory until `gc()`"), because
   refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
   Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
-- **A factor build is bound by Polars' Enum interning.** `string_to_factor`
-  (`crates/table/src/convert.rs`) hashes, deduplicates and sorts the levels itself in parallel
-  (1.8 s for `join_big.csv`'s 9.95 million distinct `id6` values on 4 cores), then hands the sorted
-  levels to Polars' `FrozenCategories::new`, which inserts them one at a time into a concurrent
-  table that copies and hashes each key again: 9.6 s for those 9.95 million levels, 3.1 s to build
-  and 2.4 s to drop for 6.3 million. The whole factor conversion is 0.9 s for `groupby.csv`, 7.3 s
-  for `join_x.csv` and 12.3 s for `join_big.csv`, against data.table's `fread(stringsAsFactors =
-  TRUE)` at 5.3 s, 31 s and 37 s (1e7 rows, parse included on both sides). Removing the rest needs
-  a factor type outside Polars (codes plus a plain levels array, mapped to an Enum only when a
-  Polars plan needs one), which every kernel and the lazy planner must handle (`decisions.md`,
-  "Factors stay Polars Enums").
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`, so
   `lubridate::floor_date` runs on R vectors in the `trials` module), no `cast`, `n_unique`,
   `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
@@ -2732,8 +2721,8 @@ The end-to-end guard rests on the corpus suites.
 - **A filtered `:=` loop is engine-bound** (`tools/bench/internal/table/ry.R`, "update subset", 1e6 rows:
   0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
   5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
-  engine code in a different process (libR.so allocates with glibc malloc, the Rust bench with
-  mimalloc), which is the next thing to check.
+  engine code in a different process. Both run on the same allocator
+  (`crates/table/benches/allocator.rs`), so the gap is elsewhere and has not been profiled.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.
