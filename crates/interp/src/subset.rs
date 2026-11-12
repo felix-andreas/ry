@@ -453,7 +453,7 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let object = values::materialize(object)?;
-    if let Some(offsets) = sequence_offsets(index) {
+    if let Some((_, offsets)) = sequence_offsets(index) {
         let count = offsets.len();
         return Ok(Some(gather_kind(object, offsets, count)?));
     }
@@ -530,16 +530,22 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
 }
 
 /// The zero-based offsets a compact sequence subscript selects, computed from its `c(n, n1,
-/// inc)` info instead of expanding it, as GNU R reads a compact subscript through `*_ELT`. `None`
-/// unless every element is at least one, the only case that needs no further rules. An
-/// increment of zero cannot occur, and offsets past the end are the caller's to check.
-unsafe fn sequence_offsets(index: Sexp) -> Option<impl ExactSizeIterator<Item = usize> + Clone> {
+/// inc)` info instead of expanding it, as GNU R reads a compact subscript through `*_ELT`, and
+/// the highest of them. `None` unless every element is a whole number of at least one, the only
+/// case that needs no further rules; offsets past the end are the caller's to check.
+unsafe fn sequence_offsets(index: Sexp) -> Option<(usize, impl ExactSizeIterator<Item = usize>)> {
     let (count, first, increment) = values::compact_sequence(index)?;
     let last = first + increment * count.saturating_sub(1) as f64;
-    if first.min(last) < 1.0 {
+    if first.min(last) < 1.0 || first.fract() != 0.0 || increment.abs() != 1.0 {
         return None;
     }
-    Some((0..count).map(move |slot| (first + increment * slot as f64).trunc() as usize - 1))
+    let start = first as usize - 1;
+    let step = increment as isize;
+    let highest = first.max(last) as usize - 1;
+    Some((
+        highest,
+        (0..count).map(move |slot| start.wrapping_add_signed(step * slot as isize)),
+    ))
 }
 
 /// One bit per element, inline for vectors of up to 256 elements.
@@ -2761,67 +2767,73 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         return Ok(false);
     }
     let count = length(target);
-    let offsets: Vec<usize> = if let Some(offsets) = sequence_offsets(index) {
-        if offsets.clone().any(|offset| offset >= count) {
-            return Ok(false);
-        }
-        offsets.collect()
-    } else {
-        let index = values::materialize(index)?;
-        match index.kind() {
-            SexpType::Integer => {
-                let positions = values::ints(index);
-                if positions
-                    .iter()
-                    .any(|&position| position <= 0 || position as usize > count)
-                {
-                    return Ok(false);
-                }
-                positions
-                    .iter()
-                    .map(|&position| position as usize - 1)
-                    .collect()
-            }
-            SexpType::Real => {
-                let positions = values::reals(index);
-                // NaN fails both comparisons, so an NA subscript also declines.
-                if !positions
-                    .iter()
-                    .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
-                {
-                    return Ok(false);
-                }
-                positions
-                    .iter()
-                    .map(|&position| position as usize - 1)
-                    .collect()
-            }
-            _ => return Ok(false),
-        }
-    };
-    if !offsets.len().is_multiple_of(value_count) {
-        return Ok(false);
+    if let Some((highest, offsets)) = sequence_offsets(index) {
+        return Ok(highest < count && scatter_offsets(target, offsets, value, value_count));
     }
-    match kind {
-        SexpType::Real => recycle_into(
-            values::reals_mut(target),
-            offsets.iter().copied(),
-            values::reals(value),
-        ),
-        SexpType::Logical | SexpType::Integer => recycle_into(
-            values::ints_mut(target),
-            offsets.iter().copied(),
-            values::ints(value),
-        ),
+    let index = values::materialize(index)?;
+    let offsets: Vec<usize> = match index.kind() {
+        SexpType::Integer => {
+            let positions = values::ints(index);
+            if positions
+                .iter()
+                .any(|&position| position <= 0 || position as usize > count)
+            {
+                return Ok(false);
+            }
+            positions
+                .iter()
+                .map(|&position| position as usize - 1)
+                .collect()
+        }
+        SexpType::Real => {
+            let positions = values::reals(index);
+            // NaN fails both comparisons, so an NA subscript also declines.
+            if !positions
+                .iter()
+                .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
+            {
+                return Ok(false);
+            }
+            positions
+                .iter()
+                .map(|&position| position as usize - 1)
+                .collect()
+        }
+        _ => return Ok(false),
+    };
+    Ok(scatter_offsets(
+        target,
+        offsets.iter().copied(),
+        value,
+        value_count,
+    ))
+}
+
+/// Writes `value`, recycled, to `offsets` of `target`, which share its type and lie inside it.
+/// False, having written nothing, unless the number of offsets is a multiple of `value_count`.
+unsafe fn scatter_offsets(
+    target: Sexp,
+    offsets: impl ExactSizeIterator<Item = usize>,
+    value: Sexp,
+    value_count: usize,
+) -> bool {
+    if !offsets.len().is_multiple_of(value_count) {
+        return false;
+    }
+    match target.kind() {
+        SexpType::Real => recycle_into(values::reals_mut(target), offsets, values::reals(value)),
+        SexpType::Logical | SexpType::Integer => {
+            recycle_into(values::ints_mut(target), offsets, values::ints(value))
+        }
         _ => {
             let source = value.slice::<Sexp>();
             let heap = crate::heap();
-            for (position, &offset) in offsets.iter().enumerate() {
+            for (position, offset) in offsets.enumerate() {
                 heap.set_element(target, offset, source[position % value_count]);
             }
         }
     }
-    Ok(true)
+    true
 }
 
 /// A logical subscript longer than the vector stretches it on assignment to the subscript's
