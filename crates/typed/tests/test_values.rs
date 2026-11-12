@@ -121,10 +121,14 @@ fn lists_follow_their_models() {
                     4 => (ry_list_reverse(list, flag), model.reversed()),
                     5 if kind != STR => {
                         let decreasing = rng.below(2) == 1;
-                        (
-                            ry_list_sort(list, flag, decreasing as u32),
-                            model.sorted(decreasing),
-                        )
+                        let sorted = ry_list_sort(list, flag, decreasing as u32);
+                        match model.sorted(decreasing) {
+                            Some(expected) => (sorted, expected),
+                            None => {
+                                assert!(sorted.is_null(), "a sort of a list with `NA` succeeded");
+                                continue;
+                            }
+                        }
                     }
                     6 => (ry_list_unique(list, flag), model.unique()),
                     7 => {
@@ -1024,32 +1028,30 @@ impl Model {
         model
     }
 
-    fn sorted(&self, decreasing: bool) -> Model {
+    /// The sorted model, or `None` when it holds an `NA` or NaN, which the sort refuses.
+    fn sorted(&self, decreasing: bool) -> Option<Model> {
         match self {
             Model::Int(values) => {
-                let mut values: Vec<i32> = values
-                    .iter()
-                    .copied()
-                    .filter(|&value| value != NA)
-                    .collect();
+                if values.contains(&NA) {
+                    return None;
+                }
+                let mut values = values.clone();
                 values.sort();
                 if decreasing {
                     values.reverse();
                 }
-                Model::Int(values)
+                Some(Model::Int(values))
             }
             Model::Dbl(values) => {
-                let mut values: Vec<f64> = values
-                    .iter()
-                    .copied()
-                    .filter(|value| !value.is_nan())
-                    .collect();
-                if decreasing {
-                    values.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
-                } else {
-                    values.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                if values.iter().any(|value| value.is_nan()) {
+                    return None;
                 }
-                Model::Dbl(values)
+                let mut values = values.clone();
+                values.sort_by(|x, y| {
+                    let order = x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal);
+                    if decreasing { order.reverse() } else { order }
+                });
+                Some(Model::Dbl(values))
             }
             _ => panic!("sorting an unsortable kind"),
         }

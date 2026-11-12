@@ -22,6 +22,7 @@ use {
     },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
+    thin_vec::ThinVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -1890,12 +1891,12 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         env: context_env,
         sys_parent: env,
         args: start,
-        on_exit: Vec::new(),
+        on_exit: ThinVec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
         method_vars: state.method_vars.len() as u32,
-        closures: state.frame_closures.len(),
+        closures: state.frame_closures.len() as u32,
         slots: crate::NO_SLOTS,
         missing: 0,
         caller: crate::NO_SLOTS,
@@ -1914,7 +1915,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     crate::conditions::restore_handlers(state.frames[depth - 1].handlers.clone());
     state
         .frame_closures
-        .truncate(state.frames[depth - 1].closures);
+        .truncate(state.frames[depth - 1].closures as usize);
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     if let Ok(value) = result {
