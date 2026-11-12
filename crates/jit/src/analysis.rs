@@ -1399,24 +1399,48 @@ fn native(action: &Action<'_>) -> bool {
     )
 }
 
-/// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
-/// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
-/// has never run, because code compiled without that type runs the instruction in tier 0 for
-/// as long as it lives. A `shared` plan speculates only on lookups that every enclosure resolves
-/// the same way (see `runtime::SHARED`).
+/// The frame a body runs in, which decides where the plan keeps its variables.
+#[derive(Clone, Copy)]
+pub enum Frame {
+    /// A closure's frame, which binds `formals` and the symbols the body assigns, each in a
+    /// slot. Names it does not bind are looked up from `enclosure`, the enclosure of the
+    /// closure's environment.
+    Closure { formals: Sexp, enclosure: Sexp },
+    /// The global environment `env`, where a top-level loop runs. It has no locals, so the plan
+    /// has no slots: every variable read and write is a tier-0 step on `env`'s bindings, which
+    /// code the loop calls must see at once. Function lookups start at `env` itself, because any
+    /// of its bindings may shadow the search path, and a later binding of a speculated symbol
+    /// invalidates the code like any other redefinition.
+    #[expect(
+        dead_code,
+        reason = "the tier's entry is not wired to top-level loops, which run with the tier off"
+    )]
+    Global { env: Sexp },
+}
+
+/// Builds the plan for `code`, a body that runs in `frame`, in `arena`. A `patient` plan
+/// refuses as [`COLD`] when an instruction whose result type matters has never run, because
+/// code compiled without that type runs the instruction in tier 0 for as long as it lives. A
+/// `shared` plan speculates only on lookups that every enclosure resolves the same way (see
+/// `runtime::SHARED`).
 pub unsafe fn plan<'a>(
     arena: Arena<'a>,
     code: Sexp,
-    formals: Sexp,
-    enclosure: Sexp,
+    frame: Frame,
     patient: bool,
     shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
-    // A body that reflects on its frame can bind any symbol, which slots cannot model.
-    let Some(locals) = bytecode::local_symbols(source, formals) else {
-        return Err(Refusal("the body reflects on its frame"));
+    let (formals, enclosure, locals, global) = match frame {
+        Frame::Closure { formals, enclosure } => {
+            // A body that reflects on its frame can bind any symbol, which slots cannot model.
+            let Some(locals) = bytecode::local_symbols(source, formals) else {
+                return Err(Refusal("the body reflects on its frame"));
+            };
+            (formals, enclosure, locals, false)
+        }
+        Frame::Global { env } => (values::nil(), env, FxHashSet::default(), true),
     };
     let insts = decode(arena, code)?;
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
@@ -1443,6 +1467,7 @@ pub unsafe fn plan<'a>(
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
         patient,
+        global,
     };
     builder.collect_slots(formals);
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
@@ -1709,6 +1734,8 @@ struct Builder<'a> {
     states: States<'a>,
     /// The edges leaving the instruction [`Builder::transfer`] last ran, by target pc.
     edges: List<'a, (usize, StateId)>,
+    /// Whether the body runs in the global frame ([`Frame::Global`]), which has no slots.
+    global: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -1717,6 +1744,9 @@ impl<'a> Builder<'a> {
     }
 
     unsafe fn collect_slots(&mut self, formals: Sexp) {
+        if self.global {
+            return;
+        }
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
@@ -2074,6 +2104,24 @@ impl<'a> Builder<'a> {
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
         let action = match inst.op {
+            // The global frame's variables are its environment's bindings, which an active
+            // binding or code the loop calls may read or rebind.
+            Op::GetVar if self.global => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            Op::SetVar | Op::SubAssign | Op::SubAssignMatrix if self.global => {
+                let dst = (inst.op != Op::SetVar).then(|| (operand(0), Ty::Boxed));
+                let action = self.opaque_step(state, dst, &[], Effect::Opaque);
+                state.visible = Some(false);
+                action
+            }
+            // Compiled `for` steps keep the loop variable in a slot.
+            Op::ForStep if self.global => {
+                return Err(Refusal("a loop variable in the global environment"));
+            }
             Op::Constant => {
                 let value = self.constant(operand(1));
                 let ty = constant_type(value);
