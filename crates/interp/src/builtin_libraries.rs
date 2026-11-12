@@ -451,7 +451,7 @@ unsafe fn is_marker(tag: Sexp, marker: &str) -> bool {
 }
 
 unsafe fn dll_info(package: &str, path: &str) -> R<Sexp> {
-    let info = crate::native::dll_info(package, path)?;
+    let info = crate::native::dll_info(package, path, false)?;
     let pointer = values::list_get(info, "info");
     let marker = values::install(LIBRARY_MARKER)?;
     crate::heap().set_external_tag(pointer, marker);
