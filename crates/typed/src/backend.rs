@@ -69,7 +69,8 @@ pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
         | Type::Set(_)
         | Type::Dict { .. }
         | Type::Record(_)
-        | Type::Tag(_) => SmallVec::from_slice(&[I64]),
+        | Type::Tag(_)
+        | Type::Table => SmallVec::from_slice(&[I64]),
     }
 }
 

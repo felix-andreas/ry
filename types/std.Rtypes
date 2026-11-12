@@ -1583,7 +1583,7 @@ Num.is_nan : fn(number: F64) -> Bool
 #'
 #' ```r dput
 #' Num.bitwise_and(12, 10)
-#' #> 8L
+#' #> 8i64
 #' ```
 Num.bitwise_and : fn(first: I64, second: I64) -> I64
 
@@ -1591,7 +1591,7 @@ Num.bitwise_and : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.bitwise_or(12, 10)
-#' #> 14L
+#' #> 14i64
 #' ```
 Num.bitwise_or : fn(first: I64, second: I64) -> I64
 
@@ -1601,7 +1601,7 @@ Num.bitwise_or : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.bitwise_xor(12, 10)
-#' #> 6L
+#' #> 6i64
 #' ```
 Num.bitwise_xor : fn(first: I64, second: I64) -> I64
 
@@ -1609,7 +1609,7 @@ Num.bitwise_xor : fn(first: I64, second: I64) -> I64
 #'
 #' ```r dput
 #' Num.bitwise_not(5)
-#' #> -6L
+#' #> -6i64
 #' ```
 Num.bitwise_not : fn(number: I64) -> I64
 
@@ -1618,7 +1618,7 @@ Num.bitwise_not : fn(number: I64) -> I64
 #'
 #' ```r dput
 #' Num.shift_left_by(1, 4)
-#' #> 16L
+#' #> 16i64
 #' ```
 Num.shift_left_by : fn(number: I64, bits: I64) -> I64
 
@@ -1626,7 +1626,7 @@ Num.shift_left_by : fn(number: I64, bits: I64) -> I64
 #'
 #' ```r dput
 #' Num.shift_right_by(-16, 2)
-#' #> -4L
+#' #> -4i64
 #' ```
 Num.shift_right_by : fn(number: I64, bits: I64) -> I64
 
@@ -1634,7 +1634,7 @@ Num.shift_right_by : fn(number: I64, bits: I64) -> I64
 #'
 #' ```r dput
 #' Num.shift_right_zf_by(-16, 28)
-#' #> 15L
+#' #> 68719476735i64
 #' ```
 Num.shift_right_zf_by : fn(number: I64, bits: I64) -> I64
 

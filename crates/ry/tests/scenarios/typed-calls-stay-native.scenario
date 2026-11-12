@@ -2,8 +2,9 @@
 # or again and again from an interpreted wrapper whose arguments are promises over its variables
 # or over arguments its own caller computed.
 # `RY_TYPED_LOG` names every typed function a call of falls back to the interpreter, so a kernel
-# that left native code shows up here and not only as lost time. `clock` reads R's clock, which
-# the typed core refuses, so it is the one name the log may print.
+# that left native code shows up here and not only as lost time. `clock` reads R's clock, so its
+# signature has an R type: it is a boundary function, which strict mode does not hold to native
+# code, and it is the one name the log may print.
 
 requires ry-runtime
 
@@ -18,7 +19,7 @@ file calls.R
 |   for (i in List.range(1, List.len(x))) total <- total + x[[i]] * y[[i]]
 |   total
 | }
-| clock <- function() -> F64 Num.from_r(proc.time()[[3]])
+| clock <- function() -> double proc.time()[[3]]
 | x <- [1.0, 2.0, 3.0]
 | wrap <- function() {
 |   clock()
