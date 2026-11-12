@@ -9129,3 +9129,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Lazy arguments.** The native tier reads some promise arguments ahead without forcing them (`native::pure_value`). If such a value depends on a variable, an R call in the body could change that variable before R would have forced the argument, so code that calls R (`Compiled::calls_r`, which includes the functions it calls) declines those calls with a reason.
 - **Pinned by** `typed-code-calls-r.scenario` and `test_scenarios::typed_benchmarks_run_natively`, which accepts the one feedback fallback line per conversion.
 
+
+## Published benchmarks measure the release archive
+
+- **Previous shape.** `just bench <suite> --write` recorded a plain `cargo build --release` of the working tree. The Linux release is profile-guided and laid out by BOLT (`tools/layout/optimize.sh`), so the published numbers measured a build nobody downloads. At one commit, the shipped archive beat a plain build of it by 1.12x on `lapply` (process wall) and 1.30x on the validation workload (median warm run), medians of 15 interleaved runs each.
+- **Target shape.** `bench.py --release ARCHIVE` unpacks the official Linux x86_64 archive into a private directory, points `XDG_CACHE_HOME` there and clears `RY_LIBR`, `RY_BASE_R` and `R_HOME`, so the archive's `ry` extracts and loads only its own runtime and base R. `--write` requires `--release`, refuses a nightly, and stores `meta.release` (tag, archive name, sha256) plus the commit the tag names. Recording happens once per release, right after the tag.
+- **Why not reproduce the release locally.** The full `optimize.sh` does not fit a 15 GB machine without swap: the instrumented fat-LTO link of `ry` alone reaches about 14 GB. CI builds it on its runner, and the archive it uploads is the artifact to measure, so there is no stand-in to keep in sync.
+- **Images.** `refuse_foreign_images` reads an embedded runtime's identity through the R home it extracted (`.libr` names the library), so the archive's shipped images pass and any `.ryc` another build wrote into a package library stops the run.
+- **Change gating is separate.** A change is still judged on plain release builds by `Ir`, with the no-op control for layout effects.
+- **Pinned by** `tools/bench/test_bench.py` (a fake archive), run from `test_release_metadata::the_benchmark_runner_records_the_release_archive_and_refuses_foreign_images`.
