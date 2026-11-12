@@ -1201,8 +1201,9 @@ impl Lowering<'_> {
                         .iter()
                         .any(|&(_, operand)| self.is_table(operand));
                 }
-                resolve_function(head, self.env)
-                    .is_some_and(|speculation| is_table_function(&speculation))
+                resolve_function(head, self.env).is_some_and(|speculation| {
+                    is_table_function(&speculation) || returns_table(speculation.function)
+                })
             }
             _ => false,
         }
@@ -5753,6 +5754,22 @@ unsafe fn is_table_function(speculation: &Speculation) -> bool {
     loaded_namespace(package)
         .and_then(|namespace| heap.frame_cell(namespace, speculation.symbol))
         .is_some_and(|cell| cell.cdr() == speculation.function)
+}
+
+/// Whether `function` is a typed closure that declares a table value as its result.
+unsafe fn returns_table(function: Sexp) -> bool {
+    function.kind() == SexpType::Closure
+        && interp::annotations::return_annotation(function).is_some_and(|declared| {
+            let name = declared
+                .trim()
+                .split(|next: char| !next.is_alphanumeric())
+                .next()
+                .unwrap_or_default();
+            matches!(
+                name,
+                "Expr" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+            )
+        })
 }
 
 unsafe fn is_base_function(speculation: &Speculation) -> bool {

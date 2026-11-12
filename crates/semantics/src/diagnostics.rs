@@ -2712,10 +2712,15 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 .text(db)
                 .get(usize::from(range.start())..usize::from(range.end()))
                 .unwrap_or_default();
+            let severity = if blocker.kind.is_error() {
+                Severity::Error
+            } else {
+                Severity::Warning
+            };
             diagnostics.push(Diagnostic::new(
                 range,
-                Severity::Error,
-                "native",
+                severity,
+                blocker.kind.code(),
                 blocker.kind.message(source),
             ));
         }

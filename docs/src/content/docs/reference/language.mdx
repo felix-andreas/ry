@@ -116,7 +116,7 @@ print(first_or([], 7))
 </TabItem>
 </Tabs>
 
-```text ry run runtime=ry exact
+```text ry run runtime=ry strict exact
 10i64
 7i64
 ```
@@ -215,7 +215,7 @@ describe <- function(xs: List<I64>) -> Str {
 print(describe([5, 6, 7]))
 ```
 
-```text ry run runtime=ry exact
+```text ry run runtime=ry strict exact
 [1] "starts positive, 2 more"
 ```
 
@@ -235,7 +235,7 @@ print(add_strings("4", "5"))
 print(add_strings("4", "five"))
 ```
 
-```text ry run runtime=ry exact
+```text ry run runtime=ry strict exact
 :Ok(9i64)
 :Err(:InvalidNumStr)
 ```
@@ -290,7 +290,8 @@ native
 
 A function with an R type in its signature, such as `function(path: character) -> F64`, is a
 boundary function: it may mix R values and ry values freely, and the interpreter runs it when it
-has to. [Native functions](/reference/type-system#native-functions) has the full rule.
+has to. Legitimate ry that the native compiler does not compile yet, such as `try`, gets a warning
+with the code `interpreted` that names the construct. [Native functions](/reference/type-system#native-functions) has the full rule.
 
 ## Where to go next
 

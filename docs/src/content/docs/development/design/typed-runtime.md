@@ -428,11 +428,12 @@ until the benchmark code bases show the copy matters.
 ## Explaining slow paths
 
 A function the native compiler cannot compile at all is not a slow path to explain: in strict mode
-it is a `native` error. A function whose signature is written entirely in ry types must run
+it is a finding. A function whose signature is written entirely in ry types is meant to run
 natively, and `ry check` reports the construct that would send it to the interpreter, with the fix
-([native functions](/reference/type-system#native-functions)). A test runs a corpus of typed
-programs both ways and fails when a function without a `native` finding falls back, so the checker
-and the compiler agree. Two things are outside that rule: a function with an R type in its
+([native functions](/reference/type-system#native-functions)): an R value is a `native` error, and
+ry that the compiler does not handle yet is an `interpreted` warning. A test runs a corpus of typed
+programs both ways and fails when a function without a finding falls back, so the checker and the
+compiler agree. Two things are outside that rule: a function with an R type in its
 signature, which is a boundary function and is not judged, and a single call from R code that the
 native entry declines, such as one that passes a record. `RY_TYPED_LOG=1` prints both as they run.
 

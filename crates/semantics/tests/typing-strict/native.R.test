@@ -124,7 +124,7 @@ cat(main(2), "\n")
 first_of: fn(first: F64, ...: F64) -> F64
 main: fn(x: F64) -> F64
 NULL
-53..56 error[native] a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
+53..56 warning[interpreted] this function runs in the interpreter, because a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
 
 #---- function_taken_as_a_parameter
 #~~~~ script.R
@@ -139,8 +139,8 @@ apply_twice: fn(step: fn(F64) -> F64, x: F64) -> F64
 bump: fn(x: F64) -> F64
 main: fn(x: F64) -> F64
 NULL
-53..57 error[native] `step` takes a function, and a function passed as a value is not compiled natively yet. Define the function inside this one, or give a parameter an R type so this function is a boundary function that the interpreter runs
-186..190 error[native] a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+53..57 warning[interpreted] this function runs in the interpreter, because `step` takes a function, and a function passed as a value is not compiled natively yet. Define the function inside this one, or give a parameter an R type so this function is a boundary function that the interpreter runs
+186..190 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
 
 #---- invisible_result
 #~~~~ script.R
@@ -162,8 +162,8 @@ remember: fn(x: F64) -> F64
 show_all: fn(n: I64) -> NULL
 NULL
 NULL
-70..86 error[native] the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
-130..206 error[native] the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+70..86 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+130..206 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
 
 #---- super_assignment
 #~~~~ script.R
@@ -182,7 +182,7 @@ cat(Num.to_r(count_up(4)), "\n")
 == script.R
 count_up: fn(n: I64) -> I64
 NULL
-116..135 error[native] `<<-` is not compiled natively yet: a native function changes only its own variables. Return the new value and assign it in the caller
+116..135 warning[interpreted] this function runs in the interpreter, because `<<-` is not compiled natively yet: a native function changes only its own variables. Return the new value and assign it in the caller
 
 #---- assignment_to_a_record_field
 #~~~~ script.R
@@ -199,7 +199,7 @@ cat(main("grace"), "\n")
 renamed: fn(user: User, name: Str) -> Str
 main: fn(name: Str) -> Str
 NULL
-114..131 error[native] an assignment of this form is not compiled natively yet. Native code assigns to a variable, or to one item of a list this function made, as in `xs[[i]] <- value`. Build a new record with `(..record, field = value)`
+114..131 warning[interpreted] this function runs in the interpreter, because an assignment of this form is not compiled natively yet. Native code assigns to a variable, or to one item of a list this function made, as in `xs[[i]] <- value`. Build a new record with `(..record, field = value)`
 
 #---- local_function_defined_in_a_branch
 #~~~~ script.R
@@ -216,7 +216,7 @@ cat(pick(1, TRUE), "\n")
 == script.R
 pick: fn(x: F64, up: Bool) -> F64
 NULL
-76..113 error[native] `step` is a function defined inside a branch or a loop, which is not compiled natively yet. Define it once at the top of the function
+76..113 warning[interpreted] this function runs in the interpreter, because `step` is a function defined inside a branch or a loop, which is not compiled natively yet. Define it once at the top of the function
 
 #---- return_in_a_local_function
 #~~~~ script.R
@@ -233,7 +233,7 @@ cat(clamp_all(0.5, 3), "\n")
 == script.R
 clamp_all: fn(low: F64, high: F64) -> F64
 NULL
-125..134 error[native] `return` inside a local function is not compiled natively yet, because native code runs a local function in place. End the function with the value instead
+125..134 warning[interpreted] this function runs in the interpreter, because `return` inside a local function is not compiled natively yet: native code runs a local function in place. End the function with the value instead
 
 #---- function_used_as_a_value
 #~~~~ script.R
@@ -251,8 +251,8 @@ cat(add_three(1), "\n")
 adder: fn(by: F64) -> fn(F64) -> F64
 add_three: fn(x: F64) -> F64
 NULL
-77..107 error[native] a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
-170..174 error[native] `step` is a variable that holds a function, and calling one is not compiled natively yet. Define the function with `step <- function(...)` in this function, or call a top-level function
+77..107 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+170..174 warning[interpreted] this function runs in the interpreter, because `step` is a variable that holds a function, and calling one is not compiled natively yet. Define the function with `step <- function(...)` in this function, or call a top-level function
 
 #---- typed_call_with_named_arguments
 #~~~~ script.R
@@ -265,7 +265,7 @@ cat(area_of(3), "\n")
 area: fn(width: F64, height: F64) -> F64
 area_of: fn(side: F64) -> F64
 NULL
-121..158 error[native] a call of the typed function `area` with named arguments is not compiled natively yet. Pass the arguments by position
+121..158 warning[interpreted] this function runs in the interpreter, because a call of the typed function `area` with named arguments is not compiled natively yet. Pass the arguments by position
 
 #---- typed_call_that_leaves_a_default_out
 #~~~~ script.R
@@ -278,7 +278,7 @@ cat(with_default(3), "\n")
 scaled: fn(x: F64, [factor]: F64) -> F64
 with_default: fn(x: F64) -> F64
 NULL
-126..135 error[native] this call of `scaled` does not pass every parameter, which is not compiled natively yet. Pass each argument by position
+126..135 warning[interpreted] this function runs in the interpreter, because this call of `scaled` does not pass every parameter, which is not compiled natively yet. Pass each argument by position
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
@@ -292,7 +292,7 @@ cat(reversed_first(1), "\n")
 == script.R
 reversed_first: fn(first: F64) -> F64
 NULL
-87..99 error[native] `List.reverse` is not compiled natively yet, so this function would run in the interpreter. Write the step with a loop or another standard library function, or move it into a function with an R type in its signature
+87..99 warning[interpreted] this function runs in the interpreter, because `List.reverse` is not compiled natively yet. Write the step with a loop or another standard library function
 
 #---- standard_library_function_passed_by_name
 #~~~~ script.R
@@ -303,7 +303,7 @@ cat(as_floats(4), "\n")
 == script.R
 as_floats: fn(n: I64) -> F64
 NULL
-94..104 error[native] a function passed by name is not compiled natively yet unless it is a typed function of the project or a local function. Wrap it in a function literal, as in `function(x: I64) -> F64 Num.to_f64(x)`
+94..104 warning[interpreted] this function runs in the interpreter, because a function passed by name is not compiled natively yet unless it is a typed function of the project or a local function. Wrap it in a function literal, as in `function(x: I64) -> F64 Num.to_f64(x)`
 
 #---- dict_of_bool
 #~~~~ script.R
@@ -318,7 +318,7 @@ cat(Num.to_r(distinct("a", "b")), "\n")
 == script.R
 distinct: fn(first: Str, second: Str) -> I64
 NULL
-102..114 error[native] a `Dict` whose keys or values are not `I64`, `F64` or `Str` is not compiled natively yet. Keep the values in a `List` and store their positions in the dictionary
+102..114 warning[interpreted] this function runs in the interpreter, because a `Dict` whose keys or values are not `I64`, `F64` or `Str` is not compiled natively yet. Keep the values in a `List` and store their positions in the dictionary
 
 #---- match_guard
 #~~~~ script.R
@@ -338,7 +338,7 @@ cat(graded(12), "\n")
 grade: fn(reading: Reading) -> Str
 graded: fn(amount: F64) -> Str
 NULL
-156..162 error[native] a `match` arm with an `if` guard is not compiled natively yet. Test the condition inside the arm's body
+156..162 warning[interpreted] this function runs in the interpreter, because a `match` arm with an `if` guard is not compiled natively yet. Test the condition inside the arm's body
 
 #---- nested_match_pattern
 #~~~~ script.R
@@ -359,8 +359,8 @@ cat(main(2), "\n")
 describe: fn(slot: Slot) -> Str
 main: fn(amount: F64) -> Str
 NULL
-176..211 error[native] this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
-227..252 error[native] this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
+176..211 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
+227..252 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
 
 #---- match_on_a_list
 #~~~~ script.R
@@ -376,7 +376,7 @@ cat(first_or_zero(4), "\n")
 == script.R
 first_or_zero: fn(first: F64) -> F64
 NULL
-80..92 error[native] a `match` on a value that is not a tag or a record is not compiled natively yet. Compare the value with `if` and `==`
+80..92 warning[interpreted] this function runs in the interpreter, because a `match` on a value that is not a tag or a record is not compiled natively yet. Compare the value with `if` and `==`
 
 #---- name_set_only_in_a_loop
 #~~~~ script.R
@@ -391,7 +391,7 @@ cat(last_seen(3), "\n")
 last_seen: fn(n: I64) -> F64
 NULL
 114..118 warning[maybe-undefined] `last` is only assigned on some paths here, so this read can find nothing.
-114..118 error[native] `last` is first set inside a branch or a loop and read after it, which is not compiled natively yet. Give `last` a value before the branch
+114..118 warning[interpreted] this function runs in the interpreter, because `last` is first set inside a branch or a loop and read after it, which is not compiled natively yet. Give `last` a value before the branch
 
 #---- variable_that_changes_type
 #~~~~ script.R
@@ -406,7 +406,7 @@ cat(widened(2), "\n")
 == script.R
 widened: fn(n: I64) -> F64
 NULL
-71..97 error[native] `value` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value, or give the first one the wider type, as in `value <- @Union(:Tag)`
+71..97 warning[interpreted] this function runs in the interpreter, because `value` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value, or give the first one the wider type, as in `value <- @Union(:Tag)`
 
 #---- tag_variable_assigned_again
 #~~~~ script.R
@@ -434,7 +434,7 @@ cat(cycled(3), "\n")
 next_light: fn(light: Light) -> Light
 cycled: fn(n: I64) -> F64
 NULL
-282..308 error[native] `light` holds a tag and is assigned again, which is not compiled natively yet: native code fixes the tags a variable can hold where it is first set. Use a new name for each value, or compute the final value in one expression
+282..308 warning[interpreted] this function runs in the interpreter, because `light` holds a tag and is assigned again, which is not compiled natively yet: native code fixes the tags a variable can hold where it is first set. Use a new name for each value, or compute the final value in one expression
 
 #---- global_that_holds_a_ry_value
 #~~~~ script.R
@@ -447,7 +447,7 @@ cat(taxed(100), "\n")
 rate: F64
 taxed: fn(amount: F64) -> F64
 NULL
-86..90 error[native] reading the global `rate` is not compiled natively yet. Pass the value in as a parameter
+86..90 warning[interpreted] this function runs in the interpreter, because reading the global `rate` is not compiled natively yet. Pass the value in as a parameter
 
 #---- variable_of_an_enclosing_boundary_function
 #~~~~ script.R
@@ -466,7 +466,7 @@ cat(scaled_total(c(1, 2)), "\n")
 == script.R
 scaled_total: fn(values: double[]) -> double
 NULL
-351..357 error[native] reading `factor` from the enclosing function is not compiled natively yet, because that function is not native. Pass the value in as a parameter
+351..357 warning[interpreted] this function runs in the interpreter, because reading `factor` from the enclosing function is not compiled natively yet: that function is not native. Pass the value in as a parameter
 
 #---- colon_range
 #~~~~ script.R
@@ -516,8 +516,8 @@ add_matched: fn(a: Str, b: Str) -> Result<I64, :InvalidNumStr>
 total: fn(a: Str, b: Str) -> I64
 I64
 I64
-232..249 error[native] `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
-257..274 error[native] `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
+232..249 warning[interpreted] this function runs in the interpreter, because `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
+257..274 warning[interpreted] this function runs in the interpreter, because `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
 
 #---- boundary_function_is_not_judged
 #~~~~ script.R
@@ -999,7 +999,7 @@ missing_amount <- function(amount: F64) -> F64 {
 missing_amount: fn(amount: F64) -> F64
 0..14 warning[unused] `missing_amount` is assigned but never used.
 51..59 warning[unused] `fallback` is assigned but never used.
-63..71 error[native] this literal is an R value with no ry type. Use a `Result` or a tag for a missing value
+63..71 error[native] this literal is an R value with no ry type, and a native function holds only ry values. Use a `Result` or a tag for a missing value
 
 #---- each_function_is_reported_where_the_value_first_appears
 #~~~~ script.R
@@ -1014,3 +1014,21 @@ label_width <- function(label: Str) -> F64 {
 label_width: fn(label: Str) -> F64
 0..11 warning[unused] `label_width` is assigned but never used.
 56..68 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+
+#---- operator_on_a_table_expression_of_another_form
+#~~~~ script.R
+units <- function() -> Expr Expr.col("units")
+picked <- function(sales: DataFrame{units: integer[], price: double[]}, wide: Bool) -> DataFrame {
+  DataFrame.filter(sales, (if (wide) Expr.col("units") else Expr.col("price")) > 3L)
+}
+helped <- function(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame {
+  DataFrame.filter(sales, units() > 3L)
+}
+#++++
+== script.R
+units: fn() -> Expr
+picked: fn(sales: DataFrame{units: integer[], price: double[]}, wide: Bool) -> DataFrame
+helped: fn(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame
+46..52 warning[unused] `picked` is assigned but never used.
+232..238 warning[unused] `helped` is assigned but never used.
+171..223 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable

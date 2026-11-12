@@ -17,6 +17,7 @@ use {
         ClientOptions, Notification, Outgoing, RequestKind, Simulation, position_of,
         verify_against_fresh_start,
     },
+    semantics::native::COMPILED_STD,
     serde_json::{Value, json},
     std::{
         collections::{BTreeMap, VecDeque},
@@ -282,20 +283,21 @@ struct NativeProgram {
     /// Files the program reads from its working directory when it runs.
     siblings: Vec<PathBuf>,
     /// Whether the program is written for strict mode, so it must report no error but the
-    /// `native` findings of the functions its `# blocked:` header names. A program that is not
+    /// `native` and `interpreted` findings of the functions its `# blocked:` header names. A program that is not
     /// is left out when strict mode finds another error in it.
     stated: bool,
 }
 
 /// `ry check` and the typed core must agree on which functions run natively. In strict mode a
-/// function whose signature is written in ry types gets a `native` error for whatever keeps it
-/// off native code, so a function without one must not fall back to the interpreter. Each
+/// function whose signature is written in ry types gets a finding for whatever keeps it off
+/// native code: a `native` error for an R value, an `interpreted` warning for ry the typed core
+/// does not compile yet. A function without one must not fall back to the interpreter. Each
 /// program is checked in strict mode and run with `RY_TYPED_LOG`, and every fallback has to
-/// belong to a function that has a `native` finding, that the program declares a boundary
+/// belong to a function that has such a finding, that the program declares a boundary
 /// function, or that `NATIVE_CHECK_EXCEPTIONS` pins.
 ///
 /// A program under `tests/native` states what it shows in its header: `# blocked: f, g` names
-/// the top-level functions that must get a `native` finding, and `# boundary: h` the ones with
+/// the top-level functions that must get a finding, and `# boundary: h` the ones with
 /// an R type in their signature, which the interpreter runs. It runs without strict mode,
 /// because strict mode refuses to run a program with an error and the typed core compiles the
 /// same either way.
@@ -377,6 +379,8 @@ fn native_diagnostics_agree_with_the_typed_core() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut failures = Vec::new();
     let mut pinned = vec![false; NATIVE_CHECK_EXCEPTIONS.len()];
+    // The standard library functions a function of the corpus calls and then runs natively.
+    let mut exercised = vec![false; COMPILED_STD.len()];
     for program in &programs {
         let name = &program.name;
         let project = |strict: bool| {
@@ -430,7 +434,7 @@ fn native_diagnostics_agree_with_the_typed_core() {
             let finding: Value = serde_json::from_str(line)
                 .unwrap_or_else(|error| panic!("{name}: `{line}` is not a finding: {error}"));
             let code = finding["code"].as_str().unwrap_or_default();
-            if code != "native" {
+            if code != "native" && code != "interpreted" {
                 if finding["severity"] == "error" {
                     other_errors.push(format!(
                         "{name}: an error other than `native`, [{code}] {}",
@@ -489,6 +493,22 @@ fn native_diagnostics_agree_with_the_typed_core() {
             failures.push(format!("{name} failed:\n{stderr}"));
             continue;
         }
+        // Every fallback of a function with no finding fails below, so a call in such a
+        // function ran natively.
+        for (line, owner) in lines.iter().zip(&owners) {
+            let Some(owner) = owner else { continue };
+            if boundary.contains(owner) || blocked.contains(owner) {
+                continue;
+            }
+            for (function, exercised) in COMPILED_STD.iter().zip(&mut exercised) {
+                *exercised |= line.match_indices(function).any(|(at, _)| {
+                    line[at + function.len()..].starts_with('(')
+                        && !line[..at].ends_with(|before: char| {
+                            before.is_alphanumeric() || before == '_' || before == '.'
+                        })
+                });
+            }
+        }
         for (function, reason) in typed_fallbacks(&stderr) {
             // A fallback names the function that ran, which may be a local one.
             let function = lines
@@ -526,6 +546,14 @@ fn native_diagnostics_agree_with_the_typed_core() {
             failures.push(format!(
                 "{program}: `{function}` is pinned as an exception and no longer falls back; \
                  remove it from `NATIVE_CHECK_EXCEPTIONS`"
+            ));
+        }
+    }
+    for (function, exercised) in COMPILED_STD.iter().zip(exercised) {
+        if !exercised {
+            failures.push(format!(
+                "`{function}` is listed in `semantics::native::COMPILED_STD`, and no function of \
+                 the corpus that runs natively calls it; add a program under `tests/native`"
             ));
         }
     }

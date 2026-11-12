@@ -61,6 +61,13 @@ pub enum NativeBlockerKind {
     },
     /// `table$column` or `table[["column"]]` outside a conversion.
     ColumnRead,
+    /// `from:to`, which builds an R vector.
+    Range,
+    /// `Num.to_r` or `List.to_r` anywhere but directly in an R call's arguments.
+    ToROutsideCall(Symbol),
+    /// A literal such as `NULL` or `NA`, which has no ry type.
+    RLiteral,
+    /// Legitimate ry that sends the function to the interpreter until the typed core compiles it.
     Uncompiled(Uncompiled),
 }
 
@@ -106,16 +113,14 @@ pub enum Uncompiled {
     MatchGuard,
     MatchPattern,
     MatchScrutinee,
+    TableOperand,
     BranchOnlyName(Symbol),
     TypeChange(Symbol),
     TagReassigned(Symbol),
     BranchTypes,
     GlobalRead(Symbol),
     EnclosingRead(Symbol),
-    Range,
-    ToROutsideCall(Symbol),
     ComputedCall,
-    RLiteral,
     Try,
     Construct(&'static str),
 }
@@ -218,7 +223,36 @@ impl NativeBlockerKind {
                      read: `List.from_r({read})`"
                 )
             }
-            NativeBlockerKind::Uncompiled(construct) => construct.message(),
+            NativeBlockerKind::Range => {
+                format!("`:` builds an R vector, and {HOLDS}. Write `List.range(from, to)`")
+            }
+            NativeBlockerKind::ToROutsideCall(name) => format!(
+                "`{name}` gives an R value, which a native function holds only as the argument of \
+                 an R call. Write it directly inside the call, as in `cat({name}(x))`"
+            ),
+            NativeBlockerKind::RLiteral => format!(
+                "this literal is an R value with no ry type, and {HOLDS}. Use a `Result` or a tag \
+                 for a missing value"
+            ),
+            NativeBlockerKind::Uncompiled(construct) => format!(
+                "this function runs in the interpreter, because {}",
+                construct.reason()
+            ),
+        }
+    }
+
+    /// An R value in a native function breaks the rule the function is written under, which is
+    /// an error. A construct the typed core does not compile yet is the compiler's gap, not the
+    /// program's, so it is a warning that says where native code ends.
+    pub fn is_error(&self) -> bool {
+        !matches!(self, NativeBlockerKind::Uncompiled(_))
+    }
+
+    pub fn code(&self) -> &'static str {
+        if self.is_error() {
+            "native"
+        } else {
+            "interpreted"
         }
     }
 }
@@ -235,7 +269,8 @@ impl Conversion {
 }
 
 impl Uncompiled {
-    fn message(self) -> String {
+    /// What is not compiled, then what to write instead.
+    fn reason(self) -> String {
         const YET: &str = "is not compiled natively yet";
         match self {
             Uncompiled::Dots => format!(
@@ -265,7 +300,7 @@ impl Uncompiled {
                  once at the top of the function"
             ),
             Uncompiled::ReturnInLocalFunction => format!(
-                "`return` inside a local function {YET}, because native code runs a local \
+                "`return` inside a local function {YET}: native code runs a local \
                  function in place. End the function with the value instead"
             ),
             Uncompiled::FunctionValue => format!(
@@ -286,9 +321,8 @@ impl Uncompiled {
                  argument by position"
             ),
             Uncompiled::StdFunction(name) => format!(
-                "`{name}` {YET}, so this function would run in the interpreter. Write the step \
-                 with a loop or another standard library function, or move it into a function \
-                 with an R type in its signature"
+                "`{name}` {YET}. Write the step with a loop or another standard library \
+                 function"
             ),
             Uncompiled::MappedFunction => format!(
                 "a function passed by name {YET} unless it is a typed function of the project or \
@@ -309,6 +343,11 @@ impl Uncompiled {
             Uncompiled::MatchScrutinee => format!(
                 "a `match` on a value that is not a tag or a record {YET}. Compare the value with \
                  `if` and `==`"
+            ),
+            Uncompiled::TableOperand => format!(
+                "an operator applied directly to a table expression that a local function, an \
+                 `if` or a `match` gives {YET}. Assign the expression to a variable first, and \
+                 apply the operator to the variable"
             ),
             Uncompiled::BranchOnlyName(name) => format!(
                 "`{name}` is first set inside a branch or a loop and read after it, which {YET}. \
@@ -332,24 +371,12 @@ impl Uncompiled {
                 format!("reading the global `{name}` {YET}. Pass the value in as a parameter")
             }
             Uncompiled::EnclosingRead(name) => format!(
-                "reading `{name}` from the enclosing function {YET}, because that function is \
+                "reading `{name}` from the enclosing function {YET}: that function is \
                  not native. Pass the value in as a parameter"
-            ),
-            Uncompiled::Range => String::from(
-                "`:` builds an R vector, and a native function holds only ry values. Write \
-                 `List.range(from, to)`",
-            ),
-            Uncompiled::ToROutsideCall(name) => format!(
-                "`{name}` gives an R value, which a native function holds only as the argument of \
-                 an R call. Write it directly inside the call, as in `cat({name}(x))`"
             ),
             Uncompiled::ComputedCall => {
                 format!("a call of a computed function {YET}. Call a function by its name")
             }
-            Uncompiled::RLiteral => String::from(
-                "this literal is an R value with no ry type. Use a `Result` or a tag for a \
-                 missing value",
-            ),
             Uncompiled::Try => format!(
                 "`try` {YET}. Match the result instead, and return the error from its arm: \
                  `match (result) {{ :Ok(value) => ..., :Err(error) => :Err(error) }}`"
@@ -361,7 +388,9 @@ impl Uncompiled {
 
 /// The standard library functions the typed core has native code for, as its lowering spells
 /// them. A function the list leaves out sends its caller to the interpreter wherever it stands.
-const COMPILED_STD: &[&str] = &[
+/// The typed core's lowering is the source of truth, and it lives in a crate this one cannot
+/// read, so `native_diagnostics_agree_with_the_typed_core` checks each name against it.
+pub const COMPILED_STD: &[&str] = &[
     "Dict.contains",
     "Dict.empty",
     "Dict.get",
@@ -638,7 +667,7 @@ enum Use {
     TableArgument,
 }
 
-enum Callee<'db> {
+enum Callee {
     Return,
     Stop,
     Local(ExprId),
@@ -648,7 +677,9 @@ enum Callee<'db> {
     ToR(Symbol),
     Std(Symbol),
     Table,
-    Native(Symbol, FunctionType<'db>),
+    /// A top-level native function, with how many arguments a call passes it unless it takes
+    /// `...`.
+    Native(Symbol, Option<usize>),
     R(Symbol, ROrigin),
     Computed,
 }
@@ -870,7 +901,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         match *module.kind(id) {
             ExpressionKind::Missing | ExpressionKind::Break | ExpressionKind::Next => {}
             ExpressionKind::Literal(LiteralKind::Complex(_) | LiteralKind::Na(_)) => {
-                self.uncompiled(id, Uncompiled::RLiteral);
+                self.block(id, NativeBlockerKind::RLiteral);
             }
             ExpressionKind::Literal(_) => {}
             ExpressionKind::NameRef(name) => self.read(id, name),
@@ -961,7 +992,13 @@ impl<'a, 'db> Judge<'a, 'db> {
             ExpressionKind::Unary { operator, operand } => match operator {
                 UnaryOperator::Tilde => self.uncompiled(id, Uncompiled::Construct("a formula")),
                 UnaryOperator::Help => self.uncompiled(id, Uncompiled::Construct("a help query")),
-                _ => self.walk(operand, self.operand_use(id)),
+                _ => {
+                    let usage = self.operand_use(id);
+                    if usage == Use::TableArgument {
+                        self.table_operand(operand);
+                    }
+                    self.walk(operand, usage);
+                }
             },
             ExpressionKind::Binary {
                 operator,
@@ -988,7 +1025,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     );
                 }
                 BinaryOperator::Sequence => {
-                    self.uncompiled(id, Uncompiled::Range);
+                    self.block(id, NativeBlockerKind::Range);
                     self.walk(lhs, Use::Value);
                     self.walk(rhs, Use::Value);
                 }
@@ -1002,6 +1039,10 @@ impl<'a, 'db> Judge<'a, 'db> {
                 }
                 _ => {
                     let operand = self.operand_use(id);
+                    if operand == Use::TableArgument {
+                        self.table_operand(lhs);
+                        self.table_operand(rhs);
+                    }
                     self.walk(lhs, operand);
                     self.walk(rhs, operand);
                 }
@@ -1139,14 +1180,53 @@ impl<'a, 'db> Judge<'a, 'db> {
     /// How an operator reads its operands. One that builds a DataFrame expression is a table
     /// call, so an operand may be what an argument of one may be.
     fn operand_use(&self, operator: ExprId) -> Use {
-        let db = self.judged.db;
-        let builds_expression = self.ty(operator).is_some_and(
-            |ty| matches!(self.peel(ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Expr"),
-        );
-        if builds_expression {
+        if self.is_expression(operator) {
             Use::TableArgument
         } else {
             Use::Value
+        }
+    }
+
+    fn is_expression(&self, id: ExprId) -> bool {
+        let db = self.judged.db;
+        self.ty(id).is_some_and(
+            |ty| matches!(self.peel(ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Expr"),
+        )
+    }
+
+    /// The typed core tells a table expression among an operator's operands by the operand's
+    /// form, before it compiles the operand: a variable, another operator, or a call of a table
+    /// function or of a top-level native function. An expression of any other form reaches the
+    /// operator as a value native code cannot compare.
+    fn table_operand(&mut self, operand: ExprId) {
+        if !self.is_expression(operand) {
+            return;
+        }
+        let module = self.judged.module;
+        let mut inner = operand;
+        while let ExpressionKind::Paren(next) = *module.kind(inner) {
+            inner = next;
+        }
+        let called = match *module.kind(inner) {
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Pipe,
+                rhs,
+                ..
+            } => match *module.kind(rhs) {
+                ExpressionKind::Call { callee, .. } => Some(callee),
+                _ => return,
+            },
+            ExpressionKind::NameRef(_)
+            | ExpressionKind::Unary { .. }
+            | ExpressionKind::Binary { .. } => return,
+            ExpressionKind::Call { callee, .. } => Some(callee),
+            _ => None,
+        };
+        let told = called.is_some_and(|callee| {
+            matches!(self.callee(callee), Callee::Table | Callee::Native(..))
+        });
+        if !told {
+            self.uncompiled(operand, Uncompiled::TableOperand);
         }
     }
 
@@ -1481,7 +1561,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.scope.truncate(mark);
     }
 
-    fn callee(&self, callee: ExprId) -> Callee<'db> {
+    fn callee(&self, callee: ExprId) -> Callee {
         let module = self.judged.module;
         match *module.kind(callee) {
             ExpressionKind::NameRef(name) => {
@@ -1518,7 +1598,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
-    fn global_callee(&self, callee: ExprId, name: Symbol) -> Callee<'db> {
+    fn global_callee(&self, callee: ExprId, name: Symbol) -> Callee {
         let db = self.judged.db;
         let project = self
             .judged
@@ -1536,7 +1616,8 @@ impl<'a, 'db> Judge<'a, 'db> {
         match ty.map(|ty| ty.kind(db)) {
             Some(TyKind::Function(function)) if !function.inferred => {
                 if is_native_signature(db, self.judged.definitions, function, 0) {
-                    Callee::Native(name, function.clone())
+                    let formals = function.positional.len() + function.named.len();
+                    Callee::Native(name, function.variadic.is_none().then_some(formals))
                 } else {
                     Callee::R(name, ROrigin::Boundary)
                 }
@@ -1605,7 +1686,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             Callee::ToR(name) => {
                 if !matches!(usage, Use::Argument(_) | Use::TableArgument) {
-                    self.uncompiled(id, Uncompiled::ToROutsideCall(name));
+                    self.block(id, NativeBlockerKind::ToROutsideCall(name));
                 }
                 for &(_, value) in arguments {
                     self.walk(value, Use::Value);
@@ -1627,11 +1708,10 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.walk(value, Use::TableArgument);
                 }
             }
-            Callee::Native(name, function) => {
-                let formals = function.positional.len() + function.named.len();
+            Callee::Native(name, formals) => {
                 if named {
                     self.uncompiled(id, Uncompiled::NamedArguments(name));
-                } else if function.variadic.is_none() && formals != arguments.len() {
+                } else if formals.is_some_and(|formals| formals != arguments.len()) {
                     self.uncompiled(id, Uncompiled::ArgumentCount(name));
                 }
                 for &(_, value) in arguments {
@@ -1727,7 +1807,7 @@ fn named_values<'a>(
 }
 
 /// What a name of R, of a package or of ry's own library calls.
-fn library_callee<'db>(name: Symbol) -> Callee<'db> {
+fn library_callee(name: Symbol) -> Callee {
     let text = name.as_str();
     match text {
         "return" => return Callee::Return,

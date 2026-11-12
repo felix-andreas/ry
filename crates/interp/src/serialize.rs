@@ -547,8 +547,7 @@ impl Reader<'_> {
                 if object_kind == SexpType::Closure
                     && attributes.kind() == SexpType::Pairlist
                     && attributes.tag().kind() == SexpType::Symbol
-                    && values::symbol_name(attributes.tag())
-                        == crate::annotations::STREAM_ATTRIBUTE
+                    && values::symbol_name(attributes.tag()) == crate::annotations::STREAM_ATTRIBUTE
                 {
                     crate::heap().root(object);
                     crate::heap().root(attributes);

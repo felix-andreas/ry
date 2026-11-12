@@ -1027,7 +1027,7 @@ the arms above it already cover is an `unreachable-pattern` warning.
 least one item, binding the remaining items to `rest` as a list. `[.., last]` matches from the end.
 `p as name` matches what `p` matches and binds the whole value to `name`:
 
-```r ry run runtime=ry
+```r ry run runtime=ry strict
 describe <- function(xs: List<I64>) -> Str match (xs) {
   [] => "empty",
   [only] => f"just {only}",
@@ -4368,10 +4368,16 @@ annotated where they are.
 
 ### Native functions
 
-In strict mode, a function whose signature is written entirely in ry types is a *native function*,
-and its body may hold only ry values. `ry check` reports each construct that breaks this, with the
-code `native`, because such a function is compiled to machine code and any of these constructs
-would send it to the interpreter instead:
+In strict mode, a function whose signature is written entirely in ry types is a *native function*.
+It is compiled to machine code, and its body may hold only ry values. `ry check` reports each
+construct that would send it to the interpreter instead, under one of two codes:
+
+| Code | Severity | What it marks |
+| --- | --- | --- |
+| `native` | error | an R value used outside a conversion, which breaks the rule |
+| `interpreted` | warning | legitimate ry that the native compiler does not compile yet |
+
+A native function with neither finding runs natively. This is a `native` error:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
@@ -4548,8 +4554,14 @@ native
     it is read: `List.from_r(sales$units)`
 ```
 
-**A construct that is not compiled natively yet.** These are legitimate ry that the native compiler
-does not compile, and each message gives the workaround:
+**An R value written as a literal or an operator.** `a:b` builds an R vector, and `NA` and complex
+literals have no ry type, so each is a `native` error. Write `List.range(a, b)`, and use a `Result`
+or a tag for a missing value. `Num.to_r` and `List.to_r` give an R value too, so they stand directly
+inside the arguments of an R call.
+
+**A construct that is not compiled natively yet.** The program is legitimate ry and runs with the
+same results, but the function that holds the construct runs in the interpreter. The finding is an
+`interpreted` warning, and each message gives the way to write the step that compiles:
 
 ```r
 count_up <- function(limit: I64) -> I64 {
@@ -4565,10 +4577,10 @@ print(count_up(2))
 ```
 
 ```text ry check typing strict
-native
+interpreted
 
-  x `<<-` is not compiled natively yet: a native function changes only its own variables. Return the
-    new value and assign it in the caller
+  ! this function runs in the interpreter, because `<<-` is not compiled natively yet: a native
+    function changes only its own variables. Return the new value and assign it in the caller
 ```
 
 | Construct | What to write instead |
@@ -4587,8 +4599,6 @@ native
 | a `match` on a list or a scalar (so every list pattern), a nested pattern, and an arm with an `if` guard | match a tag, a record or a tuple, and test inside the arm |
 | a read of a global that holds a ry value, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
-| `a:b`, `NA` and complex literals | `List.range(a, b)`; a `Result` or a tag for a missing value |
-| `Num.to_r` or `List.to_r` outside the arguments of an R call | write it directly inside the call |
 
 The rule covers the function's body. How R code calls a native function is not checked: a call from
 the interpreter that passes a record, a tuple, a function, or an argument that is neither a
@@ -4601,8 +4611,9 @@ call with its reason.
 Strict diagnostics carry the code `strict`, so they can be filtered separately from type errors. Each
 origin is reported once, at the exact range of the originating expression. A binding and a bare
 expression are worded differently, because a binding can be annotated and a bare expression cannot.
-What keeps a [native function](#native-functions) off native code carries the code `native`. Both
-are errors, and `ry run` refuses to start a program that has one.
+An R value in a [native function](#native-functions) carries the code `native`. All three are
+errors, and `ry run` refuses to start a program that has one. A construct that sends a native
+function to the interpreter carries the code `interpreted` and is a warning, so the program runs.
 
 ## Syntax errors
 
