@@ -761,11 +761,18 @@ fn echo(mut stream: impl Write, bytes: &[u8]) {
 }
 
 /// While the editor runs, the terminal is raw (no signal); while R evaluates,
-/// Ctrl-C arrives as SIGINT and raises R's cooperative interrupt flag.
+/// Ctrl-C arrives as SIGINT and raises R's cooperative interrupt flag. A process started with
+/// SIGINT ignored keeps ignoring it, which is what R checks for when it installs its own handler.
 #[cfg(unix)]
 fn install_sigint_handler() {
     use std::{mem, ptr};
     unsafe {
+        let mut current: libc::sigaction = mem::zeroed();
+        if libc::sigaction(libc::SIGINT, ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+        {
+            return;
+        }
         let mut action: libc::sigaction = mem::zeroed();
         action.sa_sigaction = libr::sigint_to_r_flag as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);
