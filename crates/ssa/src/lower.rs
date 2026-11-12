@@ -144,6 +144,7 @@ impl Module {
         if dump {
             eprintln!("{}", self.context.func.display());
         }
+        self.context.set_disasm(dump);
         if let Err(failure) = self.jit.define_function(id, &mut self.context) {
             if dump {
                 eprintln!("{failure:?}");
@@ -151,10 +152,11 @@ impl Module {
             self.jit.clear_context(&mut self.context);
             return Err(Error("Cranelift rejected the function"));
         }
-        let size = self
-            .context
-            .compiled_code()
-            .map_or(0, |code| code.code_info().total_size);
+        let compiled = self.context.compiled_code();
+        if let Some(assembly) = compiled.and_then(|code| code.vcode.as_ref()) {
+            eprintln!("{assembly}");
+        }
+        let size = compiled.map_or(0, |code| code.code_info().total_size);
         self.jit.clear_context(&mut self.context);
         Ok(size)
     }
@@ -172,11 +174,7 @@ impl Module {
     }
 
     fn signature(&self, signature: &Signature) -> clif::Signature {
-        let call_conv = match signature.call_conv {
-            CallConv::Host => self.jit.isa().default_call_conv(),
-            CallConv::Tail => ClifCallConv::Tail,
-        };
-        clif_signature(signature, call_conv)
+        clif_signature(signature, self.jit.isa().default_call_conv())
     }
 }
 
@@ -230,13 +228,10 @@ impl ObjectModule {
     /// Declares a function the section exports under `name`, so bodies can call it before it is
     /// defined.
     pub fn declare(&mut self, name: &str, signature: &Signature) -> Result<FuncId, Error> {
-        let call_conv = match signature.call_conv {
-            CallConv::Host => self.object.isa().default_call_conv(),
-            CallConv::Tail => ClifCallConv::Tail,
-        };
+        let host = self.object.isa().default_call_conv();
         let id = self
             .object
-            .declare_function(name, Linkage::Export, &clif_signature(signature, call_conv))
+            .declare_function(name, Linkage::Export, &clif_signature(signature, host))
             .map_err(|_| Error("Cranelift rejected the function declaration"))?;
         self.names.push(name.into());
         Ok(id)
@@ -245,11 +240,8 @@ impl ObjectModule {
     /// Compiles `function` as the body of `id` and returns the size of its machine code.
     pub fn define(&mut self, id: FuncId, function: &Function) -> Result<u32, Error> {
         self.object.clear_context(&mut self.context);
-        let call_conv = match function.signature.call_conv {
-            CallConv::Host => self.object.isa().default_call_conv(),
-            CallConv::Tail => ClifCallConv::Tail,
-        };
-        self.context.func.signature = clif_signature(&function.signature, call_conv);
+        let host = self.object.isa().default_call_conv();
+        self.context.func.signature = clif_signature(&function.signature, host);
         lower(
             function,
             &mut self.object,
@@ -284,8 +276,13 @@ impl From<Error> for &'static str {
     }
 }
 
-fn clif_signature(signature: &Signature, call_conv: ClifCallConv) -> clif::Signature {
-    let mut lowered = clif::Signature::new(call_conv);
+/// `signature` for Cranelift, where `host` is the platform's C convention.
+fn clif_signature(signature: &Signature, host: ClifCallConv) -> clif::Signature {
+    let mut lowered = clif::Signature::new(match signature.call_conv {
+        CallConv::Host => host,
+        CallConv::Tail => ClifCallConv::Tail,
+        CallConv::Preserving => ClifCallConv::PreserveAll,
+    });
     lowered.params.extend(
         signature
             .params
@@ -379,13 +376,7 @@ fn lower(
     let signatures: Vec<clif::SigRef> = function
         .signatures
         .iter()
-        .map(|signature| {
-            let call_conv = match signature.call_conv {
-                CallConv::Host => host,
-                CallConv::Tail => ClifCallConv::Tail,
-            };
-            builder.import_signature(clif_signature(signature, call_conv))
-        })
+        .map(|signature| builder.import_signature(clif_signature(signature, host)))
         .collect();
     let slots: Vec<clif::StackSlot> = function
         .slots

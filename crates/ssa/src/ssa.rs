@@ -165,11 +165,15 @@ impl From<f64> for Ieee64 {
 
 /// How a function receives its arguments. `Host` is the platform's C convention, which every
 /// entry point the runtime calls uses; `Tail` is the convention compiled code calls itself with,
-/// which allows tail calls.
+/// which allows tail calls. A `Preserving` function saves every register it writes and returns
+/// nothing, so a call of it costs its caller no register: a value that is live across the call
+/// stays where it is. Rarely taken paths call the runtime through one, because the allocator
+/// otherwise keeps a value that is live across any call in memory, hot path included.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CallConv {
     Host,
     Tail,
+    Preserving,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -31,7 +31,7 @@ use {
         Value, Variable,
         types::{F64, I32, I64},
     },
-    std::sync::atomic::AtomicBool,
+    std::{cell::Cell, sync::atomic::AtomicBool},
 };
 
 /// A compiled function another one may call: its code's address and its machine signature.
@@ -90,12 +90,20 @@ fn signature(params: &[Type], result: Type) -> Signature {
     signature
 }
 
+/// A runtime function's address, for a call from compiled code.
+macro_rules! address {
+    ($function:path) => {
+        $function as *const () as usize
+    };
+}
+
 /// Compiles `function`, whose calls of other functions index `callees`.
 pub fn compile(
     function: &Function,
     callees: &[Callee],
     r_calls: &[usize],
 ) -> Result<Code, Refusal> {
+    let frees = frees()?;
     ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
@@ -109,6 +117,8 @@ pub fn compile(
             r_calls,
             own,
             host: CallConv::Host,
+            frees,
+            free: None,
             variables: Vec::new(),
             blocks: Vec::new(),
             signatures: FxHashMap::default(),
@@ -179,6 +189,64 @@ fn trampoline(
     Ok(id)
 }
 
+/// The entries compiled code frees a string's buffer and an object through. A drop frees only
+/// when it takes the last reference, and the free functions follow the host's C convention,
+/// under which a call costs its caller every floating-point register and most others. The
+/// allocator would answer by keeping each value that is live across a drop in memory, on the
+/// paths that never free too, so compiled code calls these entries instead: they preserve every
+/// register and pass their argument on.
+#[derive(Clone, Copy)]
+struct Frees {
+    string: usize,
+    object: usize,
+}
+
+thread_local! {
+    /// Compiled on first use and kept per thread, as the code modules are.
+    static FREES: Cell<Option<Frees>> = const { Cell::new(None) };
+}
+
+fn frees() -> Result<Frees, Refusal> {
+    if let Some(frees) = FREES.get() {
+        return Ok(frees);
+    }
+    let frees = ssa::with_module(Allocator::Backtracking, |module| -> Result<Frees, Refusal> {
+        let string = preserving(module, address!(values::ry_str_free))?;
+        let object = preserving(module, address!(values::ry_list_free))?;
+        module.finalize()?;
+        Ok(Frees {
+            string: module.address(string),
+            object: module.address(object),
+        })
+    })?;
+    FREES.set(Some(frees));
+    Ok(frees)
+}
+
+/// A function in the register-preserving convention that passes its one word to the host
+/// function at `address`.
+fn preserving(module: &mut ssa::Module, address: usize) -> Result<FuncId, Refusal> {
+    let mut outer = Signature::new(CallConv::Preserving);
+    outer.params.push(AbiParam::new(I64));
+    let id = module.declare(&outer)?;
+    let mut builder = Builder::new(outer);
+    let mut inner = Signature::new(CallConv::Host);
+    inner.params.push(AbiParam::new(I64));
+    let inner = builder.import_signature(inner);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let &[pointer] = builder.block_params(entry) else {
+        return Err(Refusal::new("a free entry without its parameter"));
+    };
+    let callee = builder.ins().iconst(I64, address as i64);
+    builder.ins().call_indirect(inner, callee, &[pointer]);
+    builder.ins().return_(&[]);
+    builder.seal_all_blocks();
+    module.define(id, &builder.finalize())?;
+    Ok(id)
+}
+
 type SignatureKey = (SmallVec<[Machine; 8]>, SmallVec<[Machine; 3]>);
 
 struct Emitter<'a> {
@@ -189,17 +257,13 @@ struct Emitter<'a> {
     r_calls: &'a [usize],
     own: FuncRef,
     host: CallConv,
+    frees: Frees,
+    /// The signature of a [`Frees`] entry, imported on the function's first drop.
+    free: Option<SigRef>,
     variables: Vec<SmallVec<[Variable; 2]>>,
     blocks: Vec<Block>,
     signatures: FxHashMap<SignatureKey, SigRef>,
     budget: Option<Variable>,
-}
-
-/// A runtime function's address, for a call from compiled code.
-macro_rules! address {
-    ($function:path) => {
-        $function as *const () as usize
-    };
 }
 
 impl Emitter<'_> {
@@ -512,11 +576,11 @@ impl Emitter<'_> {
         match ty {
             Type::Str => {
                 let heap = self.heap_string(values[0], values[1]);
-                self.count(heap, values[0], Some(address!(values::ry_str_free)));
+                self.count(heap, values[0], Some(self.frees.string));
             }
             ty if ty.is_object() => {
                 let live = self.builder.ins().icmp_imm_s(IntCC::NotEqual, values[0], 0);
-                self.count(live, values[0], Some(address!(values::ry_list_free)));
+                self.count(live, values[0], Some(self.frees.object));
             }
             _ => {}
         }
@@ -565,7 +629,20 @@ impl Emitter<'_> {
                 self.builder.ins().jump(done, &[]);
                 self.builder.switch_to_block(release);
                 self.builder.set_cold_block(release);
-                self.call(free, &[I64], &[], &[pointer]);
+                let signature = match self.free {
+                    Some(signature) => signature,
+                    None => {
+                        let mut signature = Signature::new(CallConv::Preserving);
+                        signature.params.push(AbiParam::new(I64));
+                        let imported = self.builder.import_signature(signature);
+                        self.free = Some(imported);
+                        imported
+                    }
+                };
+                let callee = self.iconst(free as i64);
+                self.builder
+                    .ins()
+                    .call_indirect(signature, callee, &[pointer]);
                 self.builder.ins().jump(done, &[]);
             }
         }
