@@ -1,0 +1,31 @@
+# An in-process web server answers a request: httpuv calls the R handler from its event loop,
+# and builds the request environment through Rcpp, which asks R_getVarEx() whether each name is
+# bound by passing a C NULL as the default. plumber serves every request this way.
+
+requires ry-runtime r-package:httpuv r-package:later r-package:curl
+
+file serve.R
+| server <- httpuv::startServer("127.0.0.1", httpuv::randomPort(), list(
+|   call = function(req) list(
+|     status = 200L,
+|     headers = list("Content-Type" = "text/plain"),
+|     body = paste(req$REQUEST_METHOD, req$PATH_INFO, req$QUERY_STRING)
+|   )
+| ))
+| answer <- NULL
+| curl::curl_fetch_multi(
+|   sprintf("http://127.0.0.1:%d/hello?name=ry", server$getPort()),
+|   done = function(response) answer <<- paste(response$status_code, rawToChar(response$content)),
+|   fail = function(message) answer <<- paste("failed:", message)
+| )
+| deadline <- Sys.time() + 20
+| while (is.null(answer) && Sys.time() < deadline) {
+|   curl::multi_run(timeout = 0.05, poll = TRUE)
+|   later::run_now(0.05)
+| }
+| server$stop()
+| cat("answer:", answer, "\n")
+
+run ry run serve.R
+expect exit 0
+expect stdout "answer: 200 GET /hello ?name=ry"
