@@ -642,7 +642,7 @@ impl Lowering<'_> {
             }
             if inst.dest.is_some_and(|dest| members.contains(&dest)) {
                 match &mut inst.op {
-                    Op::NewVector(held, _) => *held = item,
+                    Op::NewVector(held, _) | Op::EmptyList(held, _) => *held = item,
                     Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
                     _ => {}
                 }
@@ -659,11 +659,13 @@ impl Lowering<'_> {
     }
 
     /// A list literal `[a, b, ...]` (`.ry_array`), or an empty one whose storage the preflight
-    /// named (`hint`). An empty list of records or tags is pending until its item type shows.
+    /// named (`hint`), with room for `capacity` items when it comes from `List.with_capacity`.
+    /// An empty list of records or tags is pending until its item type shows.
     unsafe fn list_literal(
         &mut self,
         arguments: &Arguments,
         hint: Option<&str>,
+        capacity: Option<Local>,
     ) -> Result<Local, Refusal> {
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
         for &(ref name, item) in &arguments.items {
@@ -697,10 +699,16 @@ impl Lowering<'_> {
                 Some(_) => return Err(Refusal::new("an empty list of an unknown item type")),
             },
         };
-        let zero = self.int(0);
-        let fresh = self
-            .builder
-            .emit(Type::vector(item), Op::NewVector(item, zero));
+        let fresh = match capacity {
+            Some(capacity) => self
+                .builder
+                .emit(Type::vector(item), Op::EmptyList(item, capacity)),
+            None => {
+                let zero = self.int(0);
+                self.builder
+                    .emit(Type::vector(item), Op::NewVector(item, zero))
+            }
+        };
         let ty = Type::Vector { item, array: true };
         let mut list = self.builder.emit(ty, Op::Relabel(fresh, ty));
         if values.is_empty() && hint == Some("list") {
@@ -2737,9 +2745,20 @@ impl Lowering<'_> {
                     && list.cdr() == rvalues::nil()
                 {
                     let hint = constant_string(hint);
-                    return self.list_literal(&Arguments { items: Vec::new() }, hint.as_deref());
+                    let empty = Arguments { items: Vec::new() };
+                    return self.list_literal(&empty, hint.as_deref(), None);
                 }
-                if self.is_library_call(list, "Dict.empty")? {
+                if self.is_library_call(list, "List.with_capacity", 1)? {
+                    let [capacity] = Arguments::of(list).exactly(1)?[..] else {
+                        return Err(Refusal::new("a malformed `List.with_capacity`"));
+                    };
+                    let capacity = self.value(capacity)?;
+                    let capacity = self.integer_count(capacity)?;
+                    let hint = constant_string(hint);
+                    let empty = Arguments { items: Vec::new() };
+                    return self.list_literal(&empty, hint.as_deref(), Some(capacity));
+                }
+                if self.is_library_call(list, "Dict.empty", 0)? {
                     let ty = constant_string(hint)
                         .as_deref()
                         .and_then(dict_type)
@@ -2748,7 +2767,7 @@ impl Lowering<'_> {
                 }
                 self.value(list)
             }
-            ".ry_array" => self.list_literal(&arguments, None),
+            ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
             "List.concat" => self.concat(&arguments),
             "List.swap" => self.swap(&arguments),
@@ -3352,7 +3371,7 @@ impl Lowering<'_> {
             ));
         }
         let state = match state {
-            Some(state) if self.is_library_call(state, "Dict.empty")? => {
+            Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
                 // An empty dictionary's type is the one the step function declares for its state.
                 let Callable::Inline(formals, body, _) = callable else {
                     return Err(Refusal::new("a walk from `Dict.empty()` with a named step"));
@@ -3483,13 +3502,18 @@ impl Lowering<'_> {
         }
     }
 
-    /// Whether `expression` is a call without arguments of the standard library's `name`, which
-    /// the lookup assumes keeps finding it.
-    unsafe fn is_library_call(&mut self, expression: Sexp, name: &str) -> Result<bool, Refusal> {
+    /// Whether `expression` is a call of the standard library's `name` with `arity` arguments,
+    /// which the lookup assumes keeps finding it.
+    unsafe fn is_library_call(
+        &mut self,
+        expression: Sexp,
+        name: &str,
+        arity: usize,
+    ) -> Result<bool, Refusal> {
         if expression.kind() != SexpType::Language
             || expression.car().kind() != SexpType::Symbol
             || rvalues::symbol_name(expression.car()) != name
-            || expression.cdr() != rvalues::nil()
+            || Arguments::of(expression).items.len() != arity
             || self.lookup(expression.car()).is_some()
         {
             return Ok(false);
