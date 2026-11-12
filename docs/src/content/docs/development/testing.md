@@ -445,18 +445,20 @@ engine, because a failure there reproduces on every host. A beta release require
 empty, intermittent entries included.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
-a case needs a package that is not installed (a case names its packages in a leading
-`# oracle: requires` comment). It lists each such case and exits 1. Install the packages into the
-corpus library with `just corpus`, which the oracle searches by itself ([Corpus and
-oracle](/development/corpus-and-oracle)). For a deliberately partial local run, `--allow-skips`
-skips those cases and marks every summary line `PARTIAL`:
+a case needs a package that is not installed or a locale that is not generated. A case names them
+in a leading `# oracle: requires` comment: packages by name (`# oracle: requires knitr, rmarkdown`)
+and a locale it switches to as `# oracle: requires locale en_US.ISO-8859-1`. The run lists each
+such case and exits 1. Install the packages into the corpus library with `just corpus`, which the
+oracle searches by itself ([Corpus and oracle](/development/corpus-and-oracle)), and generate the
+locales with `sudo tools/dev-setup.sh` (or `tools/oracle-locales.sh` alone). For a deliberately
+partial local run, `--allow-skips` skips those cases and marks every summary line `PARTIAL`:
 
 ```
 skip    cases/datatable__fread.R: needs bit64
 skip    cases/packages__xts_keeps_source_rownames.R: needs xts
 ok      cases/arith__complex_math.R
 ok      cases/base__match_arg_native.R
-PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package)
+PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package or locale)
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 

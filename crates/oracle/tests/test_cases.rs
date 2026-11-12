@@ -253,6 +253,29 @@ fn corpus_library_follows_an_explicit_r_libs() {
 /// oracle compares with the recorded outcomes and asks the engine which packages it has, so a
 /// shell script stands in for both and the test needs no R.
 #[test]
+fn a_case_needing_a_locale_runs_only_where_the_locale_loads() {
+    let directory = std::env::temp_dir().join(format!("oracle-locales-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
+    let case = |name: &str, locale: &str| {
+        let path = directory.join(name);
+        std::fs::write(&path, format!("# oracle: requires locale {locale}\ncat(1)\n"))
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        path
+    };
+    let present = case("present.R", "C.UTF-8");
+    let absent = case("absent.R", "xx_XX.NO-SUCH-CODESET");
+    let (runnable, missing) = runnable_cases(vec![present.clone(), absent.clone()], || {
+        panic!("a locale requirement must not ask GNU R for its packages")
+    });
+    assert_eq!(runnable, vec![present]);
+    assert_eq!(
+        missing,
+        vec![(absent, vec!["locale xx_XX.NO-SUCH-CODESET".to_string()])]
+    );
+    std::fs::remove_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
 fn compare_fails_on_a_missing_package_unless_skips_are_allowed() {
     let directory = std::env::temp_dir().join(format!("oracle-skips-{}", std::process::id()));
     let cases = directory.join("cases");
@@ -307,7 +330,7 @@ fn compare_fails_on_a_missing_package_unless_skips_are_allowed() {
     assert_eq!(status, Some(0), "{text}");
     assert!(
         text.contains(&format!(
-            "PARTIAL {engine}: 1 passed, 0 failed (0 known, 0 new), 1 skipped (1 missing a package)"
+            "PARTIAL {engine}: 1 passed, 0 failed (0 known, 0 new), 1 skipped (1 missing a package or locale)"
         )),
         "{text}"
     );
