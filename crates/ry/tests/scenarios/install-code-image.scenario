@@ -183,3 +183,31 @@ run ry run --runtime ry use.R
 expect exit 0
 expect stdout "[1] 155"
 expect stderr lacks "cannot use the code image"
+
+# Base is lazy-loaded, so a fresh session holds a promise for each base function it has not
+# called yet. The install fetched `drop` while writing the image, and the image names it; a
+# session whose first call of `drop` comes from the package's code forces the promise to read it.
+file flat/DESCRIPTION
+| Package: flat
+| Version: 1.0.0
+| Title: Flattens a number
+| Description: A small package whose code names a base function.
+| License: MIT
+file flat/NAMESPACE
+| export(flat)
+file flat/R/flat.R
+| flat <- function(x) {
+|     r <- drop(x)
+|     for (i in 1:3) r <- r + 1
+|     r
+| }
+file flat.R
+| library(flat, lib.loc = "library")
+| print(flat(0.5))
+run ry install flat -l library
+expect exit 0
+expect stdout "code image: closures=1 written=1"
+run ry run --runtime ry flat.R
+expect exit 0
+expect stdout "[1] 3.5"
+expect stderr lacks "cannot use the code image"
