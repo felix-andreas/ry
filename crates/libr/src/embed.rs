@@ -28,16 +28,17 @@ pub extern "C" fn ry_initialize() -> c_int {
     0
 }
 
-/// With `enabled`, every allocation collects first (with major collections spaced as
+/// With `mode` 1, every allocation collects first (with major collections spaced as
 /// [`heap::GcStress::EveryAllocation`] describes), which turns a missing root into a crash at the
-/// allocation that exposes it.
+/// allocation that exposes it. Mode 2 asks for [`heap::GcStress::Young`], which also frees
+/// untenured survivors of earlier collections. Mode 0 turns the stress off.
 #[unsafe(no_mangle)]
-pub extern "C" fn ry_set_gc_stress(enabled: c_int) {
+pub extern "C" fn ry_set_gc_stress(mode: c_int) {
     runtime().heap.update_policy(|policy| {
-        policy.stress = if enabled != 0 {
-            GcStress::EveryAllocation
-        } else {
-            GcStress::Off
+        policy.stress = match mode {
+            0 => GcStress::Off,
+            2 => GcStress::Young,
+            _ => GcStress::EveryAllocation,
         }
     });
 }
