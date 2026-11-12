@@ -1982,7 +1982,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "heap",
  "interp",
- "libc",
  "rustc-hash",
  "smallvec",
  "ssa",

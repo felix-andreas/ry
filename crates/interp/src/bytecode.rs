@@ -25,8 +25,7 @@
 //!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
 //!   slot hints (an integer vector, one per lookup site), the ninth the stored half of the
 //!   effect-free fact (see [`crate::effects`]), the tenth the last argument-match plan of a
-//!   closure body (see `eval::match_args_cached`), and the eleventh the baseline tier's machine
-//!   code (an external pointer whose address is a [`BaselineCode`]), `NULL` until it exists.
+//!   closure body (see `eval::match_args_cached`), and the eleventh the slot table (see [`SLOTS`]).
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -155,11 +154,6 @@ pub struct Tier {
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
-    /// Called once a body without baseline code reaches [`Tier::baseline_threshold`] entries or
-    /// backward jumps. It stores the body's [`BaselineCode`] in its `BASELINE` constant, or
-    /// leaves the constant `NULL` when the body does not compile.
-    pub baseline: unsafe fn(&Machine<'_>),
-    pub baseline_threshold: i32,
     /// Called before a typed closure gets a frame, with its arguments matched by position or by
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
@@ -620,12 +614,11 @@ pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
 pub const SUMMARY: usize = 8;
 pub const MATCHES: usize = 9;
-pub const BASELINE: usize = 10;
 /// `NULL`, or for a closure body whose call frames keep their variables in slots, a list of the
 /// slot table (per inline cache, the slot of the symbol a `GetVar`, `SetVar` or `GetFun` with
 /// that cache reads, or -1) and the slots' symbols, the formals first in order.
-pub const SLOTS: usize = 11;
-pub const FIRST_CONSTANT: usize = 12;
+pub const SLOTS: usize = 10;
+pub const FIRST_CONSTANT: usize = 11;
 
 /// The most formals a slot frame takes: [`crate::Frame::missing`] has a bit per formal.
 pub const MAX_SLOT_FORMALS: usize = 64;
@@ -655,7 +648,7 @@ pub mod profile {
     pub const RECORDING: usize = 3;
     /// The entry count at which the next entry of this code asks [`super::entry_event`] what to
     /// do, or `i32::MIN` to ask at the very next entry. Every tier decision at entry (recording,
-    /// the first-call compile, the entry-threshold compile, baseline code, running optimized
+    /// the first-call compile, the entry-threshold compile, running optimized
     /// code) happens at a known count, so one comparison per call stands in for testing each
     /// of them, which cost about 30 instructions per call of every body. Whatever changes a
     /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
@@ -1035,7 +1028,7 @@ pub enum Op {
     /// `dst program target`: an [`Op::Fused`] site that gave up, which does nothing. The
     /// compiler emits it when the ordinary code did not take the expected shape, and a fused
     /// site rewrites its own opcode to it after [`fusion::GIVE_UP`] declines in a row, so a site
-    /// that never fuses costs one dispatch in tier 0 and no code at all in baseline code.
+    /// that never fuses costs one dispatch in tier 0.
     Unfused,
     /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
     /// `symbol`, or in the global environment.
@@ -2212,7 +2205,6 @@ impl Compiler {
         values::ints_mut(profile)[profile::NEXT] = i32::MIN;
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
-        heap.set_element(constants, BASELINE, nil());
         heap.set_element(constants, SUMMARY, compiler.summary);
         heap.set_element(constants, SLOTS, compiler.slot_table()?);
         let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
@@ -5561,39 +5553,28 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     } else {
         None
     };
-    if entered.is_none()
-        && entries == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && constants.element(BASELINE) == nil()
-    {
-        (tier.baseline)(machine);
-    }
     // The tier may have compiled, refused, or moved the counters, so the schedule is derived
     // from what they hold now.
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES];
     let state = profile[profile::TIER_STATE];
-    profile[profile::NEXT] = if constants.element(TIER1) != nil()
-        || (state >= 0 && entries >= tier.entry_threshold)
-    {
-        i32::MIN
-    } else {
-        let start = recording_start(tier.entry_threshold);
-        let baseline = (tier.baseline_threshold != NEVER && constants.element(BASELINE) == nil())
-            .then_some(tier.baseline_threshold);
-        [
-            (state >= 0).then_some(1),
-            (2 < start).then_some(2),
-            (state >= 0).then_some(start),
-            (state >= 0).then_some(tier.entry_threshold),
-            baseline,
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|&count| count > entries)
-        .min()
-        .unwrap_or(NEVER)
-    };
+    profile[profile::NEXT] =
+        if constants.element(TIER1) != nil() || (state >= 0 && entries >= tier.entry_threshold) {
+            i32::MIN
+        } else {
+            let start = recording_start(tier.entry_threshold);
+            [
+                (state >= 0).then_some(1),
+                (2 < start).then_some(2),
+                (state >= 0).then_some(start),
+                (state >= 0).then_some(tier.entry_threshold),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|&count| count > entries)
+            .min()
+            .unwrap_or(NEVER)
+        };
     entered
 }
 
@@ -5886,10 +5867,6 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     };
     if !SINGLE {
         release(&state);
-        if let Some(baseline) = baseline_code(state.constants) {
-            run_baseline(&mut state, baseline, pc);
-            return (state.exit, STOP);
-        }
     }
     (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
     (state.exit, state.stepped)
@@ -5973,102 +5950,12 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>) -> Activation<'m, 'a>
     }
 }
 
-/// The machine code the baseline tier compiled for these constants' code, if any.
-#[inline(always)]
-unsafe fn baseline_code(constants: Sexp) -> Option<BaselineCode> {
-    let holder = pool_entry(constants, BASELINE);
-    if holder.kind() != SexpType::ExternalPtr {
-        return None;
-    }
-    let address = holder.external_address();
-    // SAFETY: the baseline tier stores only addresses of functions with this signature.
-    (!address.is_null())
-        .then(|| std::mem::transmute::<*mut std::ffi::c_void, BaselineCode>(address))
-}
-
-/// Runs baseline machine code for the activation from `pc` until the activation returns. A
-/// panic inside an instruction is parked while the machine code returns (unwinding through it
-/// is undefined) and resumed here.
-#[inline(never)]
-unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, pc: usize) {
-    baseline((state as *mut Activation<'_, '_>).cast(), pc);
-    if let Some(payload) = PARKED_PANIC.take() {
-        std::panic::resume_unwind(payload);
-    }
-}
-
-thread_local! {
-    /// A panic raised inside a baseline step, carried past the machine code that called it.
-    static PARKED_PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// The baseline tier's machine code for one body: called with the activation and the pc to
-/// start at, it runs instructions until one answers [`STOP`], leaving the result where the
-/// interpreter's handler chain leaves it.
-pub type BaselineCode = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
-
-/// One instruction run for baseline machine code: it takes the activation and the
-/// instruction's pc and answers where to continue, encoded by [`baseline_answer`].
-pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> usize;
-
-/// What a [`BaselineStep`] answers when the activation is done.
-pub const BASELINE_STOP: usize = STOP;
-
-/// Encodes the pc a step continues at for baseline code: 0 for the next instruction, the pc
-/// plus one for any other, and [`STOP`] as itself. Almost every instruction falls through, and
-/// a zero answer lets the code after each call be one test and one branch instead of a compare
-/// against the next pc, which keeps the per-instruction code short.
-#[inline(always)]
-pub fn baseline_answer(pc: usize, next: usize) -> usize {
-    if pc == next {
-        0
-    } else if pc == STOP {
-        STOP
-    } else {
-        pc + 1
-    }
-}
-
-/// Where baseline machine code finds what it reads directly instead of calling a step.
-pub mod baseline_layout {
-    use super::Activation;
-    /// The activation's register window pointer.
-    pub const REGISTERS: usize = std::mem::offset_of!(Activation<'static, 'static>, registers);
-    /// The activation's `Interp` pointer.
-    pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
-    /// The pointer to the activation's header register, which holds its environment.
-    pub const HEADER: usize = std::mem::offset_of!(Activation<'static, 'static>, header);
-    /// The pointer to the code's slot map, one `i32` frame slot (or -1) per lookup slot; null
-    /// when the code has no slot table.
-    pub const SLOT_MAP: usize = std::mem::offset_of!(Activation<'static, 'static>, slot_map);
-    /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
-    pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
-        + std::mem::offset_of!(super::LookupCache, hints);
-    /// The feedback pointer, null while nothing records type feedback.
-    pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
+/// Where tier-1 code finds the interpreter state it writes directly.
+pub mod interp_layout {
     /// The visibility flag inside `Interp`.
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.
     pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
-}
-
-/// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
-#[inline(always)]
-unsafe fn guarded(
-    state: *mut std::ffi::c_void,
-    at: usize,
-    step: impl FnOnce(&mut Activation<'_, '_>, usize) -> usize,
-) -> usize {
-    let state = &mut *state.cast::<Activation<'_, '_>>();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(&mut *state, at))) {
-        Ok(pc) => pc,
-        Err(payload) => {
-            PARKED_PANIC.set(Some(payload));
-            state.exit = Ok(nil());
-            STOP
-        }
-    }
 }
 
 /// The handler table position of the instruction at `pc`.
@@ -6101,30 +5988,7 @@ const STOP: usize = usize::MAX;
 /// activation's result in [`Activation::exit`], so that few values stay live across the calls
 /// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
-    ($($name:ident, $step:ident: $op:ident, $roots:literal, $body:ident;)*) => {
-        $(
-            unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
-                guarded(state, at, |state, at| {
-                    let instruction =
-                        Instruction { code: state.code, at, registers: state.registers };
-                    let flow = $body(state, instruction);
-                    let next = at + 1 + operand_count(Op::$op);
-                    let pc = advance::<false>(state, at, next, flow);
-                    if $roots && pc != STOP {
-                        release(state);
-                    }
-                    baseline_answer(pc, next)
-                })
-            }
-        )*
-
-        /// The step each op runs as in baseline machine code, indexed like [`OPS`].
-        pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
-            let mut table: [BaselineStep; OPS.len()] = [step_jump; OPS.len()];
-            $(table[Op::$op as usize] = $step;)*
-            table
-        };
-
+    ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
         // Never inlined: a fast handler tail-calls these on its slow path, and inlining one
         // would bring its frame setup back onto the fast path.
         $(
@@ -6208,56 +6072,56 @@ static RUN_HANDLERS: [Handler; HANDLER_COUNT] =
 static STEP_HANDLERS: [Handler; HANDLER_COUNT] = handler_table::<true>();
 
 handlers! {
-    run_constant, step_constant: Constant, false, op_constant;
-    run_get_var, step_get_var: GetVar, true, op_get_var;
-    run_set_var, step_set_var: SetVar, true, op_set_var;
-    run_get_fun, step_get_fun: GetFun, true, op_get_fun;
-    run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
-    run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
-    run_call_builtin_rebinding, step_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
-    run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
-    run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
-    run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
-    run_field, step_field: Field, true, op_field;
-    run_item, step_item: Item, true, op_item;
-    run_match_shape, step_match_shape: MatchShape, false, op_match_shape;
-    run_match_tag, step_match_tag: MatchTag, false, op_match_tag;
-    run_match_literal, step_match_literal: MatchLiteral, true, op_match_literal;
-    run_slot, step_slot: Slot, true, op_slot;
-    run_match_fail, step_match_fail: MatchFail, true, op_match_fail;
-    run_construct, step_construct: Construct, true, op_construct;
-    run_move, step_move: Move, false, op_move;
-    run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
-    run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
-    run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
-    run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
-    run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
-    run_ast, step_ast: Ast, true, op_ast;
-    run_guard, step_guard: Guard, true, op_guard;
-    run_resume, step_resume: Resume, false, op_resume;
-    run_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless;
-    run_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic;
-    run_return, step_return: Return, false, op_return;
-    run_for_init, step_for_init: ForInit, true, op_for_init;
-    run_for_step, step_for_step: ForStep, true, op_for_step;
-    run_for_end, step_for_end: ForEnd, false, op_for_end;
-    run_invisible, step_invisible: Invisible, false, op_invisible;
-    run_visible, step_visible: Visible, false, op_visible;
-    run_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref;
-    run_end_statement, step_end_statement: EndStatement, false, op_end_statement;
-    run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
-    run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
-    run_closure, step_closure: Closure, true, op_closure;
-    run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
-    run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
-    run_replace, step_replace: Replace, true, op_replace;
-    run_missing, step_missing: Missing, true, op_missing;
-    run_namespace, step_namespace: Namespace, true, op_namespace;
-    run_fused, step_fused: Fused, true, op_fused;
-    run_unfused, step_unfused: Unfused, false, op_unfused;
-    run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
-    run_internal, step_internal: Internal, true, op_internal;
+    run_constant: Constant, false, op_constant;
+    run_get_var: GetVar, true, op_get_var;
+    run_set_var: SetVar, true, op_set_var;
+    run_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
+    run_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field: Field, true, op_field;
+    run_item: Item, true, op_item;
+    run_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot: Slot, true, op_slot;
+    run_match_fail: MatchFail, true, op_match_fail;
+    run_construct: Construct, true, op_construct;
+    run_move: Move, false, op_move;
+    run_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast: Ast, true, op_ast;
+    run_guard: Guard, true, op_guard;
+    run_resume: Resume, false, op_resume;
+    run_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return: Return, false, op_return;
+    run_for_init: ForInit, true, op_for_init;
+    run_for_step: ForStep, true, op_for_step;
+    run_for_end: ForEnd, false, op_for_end;
+    run_invisible: Invisible, false, op_invisible;
+    run_visible: Visible, false, op_visible;
+    run_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right: LogicRight, true, op_logic_right;
+    run_closure: Closure, true, op_closure;
+    run_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace: Replace, true, op_replace;
+    run_missing: Missing, true, op_missing;
+    run_namespace: Namespace, true, op_namespace;
+    run_fused: Fused, true, op_fused;
+    run_unfused: Unfused, false, op_unfused;
+    run_super_assign: SuperAssign, true, op_super_assign;
+    run_internal: Internal, true, op_internal;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -6293,46 +6157,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         return;
     }
     release(state);
-    // A body whose baseline code appeared while this activation looped in tier 0 moves over
-    // at the back edge, so its loop does not finish in the slower tier.
-    if target < at
-        && let Some(baseline) = baseline_code(state.constants)
-    {
-        run_baseline(state, baseline, pc);
-        return;
-    }
     become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
-}
-
-/// `Jump` for baseline code, which jumps forward by itself and calls this only for a backward
-/// jump: it polls for an interrupt and counts the back edge for the optimizing tier.
-unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize {
-    guarded(state, at, |state, at| {
-        let target = *state.code.add(at + 1) as usize;
-        let mut pc = target;
-        if target < at {
-            if let Err(unwind) = crate::unwind::poll_interrupt() {
-                pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = &(*state.interp).bytecode.tier
-                && back_edge_due(state, tier)
-            {
-                match back_edge(state, tier, pc) {
-                    BackEdge::Continue(resume) => pc = resume,
-                    BackEdge::Finished(result) => {
-                        state.exit = result;
-                        return STOP;
-                    }
-                    BackEdge::Unwound { pc: resume, unwind } => {
-                        pc = failed::<false>(state, resume, unwind);
-                    }
-                }
-            }
-        }
-        if pc != STOP {
-            release(state);
-        }
-        baseline_answer(pc, at + 1 + operand_count(Op::Jump))
-    })
 }
 
 // Fast paths and specialized forms.
@@ -10112,16 +9937,14 @@ enum BackEdge {
 }
 
 /// Counts a backward jump and answers whether it reaches a count [`back_edge`] acts on. Every
-/// backward jump of every loop pays this, so it is one increment and three comparisons, inlined
+/// backward jump of every loop pays this, so it is one increment and two comparisons, inlined
 /// into the jump; the rest waits in [`back_edge`] for the counts that need it.
 #[inline(always)]
 unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
     let profile = values::ints_mut(state.constants.element(PROFILE));
     let count = profile[profile::BACK_EDGES].saturating_add(1);
     profile[profile::BACK_EDGES] = count;
-    count >= tier.back_edge_threshold
-        || count == tier.back_edge_threshold / 2
-        || count == tier.baseline_threshold
+    count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2
 }
 
 #[inline(never)]
@@ -10135,13 +9958,6 @@ unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> B
         profile[profile::RECORDING] = 1;
         state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
     }
-    if profile[profile::BACK_EDGES] == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && machine.code.cdr().element(BASELINE) == nil()
-    {
-        (tier.baseline)(machine);
-    }
-    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }

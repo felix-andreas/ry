@@ -408,5 +408,3 @@ where frame work is about 2.2k instructions per call.
 - Whether the JIT's tier 1 should read slots directly. It already keeps its own slots for the same
   symbols (`crates/jit/src/analysis.rs`) and writes them back to the heap frame. With slot frames,
   tier 1 could share the interpreter's slots, which would remove its write-back.
-- The baseline tier probes the heap frame inline at fixed offsets (`heap::env::layout`). It would
-  read slots by index instead.
