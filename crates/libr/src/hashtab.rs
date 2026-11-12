@@ -307,31 +307,37 @@ pub unsafe extern "C" fn R_maphash(table_value: Hashtab, function: Sexp) -> Sexp
 
 unsafe extern "C" {
     fn ry_maphash_call(
-        function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void),
+        function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void) -> Option<Sexp>,
         key: Sexp,
         value: Sexp,
         data: *mut c_void,
+        result: *mut Option<Sexp>,
         status: *mut c_int,
     );
 }
 
-/// `R_maphashC(h, FUN, data)`: calls the C function `FUN(key, value, data)` for each entry.
+/// `R_maphashC(h, FUN, data)`: calls the C function `FUN(key, value, data)` for each entry
+/// until one returns a value other than C `NULL`, and returns that value, or C `NULL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_maphashC(
     table_value: Hashtab,
-    function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void),
+    function: unsafe extern "C" fn(Sexp, Sexp, *mut c_void) -> Option<Sexp>,
     data: *mut c_void,
-) {
+) -> Option<Sexp> {
     enter(|| {
         let cell = table(table_value)?;
         for (key, value) in entries(cell) {
+            let mut result = None;
             let mut status = 0;
             crate::boundary::with_native_scope(|| {
-                ry_maphash_call(function, key, value, data, &mut status);
+                ry_maphash_call(function, key, value, data, &mut result, &mut status);
                 status
             })?;
+            if result.is_some() {
+                return Ok(result);
+            }
         }
-        Ok(())
+        Ok(None)
     })
 }
 

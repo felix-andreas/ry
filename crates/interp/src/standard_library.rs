@@ -2355,15 +2355,22 @@ unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
 unsafe fn list_with_capacity(call: &Call<'_>) -> R<Sexp> {
     let [capacity] = arguments(call, ["capacity"])?;
     let capacity = count(call, "capacity", capacity)?;
-    resizable(SexpType::List, 0, capacity)
+    Ok(arrays::finish(resizable(SexpType::Logical, 0, capacity)?))
 }
 
 unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
     let [list, spare] = arguments(call, ["list", "spare"])?;
     let spare = count(call, "spare", spare)?;
-    // An empty Array has no item type to reserve room for, and an Array the call does not own
-    // is copied by its next update anyway.
+    // An Array the call does not own is copied by its next update anyway.
     if list.is_array() {
+        if length(list) == 0 {
+            let room = spare.max(if crate::heap().is_resizable(list) {
+                list.capacity() as usize
+            } else {
+                0
+            });
+            return Ok(arrays::finish(resizable(SexpType::Logical, 0, room)?));
+        }
         if !owned_array(call, list) {
             return Ok(list);
         }
@@ -3650,6 +3657,21 @@ unsafe fn owned_for(call: &Call<'_>, list: Sexp, value: Sexp) -> bool {
 /// fit an Array's item type: the caller then builds a new list, which reports that item.
 unsafe fn append_owned(call: &Call<'_>, list: Sexp, items: &[Sexp]) -> R<Option<Sexp>> {
     let array = list.is_array();
+    let heap = crate::heap();
+    if array && length(list) == 0 {
+        // An empty Array is stored as `logical` until its first items decide its storage, so
+        // they go into a new Array that keeps the room `List.with_capacity` set aside.
+        if !heap.is_resizable(list) || list.capacity() as usize <= items.len() {
+            return Ok(None);
+        }
+        let Ok(first) = arrays::from_items(items)? else {
+            return Ok(None);
+        };
+        return Ok(Some(arrays::finish(with_capacity(
+            first,
+            list.capacity() as usize,
+        )?)));
+    }
     let owned = if array {
         owned_array(call, list) && items.iter().all(|&item| arrays::holds_item(list, item))
     } else {
@@ -3658,7 +3680,6 @@ unsafe fn append_owned(call: &Call<'_>, list: Sexp, items: &[Sexp]) -> R<Option<
     if !owned {
         return Ok(None);
     }
-    let heap = crate::heap();
     let count = length(list);
     let needed = count + items.len();
     let list = if heap.is_resizable(list) && needed <= list.capacity() as usize {
@@ -3696,7 +3717,7 @@ unsafe fn replace_owned(list: Sexp, at: usize, value: Sexp) -> R<()> {
 }
 
 /// A fresh resizable vector of `kind` with room for `capacity` elements and length `count`.
-unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
+pub(crate) unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
     let heap = crate::heap();
     let vector = heap.alloc_resizable_vector(kind, capacity.max(count) as isize)?;
     heap.root(vector);

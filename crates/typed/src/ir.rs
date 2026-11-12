@@ -387,6 +387,9 @@ pub enum Op {
     Slice(Local, Local, Local),
     /// A new vector of this many default items (`numeric(n)`, `character(n)`).
     NewVector(Item, Local),
+    /// An empty ry list with room for this many items (`List.with_capacity(n)`), failing for a
+    /// negative count.
+    EmptyList(Item, Local),
     /// `seq_len(n)`, failing for a negative `n`.
     SeqLen(Local),
     /// `from:to` of integers.
@@ -518,6 +521,7 @@ impl Op {
             | Truth(a)
             | Length(a)
             | NewVector(_, a)
+            | EmptyList(_, a)
             | SeqLen(a)
             | VectorNot(a)
             | VectorMath(_, _, a)

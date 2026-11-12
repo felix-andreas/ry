@@ -155,6 +155,7 @@ pub unsafe fn lower(
     closure: Sexp,
     params: &[Type],
     guess: Type,
+    declared: Option<Type>,
     callees: &mut dyn Callees,
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
@@ -174,6 +175,8 @@ pub unsafe fn lower(
         env: closure.tag(),
         params: SmallVec::from_slice(params),
         guess,
+        declared,
+        tails: SmallVec::new(),
         callees,
         scopes: vec![Scope::default()],
         loops: Vec::new(),
@@ -190,6 +193,7 @@ pub unsafe fn lower(
         converted: None,
         pending: Vec::new(),
     };
+    tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
     assigned_symbols(body, &mut assigned);
     for (index, &(symbol, _)) in formals.iter().enumerate() {
@@ -287,6 +291,11 @@ struct Lowering<'c> {
     env: Sexp,
     params: SmallVec<[Type; 4]>,
     guess: Type,
+    /// The result type the function declares, which a `match` whose value is the function's
+    /// result lowers its arms against ([`Lowering::switch_shapes`]).
+    declared: Option<Type>,
+    /// The `match` calls whose value is the function's result.
+    tails: SmallVec<[Sexp; 2]>,
     callees: &'c mut dyn Callees,
     /// The function's own names, then one scope per inlined function.
     scopes: Vec<Scope>,
@@ -642,7 +651,7 @@ impl Lowering<'_> {
             }
             if inst.dest.is_some_and(|dest| members.contains(&dest)) {
                 match &mut inst.op {
-                    Op::NewVector(held, _) => *held = item,
+                    Op::NewVector(held, _) | Op::EmptyList(held, _) => *held = item,
                     Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
                     _ => {}
                 }
@@ -659,11 +668,13 @@ impl Lowering<'_> {
     }
 
     /// A list literal `[a, b, ...]` (`.ry_array`), or an empty one whose storage the preflight
-    /// named (`hint`). An empty list of records or tags is pending until its item type shows.
+    /// named (`hint`), with room for `capacity` items when it comes from `List.with_capacity`.
+    /// An empty list of records or tags is pending until its item type shows.
     unsafe fn list_literal(
         &mut self,
         arguments: &Arguments,
         hint: Option<&str>,
+        capacity: Option<Local>,
     ) -> Result<Local, Refusal> {
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
         for &(ref name, item) in &arguments.items {
@@ -697,10 +708,16 @@ impl Lowering<'_> {
                 Some(_) => return Err(Refusal::new("an empty list of an unknown item type")),
             },
         };
-        let zero = self.int(0);
-        let fresh = self
-            .builder
-            .emit(Type::vector(item), Op::NewVector(item, zero));
+        let fresh = match capacity {
+            Some(capacity) => self
+                .builder
+                .emit(Type::vector(item), Op::EmptyList(item, capacity)),
+            None => {
+                let zero = self.int(0);
+                self.builder
+                    .emit(Type::vector(item), Op::NewVector(item, zero))
+            }
+        };
         let ty = Type::Vector { item, array: true };
         let mut list = self.builder.emit(ty, Op::Relabel(fresh, ty));
         if values.is_empty() && hint == Some("list") {
@@ -2737,9 +2754,20 @@ impl Lowering<'_> {
                     && list.cdr() == rvalues::nil()
                 {
                     let hint = constant_string(hint);
-                    return self.list_literal(&Arguments { items: Vec::new() }, hint.as_deref());
+                    let empty = Arguments { items: Vec::new() };
+                    return self.list_literal(&empty, hint.as_deref(), None);
                 }
-                if self.is_library_call(list, "Dict.empty")? {
+                if self.is_library_call(list, "List.with_capacity", 1)? {
+                    let [capacity] = Arguments::of(list).exactly(1)?[..] else {
+                        return Err(Refusal::new("a malformed `List.with_capacity`"));
+                    };
+                    let capacity = self.value(capacity)?;
+                    let capacity = self.integer_count(capacity)?;
+                    let hint = constant_string(hint);
+                    let empty = Arguments { items: Vec::new() };
+                    return self.list_literal(&empty, hint.as_deref(), Some(capacity));
+                }
+                if self.is_library_call(list, "Dict.empty", 0)? {
                     let ty = constant_string(hint)
                         .as_deref()
                         .and_then(dict_type)
@@ -2748,7 +2776,7 @@ impl Lowering<'_> {
                 }
                 self.value(list)
             }
-            ".ry_array" => self.list_literal(&arguments, None),
+            ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
             "List.concat" => self.concat(&arguments),
             "List.swap" => self.swap(&arguments),
@@ -3352,7 +3380,7 @@ impl Lowering<'_> {
             ));
         }
         let state = match state {
-            Some(state) if self.is_library_call(state, "Dict.empty")? => {
+            Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
                 // An empty dictionary's type is the one the step function declares for its state.
                 let Callable::Inline(formals, body, _) = callable else {
                     return Err(Refusal::new("a walk from `Dict.empty()` with a named step"));
@@ -3483,13 +3511,18 @@ impl Lowering<'_> {
         }
     }
 
-    /// Whether `expression` is a call without arguments of the standard library's `name`, which
-    /// the lookup assumes keeps finding it.
-    unsafe fn is_library_call(&mut self, expression: Sexp, name: &str) -> Result<bool, Refusal> {
+    /// Whether `expression` is a call of the standard library's `name` with `arity` arguments,
+    /// which the lookup assumes keeps finding it.
+    unsafe fn is_library_call(
+        &mut self,
+        expression: Sexp,
+        name: &str,
+        arity: usize,
+    ) -> Result<bool, Refusal> {
         if expression.kind() != SexpType::Language
             || expression.car().kind() != SexpType::Symbol
             || rvalues::symbol_name(expression.car()) != name
-            || expression.cdr() != rvalues::nil()
+            || Arguments::of(expression).items.len() != arity
             || self.lookup(expression.car()).is_some()
         {
             return Ok(false);
@@ -3682,11 +3715,19 @@ impl Lowering<'_> {
     /// Branches on the shape of the box `value`, lowering `arm` once for each of `shapes` and,
     /// unless they are all the box may have, once with `None` for any other, and joins the
     /// values the arms complete with.
+    ///
+    /// `target` is the type the switch's value must have, the function's declared result when
+    /// that value is the function's result. An arm for a shape only confirmed somewhere whose
+    /// value cannot have it gives up for that shape alone, as an arm that does not lower does.
+    /// A tag from R is any tag, whatever the annotation says, so ill-typed R code can confirm
+    /// `:One(F64)` beside the `:One(I64)` a function declares, and without a target the arms
+    /// would disagree and the whole function would refuse for the rest of the session.
     unsafe fn switch_shapes(
         &mut self,
         value: Local,
         shapes: &[u32],
         exhaustive: bool,
+        target: Option<Type>,
         arm: &mut dyn FnMut(&mut Self, Option<u32>) -> Result<Option<Local>, Refusal>,
     ) -> Result<Option<Local>, Refusal> {
         let mut cases: SmallVec<[Option<u32>; 4]> =
@@ -3726,6 +3767,19 @@ impl Lowering<'_> {
                         return Err(refusal);
                     }
                     Ok(None)
+                }
+                (Ok(Some(completed)), checkpoint) if target.is_some() => {
+                    match (self.toward(completed, target), checkpoint) {
+                        (Some(completed), _) => Ok(Some(completed)),
+                        (None, Some(checkpoint)) => {
+                            if self.rewind(checkpoint, body) {
+                                Ok(None)
+                            } else {
+                                Ok(Some(completed))
+                            }
+                        }
+                        (None, None) => Ok(Some(completed)),
+                    }
                 }
                 (completed, _) => completed,
             };
@@ -3772,6 +3826,17 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Fail);
         }
         Ok(result)
+    }
+
+    /// `value` as a value of `target`, converting a number to the `I64` a function declares as
+    /// its exit does, or `None` when it cannot be one.
+    unsafe fn toward(&mut self, value: Local, target: Option<Type>) -> Option<Local> {
+        let target = target?;
+        let value = match (target, self.builder.ty(value)) {
+            (Type::I64, Type::Int | Type::Dbl) => self.to_i64(value).ok()?,
+            _ => value,
+        };
+        joined(target, self.builder.ty(value)).map(|_| value)
     }
 
     fn checkpoint(&self) -> Checkpoint {
@@ -3858,27 +3923,36 @@ impl Lowering<'_> {
             pattern_layouts(pattern, &mut layouts, &mut tags)?;
         }
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(value), &layouts, &tags)?;
-        self.switch_shapes(value, &candidates, exhaustive, &mut |lowering, shape| {
-            for &(pattern, body) in &parsed {
-                let mut bindings: SmallVec<[(Sexp, Option<usize>); 4]> = SmallVec::new();
-                if !pattern_matches(pattern, shape, &mut bindings)? {
-                    continue;
+        let target = (self.inlined.is_empty() && self.tails.contains(&call))
+            .then_some(self.declared)
+            .flatten();
+        self.switch_shapes(
+            value,
+            &candidates,
+            exhaustive,
+            target,
+            &mut |lowering, shape| {
+                for &(pattern, body) in &parsed {
+                    let mut bindings: SmallVec<[(Sexp, Option<usize>); 4]> = SmallVec::new();
+                    if !pattern_matches(pattern, shape, &mut bindings)? {
+                        continue;
+                    }
+                    for (symbol, field) in bindings {
+                        let bound = match (field, shape) {
+                            (Some(index), Some(shape)) => lowering.field(value, shape, index)?,
+                            _ => value,
+                        };
+                        lowering.assign(symbol, bound)?;
+                    }
+                    return lowering.expression(body);
                 }
-                for (symbol, field) in bindings {
-                    let bound = match (field, shape) {
-                        (Some(index), Some(shape)) => lowering.field(value, shape, index)?,
-                        _ => value,
-                    };
-                    lowering.assign(symbol, bound)?;
-                }
-                return lowering.expression(body);
-            }
-            // The interpreter raises the error that no arm matches.
-            lowering.builder.terminate(Terminator::Fail);
-            let unreachable = lowering.builder.block();
-            lowering.builder.switch_to(unreachable);
-            Ok(None)
-        })
+                // The interpreter raises the error that no arm matches.
+                lowering.builder.terminate(Terminator::Fail);
+                let unreachable = lowering.builder.block();
+                lowering.builder.switch_to(unreachable);
+                Ok(None)
+            },
+        )
     }
 
     /// `Result.with_default(result, default)`.
@@ -3890,8 +3964,12 @@ impl Lowering<'_> {
         let default = self.value(default)?;
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
-        let value =
-            self.switch_shapes(result, &candidates, exhaustive, &mut |lowering, shape| {
+        let value = self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            None,
+            &mut |lowering, shape| {
                 let layout = shape.map(|shape| shapes::shape(shape).layout);
                 match (shape, layout) {
                     (Some(shape), Some(layout)) if layout == ok => {
@@ -3905,7 +3983,8 @@ impl Lowering<'_> {
                         Ok(None)
                     }
                 }
-            })?;
+            },
+        )?;
         let value = value.ok_or(Refusal::new("a `Result.with_default` of no result"))?;
         self.usable(value)?;
         Ok(value)
@@ -3975,27 +4054,33 @@ impl Lowering<'_> {
             array: true,
         };
         self.builder.function.locals[output.0 as usize] = output_ty;
-        self.switch_shapes(result, &candidates, exhaustive, &mut |lowering, shape| {
-            let layout = shape.map(|shape| shapes::shape(shape).layout);
-            match (shape, layout) {
-                (Some(shape), Some(layout)) if layout == kept => {
-                    let field = lowering.field(result, shape, 0)?;
-                    let pushed = lowering.builder.emit(output_ty, Op::Push(output, field));
-                    lowering.builder.push(Some(output), Op::Copy(pushed));
+        self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            None,
+            &mut |lowering, shape| {
+                let layout = shape.map(|shape| shapes::shape(shape).layout);
+                match (shape, layout) {
+                    (Some(shape), Some(layout)) if layout == kept => {
+                        let field = lowering.field(result, shape, 0)?;
+                        let pushed = lowering.builder.emit(output_ty, Op::Push(output, field));
+                        lowering.builder.push(Some(output), Op::Copy(pushed));
+                    }
+                    (_, Some(layout)) if layout == ok || layout == err => {}
+                    _ => {
+                        // Something other than a result, which the interpreter rejects.
+                        lowering.builder.terminate(Terminator::Fail);
+                        let unreachable = lowering.builder.block();
+                        lowering.builder.switch_to(unreachable);
+                        return Ok(None);
+                    }
                 }
-                (_, Some(layout)) if layout == ok || layout == err => {}
-                _ => {
-                    // Something other than a result, which the interpreter rejects.
-                    lowering.builder.terminate(Terminator::Fail);
-                    let unreachable = lowering.builder.block();
-                    lowering.builder.switch_to(unreachable);
-                    return Ok(None);
-                }
-            }
-            Ok(Some(
-                lowering.builder.emit(Type::Null, Op::Const(Constant::Null)),
-            ))
-        })?;
+                Ok(Some(
+                    lowering.builder.emit(Type::Null, Op::Const(Constant::Null)),
+                ))
+            },
+        )?;
         let next = self
             .builder
             .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
@@ -4203,8 +4288,12 @@ impl Lowering<'_> {
             .ok_or(Refusal::new("an update that never completes"))?;
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(answer), &[ok, err], &[])?;
-        let updated =
-            self.switch_shapes(answer, &candidates, exhaustive, &mut |lowering, shape| {
+        let updated = self.switch_shapes(
+            answer,
+            &candidates,
+            exhaustive,
+            None,
+            &mut |lowering, shape| {
                 let layout = shape.map(|shape| shapes::shape(shape).layout);
                 match (shape, layout) {
                     (Some(shape), Some(layout)) if layout == ok => {
@@ -4230,7 +4319,8 @@ impl Lowering<'_> {
                         Ok(None)
                     }
                 }
-            })?;
+            },
+        )?;
         let updated = updated.ok_or(Refusal::new("an update that never completes"))?;
         self.usable(updated)?;
         Ok(updated)
@@ -5361,6 +5451,38 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
                     .any(|&(_, branch)| tail_invisible(branch))
         }
         _ => false,
+    }
+}
+
+/// Collects the `match` calls whose value is the value of `expression`: `expression` itself,
+/// the last expression of a block, the branches of an `if` and the bodies of a `match`'s arms.
+unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
+    if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+        return;
+    }
+    let args = rvalues::pairlist_items(expression.cdr());
+    match &*rvalues::symbol_name(expression.car()) {
+        "{" | "(" => {
+            if let Some(&(_, last)) = args.last() {
+                tail_matches(last, tails);
+            }
+        }
+        "if" => {
+            for &(_, branch) in args.iter().skip(1) {
+                tail_matches(branch, tails);
+            }
+        }
+        ".ry_match" => {
+            tails.push(expression);
+            for &(_, arm) in args.iter().skip(1) {
+                if arm.kind() == SexpType::Language {
+                    if let Some(&(_, body)) = rvalues::pairlist_items(arm.cdr()).last() {
+                        tail_matches(body, tails);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
