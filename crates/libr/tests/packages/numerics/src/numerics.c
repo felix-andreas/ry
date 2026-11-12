@@ -16,14 +16,20 @@
 #include <R_ext/Linpack.h>
 #include <R_ext/Utils.h>
 
-/* No header declares R's Fortran printing and signalling helpers; packages declare them. */
+/* No header declares R's Fortran printing and signalling helpers; packages declare them. GNU R
+   4.6 hides rexitc and rwarnc, so the signals go through the Fortran subroutines rexit and rwarn
+   that call them, with the length Fortran passes as a hidden trailing argument. */
 void F77_NAME(dblepr)(const char *label, int *nchar, double *data, int *ndata);
 void F77_NAME(intpr)(const char *label, int *nchar, int *data, int *ndata);
-void F77_NAME(rexitc)(const char *message, int *nchar);
-void F77_NAME(rwarnc)(const char *message, int *nchar);
+void F77_NAME(rexit)(const char *message, size_t length);
+void F77_NAME(rwarn)(const char *message, size_t length);
 /* Utils.h declares these only from R 4.4. */
 double F77_NAME(d1mach)(int *i);
 int F77_NAME(i1mach)(int *i);
+/* GNU R 4.6's Applic.h declares fdhess only for base R's own packages (USE_BASE_R_SUPPORT), but
+   libR still exports it, so a package declares it itself. */
+void fdhess(int n, double *x, double fval, fcn_p fun, void *state, double *h, int nfd,
+            double *step, double *f, int ndigit, double *typx);
 
 #define MAX_TOKENS 4096
 
@@ -1047,7 +1053,8 @@ SEXP num_failing(SEXP which)
     int kind = asInteger(which);
     double b[2] = {0, 0}, fmin, result, abserr, work[400], lo = 0, hi = 1, eps = 1e-6;
     int mask[2] = {1, 1}, fncount, grcount, fail, neval, ier, limit = 100, lenw = 400, last;
-    int iwork[100], length = 12;
+    int iwork[100];
+    size_t length = 12;
     PROTECT(allocVector(REALSXP, 3));
     switch (kind) {
     case 0:
@@ -1059,10 +1066,10 @@ SEXP num_failing(SEXP which)
                &limit, &lenw, &last, iwork, work);
         break;
     case 2:
-        F77_CALL(rexitc)("fortran says no", &length);
+        F77_CALL(rexit)("fortran says no", length);
         break;
     default:
-        F77_CALL(rwarnc)("fortran warns", &length);
+        F77_CALL(rwarn)("fortran warns", length);
         break;
     }
     UNPROTECT(1);
