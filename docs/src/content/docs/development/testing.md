@@ -549,17 +549,20 @@ that judge a change therefore stay plain release builds, and the control is the 
 effect. The published suites measure the shipped layout itself: they are recorded on the release
 archive (`bench.py --release`, see [Benchmarks](/benchmarks/#how-it-was-measured)).
 
-Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
-loads only into the runtime build that wrote it, and any other build silently ignores it, so that
-build starts on the slow path and runs the package without its compiled code. A start rewrites a
-stale start-up image and the base packages' images, but nothing rewrites the recommended packages'
-images except `just base-r`, or a package library's except reinstalling the package. Two builds
-that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
-therefore refuses to start when a binary under test would load a code image another build wrote, or
-when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
-`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it. A release archive
-under `--release` extracts its runtime and base R into a cache directory of its own, so it loads
-the images it shipped, and any image in a package library that another build wrote stops the run.
+Two builds can share `target/base-r` in a comparison, because each loads only images its own
+name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
+[the architecture page](/development/architecture#the-start-up-image)). A build's first start
+writes its images into the base R tree, so `tools/bench/bench.py` starts each build once before
+timing anything. A package library gets code images only when a package is installed, so bench.py
+stops when a package in the corpus library or `R_LIBS` has only another build's code image, and
+names the packages to reinstall. `RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was
+written by another build of the runtime` (or why else it skipped an image) on standard error, and
+`ry: image written: ...` when it writes a build's images. `bench.py` sets it on every timed process
+and fails one that prints either, because that process timed a slow start. It refuses a runtime
+that predates the flag. Under `--release`, the archive extracts its runtime and base R into a
+cache directory of its own, so it loads the images it shipped, and bench.py reads its runtime from
+the R home it reports. `two_builds_alternate_starts_without_displacing_each_others_images` in
+`crates/ry/tests/test_perf.rs` pins both halves.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with

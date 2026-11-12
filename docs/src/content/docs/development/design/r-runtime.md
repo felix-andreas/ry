@@ -623,7 +623,7 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 
 ### Code images of installed packages
 
-`R CMD INSTALL` writes `R/<package>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
+`R CMD INSTALL` writes `R/<package>.<build>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
 After the R code is installed, a fresh session loads the namespace, fetches every binding from the
 lazy-load database, and compiles each closure the fetches made, nested function bodies included.
 When a later session fetches the same record, it notes where each closure's code lies in the image,
@@ -677,7 +677,7 @@ bytecode only").
   keeps only the object bits the encoder can write (the S4 bit) of each constant.
 - **Lifetime.** Waiting code holds its body, its formals and the mapped file. `lazyLoadDBflush`,
   which `unloadNamespace` calls, drops all three for its database.
-- **Writing.** The image is written to `R/<package>.ryc.partial`, synced to disk, and renamed over
+- **Writing.** The image is written to `R/<package>.<build>.ryc.partial`, synced to disk, and renamed over
   the old image, so a crash leaves the old image or the new one. It is never rewritten in place: a
   process that maps the old file would see its pages change under it, or die with `SIGBUS` once
   the file shrank. A failed write removes the staging file.

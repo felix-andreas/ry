@@ -99,7 +99,10 @@ expect stdout "[1] \"new 1\""
 # when the image is opened. The record table starts after the magic, the build blob and 24 bytes
 # of flags, stamp and count, and a stream's offset is the u64 at byte 12 of its 52-byte entry.
 file save.R
-| file.copy("library/tally/R/tally.ryc", "good.ryc", overwrite = TRUE)
+| image <- list.files("library/tally/R", "\\.ryc$", full.names = TRUE)
+| stopifnot(length(image) == 1L)
+| file.copy(image, "good.ryc", overwrite = TRUE)
+| writeLines(image, "image.txt")
 file flip.R
 | bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
 | word <- function(at) readBin(bytes[at + 1:4], "integer", size = 4, endian = "little")
@@ -108,14 +111,14 @@ file flip.R
 |   at <- word(table + (entry - 1) * 52 + 12) + 1
 |   bytes[at] <- as.raw(bitwXor(as.integer(bytes[at]), 1L))
 | }
-| writeBin(bytes, "library/tally/R/tally.ryc")
+| writeBin(bytes, readLines("image.txt"))
 file truncate.R
 | bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
-| writeBin(bytes[1:40], "library/tally/R/tally.ryc")
+| writeBin(bytes[1:40], readLines("image.txt"))
 file build.R
 | bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
 | bytes[18] <- as.raw(bitwXor(as.integer(bytes[18]), 1L))
-| writeBin(bytes, "library/tally/R/tally.ryc")
+| writeBin(bytes, readLines("image.txt"))
 
 run ry run --runtime ry save.R
 expect exit 0

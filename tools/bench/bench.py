@@ -41,15 +41,21 @@ The runner unpacks it into a private directory with its own cache directory, whe
 archive's sha256. A nightly archive runs too, but `--write` refuses it. Without `--release`, `--ry`
 names the build under test.
 
-Before anything runs, every ry under test must load only start-up and code images its own runtime
-build wrote, and two binaries must not share a base R tree; otherwise the run stops and names the
-stale files (`refuse_foreign_images`). For a release that means the images it shipped in its base R,
-and no package library may hold an image another build wrote.
-
 Every suite checks before it runs that the corpus library holds each package its programs load, at
 the version lock.tsv pins (for the packages suite, every locked package), and stops with the list of
 missing ones. `--partial` runs anyway: the summary and results.json say the run is partial and name
 the missing packages, and `--write` refuses such a run.
+
+A start-up image and a package's code image load only into the build of ry that wrote them, and a
+build that cannot load them starts the slow way: a start that calls `stats::median` runs 8 times the
+instructions (306 million rather than 37) and peaks 9 MiB higher. Builds that share a base R tree
+each keep their own images there (crates/rcmd/src/images.rs), and a build writes its images the
+first time it starts. Before the first suite, bench.py starts each ry build once, so no timed
+process pays for writing them, and stops when a package in the corpus library or `R_LIBS` has only
+another build's code image, naming the packages to reinstall (`refuse_foreign_images`). Every ry
+process runs with `RY_IMAGE_LOG=1`, and one that reports an unused image or writes images fails, so
+a run never compares a fast start with a slow one. A build whose runtime predates `RY_IMAGE_LOG`
+cannot report one, so bench.py refuses it.
 
 The typed suite needs rustc and no GNU R. Its engines are Rust, the baseline, and ry typed: each
 program's `<name>.typed.R` runs as in the kernels and applications suites, and its Rust twin
@@ -71,8 +77,8 @@ Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rs
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial] [--any-build]
 """
-import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, shlex, shutil, statistics
-import re, subprocess, sys, tarfile, tempfile, threading, time, tomllib
+import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
+import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -101,6 +107,11 @@ RUST_SHORT = 0.0001
 # An interval reaching further than this from its median is too wide to quote.
 WIDE = 0.10
 PROGRAM_TIMEOUT = 300
+# The lines ry prints on standard error under RY_IMAGE_LOG for each start-up or code image it could
+# not use (crates/interp/src/image.rs, `report_unused`), and when it writes a build's images into a
+# base R tree (crates/rcmd/src/rcmd.rs, `refresh_start_image`).
+IMAGE_UNUSED = "ry: image unused: "
+IMAGE_WRITTEN = "ry: image written: "
 STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 # A typed call that first runs in the interpreter to observe an R value's type logs this, then
 # compiles on its next call, so the line is not a refusal.
@@ -132,6 +143,9 @@ def main():
     parser.add_argument("--any-build", action="store_true",
                         help="also time a ry that is not a release build, and say so in the output")
     args = parser.parse_args()
+    # Programs run from their own directories.
+    args.ry = os.path.abspath(args.ry)
+    args.baseline = args.baseline and os.path.abspath(args.baseline)
     suites = SUITES if "all" in args.suites else args.suites
     for suite in suites:
         if suite not in SUITES:
@@ -221,11 +235,12 @@ def engines(args, suite):
     if suite == RUST_SUITE:
         # The typed programs load no package, so neither engine gets a library, and `--jit-off`
         # does not apply: a strict typed program is compiled before it runs.
+        ry_env = dict(base, RY_IMAGE_LOG="1")
         table = [Engine("rust", "Rust", None, base),
-                 Engine("ry_typed", "ry typed", [args.ry, "run", "--runtime", "ry"], base, typed=True)]
+                 Engine("ry_typed", "ry typed", [args.ry, "run", "--runtime", "ry"], ry_env, typed=True)]
         if args.baseline:
             table.append(Engine("baseline_typed", "baseline typed", [args.baseline, "run", "--runtime", "ry"],
-                                base, typed=True))
+                                ry_env, typed=True))
         return table
     library = corpus.corpus / "library"
     if library.is_dir():
@@ -235,19 +250,109 @@ def engines(args, suite):
                                        capture_output=True, text=True, check=True).stdout.strip()
         base.update(R_LIBS=str(library), R_LIBS_USER=str(library), R_LIBS_SITE=gnu_r_library)
     ry = [args.ry, "run", "--runtime", "ry"]
+    ry_env = dict(base, RY_IMAGE_LOG="1")
     table = [Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base),
-             Engine("ry", "ry", ry, base)]
+             Engine("ry", "ry", ry, ry_env)]
     typed = suite in TYPED_SUITES
     if typed:
-        table.append(Engine("ry_typed", "ry typed", ry, base, typed=True))
+        table.append(Engine("ry_typed", "ry typed", ry, ry_env, typed=True))
     if args.jit_off:
-        table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(base, RY_JIT="off")))
+        table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
         baseline = [args.baseline, "run", "--runtime", "ry"]
-        table.append(Engine("baseline", "baseline", baseline, base))
+        baseline_env = dict(base, RY_IMAGE_LOG="1")
+        table.append(Engine("baseline", "baseline", baseline, baseline_env))
         if typed:
-            table.append(Engine("baseline_typed", "baseline typed", baseline, base, typed=True))
+            table.append(Engine("baseline_typed", "baseline typed", baseline, baseline_env, typed=True))
     return table
+
+
+def file_contains(path, needle):
+    """Whether the file holds `needle`, read in 1 MiB pieces. Reading a 120 MiB libR whole would
+    raise this process's peak RSS, which every later child inherits as the floor of its own
+    `ru_maxrss` (the kernel carries the parent's peak across fork and exec)."""
+    tail = b""
+    with open(path, "rb") as file:
+        while piece := file.read(1 << 20):
+            if needle in tail + piece:
+                return True
+            tail = piece[-(len(needle) - 1):]
+    return False
+
+
+def refuse_foreign_images(binaries):
+    """Exits unless every ry build in `binaries` would load only images it wrote itself.
+
+    An image loads only into the build whose identity its file name carries
+    (crates/rcmd/src/images.rs), and any other build starts the slow way or runs the package without
+    its compiled code. Each build starts once first, which writes its images into the base R tree
+    it finds if they are missing; the probe loads a function from stats, so it opens a code image as
+    well as the start-up image, and it must report no unused image. A package library gets code
+    images only when a package is installed, so a package there that has only another build's code
+    image stops the run with the list of packages to reinstall. A release carries its runtime inside
+    itself and extracts it on its first start, so its runtime is read from the R home it reports,
+    whose `.libr` names the runtime library on its first line.
+    """
+    for binary in dict.fromkeys(binaries):
+        with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
+            script = pathlib.Path(work) / "probe.R"
+            script.write_text("invisible(stats::median(c(3, 1, 2)))\ncat(R.home())\n")
+            env = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1")
+            status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], env, cwd=work,
+                                           check_images=False)
+        if status != 0:
+            sys.exit(f"error: {binary} cannot run a two-line R script: {failure_reason(out, err)}")
+        runtime = runtime_of(binary)
+        if runtime is None:
+            home = pathlib.Path(out.strip())
+            try:
+                runtime = pathlib.Path((home / ".libr").read_text().splitlines()[0])
+            except (OSError, IndexError) as error:
+                sys.exit(f"error: {binary} reported the R home {home}, which names no runtime library: {error}")
+        if not file_contains(runtime, b"RY_IMAGE_LOG"):
+            sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot "
+                     "report a start-up or code image it does not use, and its timings may measure a "
+                     "slow start; compare a build that has it")
+        unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
+        if unused:
+            sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would "
+                     "time a slow start:\n" + "\n".join(f"  {line}" for line in unused))
+        identity = runtime_identity(runtime)
+        libraries = [corpus.corpus / "library"]
+        libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
+                      for part in os.environ.get(variable, "").split(os.pathsep) if part]
+        stale = sorted({package.name for library in libraries if library.is_dir()
+                        for package in library.iterdir() if foreign_code_image(package, identity)})
+        if stale:
+            sys.exit(f"error: {binary} (runtime {identity}) would run these packages without their "
+                     "compiled code, because another build of ry installed them; reinstall them with "
+                     "this build: " + ", ".join(stale))
+
+
+def foreign_code_image(package, identity):
+    """Whether the installed `package` has a code image of its lazy-load database, but none of the
+    runtime build `identity`: `R/<name>.<build>.ryc`, or `R/<name>.ryc` from a ry that predates
+    build-keyed names."""
+    code = package / "R"
+    images = list(code.glob(f"{glob_escape(package.name)}.*ryc"))
+    return bool(images) and not (code / f"{package.name}.{identity}.ryc").is_file()
+
+
+def glob_escape(text):
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def runtime_of(binary):
+    """The runtime library the ry build `binary` loads: `RY_LIBR`, or the one beside it; None for a
+    build that carries its runtime inside itself."""
+    if os.environ.get("RY_LIBR"):
+        return pathlib.Path(os.environ["RY_LIBR"])
+    beside = pathlib.Path(binary).resolve().with_name(runtime_library_name())
+    return beside if beside.is_file() else None
+
+
+def runtime_library_name():
+    return {"Darwin": "libR.dylib", "Windows": "R.dll"}.get(platform.system(), "libR.so")
 
 
 def load_suite(suite):
@@ -436,10 +541,12 @@ def duration(seconds):
 
 # Running one program on one engine.
 
-def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT):
+def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
     resident set in MiB. `wait4` reports the child's own peak, which covers the whole process from
-    start-up on and any process it waited for."""
+    start-up on and any process it waited for. The status is None when the process timed out or,
+    with `check_images`, when ry reported an image it could not use: such a process timed a slow
+    start, so its numbers do not count."""
     with tempfile.TemporaryFile("w+") as stdout, tempfile.TemporaryFile("w+") as stderr:
         started = time.monotonic()
         child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd)
@@ -462,6 +569,10 @@ def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT):
         out, err = stdout.read(), stderr.read()
     if expired.is_set():
         return None, out, f"timed out after {timeout} s", seconds, usage.ru_maxrss / 1024
+    unused = [line for line in err.splitlines()
+              if line.startswith((IMAGE_UNUSED, IMAGE_WRITTEN))] if check_images else []
+    if unused:
+        return None, out, f"started without an image it should load ({unused[0]})", seconds, usage.ru_maxrss / 1024
     return child.returncode, out, err, seconds, usage.ru_maxrss / 1024
 
 
@@ -974,113 +1085,12 @@ def release_tag(version):
     return (match[2] or match[1]), match[2] is not None
 
 
-def refuse_foreign_images(binaries):
-    """Exits when a ry under test would load a start-up or code image another build wrote, or when
-    two of them share one base R tree.
-
-    An image loads only into the runtime build that wrote it, and every other build ignores it, so
-    the packages it covers run without their compiled code and start-up takes the slow path, and a
-    comparison would credit that time to the code under test. Each binary runs once first, because a
-    start rewrites a stale start-up image and the base packages' images, and because a release
-    extracts its runtime and base R on its first start. The recommended packages' images are
-    rewritten only by `just base-r`, and a package library's only by reinstalling the package.
-    """
-    homes = {}
-    for binary in binaries:
-        with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
-            script.write("cat(R.home())\n")
-            script.flush()
-            started = subprocess.run([binary, "run", "--runtime", "ry", script.name],
-                                     capture_output=True, text=True, timeout=600)
-        if started.returncode != 0:
-            sys.exit(f"error: {binary} does not start: {started.stderr.strip()}")
-        identity, home = runtime_identity(binary), base_tree(binary)
-        if identity is None or home is None:
-            identity, home = embedded_runtime(binary, pathlib.Path(started.stdout.strip()))
-        if home in homes:
-            sys.exit(f"error: {homes[home]} and {binary} share the base R tree {home}, so each start "
-                     "of one rewrites the start-up image the other loads; give each build its own "
-                     "copy with `ry-rcmd start-image BASE --libr LIBR` and point RY_BASE_R at it")
-        homes[home] = binary
-        stale = foreign_images(identity, home)
-        if stale:
-            sys.exit(f"error: {binary} (runtime {identity}) would ignore these images, which another "
-                     "build wrote, and run that code without them; run `just base-r` for base R's "
-                     "packages and reinstall any other package with this build:\n"
-                     + "\n".join(f"  {image} ({image_writer(image) or 'unreadable'})" for image in stale))
-
-
-def foreign_images(identity, home):
-    """The start-up and code images that a runtime of `identity` with base R tree `home` would load
-    but did not write: base R's, and those of the corpus library and of `R_LIBS` and `R_LIBS_USER`."""
-    libraries = [home / "library", corpus.corpus / "library"]
-    libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
-                  for part in os.environ.get(variable, "").split(os.pathsep) if part]
-    images = [home / "library/base/R/ry-start.image"]
-    images += sorted({image for library in libraries if library.is_dir()
-                      for image in library.glob("*/R/*.ryc")})
-    return [image for image in images if image_writer(image) != identity]
-
-
-def runtime_identity(binary):
-    """The identity of the runtime library beside `binary`, which stamps every image it writes, or
-    None for a binary with no `libR` beside it."""
-    directory = pathlib.Path(binary).resolve().parent
-    library = next((directory / name for name in ("libR.so", "libR.dylib", "R.dll")
-                    if (directory / name).is_file()), None)
-    return None if library is None else library_identity(library)
-
-
-def embedded_runtime(binary, home):
-    """The identity and R home of a ry that embeds its runtime, read from the R home it extracted:
-    the home's `.libr` names the runtime library on its first line."""
-    try:
-        library = pathlib.Path((home / ".libr").read_text().splitlines()[0])
-    except (OSError, IndexError) as error:
-        sys.exit(f"error: {binary} reported the R home {home}, which names no runtime library: {error}")
-    return library_identity(library), home.resolve()
-
-
-def library_identity(library):
+def runtime_identity(library):
+    """The identity of the runtime library `library`, which names every image it writes."""
     import ctypes
     function = ctypes.CDLL(str(library), mode=os.RTLD_LOCAL).ry_runtime_id
     function.restype = ctypes.c_char_p
     return function().decode()
-
-
-def base_tree(binary):
-    """The base R tree `rcmd::base::installed` finds for `binary`, or None for none."""
-    if os.environ.get("R_HOME"):
-        return pathlib.Path(os.environ["R_HOME"]).resolve()
-    if os.environ.get("RY_BASE_R"):
-        return pathlib.Path(os.environ["RY_BASE_R"]).resolve()
-    directory = pathlib.Path(binary).resolve().parent
-    candidates = [directory / "base-r", directory / "../lib/ry/base-r"]
-    target = next((ancestor for ancestor in [directory, *directory.parents]
-                   if (ancestor / "CACHEDIR.TAG").is_file()), None)
-    if target is not None and not directory.is_relative_to(target / "tmp"):
-        for ancestor in [directory, *directory.parents]:
-            candidates.append(ancestor / "base-r")
-            if ancestor == target:
-                break
-    return next((candidate.resolve() for candidate in candidates
-                 if (candidate / "library/base/R/base").is_file()), None)
-
-
-def image_writer(path):
-    """The runtime identity a start-up image (`RYSTART`) or code image (`RYCODE`) was written by,
-    read from its header, or None when the file is neither."""
-    try:
-        with open(path, "rb") as file:
-            header = file.read(4096)
-    except OSError:
-        return None
-    # A start-up image puts its header's length before the header, which opens with the identity.
-    offset = {b"RYSTART": 16, b"RYCODE\x00": 8}.get(header[:7])
-    if offset is None or len(header) < offset + 8:
-        return None
-    length = int.from_bytes(header[offset:offset + 8], "little")
-    return header[offset + 8:offset + 8 + length].decode(errors="replace")
 
 
 def metadata(args, release):
