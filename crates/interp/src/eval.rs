@@ -178,6 +178,7 @@ pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
 /// The value of a binding cell, calling an active binding's function.
 pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
+        interp().active_binding_reads += 1;
         let function = cell.cdr();
         let value = apply(nil(), function, &[], values::global_env())?;
         return Ok(value);
