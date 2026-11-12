@@ -9,6 +9,7 @@ file DESCRIPTION
 | Version: 0.1.0
 | Imports: notinstalledanywhere
 | Config/testthat/edition: 3
+| Config/testthat/parallel: true
 file NAMESPACE
 | export(area)
 file ry.toml
@@ -42,6 +43,14 @@ file tests/testthat/test-square.R
 file tests/testthat/test-wrong.R
 | test_that("a wrong expectation fails the run", expect_equal(area(2, 2), 5))
 
+# The package declares parallel tests, so a plain run starts workers, as many as
+# `TESTTHAT_CPUS` names.
+env TESTTHAT_CPUS 3
+run ry test --reporter summary --runtime ry
+expect exit 1
+expect stderr "Starting 3 test processes."
+expect stdout "square: .."
+
 run ry test --jobs 2 --reporter summary --runtime ry
 expect exit 1
 expect stderr "Starting 2 test processes."
@@ -50,11 +59,13 @@ expect stdout "square: .."
 expect stdout "wrong: 1"
 expect stdout "Expected `area(2, 2)` to equal 5."
 
-# One job runs the files in the `ry test` process, as a run without the flag does here.
-run ry test --jobs 1 --reporter summary --runtime ry --filter wrong
+# One job runs the files in the `ry test` process, whatever the package declares. The helper
+# then reports no worker, so the files that expect one fail.
+run ry test --jobs 1 --reporter summary --runtime ry
 expect exit 1
 expect stderr lacks "test processes"
-expect stdout "wrong: 1"
+expect stdout "worker=FALSE"
+expect stdout "wrong: 3"
 
 # A profile summary describes one process, so it cannot cover workers.
 run ry test --jobs 2 --runtime ry --profile-summary summary.txt

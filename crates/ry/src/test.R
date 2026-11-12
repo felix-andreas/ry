@@ -34,23 +34,30 @@ local({
   # many: `TESTTHAT_PARALLEL` overrides the package's `Config/testthat/parallel`, and
   # `TESTTHAT_CPUS` or the `Ncpus` option, which wins, names the count, which is 2 otherwise.
   # `jobs` is the user's `--jobs`, which settles both; without it the package decides whether,
-  # and a count nothing names is every core.
-  choose_workers <- function(jobs, cores) {
+  # and a count nothing names is every core. The count is set only for a run that starts
+  # workers, so that tests in one process see the settings they would see under devtools.
+  # Returns whether the run starts workers.
+  choose_workers <- function(root, jobs, cores) {
+    if (!is.null(jobs)) Sys.setenv(TESTTHAT_PARALLEL = if (jobs > 1L) "TRUE" else "FALSE")
+    if (!wants_workers(root)) return(FALSE)
     if (!is.null(jobs)) {
-      Sys.setenv(TESTTHAT_PARALLEL = if (jobs > 1L) "TRUE" else "FALSE", TESTTHAT_CPUS = jobs)
-      if (jobs > 1L) options(Ncpus = jobs)
+      Sys.setenv(TESTTHAT_CPUS = jobs)
+      options(Ncpus = jobs)
     } else if (is.null(getOption("Ncpus")) && !nzchar(Sys.getenv("TESTTHAT_CPUS"))) {
       Sys.setenv(TESTTHAT_CPUS = cores)
     }
+    TRUE
   }
 
-  # Whether testthat will start workers for a run of more than one file, by its own rule.
+  # Whether testthat will start workers for a run of more than one file, by its own rule: the
+  # environment variable decides when it is set, and the package's `Config/testthat/parallel`
+  # counts only together with the third edition.
   wants_workers <- function(root) {
     setting <- Sys.getenv("TESTTHAT_PARALLEL")
-    if (!nzchar(setting)) {
-      setting <- read.dcf(file.path(root, "DESCRIPTION"), fields = "Config/testthat/parallel")[[1L]]
-    }
-    identical(toupper(setting), "TRUE")
+    if (nzchar(setting)) return(identical(toupper(setting), "TRUE"))
+    fields <- read.dcf(file.path(root, "DESCRIPTION"),
+                       fields = c("Config/testthat/parallel", "Config/testthat/edition"))
+    identical(toupper(fields[[1L]]), "TRUE") && isTRUE(as.integer(fields[[2L]]) >= 3L)
   }
 
   # testthat's worker processes load the package with `pkgload::load_all()`, which sources
@@ -59,13 +66,14 @@ local({
   # (`switches`, which ry's `bin/R` reads from `RY_RUN_FLAGS`; the worker forgets them so that
   # an R process a test starts gets the defaults, as in a run without workers). testthat builds
   # the code a worker runs from its profile inside `queue_setup()`, with rlang's quasiquotation,
-  # so the call is replaced in that function's body. A testthat whose `queue_setup()` holds no
-  # such call keeps its own workers.
+  # so the call is replaced in that function's body. testthat sources the helpers in each
+  # worker itself, so the load leaves them out, as the call it replaces does. A testthat whose
+  # `queue_setup()` holds no such call keeps its own workers.
   load_workers_with_ry <- function(switches) {
     namespace <- asNamespace("testthat")
     setup <- get0("queue_setup", envir = namespace, mode = "function", inherits = FALSE)
     load <- call("{", quote(Sys.unsetenv("RY_RUN_FLAGS")), .ry_attach_call,
-                 quote(load_all(!!test_dir, quiet = TRUE)))
+                 quote(load_all(!!test_dir, quiet = TRUE, helpers = FALSE)))
     replaced <- FALSE
     replace <- function(code) {
       if (identical(code[[1L]], quote(pkgload::load_all))) {
@@ -127,8 +135,9 @@ local({
     # As `devtools::test()`: a developer's run is not a CRAN check, so a missing package is an
     # error rather than a skip, and `skip_on_cran()` tests run.
     if (!nzchar(Sys.getenv("NOT_CRAN"))) Sys.setenv(NOT_CRAN = "true")
-    choose_workers(jobs, cores)
-    if (!is.null(.ry_attach_call) && wants_workers(root)) load_workers_with_ry(switches)
+    if (choose_workers(root, jobs, cores) && !is.null(.ry_attach_call)) {
+      load_workers_with_ry(switches)
+    }
     selected <- function() {
       files <- test_files(root)
       if (is.null(filter)) files else files[grepl(filter, context_name(files))]

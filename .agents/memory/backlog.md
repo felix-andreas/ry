@@ -302,9 +302,14 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **`ry test` workers under `--runtime gnu-r` still load with pkgload**, eagerly and without
   `ry.toml`'s switches, because a GNU R worker has no `.Internal(ryLoaderAttach())`. Attaching the
   GNU R loader in the worker hook (source `gnur.R` from the binary) would close it.
-- **`ry test --watch` runs one process.** testthat's parallel runner starts workers per
-  `test_dir()` call, so a watch rerun with `--jobs` pays worker startup and a full lazy load per
-  worker each time. Keeping the workers alive across reruns needs a queue of our own.
+- **`ry test` in one process sources the testthat helpers twice**: once by the load, into
+  `package:<name>`, and once by `test_dir()`, into the test environment. `devtools::test()`
+  sources them once, because it loads with `helpers = FALSE`. `load_all()` takes `helpers` for
+  the workers already; the main process's load (`crates/ry/src/load.rs`) and the watch reload
+  need it too, without losing the reload's "a helper changed" signal.
+- **`ry test --watch --jobs N` restarts its workers on every rerun.** testthat's parallel runner
+  starts workers per `test_dir()` call, so each rerun pays worker startup and a lazy load per
+  worker. Keeping the workers alive across reruns needs a queue of our own.
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
 - **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op

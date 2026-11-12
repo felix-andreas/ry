@@ -325,7 +325,7 @@ worker is a separate R process, so test files must not depend on state another f
 | --- | --- |
 | `ry test --jobs 4` | 4 workers |
 | `ry test --jobs 1` | the `ry test` process |
-| `ry test`, and `DESCRIPTION` has `Config/testthat/parallel: true` | one worker per core |
+| `ry test`, and `DESCRIPTION` has `Config/testthat/parallel: true` and `Config/testthat/edition: 3` | one worker per core |
 | `ry test` otherwise | the `ry test` process |
 
 A run never starts more workers than it has test files, and one test file runs without workers.

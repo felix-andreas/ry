@@ -86,10 +86,17 @@ pub unsafe fn attach() -> R<()> {
 /// `.Internal(ryLoaderAttach())`: attaches the loader while the session is still starting, for
 /// code a profile runs. The profiles are sourced before the session's start attaches the
 /// loader, and a worker process that a test runner starts loads the package from its profile.
+///
+/// An attached loader stays as it is, because attaching anew would forget what it loaded.
 unsafe fn do_attach(_call: &Call<'_>) -> R<Sexp> {
-    if !ATTACHED_BY_PROFILE.swap(true, Ordering::Relaxed) {
-        scope(|| attach_fresh())?;
-    }
+    scope(|| {
+        let attached = eval_script(r#""tools:ry" %in% search()"#, values::base_env())?;
+        if values::as_logical_scalar(attached) != 1 {
+            attach_fresh()?;
+            ATTACHED_BY_PROFILE.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    })?;
     Ok(nil())
 }
 
