@@ -731,7 +731,7 @@ impl<'p> Translator<'p> {
                 self.fill_edges()?;
                 return Ok(true);
             }
-            Action::BranchUnlessPrimitive { function, expected } => {
+            Action::BranchUnlessSame { function, expected } => {
                 let value = self.load_register(function);
                 let same =
                     self.builder
