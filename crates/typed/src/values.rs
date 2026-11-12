@@ -2339,7 +2339,7 @@ struct Cursor<'a> {
 }
 
 const INLINE_FLAG: u64 = 1 << 63;
-const INLINE_CAPACITY: usize = 15;
+pub(crate) const INLINE_CAPACITY: usize = 15;
 const STR_HEADER: usize = 8;
 const HEADER_BYTES: usize = 32;
 

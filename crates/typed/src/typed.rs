@@ -23,6 +23,7 @@
     clippy::unnecessary_cast
 )]
 
+pub mod ahead;
 pub mod backend;
 pub mod fusion;
 pub mod ir;
@@ -33,7 +34,7 @@ pub mod values;
 
 use {
     crate::{
-        backend::{Callee, Code, Trampoline},
+        backend::{Callee, Code, Target, Trampoline},
         ir::{Item, Type},
         lower::{Callees, RCall, RResult, Speculation},
         values::{Boxed, List, Str},
@@ -304,6 +305,18 @@ unsafe fn compiled_or_refusal(
             "the session compiled its limit of typed functions",
         ));
     }
+    if let Some(adopted) = ahead::adopt(function, params) {
+        interp::heap().add_global_root(function);
+        if interp::annotations::typed_logging() {
+            eprintln!(
+                "typed: adopted install-time code for {params:?} -> {:?}",
+                adopted.result
+            );
+        }
+        let adopted = &*Box::leak(Box::new(adopted));
+        COMPILED.with_borrow_mut(|table| table.insert(key, Ok(adopted)));
+        return Ok(adopted);
+    }
     if !COMPILING.with_borrow_mut(|compiling| compiling.insert(key.clone())) {
         decline(|| String::from("it is called while its own code is being compiled"));
         return Err(Refusal::new(
@@ -511,7 +524,7 @@ impl Callees for Linker {
         self.speculations.extend_from_slice(&compiled.speculations);
         self.epoch = earliest(self.epoch, compiled.epoch);
         self.callees.push(Callee {
-            address: compiled.code.address,
+            target: Target::Address(compiled.code.address),
             params: SmallVec::from_slice(params),
             result: compiled.result,
         });

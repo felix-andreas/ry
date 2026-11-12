@@ -9,6 +9,12 @@
 //! a deoptimization. Calls between the package's own native functions are direct calls inside
 //! the code, and a function inlines its small siblings.
 //!
+//! A typed closure compiles first as typed code (`typed::ahead`), for the argument types it
+//! declares, into the same object. A typed closure with typed code gets no native function:
+//! its first call with arguments of those types adopts the typed code, which checks the
+//! closure's annotations as a call of it must. A typed closure the typed compiler refuses is
+//! compiled as a native function like any other, and its typed code compiles in the session.
+//!
 //! Every function the code calls by name is a check the code needs: a base builtin such as `+`
 //! must still be that builtin, and a sibling must still be the closure the code was compiled
 //! from. A call checks them once its namespace is locked, and the result holds until a binding
@@ -27,10 +33,15 @@
 //! | closure | record entry `u32` and ordinal `u32` |
 //! | types | parameter count `u8`, a type code per parameter, then the result's type code |
 //! | entry | the exported entry's name, a `u16` length and the bytes |
-//! | checks | `u32` count, then per check the name looked up (`u16` length and bytes) and either `0` and the builtin's name, or `1`, an entry `u32` and an ordinal `u32` |
+//! | checks | `u32` count, then per check the name looked up (`u16` length and bytes) and either `0` and the builtin's name, or `1`, an entry `u32` and an ordinal `u32`, or `2` for a constant of the standard library |
+//! | typed count | `u32`, then per typed function: |
+//! | closure | record entry `u32` and ordinal `u32` |
+//! | types | parameter count `u8`, each parameter's type and then the result's, as `typed::ahead::encode_type` writes them |
+//! | code | the exported names of the function and of its trampoline, each a `u16` length and the bytes |
+//! | checks | as for a native function |
 //!
-//! Type codes are 0 integer, 1 double, 2 logical, 3 integer vector, 4 double vector and 5
-//! logical vector.
+//! A native function's type codes are 0 integer, 1 double, 2 logical, 3 integer vector, 4 double
+//! vector and 5 logical vector.
 
 use {
     crate::{
@@ -47,7 +58,7 @@ use {
         unwind::R,
         values,
     },
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     ssa::{
         AbiParam, Builder, CallConv, MemFlagsData, ObjectModule, Signature, section, types::I64,
@@ -55,6 +66,13 @@ use {
     std::{
         cell::{Cell, RefCell},
         path::Path,
+    },
+    typed::{
+        ahead::{
+            Emitted, Finds, Identity, Lookup, Offer, Session, decode_type, encode_type, type_name,
+        },
+        backend::{Code, SHAPES_IN_IMAGE, image_symbol, is_image_symbol},
+        ir::Type,
     },
 };
 
@@ -97,6 +115,8 @@ enum Expected {
     Builtin(Box<str>),
     /// The package's closure made by this record entry at this ordinal.
     Sibling { entry: u32, ordinal: u32 },
+    /// The standard library's constant of the name looked up, which only typed code reads.
+    Constant,
 }
 
 /// One native function of the manifest.
@@ -110,22 +130,48 @@ struct Specialization {
     checks: Vec<Check>,
 }
 
+/// One typed function of the manifest: a typed closure compiled for the argument types it
+/// declares. A check of a builtin names the function the typed compiler called by that name,
+/// which is a builtin or a function of base R.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TypedFunction {
+    entry: u32,
+    ordinal: u32,
+    params: SmallVec<[Type; 4]>,
+    result: Type,
+    function: Box<str>,
+    trampoline: Box<str>,
+    checks: Vec<Check>,
+}
+
+/// What a native section holds, as its metadata says it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Manifest {
+    native: Vec<Specialization>,
+    typed: Vec<TypedFunction>,
+}
+
 /// How a closure fared, for the install's report.
 struct Outcome {
     name: String,
     size: usize,
+    /// A typed closure's typed code, or why it has none. `None` for an untyped closure.
+    typed: Option<Result<TypedFunction, String>>,
     compiled: Vec<Specialization>,
     refusal: &'static str,
 }
 
 /// Compiles what it can of a package's closures, for [`NativeHooks::compile`].
 unsafe fn compile(candidates: &[NativeCandidate], explain: bool) -> Option<NativeBuild> {
-    let object = match ObjectModule::new() {
+    let none = |why: &str| {
+        if explain {
+            println!("machine code: none ({why})");
+        }
+    };
+    let mut object = match ObjectModule::new() {
         Ok(object) => object,
         Err(ssa::Error(why)) => {
-            if explain {
-                println!("machine code: none ({why})");
-            }
+            none(why);
             return None;
         }
     };
@@ -134,25 +180,42 @@ unsafe fn compile(candidates: &[NativeCandidate], explain: bool) -> Option<Nativ
         .map(|candidate| (candidate.closure, (candidate.entry, candidate.ordinal)))
         .collect();
     let names = binding_names(candidates);
+    let typed = match compile_typed(&mut object, candidates, &identities) {
+        Ok(typed) => typed,
+        Err(ssa::Error(why)) => {
+            none(why);
+            return None;
+        }
+    };
     let (object, outcomes) = native::ahead_of_time(object, || {
         let mut outcomes = Vec::with_capacity(candidates.len());
         let mut count = 0usize;
         for candidate in candidates {
-            outcomes.push(compile_closure(candidate, &identities, &names, &mut count));
+            let typed = typed.get(&candidate.closure).cloned();
+            outcomes.push(compile_closure(
+                candidate,
+                typed,
+                &identities,
+                &names,
+                &mut count,
+            ));
         }
         outcomes
     });
     if explain {
         report(&outcomes);
     }
-    let specializations: Vec<Specialization> = outcomes
-        .into_iter()
-        .flat_map(|outcome| outcome.compiled)
-        .collect();
-    if specializations.is_empty() {
+    let mut manifest = Manifest::default();
+    for outcome in outcomes {
+        manifest.native.extend(outcome.compiled);
+        manifest.typed.extend(outcome.typed.and_then(Result::ok));
+    }
+    let functions = manifest.native.len() + manifest.typed.len();
+    if functions == 0 {
         return None;
     }
-    let mut code = match object?.finish(&|name| native::helper_address(name).is_some()) {
+    let known = |name: &str| native::helper_address(name).is_some() || is_image_symbol(name);
+    let mut code = match object?.finish(&known) {
         Ok(code) => code,
         Err(ssa::Error(why)) => {
             if explain {
@@ -161,10 +224,95 @@ unsafe fn compile(candidates: &[NativeCandidate], explain: bool) -> Option<Nativ
             return None;
         }
     };
-    code.metadata = encode_manifest(&specializations);
+    code.metadata = encode_manifest(&manifest);
     Some(NativeBuild {
-        functions: specializations.len(),
+        functions,
         encode: Box::new(move |base| section::encode(&code, base)),
+    })
+}
+
+/// Compiles each typed closure among `candidates` as typed code for the argument types it
+/// declares, into `object`. Gives each typed closure's function, or why it has none; the error
+/// is an object that nothing more may go into.
+unsafe fn compile_typed(
+    object: &mut ObjectModule,
+    candidates: &[NativeCandidate],
+    identities: &FxHashMap<Sexp, (u32, u32)>,
+) -> Result<FxHashMap<Sexp, Result<TypedFunction, String>>, ssa::Error> {
+    let mut session = Session::new(object, candidates.iter().map(|candidate| candidate.closure));
+    let mut attempts = Vec::new();
+    for candidate in candidates {
+        let closure = candidate.closure;
+        if closure.kind() == SexpType::Closure && annotations::is_typed(closure) {
+            attempts.push((candidate, session.compile_declared(closure)));
+        }
+    }
+    let emitted = session.finish()?;
+    Ok(attempts
+        .into_iter()
+        .map(|(candidate, attempt)| {
+            let function = attempt
+                .map_err(|refusal| refusal.0.into_owned())
+                .and_then(|index| {
+                    let emitted = emitted
+                        .get(index)
+                        .ok_or_else(|| String::from("its code is missing from the object"))?;
+                    typed_function(candidate, emitted, identities)
+                });
+            (candidate.closure, function)
+        })
+        .collect())
+}
+
+/// The manifest's entry for the typed code `emitted` of `candidate`, with each lookup the code
+/// assumes as a check a later process can make.
+unsafe fn typed_function(
+    candidate: &NativeCandidate,
+    emitted: &Emitted,
+    identities: &FxHashMap<Sexp, (u32, u32)>,
+) -> Result<TypedFunction, String> {
+    let mut encoded = Vec::new();
+    if !emitted
+        .params
+        .iter()
+        .chain([&emitted.result])
+        .all(|&ty| encode_type(ty, &mut encoded))
+    {
+        return Err(SHAPES_IN_IMAGE.to_owned());
+    }
+    if emitted.params.len() > usize::from(u8::MAX) {
+        return Err(String::from("more than 255 parameters"));
+    }
+    let mut checks = Vec::with_capacity(emitted.lookups.len());
+    for lookup in &emitted.lookups {
+        let name = values::symbol_name(lookup.symbol);
+        // The manifest stores a name's length in 16 bits.
+        if name.len() > usize::from(u16::MAX) {
+            return Err(String::from("a name longer than 65,535 bytes"));
+        }
+        let expected = match lookup.finds {
+            Finds::Function => Expected::Builtin(name.as_ref().into()),
+            Finds::Constant => Expected::Constant,
+            Finds::Sibling(closure) => {
+                let &(entry, ordinal) = identities
+                    .get(&closure)
+                    .ok_or("a call of a function from outside the package")?;
+                Expected::Sibling { entry, ordinal }
+            }
+        };
+        checks.push(Check {
+            symbol: name.as_ref().into(),
+            expected,
+        });
+    }
+    Ok(TypedFunction {
+        entry: candidate.entry,
+        ordinal: candidate.ordinal,
+        params: emitted.params.clone(),
+        result: emitted.result,
+        function: emitted.function.clone(),
+        trampoline: emitted.trampoline.clone(),
+        checks,
     })
 }
 
@@ -197,6 +345,7 @@ unsafe fn binding_names(candidates: &[NativeCandidate]) -> FxHashMap<Sexp, Strin
 
 unsafe fn compile_closure(
     candidate: &NativeCandidate,
+    typed: Option<Result<TypedFunction, String>>,
     identities: &FxHashMap<Sexp, (u32, u32)>,
     names: &FxHashMap<Sexp, String>,
     count: &mut usize,
@@ -208,9 +357,15 @@ unsafe fn compile_closure(
             .cloned()
             .unwrap_or_else(|| format!("<closure {}:{}>", candidate.entry, candidate.ordinal)),
         size: body_size(bytecode::closure_body(closure)),
+        typed,
         compiled: Vec::new(),
         refusal: "no argument types fit",
     };
+    // A native function would run before the typed code and without the checks a typed call
+    // makes, so a closure with typed code has none.
+    if matches!(outcome.typed, Some(Ok(_))) {
+        return outcome;
+    }
     let guesses = match guesses(closure) {
         Ok(guesses) => guesses,
         Err(why) => {
@@ -434,32 +589,59 @@ unsafe fn body_size(body: Sexp) -> usize {
         .sum::<usize>()
 }
 
-/// Prints what kept each closure in the interpreter, largest first, and then what each native
-/// function checks: the names it looks up when first called and the arguments it tests on every
-/// call.
+/// Prints what kept each closure in the interpreter, or a typed closure's typed code for its
+/// first call to compile, largest first, and then what each compiled function checks: the names
+/// it looks up when first called and the arguments it tests on every call.
 fn report(outcomes: &[Outcome]) {
-    let compiled = outcomes
-        .iter()
-        .filter(|outcome| !outcome.compiled.is_empty())
-        .count();
+    let has_code =
+        |outcome: &Outcome| !outcome.compiled.is_empty() || matches!(outcome.typed, Some(Ok(_)));
+    let compiled = outcomes.iter().filter(|outcome| has_code(outcome)).count();
     println!(
         "machine code: {compiled} of {} functions, by size (calls and operators in the body)",
         outcomes.len()
     );
     let mut order: Vec<&Outcome> = outcomes.iter().collect();
     order.sort_by(|a, b| {
-        (!a.compiled.is_empty(), std::cmp::Reverse(a.size), &a.name).cmp(&(
-            !b.compiled.is_empty(),
+        (has_code(a), std::cmp::Reverse(a.size), &a.name).cmp(&(
+            has_code(b),
             std::cmp::Reverse(b.size),
             &b.name,
         ))
     });
+    let looked_up = |checks: &[Check]| {
+        if checks.is_empty() {
+            "nothing".to_owned()
+        } else {
+            let names: Vec<&str> = checks.iter().map(|check| &*check.symbol).collect();
+            names.join(", ")
+        }
+    };
     for outcome in order {
+        match &outcome.typed {
+            Some(Ok(function)) => {
+                let types: Vec<String> = function.params.iter().map(|&ty| type_name(ty)).collect();
+                println!(
+                    "  typed       {:>5}  {}({}) -> {}: runs for arguments of exactly these types; looks up {} once",
+                    outcome.size,
+                    outcome.name,
+                    types.join(", "),
+                    type_name(function.result),
+                    looked_up(&function.checks),
+                );
+                continue;
+            }
+            Some(Err(why)) => {
+                println!("  first call  {:>5}  {}: {why}", outcome.size, outcome.name)
+            }
+            None => {}
+        }
         if outcome.compiled.is_empty() {
-            println!(
-                "  interpreter {:>5}  {}: {}",
-                outcome.size, outcome.name, outcome.refusal
-            );
+            if outcome.typed.is_none() {
+                println!(
+                    "  interpreter {:>5}  {}: {}",
+                    outcome.size, outcome.name, outcome.refusal
+                );
+            }
             continue;
         }
         for specialization in &outcome.compiled {
@@ -467,11 +649,6 @@ fn report(outcomes: &[Outcome]) {
                 .params
                 .iter()
                 .map(|&ty| ty_name(ty))
-                .collect();
-            let lookups: Vec<&str> = specialization
-                .checks
-                .iter()
-                .map(|check| &*check.symbol)
                 .collect();
             println!(
                 "  native      {:>5}  {}({}) -> {}: tests {} argument{} on entry; looks up {} once",
@@ -481,11 +658,7 @@ fn report(outcomes: &[Outcome]) {
                 ty_name(specialization.result),
                 types.len(),
                 if types.len() == 1 { "" } else { "s" },
-                if lookups.is_empty() {
-                    "nothing".to_owned()
-                } else {
-                    lookups.join(", ")
-                },
+                looked_up(&specialization.checks),
             );
         }
     }
@@ -527,48 +700,67 @@ fn ty_of(code: u8) -> Option<Ty> {
     })
 }
 
-fn encode_manifest(specializations: &[Specialization]) -> Vec<u8> {
+fn encode_manifest(manifest: &Manifest) -> Vec<u8> {
     let mut out = Vec::new();
     let name = |out: &mut Vec<u8>, name: &str| {
         let bytes = &name.as_bytes()[..name.len().min(u16::MAX as usize)];
         out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
         out.extend_from_slice(bytes);
     };
-    out.extend_from_slice(&(specializations.len() as u32).to_le_bytes());
-    for specialization in specializations {
-        out.extend_from_slice(&specialization.entry.to_le_bytes());
-        out.extend_from_slice(&specialization.ordinal.to_le_bytes());
-        out.push(specialization.params.len() as u8);
-        out.extend(specialization.params.iter().map(|&ty| ty_code(ty)));
-        out.push(ty_code(specialization.result));
-        name(&mut out, &specialization.function);
-        out.extend_from_slice(&(specialization.checks.len() as u32).to_le_bytes());
-        for check in &specialization.checks {
-            name(&mut out, &check.symbol);
+    let checks = |out: &mut Vec<u8>, checks: &[Check]| {
+        out.extend_from_slice(&(checks.len() as u32).to_le_bytes());
+        for check in checks {
+            name(out, &check.symbol);
             match &check.expected {
                 Expected::Builtin(builtin) => {
                     out.push(0);
-                    name(&mut out, builtin);
+                    name(out, builtin);
                 }
                 Expected::Sibling { entry, ordinal } => {
                     out.push(1);
                     out.extend_from_slice(&entry.to_le_bytes());
                     out.extend_from_slice(&ordinal.to_le_bytes());
                 }
+                Expected::Constant => out.push(2),
             }
         }
+    };
+    out.extend_from_slice(&(manifest.native.len() as u32).to_le_bytes());
+    for specialization in &manifest.native {
+        out.extend_from_slice(&specialization.entry.to_le_bytes());
+        out.extend_from_slice(&specialization.ordinal.to_le_bytes());
+        out.push(specialization.params.len() as u8);
+        out.extend(specialization.params.iter().map(|&ty| ty_code(ty)));
+        out.push(ty_code(specialization.result));
+        name(&mut out, &specialization.function);
+        checks(&mut out, &specialization.checks);
+    }
+    out.extend_from_slice(&(manifest.typed.len() as u32).to_le_bytes());
+    for function in &manifest.typed {
+        out.extend_from_slice(&function.entry.to_le_bytes());
+        out.extend_from_slice(&function.ordinal.to_le_bytes());
+        out.push(function.params.len() as u8);
+        for &ty in function.params.iter().chain([&function.result]) {
+            // A type the manifest cannot say reads back as an error, like an unknown code.
+            if !encode_type(ty, &mut out) {
+                out.push(u8::MAX);
+            }
+        }
+        name(&mut out, &function.function);
+        name(&mut out, &function.trampoline);
+        checks(&mut out, &function.checks);
     }
     out
 }
 
 /// Reads a manifest. Any bytes give a manifest or an error, never a read out of bounds.
-fn decode_manifest(bytes: &[u8]) -> Result<Vec<Specialization>, &'static str> {
+fn decode_manifest(bytes: &[u8]) -> Result<Manifest, &'static str> {
     let mut input = Input { bytes, position: 0 };
     let count = input.u32()? as usize;
     if count > bytes.len() / 12 {
         return Err("the manifest names more functions than it holds");
     }
-    let mut specializations = Vec::with_capacity(count);
+    let mut native = Vec::with_capacity(count);
     for _ in 0..count {
         let entry = input.u32()?;
         let ordinal = input.u32()?;
@@ -582,24 +774,8 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<Specialization>, &'static str> {
             return Err("a result that is not a scalar");
         }
         let function = input.name()?.into();
-        let check_count = input.u32()? as usize;
-        if check_count > bytes.len() / 3 {
-            return Err("the manifest names more checks than it holds");
-        }
-        let mut checks = Vec::with_capacity(check_count);
-        for _ in 0..check_count {
-            let symbol = input.name()?.into();
-            let expected = match input.u8()? {
-                0 => Expected::Builtin(input.name()?.into()),
-                1 => Expected::Sibling {
-                    entry: input.u32()?,
-                    ordinal: input.u32()?,
-                },
-                _ => return Err("an unknown kind of check"),
-            };
-            checks.push(Check { symbol, expected });
-        }
-        specializations.push(Specialization {
+        let checks = input.checks()?;
+        native.push(Specialization {
             entry,
             ordinal,
             params,
@@ -608,10 +784,37 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<Specialization>, &'static str> {
             checks,
         });
     }
+    let count = input.u32()? as usize;
+    if count > bytes.len() / 18 {
+        return Err("the manifest names more typed functions than it holds");
+    }
+    let mut typed = Vec::with_capacity(count);
+    for _ in 0..count {
+        let entry = input.u32()?;
+        let ordinal = input.u32()?;
+        let arity = input.u8()?;
+        let mut params = SmallVec::new();
+        for _ in 0..arity {
+            params.push(input.ty().ok_or("an unknown argument type")?);
+        }
+        let result = input.ty().ok_or("an unknown result type")?;
+        let function = input.name()?.into();
+        let trampoline = input.name()?.into();
+        let checks = input.checks()?;
+        typed.push(TypedFunction {
+            entry,
+            ordinal,
+            params,
+            result,
+            function,
+            trampoline,
+            checks,
+        });
+    }
     if input.position != bytes.len() {
         return Err("the manifest holds more than its functions");
     }
-    Ok(specializations)
+    Ok(Manifest { native, typed })
 }
 
 struct Input<'a> {
@@ -645,6 +848,36 @@ impl<'a> Input<'a> {
         let length = u16::from_le_bytes([length[0], length[1]]) as usize;
         std::str::from_utf8(self.take(length)?).map_err(|_| "a name that is not UTF-8")
     }
+
+    /// A typed function's type, as `typed::ahead::encode_type` wrote it.
+    fn ty(&mut self) -> Option<Type> {
+        let mut rest = self.bytes.get(self.position..)?;
+        let ty = decode_type(&mut rest)?;
+        self.position = self.bytes.len() - rest.len();
+        Some(ty)
+    }
+
+    fn checks(&mut self) -> Result<Vec<Check>, &'static str> {
+        let count = self.u32()? as usize;
+        if count > self.bytes.len() / 3 {
+            return Err("the manifest names more checks than it holds");
+        }
+        let mut checks = Vec::with_capacity(count);
+        for _ in 0..count {
+            let symbol = self.name()?.into();
+            let expected = match self.u8()? {
+                0 => Expected::Builtin(self.name()?.into()),
+                1 => Expected::Sibling {
+                    entry: self.u32()?,
+                    ordinal: self.u32()?,
+                },
+                2 => Expected::Constant,
+                _ => return Err("an unknown kind of check"),
+            };
+            checks.push(Check { symbol, expected });
+        }
+        Ok(checks)
+    }
 }
 
 /// Calls a native entry: the call budget, the arguments as words, where to store the value.
@@ -658,14 +891,18 @@ struct Mapped {
     checks: Vec<(Sexp, Expected)>,
 }
 
-/// A mapped section: its functions by record entry and ordinal.
+/// A mapped section: its native functions, the typed code it offers and the closures typed
+/// code names as siblings, each by record entry and ordinal.
 struct Section {
     functions: FxHashMap<(u32, u32), SmallVec<[Mapped; 2]>>,
+    typed: FxHashMap<(u32, u32), Vec<Offer>>,
+    typed_siblings: FxHashSet<(u32, u32)>,
 }
 
-/// A closure with native code: where its code lies, per function the [`check_epoch`] plus one
-/// at which its checks last passed (0 for never), and whether `RY_JIT_LOG` has reported a call
-/// that ran it.
+/// A closure with code in a section: where its code lies, per native function the
+/// [`check_epoch`] plus one at which its checks last passed (0 for never), and whether
+/// `RY_JIT_LOG` has reported a call that ran it. A closure with typed code only has no native
+/// function, and is here because a sibling's native code names it.
 ///
 /// [`check_epoch`]: interp::code_image::check_epoch
 struct Attached {
@@ -686,7 +923,8 @@ thread_local! {
 unsafe fn load(path: &Path, offset: u64, bytes: &[u8]) -> Result<Option<u32>, String> {
     // SAFETY: the resolver gives each helper's address in this build, which is the build the
     // image is stamped with.
-    let loaded = match section::load(path, offset, bytes, &native::helper_address) {
+    let resolve = |name: &str| native::helper_address(name).or_else(|| image_symbol(name));
+    let loaded = match section::load(path, offset, bytes, &resolve) {
         Ok(Some(loaded)) => loaded,
         Ok(None) => return Ok(None),
         Err(ssa::Error(why)) => return Err(why.to_owned()),
@@ -695,21 +933,66 @@ unsafe fn load(path: &Path, offset: u64, bytes: &[u8]) -> Result<Option<u32>, St
     if crate::logging() {
         eprintln!(
             "jit: mapped {} install-time functions from {}",
-            manifest.len(),
+            manifest.native.len() + manifest.typed.len(),
             path.display()
         );
     }
+    let intern = |name: &str| {
+        values::install(name).map_err(|_| "cannot intern a name the code looks up".to_owned())
+    };
+    let image = SECTIONS.with_borrow(|sections| sections.len() as u32);
+    let mut typed: FxHashMap<(u32, u32), Vec<Offer>> = FxHashMap::default();
+    let mut typed_siblings = FxHashSet::default();
+    for function in manifest.typed {
+        let address = |name: &str| {
+            loaded
+                .functions
+                .get(name)
+                .copied()
+                .ok_or("the manifest names a function the code lacks")
+        };
+        let code = Code {
+            address: address(&function.function)?,
+            trampoline: address(&function.trampoline)?,
+        };
+        let mut lookups = Vec::with_capacity(function.checks.len());
+        for check in function.checks {
+            let finds = match check.expected {
+                Expected::Builtin(_) => Finds::Function,
+                Expected::Constant => Finds::Constant,
+                Expected::Sibling { entry, ordinal } => {
+                    typed_siblings.insert((entry, ordinal));
+                    Finds::Sibling(Identity {
+                        image,
+                        entry,
+                        ordinal,
+                    })
+                }
+            };
+            lookups.push(Lookup {
+                symbol: intern(&check.symbol)?,
+                finds,
+            });
+        }
+        typed
+            .entry((function.entry, function.ordinal))
+            .or_default()
+            .push(Offer {
+                params: function.params,
+                result: function.result,
+                code,
+                lookups,
+            });
+    }
     let mut functions: FxHashMap<(u32, u32), SmallVec<[Mapped; 2]>> = FxHashMap::default();
-    for specialization in manifest {
+    for specialization in manifest.native {
         let address = *loaded
             .functions
             .get(&specialization.function)
             .ok_or("the manifest names a function the code lacks")?;
         let mut checks = Vec::with_capacity(specialization.checks.len());
         for check in specialization.checks {
-            let symbol = values::install(&check.symbol)
-                .map_err(|_| "cannot intern a name the code looks up".to_owned())?;
-            checks.push((symbol, check.expected));
+            checks.push((intern(&check.symbol)?, check.expected));
         }
         functions
             .entry((specialization.entry, specialization.ordinal))
@@ -723,14 +1006,19 @@ unsafe fn load(path: &Path, offset: u64, bytes: &[u8]) -> Result<Option<u32>, St
             });
     }
     SECTIONS.with_borrow_mut(|sections| {
-        sections.push(Section { functions });
-        Ok(Some(sections.len() as u32 - 1))
+        sections.push(Section {
+            functions,
+            typed,
+            typed_siblings,
+        });
+        Ok(Some(image))
     })
 }
 
-/// Marks the closures of a record that have native code, for [`NativeHooks::attach`].
+/// Marks the closures of a record that have native code and offers the typed code of those
+/// that have some, for [`NativeHooks::attach`].
 unsafe fn attach(section: u32, entry: u32, closures: &[Sexp]) {
-    let counts: Vec<(usize, usize)> = SECTIONS.with_borrow(|sections| {
+    let found: Vec<(usize, usize, Vec<Offer>, bool)> = SECTIONS.with_borrow(|sections| {
         let Some(found) = sections.get(section as usize) else {
             return Vec::new();
         };
@@ -738,26 +1026,46 @@ unsafe fn attach(section: u32, entry: u32, closures: &[Sexp]) {
             .iter()
             .enumerate()
             .filter_map(|(ordinal, _)| {
-                found
+                let key = (entry, ordinal as u32);
+                let count = found
                     .functions
-                    .get(&(entry, ordinal as u32))
-                    .map(|functions| (ordinal, functions.len()))
+                    .get(&key)
+                    .map_or(0, |functions| functions.len());
+                let offers = found.typed.get(&key).cloned().unwrap_or_default();
+                let named = found.typed_siblings.contains(&key);
+                (count > 0 || !offers.is_empty() || named)
+                    .then_some((ordinal, count, offers, named))
             })
             .collect()
     });
-    for (ordinal, count) in counts {
+    for (ordinal, count, offers, named) in found {
         let Some(&closure) = closures.get(ordinal) else {
             continue;
         };
         if closure.kind() != SexpType::Closure {
             continue;
         }
+        if named || !offers.is_empty() {
+            typed::ahead::identify(
+                closure,
+                Identity {
+                    image: section,
+                    entry,
+                    ordinal: ordinal as u32,
+                },
+            );
+        }
+        if !offers.is_empty() {
+            typed::ahead::offer(closure, offers);
+        }
         ATTACHED.with_borrow_mut(|attached| {
             if attached.contains_key(&closure) {
                 return;
             }
             interp::heap().preserve(closure);
-            closure.set_gp_bits(gp::NATIVE_ENTRY, true);
+            if count > 0 {
+                closure.set_gp_bits(gp::NATIVE_ENTRY, true);
+            }
             attached.insert(
                 closure,
                 Attached {
@@ -866,6 +1174,8 @@ unsafe fn checks_hold(
                     Expected::Builtin(name) => {
                         value.is_some_and(|value| base_builtin(value, *symbol) == Some(&**name))
                     }
+                    // Native code reads no constant of the standard library.
+                    Expected::Constant => false,
                     Expected::Sibling {
                         entry: sibling_entry,
                         ordinal: sibling_ordinal,
@@ -974,8 +1284,53 @@ mod tests {
         names[rng.below(names.len())].into()
     }
 
-    fn random_manifest(rng: &mut SplitMix64) -> Vec<Specialization> {
+    fn random_checks(rng: &mut SplitMix64) -> Vec<Check> {
         (0..rng.below(4))
+            .map(|_| Check {
+                symbol: random_name(rng),
+                expected: match rng.below(3) {
+                    0 => Expected::Builtin(random_name(rng)),
+                    1 => Expected::Sibling {
+                        entry: rng.next_u64() as u32,
+                        ordinal: rng.below(8) as u32,
+                    },
+                    _ => Expected::Constant,
+                },
+            })
+            .collect()
+    }
+
+    fn random_typed_type(rng: &mut SplitMix64) -> Type {
+        use typed::ir::Item;
+        const TYPED: [Type; 13] = [
+            Type::Int,
+            Type::Dbl,
+            Type::Lgl,
+            Type::Bool,
+            Type::Str,
+            Type::I64,
+            Type::Null,
+            Type::Vector {
+                item: Item::Dbl,
+                array: false,
+            },
+            Type::Vector {
+                item: Item::Str,
+                array: true,
+            },
+            Type::List(Item::I64),
+            Type::Set(Item::Str),
+            Type::Dict {
+                key: Item::Str,
+                value: Item::Dbl,
+            },
+            Type::Table,
+        ];
+        TYPED[rng.below(TYPED.len())]
+    }
+
+    fn random_manifest(rng: &mut SplitMix64) -> Manifest {
+        let native = (0..rng.below(4))
             .map(|_| Specialization {
                 entry: rng.next_u64() as u32,
                 ordinal: rng.below(8) as u32,
@@ -984,21 +1339,21 @@ mod tests {
                     .collect(),
                 result: TYPES[rng.below(3)],
                 function: format!("entry{}", rng.below(100)).into(),
-                checks: (0..rng.below(4))
-                    .map(|_| Check {
-                        symbol: random_name(rng),
-                        expected: if rng.chance(1, 2) {
-                            Expected::Builtin(random_name(rng))
-                        } else {
-                            Expected::Sibling {
-                                entry: rng.next_u64() as u32,
-                                ordinal: rng.below(8) as u32,
-                            }
-                        },
-                    })
-                    .collect(),
+                checks: random_checks(rng),
             })
-            .collect()
+            .collect();
+        let typed = (0..rng.below(4))
+            .map(|_| TypedFunction {
+                entry: rng.next_u64() as u32,
+                ordinal: rng.below(8) as u32,
+                params: (0..rng.below(5)).map(|_| random_typed_type(rng)).collect(),
+                result: random_typed_type(rng),
+                function: format!("typed{}", rng.below(100)).into(),
+                trampoline: format!("typed{}.entry", rng.below(100)).into(),
+                checks: random_checks(rng),
+            })
+            .collect();
+        Manifest { native, typed }
     }
 
     /// A manifest reads back as written, and damaged bytes give a manifest or an error, never a
@@ -1028,7 +1383,7 @@ mod tests {
                 }
             }
             if let Ok(decoded) = decode_manifest(&bytes) {
-                for specialization in &decoded {
+                for specialization in &decoded.native {
                     assert!(specialization.result.is_unboxed());
                 }
                 assert_eq!(decode_manifest(&encode_manifest(&decoded)), Ok(decoded));

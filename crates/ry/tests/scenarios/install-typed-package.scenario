@@ -1,6 +1,7 @@
 # A package's typed functions keep their declared types once the package is installed: a new
 # session checks their arguments, converts a whole number to the `I64` a parameter declares, and
-# compiles them for the declared types, with the code image and without it.
+# runs them as code for the declared types: the code the install compiled into the code image,
+# or code compiled in the session without the image.
 
 requires ry-runtime
 
@@ -38,8 +39,8 @@ expect exit 0
 expect stdout "[1] 718640.9"
 expect stdout "[1] \"a3\""
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
-expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
-expect stderr "typed: compiled for [Str, I64] -> Str"
+expect stderr "typed: adopted install-time code for [I64, Dbl] -> Dbl"
+expect stderr "typed: adopted install-time code for [Str, I64] -> Str"
 
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R

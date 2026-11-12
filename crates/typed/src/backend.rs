@@ -11,6 +11,13 @@
 //! status in registers. Each function also gets a trampoline in the host's C convention, which
 //! reads the arguments from an array of words and writes the value to another, so the driver
 //! calls every function the same way.
+//!
+//! Code is emitted for one of two places. Code for this process ([`compile`]) holds absolute
+//! addresses: of the runtime's functions, of the functions it calls and of its constants. Code
+//! for a package's code image ([`compile_into`]) is mapped by later processes, so it holds no
+//! address at all: it calls the image's other functions relative to itself and reads everything
+//! outside the image from the image's link table, by a name that [`image_symbol`] resolves when
+//! the image loads.
 
 use {
     crate::{
@@ -27,19 +34,26 @@ use {
     smallvec::SmallVec,
     ssa::{
         AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC,
-        MemFlagsData, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine,
-        Value, Variable,
+        MemFlagsData, ObjectModule, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind,
+        Type as Machine, Value, Variable,
         types::{F64, I32, I64},
     },
     std::sync::atomic::AtomicBool,
 };
 
-/// A compiled function another one may call: its code's address and its machine signature.
+/// A compiled function another one may call: where its code is and its machine signature.
 #[derive(Clone, Debug)]
 pub struct Callee {
-    pub address: usize,
+    pub target: Target,
     pub params: SmallVec<[Type; 4]>,
     pub result: Type,
+}
+
+/// Where a callee's code is: at an address of this process, or in the object being built.
+#[derive(Clone, Copy, Debug)]
+pub enum Target {
+    Address(usize),
+    Function(FuncId),
 }
 
 /// The addresses of a compiled function and of its trampoline.
@@ -90,7 +104,8 @@ fn signature(params: &[Type], result: Type) -> Signature {
     signature
 }
 
-/// Compiles `function`, whose calls of other functions index `callees`.
+/// Compiles `function` for this process. Its calls of other functions index `callees`, and its
+/// calls of R functions index `r_calls`, the addresses of their sites.
 pub fn compile(
     function: &Function,
     callees: &[Callee],
@@ -98,57 +113,123 @@ pub fn compile(
 ) -> Result<Code, Refusal> {
     ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
-        let own_signature = signature(params, function.result);
-        let id = module.declare(&own_signature)?;
-        let mut builder = Builder::new(own_signature.clone());
-        let own = builder.import_function(id, own_signature);
-        let mut emitter = Emitter {
-            builder,
-            function,
-            callees,
-            r_calls,
-            own,
-            host: CallConv::Host,
-            variables: Vec::new(),
-            blocks: Vec::new(),
-            signatures: FxHashMap::default(),
-            budget: None,
-        };
-        emitter.emit_function()?;
-        emitter.builder.seal_all_blocks();
-        let compiled = emitter.builder.finalize();
-        if std::env::var_os("RY_TYPED_DUMP").is_some() {
-            eprintln!("{compiled}");
-        }
+        let id = module.declare(&signature(params, function.result))?;
+        let compiled = emit(function, id, callees, r_calls, false)?;
         module.define(id, &compiled)?;
-        let trampoline = trampoline(module, id, params, function.result)?;
+        let outer = module.declare(&trampoline_signature())?;
+        module.define(outer, &trampoline(id, params, function.result)?)?;
         module.finalize()?;
         Ok(Code {
             address: module.address(id),
-            trampoline: module.address(trampoline),
+            trampoline: module.address(outer),
         })
     })
 }
 
-/// A function in the host's convention that calls the compiled function `inner` with
-/// arguments read from an array of words and stores its value's words.
-fn trampoline(
-    module: &mut ssa::Module,
-    inner: FuncId,
-    params: &[Type],
-    result: Type,
-) -> Result<FuncId, Refusal> {
+/// Compiles `function` into `object`, a package's code image, which exports its code as `name`
+/// and its trampoline as `trampoline_name`. Every callee is a function of the same object.
+///
+/// A function the image cannot hold is refused, and the object stays usable: its name is then
+/// defined as code that gives up, because an object with an undefined function does not link.
+/// The outer error says that even that failed, so nothing more may go into the object.
+pub fn compile_into(
+    object: &mut ObjectModule,
+    function: &Function,
+    name: &str,
+    trampoline_name: &str,
+    callees: &[Callee],
+) -> Result<Result<FuncId, Refusal>, ssa::Error> {
+    let params = &function.locals[..function.params];
+    let own = signature(params, function.result);
+    let id = object.declare(name, &own)?;
+    let outer = object.declare(trampoline_name, &trampoline_signature())?;
+    let entry = trampoline(id, params, function.result).map_err(|_| ssa::Error(NO_TRAMPOLINE))?;
+    object.define(outer, &entry)?;
+    let defined = emit(function, id, callees, &[], true)
+        .and_then(|compiled| Ok(object.define(id, &compiled)?));
+    Ok(match defined {
+        Ok(_) => Ok(id),
+        Err(refusal) => {
+            object.define(id, &gives_up(own, function.result))?;
+            Err(refusal)
+        }
+    })
+}
+
+const NO_TRAMPOLINE: &str = "a trampoline without its parameters";
+
+/// The body of `function`, whose own code is the module's function `id`.
+fn emit(
+    function: &Function,
+    id: FuncId,
+    callees: &[Callee],
+    r_calls: &[usize],
+    image: bool,
+) -> Result<ssa::Function, Refusal> {
+    let own_signature = signature(&function.locals[..function.params], function.result);
+    let mut builder = Builder::new(own_signature.clone());
+    let own = builder.import_function(id, own_signature);
+    let mut emitter = Emitter {
+        builder,
+        function,
+        callees,
+        r_calls,
+        image,
+        own,
+        host: CallConv::Host,
+        variables: Vec::new(),
+        blocks: Vec::new(),
+        signatures: FxHashMap::default(),
+        budget: None,
+    };
+    emitter.emit_function()?;
+    emitter.builder.seal_all_blocks();
+    let compiled = emitter.builder.finalize();
+    if std::env::var_os("RY_TYPED_DUMP").is_some() {
+        eprintln!("{compiled}");
+    }
+    Ok(compiled)
+}
+
+/// A body for `signature` that gives up at once.
+fn gives_up(signature: Signature, result: Type) -> ssa::Function {
+    let mut builder = Builder::new(signature);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let mut results: SmallVec<[Value; 3]> = SmallVec::new();
+    results.push(builder.ins().iconst(I64, 1));
+    for machine in words(result) {
+        results.push(if machine == F64 {
+            builder.ins().f64const(0.0)
+        } else {
+            builder.ins().iconst(machine, 0)
+        });
+    }
+    builder.ins().return_(&results);
+    builder.seal_all_blocks();
+    builder.finalize()
+}
+
+/// The signature of every trampoline: the call budget, the argument words and where the
+/// value's words go, giving the status.
+fn trampoline_signature() -> Signature {
     let mut outer = Signature::new(CallConv::Host);
     outer.params.extend([AbiParam::new(I64); 3]);
     outer.returns.push(AbiParam::new(I64));
-    let id = module.declare(&outer)?;
-    let mut builder = Builder::new(outer);
+    outer
+}
+
+/// A function in the host's convention that calls the compiled function `inner` with
+/// arguments read from an array of words and stores its value's words.
+fn trampoline(inner: FuncId, params: &[Type], result: Type) -> Result<ssa::Function, Refusal> {
+    let mut builder = Builder::new(trampoline_signature());
     let callee = builder.import_function(inner, signature(params, result));
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
     builder.switch_to_block(entry);
     let &[budget, input, output] = builder.block_params(entry) else {
-        return Err(Refusal::new("a trampoline without its parameters"));
+        return Err(Refusal::new(NO_TRAMPOLINE));
     };
     let mut arguments: SmallVec<[Value; 8]> = SmallVec::new();
     arguments.push(budget);
@@ -175,8 +256,7 @@ fn trampoline(
     }
     builder.ins().return_(&[status]);
     builder.seal_all_blocks();
-    module.define(id, &builder.finalize())?;
-    Ok(id)
+    Ok(builder.finalize())
 }
 
 type SignatureKey = (SmallVec<[Machine; 8]>, SmallVec<[Machine; 3]>);
@@ -187,6 +267,8 @@ struct Emitter<'a> {
     callees: &'a [Callee],
     /// The address of each [`crate::lower::RCall`] the function makes, as `Op::CallR` indexes them.
     r_calls: &'a [usize],
+    /// Whether the code is for a code image, which holds no address of this process.
+    image: bool,
     own: FuncRef,
     host: CallConv,
     variables: Vec<SmallVec<[Variable; 2]>>,
@@ -195,11 +277,103 @@ struct Emitter<'a> {
     budget: Option<Variable>,
 }
 
-/// A runtime function's address, for a call from compiled code.
+/// A runtime function compiled code calls: its name in a code image's link table and its
+/// address in this process.
+#[derive(Clone, Copy)]
+struct Runtime {
+    name: &'static str,
+    address: *const (),
+}
+
+/// The runtime function `$function`, which must be an entry of [`RUNTIME`]: naming one that
+/// is missing there fails the build, so image code can never name a function the loader does
+/// not know.
 macro_rules! address {
     ($function:path) => {
-        $function as *const () as usize
+        const { runtime(stringify!($function)) }
     };
+}
+
+const fn runtime(name: &str) -> Runtime {
+    let mut index = 0;
+    while index < RUNTIME.len() {
+        if same(RUNTIME[index].name.as_bytes(), name.as_bytes()) {
+            return RUNTIME[index];
+        }
+        index += 1;
+    }
+    panic!("a runtime function that is missing from the table of runtime functions")
+}
+
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// The prefix of every name image code reads from its link table.
+const SYMBOL_PREFIX: &str = "typed.";
+/// The name of the flag that says an interrupt was requested.
+const INTERRUPT_SYMBOL: &str = "typed.interrupt";
+/// The prefix of a long string constant's name, which the string's bytes follow in hexadecimal.
+const STRING_SYMBOL_PREFIX: &str = "typed.str.";
+/// The longest string constant image code holds: a symbol's name is at most 65,535 bytes.
+const MAX_IMAGE_STRING: usize = (u16::MAX as usize - STRING_SYMBOL_PREFIX.len()) / 2;
+
+/// Whether `name` is one image code reads from its link table, so a loader of this build
+/// resolves it with [`image_symbol`].
+pub fn is_image_symbol(name: &str) -> bool {
+    if name == INTERRUPT_SYMBOL {
+        return true;
+    }
+    if let Some(hex) = name.strip_prefix(STRING_SYMBOL_PREFIX) {
+        return string_of_hex(hex).is_some();
+    }
+    name.strip_prefix(SYMBOL_PREFIX)
+        .is_some_and(|name| RUNTIME.iter().any(|runtime| runtime.name == name))
+}
+
+/// What the link table slot of `name` holds in this process: a runtime function's address, the
+/// interrupt flag's address, or the buffer of a string constant, which is built here and kept
+/// for the session.
+pub fn image_symbol(name: &str) -> Option<usize> {
+    if name == INTERRUPT_SYMBOL {
+        return Some(&interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as usize);
+    }
+    if let Some(hex) = name.strip_prefix(STRING_SYMBOL_PREFIX) {
+        let bytes = string_of_hex(hex)?;
+        // SAFETY: the bytes are a live slice of valid UTF-8.
+        let string = unsafe { values::ry_str_static(bytes.as_ptr(), bytes.len() as u64) };
+        return Some(string.lo as usize);
+    }
+    let name = name.strip_prefix(SYMBOL_PREFIX)?;
+    RUNTIME
+        .iter()
+        .find(|runtime| runtime.name == name)
+        .map(|runtime| runtime.address as usize)
+}
+
+/// The bytes a string constant's symbol names: valid UTF-8 too long to store inline, since an
+/// inline string needs no symbol and its first word is not a buffer's address.
+fn string_of_hex(hex: &str) -> Option<Vec<u8>> {
+    let digits = hex.as_bytes();
+    if digits.len() % 2 != 0 {
+        return None;
+    }
+    let digit = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
+    let bytes = digits
+        .chunks_exact(2)
+        .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
+        .collect::<Option<Vec<u8>>>()?;
+    (bytes.len() > values::INLINE_CAPACITY && std::str::from_utf8(&bytes).is_ok()).then_some(bytes)
 }
 
 impl Emitter<'_> {
@@ -388,10 +562,16 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Calls the runtime function at `address` in the host's convention.
+    /// The value the image's link table holds for `name`.
+    fn symbol(&mut self, name: &str) -> Value {
+        let symbol = self.builder.import_symbol(name);
+        self.builder.ins().symbol_addr(symbol)
+    }
+
+    /// Calls the runtime function `runtime` in the host's convention.
     fn call(
         &mut self,
-        address: usize,
+        runtime: Runtime,
         params: &[Machine],
         returns: &[Machine],
         arguments: &[Value],
@@ -412,7 +592,11 @@ impl Emitter<'_> {
                 imported
             }
         };
-        let callee = self.builder.ins().iconst(I64, address as i64);
+        let callee = if self.image {
+            self.symbol(&format!("{SYMBOL_PREFIX}{}", runtime.name))
+        } else {
+            self.iconst(runtime.address as i64)
+        };
         let call = self
             .builder
             .ins()
@@ -422,12 +606,12 @@ impl Emitter<'_> {
 
     /// Calls a runtime function whose parameters are all 64-bit words and which returns one
     /// value of `returns`.
-    fn call_words(&mut self, address: usize, returns: Machine, arguments: &[Value]) -> Value {
+    fn call_words(&mut self, runtime: Runtime, returns: Machine, arguments: &[Value]) -> Value {
         let params: SmallVec<[Machine; 8]> = arguments
             .iter()
             .map(|&argument| self.builder.value_type(argument))
             .collect();
-        let results = self.call(address, &params, &[returns], arguments);
+        let results = self.call(runtime, &params, &[returns], arguments);
         results[0]
     }
 
@@ -534,7 +718,7 @@ impl Emitter<'_> {
 
     /// Counts a reference to the object at `pointer` up, or down when `free` is given, which it
     /// calls when the count reaches zero, all only when `live`. A saturated count is permanent.
-    fn count(&mut self, live: Value, pointer: Value, free: Option<usize>) {
+    fn count(&mut self, live: Value, pointer: Value, free: Option<Runtime>) {
         let (counted, done) = (self.builder.create_block(), self.builder.create_block());
         self.builder.ins().brif(live, counted, &[], done, &[]);
         self.builder.switch_to_block(counted);
@@ -583,9 +767,29 @@ impl Emitter<'_> {
                 Constant::Dbl(value) => SmallVec::from_slice(&[self.builder.ins().f64const(value)]),
                 Constant::I64(value) => SmallVec::from_slice(&[self.iconst(value)]),
                 Constant::Str(lo, hi) => {
-                    SmallVec::from_slice(&[self.iconst(lo as i64), self.iconst(hi as i64)])
+                    let string = values::Str { lo, hi };
+                    let lo = if self.image && !string.is_inline() {
+                        // SAFETY: a string constant is a static string the lowering built.
+                        let bytes = unsafe { string.bytes() };
+                        if bytes.len() > MAX_IMAGE_STRING {
+                            return Err(Refusal::new(
+                                "a string constant longer than install-time code holds",
+                            ));
+                        }
+                        let mut name =
+                            String::with_capacity(STRING_SYMBOL_PREFIX.len() + 2 * bytes.len());
+                        name.push_str(STRING_SYMBOL_PREFIX);
+                        for byte in bytes {
+                            name.push_str(&format!("{byte:02x}"));
+                        }
+                        self.symbol(&name)
+                    } else {
+                        self.iconst(lo as i64)
+                    };
+                    SmallVec::from_slice(&[lo, self.iconst(hi as i64)])
                 }
                 Constant::Null => SmallVec::from_slice(&[self.iconst(0)]),
+                Constant::Object(_) if self.image => return Err(Refusal::new(SHAPES_IN_IMAGE)),
                 Constant::Object(pointer) => SmallVec::from_slice(&[self.iconst(pointer as i64)]),
             },
             Op::Copy(a) | Op::Relabel(a, _) => {
@@ -1395,6 +1599,7 @@ impl Emitter<'_> {
                 self.dup(Type::of_item(item), &values);
                 values
             }
+            Op::ShapeOf(_) if self.image => return Err(Refusal::new(SHAPES_IN_IMAGE)),
             Op::ShapeOf(a) => {
                 let pointer = self.one(*a)?;
                 SmallVec::from_slice(&[self.builder.ins().load(
@@ -1623,8 +1828,11 @@ impl Emitter<'_> {
                 SmallVec::from_slice(&[list])
             }
             Op::Poll => {
-                let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
-                let address = self.iconst(flag);
+                let address = if self.image {
+                    self.symbol(INTERRUPT_SYMBOL)
+                } else {
+                    self.iconst(&interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64)
+                };
                 let requested = self
                     .builder
                     .ins()
@@ -1876,7 +2084,7 @@ impl Emitter<'_> {
     /// the value is `NA` and stands, and status 2 (an empty list, or an overflow) gives up.
     fn reduce_status(
         &mut self,
-        address: usize,
+        runtime: Runtime,
         result: Machine,
         x: Value,
         inst: &Inst,
@@ -1887,7 +2095,7 @@ impl Emitter<'_> {
             3,
         ));
         let out = self.builder.ins().stack_addr(I64, slot, 0);
-        let status = self.call(address, &[I64, I64], &[I32], &[x, out])[0];
+        let status = self.call(runtime, &[I64, I64], &[I32], &[x, out])[0];
         let fails = self
             .builder
             .ins()
@@ -1994,6 +2202,9 @@ impl Emitter<'_> {
         fields: &[Local],
         inst: &Inst,
     ) -> Result<SmallVec<[Value; 2]>, Refusal> {
+        if self.image {
+            return Err(Refusal::new(SHAPES_IN_IMAGE));
+        }
         let layout = shapes::shape(shape);
         if layout.words == 0 {
             return Ok(SmallVec::from_slice(&[
@@ -2051,6 +2262,9 @@ impl Emitter<'_> {
         arguments: &[Local],
         inst: &Inst,
     ) -> Result<SmallVec<[Value; 2]>, Refusal> {
+        if self.image {
+            return Err(Refusal::new(R_CALL_IN_IMAGE));
+        }
         let site = *self
             .r_calls
             .get(index)
@@ -2122,11 +2336,21 @@ impl Emitter<'_> {
                 .callees
                 .get(index)
                 .ok_or(Refusal::new("a call of a missing function"))?;
-            let signature = self
-                .builder
-                .import_signature(signature(&callee.params, callee.result));
-            let address = self.iconst(callee.address as i64);
-            self.builder.ins().call_indirect(signature, address, &words)
+            let signature = signature(&callee.params, callee.result);
+            match callee.target {
+                Target::Function(id) => {
+                    let function = self.builder.import_function(id, signature);
+                    self.builder.ins().call(function, &words)
+                }
+                Target::Address(_) if self.image => {
+                    return Err(Refusal::new("a call of code outside the code image"));
+                }
+                Target::Address(address) => {
+                    let signature = self.builder.import_signature(signature);
+                    let address = self.iconst(address as i64);
+                    self.builder.ins().call_indirect(signature, address, &words)
+                }
+            }
         };
         let results: SmallVec<[Value; 3]> =
             self.builder.inst_results(call).iter().copied().collect();
@@ -2138,6 +2362,125 @@ impl Emitter<'_> {
         Ok(SmallVec::from_slice(value))
     }
 }
+
+/// The [`Runtime`] of each function listed.
+macro_rules! runtime_table {
+    ($($function:path),* $(,)?) => {
+        [$(Runtime {
+            name: stringify!($function),
+            address: $function as *const (),
+        }),*]
+    };
+}
+
+/// Why image code holds no record, tuple or tag: a box stores its shape's id, which a process
+/// assigns as it meets the shape.
+pub const SHAPES_IN_IMAGE: &str = "a record, tuple or tag, whose shape a session numbers as it \
+     meets it, so install-time code cannot hold one yet";
+/// Why image code calls no R function: a call site holds R objects of the process that compiled
+/// it.
+pub const R_CALL_IN_IMAGE: &str = "a call of an R function, such as `stop`, which install-time \
+     code cannot make yet";
+
+/// Every runtime function compiled code calls, which [`address!`] names one of.
+const RUNTIME: &[Runtime] = &runtime_table![
+    crate::ry_call_r,
+    modulus_loses_accuracy,
+    real_cos,
+    real_exp,
+    real_integer_divide,
+    real_log,
+    real_log10,
+    real_log2,
+    real_max,
+    real_min,
+    real_modulo,
+    real_platform_power,
+    real_power,
+    real_round,
+    real_round_away,
+    real_sign,
+    real_sin,
+    real_tan,
+    round_digits,
+    values::ry_all,
+    values::ry_any,
+    values::ry_arith,
+    values::ry_arith_sv,
+    values::ry_arith_vs,
+    values::ry_box_new,
+    values::ry_compare,
+    values::ry_compare_sv,
+    values::ry_compare_vs,
+    values::ry_count_true,
+    values::ry_dict_contains,
+    values::ry_dict_get,
+    values::ry_dict_insert,
+    values::ry_dict_keys,
+    values::ry_dict_len,
+    values::ry_dict_new,
+    values::ry_dict_remove,
+    values::ry_dict_values,
+    values::ry_elementwise,
+    values::ry_format_dbl,
+    values::ry_format_fixed,
+    values::ry_format_i64,
+    values::ry_format_int,
+    values::ry_format_padded_int,
+    values::ry_list_coerce,
+    values::ry_list_concat,
+    values::ry_list_ends_with,
+    values::ry_list_free,
+    values::ry_list_from_utf8_lossy,
+    values::ry_list_join,
+    values::ry_list_nchar,
+    values::ry_list_new,
+    values::ry_list_paste,
+    values::ry_list_push,
+    values::ry_list_range_i64,
+    values::ry_list_rep,
+    values::ry_list_select,
+    values::ry_list_seq,
+    values::ry_list_seq_len,
+    values::ry_list_slice,
+    values::ry_list_sort,
+    values::ry_list_starts_with,
+    values::ry_list_swap,
+    values::ry_list_tolower,
+    values::ry_list_toupper,
+    values::ry_list_unique,
+    values::ry_list_unshare,
+    values::ry_list_with_capacity,
+    values::ry_logic,
+    values::ry_math,
+    values::ry_max_dbl,
+    values::ry_max_int,
+    values::ry_mean_dbl,
+    values::ry_min_dbl,
+    values::ry_min_int,
+    values::ry_not,
+    values::ry_power_i64,
+    values::ry_prod_dbl,
+    values::ry_round,
+    values::ry_str_ascii_case,
+    values::ry_str_compare,
+    values::ry_str_concat,
+    values::ry_str_ends_with,
+    values::ry_str_equal,
+    values::ry_str_free,
+    values::ry_str_nchar,
+    values::ry_str_repeat,
+    values::ry_str_split,
+    values::ry_str_starts_with,
+    values::ry_str_to_dbl,
+    values::ry_str_to_i64,
+    values::ry_str_to_utf8,
+    values::ry_str_tolower,
+    values::ry_str_toupper,
+    values::ry_sum_dbl,
+    values::ry_sum_i64,
+    values::ry_sum_int,
+];
 
 /// The runtime's code for lists of `item`.
 fn kind(item: Item) -> i64 {

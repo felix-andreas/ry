@@ -1,0 +1,138 @@
+# A user installs a package of typed functions. The install compiles each one for the argument
+# types it declares and writes the code into the package's code image, so the first call in a new
+# session runs that code and compiles nothing. `--explain` lists what was compiled, and for each
+# function left out, why its code waits for its first call.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: typedcode
+| Version: 1.0.0
+| Title: Typed code
+| Description: Typed functions that an install compiles to machine code.
+| License: MIT
+file pkg/NAMESPACE
+| export(grow, total, label, shout, mean_of, squares, is_even, checked, circle, point_sum)
+file pkg/R/typed.R
+| grow <- function(x: F64, rate: F64) -> F64 x + rate * x
+| total <- function(n: I64, rate: F64) -> F64 {
+|   sum <- 0.0
+|   for (i in List.range(1, n)) {
+|     sum <- grow(sum, rate) + Num.to_f64(i)
+|   }
+|   sum
+| }
+| label <- function(name: Str, n: I64) -> Str Str.concat(name, Num.to_str(n))
+| shout <- function(name: Str) -> Str Str.concat(name, " is a constant too long to hold inline")
+| mean_of <- function(xs: List<F64>) -> F64 {
+|   sum <- 0.0
+|   for (x in xs) {
+|     sum <- sum + x
+|   }
+|   sum / Num.to_f64(List.len(xs))
+| }
+| squares <- function(n: I64) -> List<I64> List.map(List.range(1, n), function(i) i * i)
+| is_even <- function(n: I64) -> Bool n %% 2 == 0
+| checked <- function(x: F64) -> F64 {
+|   if (x < 0) stop("negative")
+|   sqrt(x)
+| }
+| circle <- function(r: F64) -> F64 Num.pi * r * r
+| point_sum <- function(x: F64, y: F64) -> F64 {
+|   p <- (x = x, y = y)
+|   p$x + p$y
+| }
+
+run ry install pkg -l library --explain
+expect exit 0
+expect stdout "machine code: 8 of 10 functions"
+expect stdout "total(I64, F64) -> F64: runs for arguments of exactly these types; looks up +, *, List.range, grow, Num.to_f64 once"
+expect stdout "mean_of(List<F64>) -> F64: runs for arguments of exactly these types"
+expect stdout "squares(I64) -> List<I64>: runs for arguments of exactly these types"
+expect stdout "circle(F64) -> F64: runs for arguments of exactly these types; looks up *, Num.pi once"
+expect stdout "checked: a call of an R function, such as `stop`, which install-time code cannot make yet"
+expect stdout "point_sum: a record, tuple or tag, whose shape a session numbers as it meets it, so install-time code cannot hold one yet"
+
+file use.R
+| library(typedcode, lib.loc = "library")
+| print(total(1000, 0.001))
+| print(label("a", 3))
+| print(shout("it"))
+| xs <- List.map(List.range(1, 4), function(i) Num.to_f64(i))
+| print(mean_of(xs))
+| print(squares(4))
+| print(is_even(4))
+| print(checked(4))
+| print(circle(1))
+| print(point_sum(1, 2))
+| print(grow(1, 0.5))
+| print(tryCatch(grow("a", 1), error = conditionMessage))
+
+# The first call of each compiled function adopts the install's code. `total` calls `grow`
+# inside that code, and `grow` called from R adopts its own. The two functions the install left
+# out compile here.
+env RY_TYPED_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr "typed: adopted install-time code for [I64, Dbl] -> Dbl"
+expect stderr "typed: adopted install-time code for [Str, I64] -> Str"
+expect stderr "typed: adopted install-time code for [Str] -> Str"
+expect stderr "typed: adopted install-time code for [Vector { item: Dbl, array: true }] -> Dbl"
+expect stderr "typed: adopted install-time code for [I64] -> Vector { item: I64, array: true }"
+expect stderr "typed: adopted install-time code for [I64] -> Bool"
+expect stderr "typed: adopted install-time code for [Dbl, Dbl] -> Dbl"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr "typed: compiled for [Dbl, Dbl] -> Dbl"
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"a3\""
+expect stdout "[1] \"it is a constant too long to hold inline\""
+expect stdout "[1] 2.5"
+expect stdout "[1i64, 4i64, 9i64, 16i64]"
+expect stdout "[1] TRUE"
+expect stdout "[1] 2"
+expect stdout "[1] 3.141593"
+expect stdout "[1] 3"
+expect stdout "[1] 1.5"
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+
+# Without the code image the same calls compile in the session and give the same values.
+env RY_CODE_IMAGE 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"it is a constant too long to hold inline\""
+expect stdout "[1] 2.5"
+expect stdout "[1i64, 4i64, 9i64, 16i64]"
+expect stdout "[1] 3.141593"
+expect stdout "[1] 1.5"
+
+# Replacing a function that install-time code calls directly: a caller that already adopted its
+# code compiles again against the replacement, and a caller that has not yet run does not adopt
+# code compiled against the function that is gone.
+file rebind.R
+| library(typedcode, lib.loc = "library")
+| print(total(3, 0.5))
+| assignInNamespace("grow", function(x: F64, rate: F64) -> F64 x - rate, "typedcode")
+| print(total(3, 0.5))
+| print(typedcode::grow(1, 0.5))
+
+env RY_CODE_IMAGE 1
+run ry run --runtime ry rebind.R
+expect exit 0
+expect stderr "typed: adopted install-time code for [I64, Dbl] -> Dbl"
+expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+expect stdout "[1] 8.25"
+expect stdout "[1] 4.5"
+expect stdout "[1] 0.5"
+
+file rebind-first.R
+| library(typedcode, lib.loc = "library")
+| assignInNamespace("grow", function(x: F64, rate: F64) -> F64 x - rate, "typedcode")
+| print(total(3, 0.5))
+
+run ry run --runtime ry rebind-first.R
+expect exit 0
+expect stderr "typed: install-time code for [I64, Dbl] is not used: `grow` is no longer what it was compiled against"
+expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+expect stdout "[1] 4.5"

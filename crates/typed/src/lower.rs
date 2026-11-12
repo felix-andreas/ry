@@ -5657,7 +5657,9 @@ unsafe fn is_table_function(speculation: &Speculation) -> bool {
         .is_some_and(|cell| cell.cdr() == speculation.function)
 }
 
-unsafe fn is_base_function(speculation: &Speculation) -> bool {
+/// Whether a function lookup found the builtin of that name, or the function base R binds to
+/// the name.
+pub(crate) unsafe fn is_base_function(speculation: &Speculation) -> bool {
     let function = speculation.function;
     match function.kind() {
         SexpType::Builtin | SexpType::Special => interp::eval::builtin_def(function)
