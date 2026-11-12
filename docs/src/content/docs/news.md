@@ -57,6 +57,10 @@ counts). None was re-measured for these notes.
 
 ### Also in this release
 
+- **The VS Code extension bundles ry 0.4.4.** The extension for Linux x86_64, macOS on Apple
+  silicon and Windows x86_64 carries that platform's `ry` binary, so `ry run`, the debugger and the
+  console work without a separate install. The Marketplace extension previously bundled 0.3.2-beta,
+  which has no runtime.
 - **More of base R runs natively:** `sprintf()` and `format()` on doubles (byte for byte with GNU
   R), `tryCatch()`, `withRestarts()` and `invokeRestart()` (with the same frames and calls as
   GNU R), `message()`, `warning()`, `signalCondition()`, `getOption()`, `formatC()`, `pmax()`,
