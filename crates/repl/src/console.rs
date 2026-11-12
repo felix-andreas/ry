@@ -948,7 +948,9 @@ pub fn input_is_complete(text: &str) -> bool {
     // unless the code before the quote is already an error. The syntax crate's lexer cuts such
     // a quote at its line break instead, which suits an editor but not this question.
     let Some(start) = open_quote_start(text) else {
-        return !input_is_unfinished(text);
+        // The editor asks before the last line has its line break, and the rule that waits for
+        // the line a `#:` block annotates needs the break to see a blank line end the wait.
+        return !input_is_unfinished(&format!("{text}\n"));
     };
     let code = &text[..start];
     let has_error = parse(code)

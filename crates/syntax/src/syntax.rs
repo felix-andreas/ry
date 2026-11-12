@@ -2,6 +2,7 @@
 //! reprints exactly, and malformed input still yields a tree with local `ERROR`
 //! nodes.
 
+pub mod annotation;
 pub mod ast;
 pub mod highlight;
 pub mod kind;
@@ -67,9 +68,16 @@ impl SyntaxError {
     }
 }
 
-/// R's console rule: input is unfinished when every syntax error in it says that it ended too
-/// early, so the console reads another line instead of reporting an error. A broken `#:`
-/// comment is only a comment to R, so it never holds input back.
+/// The console's rule for reading another line instead of running what it has.
+///
+/// R's own rule is that input is unfinished when every syntax error in it says that it ended too
+/// early. A broken `#:` comment is only a comment to R, so it never holds input back.
+///
+/// ry adds one case: input that ends in a `#:` block on its own lines is unfinished, because the
+/// block annotates the expression on the line after it and means nothing alone. A blank line
+/// after the block ends the wait, exactly as it detaches the block in a file, so `text` must
+/// end with the line break of its last line for the blank line to be seen. A `@type` or `@alias`
+/// block declares a type by itself and is finished.
 pub fn input_is_unfinished(text: &str) -> bool {
     let parse = parse(text);
     let end = TextSize::of(text.trim_end());
@@ -78,7 +86,48 @@ pub fn input_is_unfinished(text: &str) -> bool {
         .iter()
         .filter(|error| !error.in_annotation)
         .peekable();
-    errors.peek().is_some() && errors.all(|error| error.incomplete || error.range.start() >= end)
+    if errors.peek().is_some() {
+        return errors.all(|error| error.incomplete || error.range.start() >= end);
+    }
+    parse.errors().is_empty() && ends_in_an_unattached_annotation(&parse.syntax_node())
+}
+
+fn ends_in_an_unattached_annotation(root: &SyntaxNode) -> bool {
+    let mut newlines = 0;
+    let mut last = root.last_child_or_token();
+    let block = loop {
+        let Some(element) = last else {
+            return false;
+        };
+        match element.kind() {
+            SyntaxKind::WHITESPACE => {}
+            SyntaxKind::NEWLINE => newlines += 1,
+            SyntaxKind::ANNOTATION => match element.clone().into_node() {
+                Some(block) => break block,
+                None => return false,
+            },
+            _ => return false,
+        }
+        last = element.prev_sibling_or_token();
+    };
+    if newlines >= 2 || annotation::block_refusal(&block).is_some() {
+        return false;
+    }
+    let declares_a_type = block.children().any(|child| {
+        child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
+            && matches!(
+                annotation::directive_name(&child).as_str(),
+                "type" | "alias"
+            )
+    });
+    let mut before = block.prev_sibling_or_token();
+    while let Some(element) = &before
+        && element.kind() == SyntaxKind::WHITESPACE
+    {
+        before = element.prev_sibling_or_token();
+    }
+    let on_its_own_lines = before.is_none_or(|element| element.kind() == SyntaxKind::NEWLINE);
+    !declares_a_type && on_its_own_lines
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

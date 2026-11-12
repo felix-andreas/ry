@@ -6101,13 +6101,21 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
             if value.kind() == SexpType::Promise {
                 if value.car() == rvalues::unbound() {
                     // An installed package binds its closures to lazy-load promises, which only
-                    // read the function from the package database, so forcing one is safe. A
-                    // promise of anything else may run arbitrary code. A load that fails leaves
+                    // read the function from the package database, so forcing one is safe. Any
+                    // other promise but a lazy definition's may run arbitrary code. A load that fails leaves
                     // the call to the interpreter, which raises the error itself.
                     let reads_database = env == heap.known().base_env
                         || env == heap.known().base_namespace
                         || matches!(interp::serialize::lazy_record_header(value), Ok(Some(_)));
-                    if !reads_database {
+                    // `ry load` binds a definition to a promise that lowers its code and
+                    // evaluates it, which for a function only makes the closure.
+                    let code = value.cdr();
+                    let lazy_definition = code.kind() == SexpType::Language
+                        && rvalues::install("ryLoaderForce")
+                            .ok()
+                            .and_then(|symbol| interp::builtins::internal_function(symbol))
+                            == Some(code.car());
+                    if !reads_database && !lazy_definition {
                         return None;
                     }
                     value = interp::eval::force_promise(value).ok()?;

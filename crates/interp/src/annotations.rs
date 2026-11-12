@@ -1,7 +1,9 @@
-//! Inline type annotations at run time. The lowering erases every annotation from the language
+//! Type annotations at run time. The lowering erases every annotation from the language
 //! objects (`body()`, `formals()` and `deparse()` show the plain R program), and a function's
 //! parameter and return types become checks at its boundary instead (`decisions.md`, "runtime
-//! annotation checks").
+//! annotation checks"). A function's signature is the one `syntax::annotation` resolves, which
+//! the checker resolves the same way, so a type counts whether it is written on the function, on
+//! the name it is assigned to, or in a `#:` block above it.
 //!
 //! A check is first-order: it tests the value's storage type against the set of `typeof`s the
 //! annotation admits, following the typing reference's promotion order, so `double` admits
@@ -32,7 +34,7 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{cell::RefCell, sync::OnceLock},
-    syntax::{SyntaxKind, SyntaxNode},
+    syntax::{SyntaxKind, SyntaxNode, annotation::signature},
 };
 
 /// The runtime's annotation state.
@@ -129,52 +131,35 @@ const RETURN_SLOT: usize = 0;
 const REST_SLOT: usize = 1;
 const FIRST_FORMAL_SLOT: usize = 2;
 
-/// Records the checks a function literal's inline annotations ask for, keyed by the formals or
-/// body the lowering just built for it. Does nothing for a literal without annotations. One
-/// whose annotations the runtime cannot check (an alias, a tag union) is still registered, so it
-/// is a typed closure that the typed core compiles.
+/// Records the checks a function literal's signature asks for, keyed by the formals or body the
+/// lowering just built for it. The signature is the one [`syntax::annotation::signature`]
+/// resolves, so a type counts the same wherever it is written: on the literal, on the name the
+/// literal is assigned to, or in the `#:` block attached to its statement. With inline
+/// annotations turned off, only the `#:` block counts. Does nothing for a literal without a
+/// signature. One whose types the runtime cannot check (an alias, a tag union) is still
+/// registered, so it is a typed closure that the typed core compiles.
 pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) -> R<()> {
-    let state = &mut interp().annotations;
-    if !state.enabled {
+    let signature = signature(node, interp().annotations.enabled);
+    if signature.is_untyped() {
         return Ok(());
     }
+    let check = |ty: &Option<SyntaxNode>| match ty {
+        Some(ty) => (mask_of(ty), ty.text().to_string()),
+        None => (0, String::new()),
+    };
     let mut slots: Vec<(Mask, String)> = vec![(0, String::new()); FIRST_FORMAL_SLOT];
-    for child in node.children() {
-        match child.kind() {
-            SyntaxKind::PARAMETER_LIST => {
-                for parameter in child
-                    .children()
-                    .filter(|c| c.kind() == SyntaxKind::PARAMETER)
-                {
-                    let check = parameter
-                        .children()
-                        .find(|c| c.kind() == SyntaxKind::TYPE_ASCRIPTION)
-                        .and_then(|ascription| type_child(&ascription))
-                        .map(|ty| (mask_of(&ty), ty.text().to_string()))
-                        .unwrap_or((0, String::new()));
-                    let is_rest = parameter
-                        .children_with_tokens()
-                        .any(|element| element.kind() == SyntaxKind::DOTS);
-                    // `...` is matched as a whole, so its type lives in the rest slot.
-                    if is_rest {
-                        slots[REST_SLOT] = check.clone();
-                    }
-                    slots.push(check);
-                }
-            }
-            SyntaxKind::RETURN_TYPE => {
-                if let Some(ty) = type_child(&child) {
-                    slots[RETURN_SLOT] = (mask_of(&ty), ty.text().to_string());
-                }
-            }
-            _ => {}
+    slots[RETURN_SLOT] = check(&signature.ret);
+    let mut formal = formals;
+    for ty in &signature.formals {
+        let check = check(ty);
+        // `...` is matched as a whole, so its type lives in the rest slot.
+        if formal.kind() == SexpType::Pairlist && formal.tag() == values::symbols().dots {
+            slots[REST_SLOT] = check.clone();
         }
-    }
-    if slots
-        .iter()
-        .all(|(mask, text)| *mask == 0 && text.is_empty())
-    {
-        return Ok(());
+        slots.push(check);
+        if formal.kind() == SexpType::Pairlist {
+            formal = formal.cdr();
+        }
     }
     let key = if formals.kind() == SexpType::Pairlist {
         formals
@@ -913,10 +898,6 @@ unsafe fn describe(value: Sexp) -> String {
 }
 
 /// The type node an ascription or a return type annotation holds.
-fn type_child(node: &SyntaxNode) -> Option<SyntaxNode> {
-    node.children().next()
-}
-
 /// The storage types a type admits, or zero when storage alone cannot decide it.
 fn mask_of(node: &SyntaxNode) -> Mask {
     match node.kind() {
