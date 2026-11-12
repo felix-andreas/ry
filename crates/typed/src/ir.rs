@@ -360,6 +360,15 @@ pub enum Op {
     /// The vector or list with item `index` (1-based) replaced: `x[[i]] <- value`. Fails out of
     /// range.
     Set(Local, Local, Local),
+    /// `List.swap(list, first, second)` of 1-based `I64` positions; out of range, the list is
+    /// unchanged.
+    Swap(Local, Local, Local),
+    /// `List.concat(first, second)` of two lists of one item type. A unique first list grows in
+    /// place.
+    Extend(Local, Local),
+    /// The items of a list from 0-based `I64` `start` for `count` items. Fails unless the range
+    /// lies within the list.
+    Slice(Local, Local, Local),
     /// A new vector of this many default items (`numeric(n)`, `character(n)`).
     NewVector(Item, Local),
     /// `seq_len(n)`, failing for a negative `n`.
@@ -519,8 +528,11 @@ impl Op {
             | DictContains(a, b)
             | DictGet(a, b)
             | DictRemove(a, b)
-            | Push(a, b) => SmallVec::from_slice(&[*a, *b]),
-            Set(a, b, c) | DictInsert(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
+            | Push(a, b)
+            | Extend(a, b) => SmallVec::from_slice(&[*a, *b]),
+            Set(a, b, c) | DictInsert(a, b, c) | Swap(a, b, c) | Slice(a, b, c) => {
+                SmallVec::from_slice(&[*a, *b, *c])
+            }
             Concat(parts, separator) | PasteVectors(parts, separator) => {
                 let mut operands = parts.clone();
                 operands.push(*separator);
@@ -546,7 +558,8 @@ impl Op {
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
             Set(..) | DictInsert(..) => position != 1,
-            DictRemove(..) => position == 0,
+            DictRemove(..) | Swap(..) | Slice(..) => position == 0,
+            Extend(..) => position < 2,
             Push(..) => true,
             // A box owns its fields.
             Construct(..) => true,
@@ -562,9 +575,8 @@ impl Op {
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
             | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
-            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_) => {
-                false
-            }
+            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
+            | Swap(..) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

@@ -1467,6 +1467,40 @@ impl Emitter<'_> {
                 );
                 SmallVec::from_slice(&[list])
             }
+            Op::Swap(list, first, second) => {
+                let pointer = self.one(*list)?;
+                let owned = self.owned(inst, 0);
+                let (first, second) = (self.one(*first)?, self.one(*second)?);
+                let list = self.call_words(
+                    address!(values::ry_list_swap),
+                    I64,
+                    &[pointer, owned, first, second],
+                );
+                SmallVec::from_slice(&[list])
+            }
+            Op::Extend(first, second) => {
+                let (a, b) = (self.one(*first)?, self.one(*second)?);
+                let (a_owned, b_owned) = (self.owned(inst, 0), self.owned(inst, 1));
+                let list = self.call_words(
+                    address!(values::ry_list_concat),
+                    I64,
+                    &[a, a_owned, b, b_owned],
+                );
+                self.fail_if_null(list, inst)?;
+                SmallVec::from_slice(&[list])
+            }
+            Op::Slice(list, start, count) => {
+                let pointer = self.one(*list)?;
+                let owned = self.owned(inst, 0);
+                let (start, count) = (self.one(*start)?, self.one(*count)?);
+                let list = self.call_words(
+                    address!(values::ry_list_slice),
+                    I64,
+                    &[pointer, owned, start, count],
+                );
+                self.fail_if_null(list, inst)?;
+                SmallVec::from_slice(&[list])
+            }
             Op::Poll => {
                 let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
                 let address = self.iconst(flag);

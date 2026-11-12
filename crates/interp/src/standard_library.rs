@@ -836,7 +836,8 @@ unsafe fn whole(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
 
 unsafe fn count(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usize> {
     let number = whole(call, parameter, value)?;
-    usize::try_from(number).map_err(|_| wrong(call, parameter, "zero or more", value))
+    usize::try_from(number)
+        .map_err(|_| call.error(format!("`{parameter}` must be zero or more, not {number}")))
 }
 
 /// A length-one string that is not `NA`.

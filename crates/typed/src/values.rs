@@ -479,6 +479,43 @@ pub unsafe extern "C" fn ry_list_push(
     target
 }
 
+/// `List.swap`: the items at 1-based positions `first` and `second` exchanged, in place when the
+/// list is owned and unique. An out-of-range position leaves the list unchanged, as in the
+/// library.
+pub unsafe extern "C" fn ry_list_swap(
+    list: *mut List,
+    owned: u32,
+    first: i64,
+    second: i64,
+) -> *mut List {
+    let length = (*list).length as usize;
+    let position = |index: i64| {
+        usize::try_from(index)
+            .ok()
+            .filter(|index| (1..=length).contains(index))
+            .map(|index| index - 1)
+    };
+    let (Some(left), Some(right)) = (position(first), position(second)) else {
+        return pass_through(list, owned);
+    };
+    let target = if owned != 0 && is_unique(list) {
+        list
+    } else {
+        let copy = list_copy(list, length);
+        consume(list, owned);
+        copy
+    };
+    if left != right {
+        let width = item_size((*target).kind);
+        ptr::swap_nonoverlapping(
+            (*target).data.add(left * width),
+            (*target).data.add(right * width),
+            width,
+        );
+    }
+    target
+}
+
 /// `as.double`, `as.integer` of a logical, or `as.character` of a number or logical. Null for
 /// any other pair, and for `as.character` of an `NA`, since `Str` has no `NA`.
 pub unsafe extern "C" fn ry_list_coerce(list: *mut List, owned: u32, kind: u32) -> *mut List {
