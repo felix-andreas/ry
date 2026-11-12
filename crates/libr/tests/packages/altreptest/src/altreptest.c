@@ -16,14 +16,24 @@
 #include <R_ext/Rdynload.h>
 #include <Rversion.h>
 
-/* libR exports these dispatch functions without declaring them in a public header. */
-SEXP ALTINTEGER_SUM(SEXP x, Rboolean narm);
-SEXP ALTINTEGER_MIN(SEXP x, Rboolean narm);
-SEXP ALTINTEGER_MAX(SEXP x, Rboolean narm);
-SEXP ALTREAL_SUM(SEXP x, Rboolean narm);
-SEXP ALTREAL_MIN(SEXP x, Rboolean narm);
-SEXP ALTREAL_MAX(SEXP x, Rboolean narm);
-SEXP ALTLOGICAL_SUM(SEXP x, Rboolean narm);
+/* Non-API entry points that packages written for older R call. GNU R 4.6 still exports them but
+   no longer declares them, so these packages declare them themselves; the parentheses keep a
+   function-like macro of the same name out of the declaration. */
+SEXP (ATTRIB)(SEXP x);
+void *(DATAPTR)(SEXP x);
+
+/* Dispatchers that GNU R exported until 4.5 and hides since, and that ry's libR exports for
+   binaries built against older R. Weak references leave them NULL where libR hides them, so the
+   package also loads into GNU R; the conformance report does not use them. */
+#define WEAK __attribute__((weak))
+SEXP ALTINTEGER_SUM(SEXP x, Rboolean narm) WEAK;
+SEXP ALTINTEGER_MIN(SEXP x, Rboolean narm) WEAK;
+SEXP ALTINTEGER_MAX(SEXP x, Rboolean narm) WEAK;
+SEXP ALTREAL_SUM(SEXP x, Rboolean narm) WEAK;
+SEXP ALTREAL_MIN(SEXP x, Rboolean narm) WEAK;
+SEXP ALTREAL_MAX(SEXP x, Rboolean narm) WEAK;
+SEXP ALTLOGICAL_SUM(SEXP x, Rboolean narm) WEAK;
+int LOGICAL_IS_SORTED(SEXP x) WEAK;
 
 static R_altrep_class_t elt_only_class, pointer_class, string_class, list_class, logical_class,
     raw_class, complex_class, failing_class, failing_string_class, allocating_class;
@@ -155,7 +165,7 @@ static void list_set_elt(SEXP x, R_xlen_t i, SEXP v)
 
 static void *list_dataptr(SEXP x, Rboolean writable)
 {
-    return writable ? DATAPTR(R_altrep_data1(x)) : (void *) DATAPTR_RO(R_altrep_data1(x));
+    return writable ? DATAPTR_RW(R_altrep_data1(x)) : (void *) DATAPTR_RO(R_altrep_data1(x));
 }
 
 /* logical: TRUE, FALSE, TRUE, ... with its own region, sortedness, missing values and sum. */
@@ -453,6 +463,12 @@ SEXP altreptest_coerce(SEXP x, SEXP type)
     return coerceVector(x, (SEXPTYPE) asInteger(type));
 }
 
+static void require(int available, const char *entry)
+{
+    if (!available)
+        Rf_error("this libR hides %s", entry);
+}
+
 SEXP altreptest_sorted(SEXP x)
 {
     SEXP result = PROTECT(allocVector(INTSXP, 2));
@@ -466,6 +482,7 @@ SEXP altreptest_sorted(SEXP x)
         INTEGER(result)[1] = REAL_NO_NA(x);
         break;
     case LGLSXP:
+        require(LOGICAL_IS_SORTED != NULL, "LOGICAL_IS_SORTED");
         INTEGER(result)[0] = LOGICAL_IS_SORTED(x);
         INTEGER(result)[1] = LOGICAL_NO_NA(x);
         break;
@@ -556,6 +573,7 @@ static SEXP or_nil(SEXP x)
 
 SEXP altreptest_sums(SEXP x)
 {
+    require(ALTINTEGER_SUM != NULL, "ALTINTEGER_SUM");
     SEXP result = PROTECT(allocVector(VECSXP, 3));
     switch (TYPEOF(x)) {
     case INTSXP:
@@ -674,6 +692,26 @@ static void note_class(SEXP x)
          type2char(TYPEOF(ALTREP_CLASS(x))));
 }
 
+/* Evaluates `name(x, na.rm = TRUE)`, through which GNU R asks the class for its Sum, Min or
+   Max. GNU R hides the dispatchers from packages, so R code is the report's way to them. */
+static SEXP summary(const char *name, SEXP x)
+{
+    SEXP remove_na = PROTECT(ScalarLogical(TRUE));
+    SEXP call = PROTECT(lang3(install(name), x, remove_na));
+    SET_TAG(CDDR(call), install("na.rm"));
+    SEXP result = eval(call, R_BaseEnv);
+    UNPROTECT(2);
+    return result;
+}
+
+static void note_summaries(SEXP x)
+{
+    double sum = asReal(summary("sum", x));
+    double min = asReal(summary("min", x));
+    double max = asReal(summary("max", x));
+    note("  sum %g, min %g, max %g", sum, min, max);
+}
+
 static void note_sorted(SEXP x)
 {
     SEXP sorted = PROTECT(altreptest_sorted(x));
@@ -731,8 +769,7 @@ static void probe_elt_3(SEXP x)
 
 static void probe_sum(SEXP x)
 {
-    SEXP sum = ALTINTEGER_SUM(x, TRUE);
-    note("  ALTINTEGER_SUM: %s", sum == NULL ? "NULL" : "a value");
+    note("  sum: %d", asInteger(summary("sum", x)));
 }
 
 static void probe_string_pointer(SEXP x)
@@ -800,10 +837,11 @@ SEXP altreptest_report(void)
          REAL_OR_NULL(x) ? "pointer" : "NULL");
     note("  data2 materialized: %s", R_altrep_data2(x) == R_NilValue ? "no" : "yes");
     note_sorted(x);
-    note("  sum %g, min %g, max %g", REAL(ALTREAL_SUM(x, TRUE))[0], REAL(ALTREAL_MIN(x, TRUE))[0],
-         REAL(ALTREAL_MAX(x, TRUE))[0]);
+    note_summaries(x);
     SET_REAL_ELT(x, 1, 9.0);
     note("  after SET_REAL_ELT: %g", REAL_ELT(x, 1));
+    /* The class's Max still answers 4.5, which shows that max() asked the class. */
+    note_summaries(x);
     {
         double buffer[3];
         R_xlen_t copied = REAL_GET_REGION(x, 3, 3, buffer);
@@ -855,8 +893,10 @@ SEXP altreptest_report(void)
         note("  LOGICAL_GET_REGION(2, 4): %d [%d,%d,%d]", (int) copied, buffer[0], buffer[1],
              buffer[2]);
     }
-    note_sorted(x);
-    note("  sum: %d", INTEGER(ALTLOGICAL_SUM(x, TRUE))[0]);
+    /* GNU R hides LOGICAL_IS_SORTED and ALTLOGICAL_SUM, and its sum() does not dispatch to a
+       logical class; test_altrep.rs checks ry's exports of both. */
+    note("  no_na: %d", LOGICAL_NO_NA(x));
+    note("  sum: %d", asInteger(summary("sum", x)));
     attempt("as integer", probe_coerce_integer, x);
     UNPROTECT(1);
 

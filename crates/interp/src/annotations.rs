@@ -458,6 +458,12 @@ pub unsafe fn declared_return_type(function: Sexp) -> Option<Declared> {
     declared(mask_at(signature.element(MASKS), RETURN_SLOT))
 }
 
+/// The annotation text of what a typed closure returns, such as `F64` or `Str`.
+pub unsafe fn return_annotation(function: Sexp) -> Option<String> {
+    let text = text_at(signature_of(function)?, RETURN_SLOT);
+    (!text.is_empty()).then_some(text)
+}
+
 /// Whether the formal at `position` of a typed closure declares `I64`, so a whole R number
 /// passed there converts to one (see [`check_value`]).
 pub unsafe fn declares_i64(function: Sexp, position: usize) -> bool {
