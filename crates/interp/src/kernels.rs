@@ -301,7 +301,7 @@ pub unsafe fn unary(
 /// code may hold a boxed scalar in more registers than one. A fresh scalar costs little.
 pub unsafe fn fits(destination: Sexp, kind: SexpType, count: usize) -> bool {
     count > 1
-        && plain(destination)
+        && writable(destination)
         && destination.kind() == kind
         && destination.length() as usize == count
 }
@@ -323,13 +323,22 @@ pub fn payload_from_right(
         && right_length != 1
 }
 
-/// Whether a kernel may read `value` directly: a logical, integer or double vector with no
-/// attributes that is neither ALTREP nor an Array.
+/// Whether a kernel may read `value`: a logical, integer or double vector with no attributes
+/// that is not an Array, and is either ordinary or a compact sequence. A compact sequence reads
+/// through its data pointer, which expands it in place as GNU R's `INTEGER_RO` does, so
+/// `x * seq_len(n)` costs the one vector `seq_len` used to allocate.
 pub unsafe fn plain(value: Sexp) -> bool {
     matches!(
         value.kind(),
         SexpType::Logical | SexpType::Integer | SexpType::Real
-    ) && bare(value)
+    ) && value.attrib() == values::nil()
+        && !value.is_array()
+        && (!value.is_altrep() || values::compact_sequence(value).is_some())
+}
+
+/// Whether a kernel may write its result into `value`: a [`plain`] vector that is not ALTREP.
+unsafe fn writable(value: Sexp) -> bool {
+    !value.is_altrep() && plain(value)
 }
 
 /// Whether a vector has no attributes and is neither ALTREP nor an Array.
@@ -589,7 +598,7 @@ pub unsafe fn fused(
         reduction.is_none()
             && !declines_midway
             && target.kind() == kind
-            && plain(target)
+            && writable(target)
             && target.length() as usize == count
     });
     // The result overwrites an operand only after a chunk is complete, so the chunk's nodes
