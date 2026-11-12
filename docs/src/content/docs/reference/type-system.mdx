@@ -3699,6 +3699,45 @@ reported once, at its first step that names a column: a later step is not report
 step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
 hides a report.
 
+#### Tables in typed code
+
+A typed function holds a `DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy` or `Expr` as one opaque
+value. It cannot look inside one, but it passes it to the [DataFrame API](/reference/dataframes),
+and those calls compile to native code like the rest of the function:
+
+```r ry run runtime=ry strict
+revenue_by_region <- function(sales: DataFrame{region: character[], units: integer[], price: double[]}) -> List<F64> {
+  totals <- sales |>
+    DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
+    DataFrame.group_by("region") |>
+    GroupBy.agg(total = Expr.sum(Expr.col("revenue"))) |>
+    DataFrame.sort("region")
+  List.from_r(totals$total)
+}
+sales <- DataFrame(region = c("north", "south", "north"), units = c(1L, 2L, 3L), price = c(10, 10, 10))
+print(revenue_by_region(sales))
+#> [40, 20]
+```
+
+Three rules cover what such a function may write:
+
+- **Table calls nest.** A call of the DataFrame API that gives a table value may stand anywhere,
+  including inside another call's arguments, and an operator with an `Expr` operand
+  (`Expr.col("units") * Expr.col("price")`) is such a call. An ordinary R call inside another R
+  call's arguments does not compile natively, because R's lazy arguments decide the order they
+  run in, and a table call changes nothing that order could show.
+- **A column is an R vector.** `totals$total` and `totals[["total"]]` stand only where an R call's
+  value may: inside `List.from_r`, `Num.from_r`, `Str.from_r` or `Bool.from_r`, which give the
+  column a ry type. `totals[...]` is not available; select rows and columns with the verbs.
+- **Numbers cross as for any R call.** An `I64` reaches a table function through `Num.to_r`, so
+  `Expr.col("units") >= least` with an `I64` is a `type-mismatch`, and
+  `Expr.col("units") >= Num.to_r(least)` is the way to write it.
+
+The functions that read a property of a table instead of giving one (`DataFrame.height`,
+`DataFrame.width`, `DataFrame.columns`, `DataFrame.schema`, `DataFrame.key`, `LazyFrame.explain`)
+and the ones that write (`DataFrame.set_key`, `DataFrame.write_csv`, `DataFrame.write_parquet`)
+are ordinary R calls.
+
 #### data.table queries
 
 DataFrames also accept data.table's bracket syntax for compatibility, and the checker types it on

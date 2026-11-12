@@ -1,0 +1,52 @@
+# Typed code holds a DataFrame as an opaque value and runs the table API on native code. Table
+# calls nest, operators over `Expr` values are table calls, and a column comes back as a ry list
+# through `List.from_r`. The first call runs in the interpreter, which records the type
+# `List.from_r` gives, and the calls after it run natively with the same result.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+| strict = true
+
+file totals.R
+| by_region <- function(sales: DataFrame{region: character[], units: integer[], price: double[]}, least: I64) -> F64 {
+|   totals <- sales |>
+|     DataFrame.filter(Expr.col("units") >= Num.to_r(least)) |>
+|     DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
+|     DataFrame.group_by("region") |>
+|     GroupBy.agg(total = Expr.sum(Expr.col("revenue"))) |>
+|     DataFrame.sort("region")
+|   revenue <- List.from_r(totals$total)
+|   List.sum(revenue)
+| }
+| sales <- DataFrame(
+|   region = c("north", "south", "north", "south"),
+|   units = c(1L, 2L, 3L, 4L),
+|   price = c(10, 10, 10, 10)
+| )
+| print(by_region(sales, 1))
+| print(by_region(sales, 3))
+| print(by_region(sales, 4))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry totals.R
+expect exit 0
+expect stdout "[1] 100\n[1] 70\n[1] 40"
+expect stderr "typed: `by_region` runs in the interpreter: no code for [Table, I64]: it waits on the interpreter to run `"
+expect stderr "typed: compiled for [Table, I64] -> Dbl"
+
+# A column is an R vector, which typed code cannot hold, so reading one outside a conversion
+# sends the function to the interpreter with a reason that names the fix.
+
+file column.R
+| first_total <- function(totals: DataFrame{total: double[]}) -> F64 {
+|   column <- totals$total
+|   Num.from_r(column[1])
+| }
+| totals <- DataFrame(total = c(1.5, 2.5))
+| print(first_total(totals))
+
+run ry run --runtime ry column.R
+expect stderr "it uses a column of a table directly, and a column is an R vector: read it inside `List.from_r`"

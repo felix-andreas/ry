@@ -77,6 +77,11 @@ pub struct RCall {
     /// Whether the call is `stop()`, which raises an error and never returns, so it cannot
     /// change a variable a lazy argument reads before R would force it.
     pub diverges: bool,
+    /// Whether the call changes nothing a second run of it would see: a table function
+    /// ([`interp::dataframe::gives_table_value`]) or a read of a table's column. Code that gives
+    /// up after one may run again in the interpreter, no lazy argument can observe it, and it
+    /// may stand inside another call's arguments.
+    pub effect_free: bool,
 }
 
 /// What compiled code does with the value of an [`RCall`].
@@ -88,9 +93,7 @@ pub enum RResult {
     /// call, which gives this type.
     Converted(Conversion, Type),
     /// The call is one of the table API's that gives a table value
-    /// ([`interp::dataframe::gives_table_value`]), which the code holds as it is. Such a call
-    /// changes nothing a second run of it would see, so code that gives up after one may run
-    /// again in the interpreter, and no lazy argument can observe it.
+    /// ([`interp::dataframe::gives_table_value`]), which the code holds as it is.
     Table,
 }
 
@@ -1047,14 +1050,13 @@ impl Lowering<'_> {
             let ty = self.builder.ty(value);
             let passes = match (conversion.is_some(), ty) {
                 (_, Type::Set(_) | Type::Dict { .. }) => false,
-                // The table engine reads an `I64` as it is.
                 (
                     false,
                     Type::I64
                     | Type::Vector {
                         item: Item::I64, ..
                     },
-                ) => table,
+                ) => false,
                 (true, ty) => {
                     matches!(ty, Type::I64 | Type::Dbl | Type::Vector { array: true, .. })
                 }
@@ -1077,18 +1079,15 @@ impl Lowering<'_> {
         }
         // R evaluates arguments lazily, in the order the function asks for them, and compiled
         // code computes them first, which only agrees while computing them calls no R function
-        // that could tell: a table function cannot.
-        if self.r_calls[calls..]
-            .iter()
-            .any(|site| !matches!(site.result, RResult::Table))
-        {
+        // that could tell.
+        if self.r_calls[calls..].iter().any(|site| !site.effect_free) {
             return Err(Refusal(Cow::Owned(format!(
                 "it calls R inside the arguments of R's `{}`, whose order R's lazy arguments \
                  decide: compute the inner call into a variable first",
                 name()
             ))));
         }
-        Ok(self.r_site(call, function, r_use, result, arguments, values))
+        Ok(self.r_site(call, function, (r_use, result), table, arguments, values))
     }
 
     /// Emits the call of the R function `function` with the arguments `arguments`, whose values
@@ -1097,8 +1096,8 @@ impl Lowering<'_> {
         &mut self,
         call: Sexp,
         function: Sexp,
-        r_use: RUse,
-        result: RResult,
+        (r_use, result): (RUse, RResult),
+        effect_free: bool,
         arguments: SmallVec<[RArgument; 4]>,
         values: SmallVec<[Local; 4]>,
     ) -> Local {
@@ -1109,6 +1108,7 @@ impl Lowering<'_> {
             arguments,
             result,
             diverges: matches!(r_use, RUse::Diverges),
+            effect_free,
         });
         let site = self.r_calls.len() - 1;
         match result {
@@ -1162,7 +1162,14 @@ impl Lowering<'_> {
             })
             .collect();
         let values = SmallVec::from_slice(&[table.1, name.1]);
-        Ok(self.r_site(call, read.function, r_use, result, arguments, values))
+        Ok(self.r_site(
+            call,
+            read.function,
+            (r_use, result),
+            true,
+            arguments,
+            values,
+        ))
     }
 
     /// Whether the code `code` gives a table value, as far as its form tells: a variable that
@@ -5617,8 +5624,21 @@ unsafe fn loaded_namespace(package: Sexp) -> Option<Sexp> {
 fn is_operator(name: &str) -> bool {
     matches!(
         name,
-        "+" | "-" | "*" | "/" | "^" | "%%" | "%/%" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "!"
-            | "&" | "|"
+        "+" | "-"
+            | "*"
+            | "/"
+            | "^"
+            | "%%"
+            | "%/%"
+            | "=="
+            | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "!"
+            | "&"
+            | "|"
     )
 }
 

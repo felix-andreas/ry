@@ -431,7 +431,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         || lowered
             .r_calls
             .iter()
-            .any(|site| !site.diverges && !matches!(site.result, RResult::Table));
+            .any(|site| !site.diverges && !site.effect_free);
     // The code calls each function and conversion it was compiled against, and keeps every site
     // for as long as it lives, which is the whole session.
     let heap = interp::heap();
@@ -1138,11 +1138,11 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 /// `site` is a site the code was compiled with, `words` holds the words of its arguments, and
 /// `out` has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
-    // A table function changes nothing a second run would see unless it warns, so only then
+    // An effect-free call changes nothing a second run would see unless it warns, so only then
     // does it count as a call the code cannot make again.
-    let table = matches!((*site).result, RResult::Table);
+    let effect_free = (*site).effect_free;
     let warnings = interp::conditions::warnings_raised();
-    if !table {
+    if !effect_free {
         R_CALLS.set(R_CALLS.get() + 1);
     }
     let heap = interp::heap();
@@ -1160,17 +1160,16 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
         None => call_r(&*site, words, out, (*site).env),
     };
     heap.release_handles(mark);
-    if table {
-        if interp::conditions::warnings_raised() != warnings {
-            R_CALLS.set(R_CALLS.get() + 1);
-        }
-        // Compiled code holds the table as a bare word, which the collector does not see, so the
-        // table stays rooted until the call that entered typed code releases its handles.
-        if outcome.is_ok()
-            && let Some(value) = Sexp::from_raw(*out as *mut _)
-        {
-            heap.root(value);
-        }
+    if effect_free && interp::conditions::warnings_raised() != warnings {
+        R_CALLS.set(R_CALLS.get() + 1);
+    }
+    // Compiled code holds a table as a bare word, which the collector does not see, so the table
+    // stays rooted until the call that entered typed code releases its handles.
+    if matches!((*site).result, RResult::Table)
+        && outcome.is_ok()
+        && let Some(value) = Sexp::from_raw(*out as *mut _)
+    {
+        heap.root(value);
     }
     match outcome {
         Ok(()) => 0,
