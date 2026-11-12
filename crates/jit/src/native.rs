@@ -3079,10 +3079,11 @@ pub(crate) unsafe fn with_released_roots(
 }
 
 unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
-    let (arguments, read) = gather(function, args)?;
+    annotations::attempt_native();
+    let (arguments, read, lazy) = gather(function, args)?;
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
-    if let Some(value) = typed::call(function, &arguments) {
+    if let Some(value) = typed::call(function, &arguments, lazy) {
         return Some(value.and_then(|value| force_read(&read).map(|()| value)));
     }
     let (types, words) = argument_words(&arguments)?;
@@ -3100,30 +3101,59 @@ unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R
 
 /// The arguments a native call passes, as values with no promise left: `None` unless every
 /// argument is positional and at hand without evaluating anything, and every formal past them
-/// has a constant scalar default. Also gives each promise read without forcing, with its value.
+/// has a constant scalar default. Also gives each promise read without forcing, with its value,
+/// and whether a value read ahead depends on a variable.
 pub(crate) unsafe fn gather(
     function: Sexp,
     args: &[interp::builtins::Arg],
-) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>)> {
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
-        || interp::moves::tracking()
-    {
+) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>, bool)> {
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+        annotations::decline(|| String::from("it is being debugged or traced"));
+        return None;
+    }
+    if interp::moves::tracking() {
+        annotations::decline(|| String::from("the session is tracking copies"));
         return None;
     }
     let formals = function.car();
     let mut formal = formals;
     let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
     let mut read: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-    for arg in args {
+    let mut lazy = false;
+    for (position, arg) in args.iter().enumerate() {
         if formal.kind() != SexpType::Pairlist
             || formal.tag() == values::symbols().dots
             || arg.tag != values::nil() && arg.tag != formal.tag()
         {
+            annotations::decline(|| {
+                format!(
+                    "argument {} is named out of order or goes to `...`, and the native tier \
+                     takes only arguments in the order of the parameters",
+                    position + 1
+                )
+            });
             return None;
         }
         let value = if arg.value.kind() == SexpType::Promise {
-            promise_value(arg.value, &mut read, 0)?
+            lazy |= arg.value.car() == values::unbound()
+                && (is_reference(arg.value)
+                    || reads_variables(bytecode::source_of_body(arg.value.cdr()), 0));
+            let Some(value) = promise_value(arg.value, &mut read, 0) else {
+                annotations::decline(|| {
+                    format!(
+                        "argument {} is `{}`, which R code wrote, so it stays lazy until the \
+                         function uses it, as in R, and the native tier reads ahead only \
+                         constants, variables and arithmetic: compute it into a variable before \
+                         the call",
+                        position + 1,
+                        interp::deparse::deparse_first_line(bytecode::source_of_body(arg.value.cdr()))
+                    )
+                });
+                return None;
+            };
+            value
         } else if arg.value == values::missing_arg() {
+            annotations::decline(|| format!("argument {} is empty", position + 1));
             return None;
         } else {
             arg.value
@@ -3136,36 +3166,60 @@ pub(crate) unsafe fn gather(
     // closure's environment, such as `1 / 12`: the frame could give it no other value.
     while formal.kind() == SexpType::Pairlist {
         if formal.tag() == values::symbols().dots {
+            annotations::decline(|| String::from("the function takes `...`"));
             return None;
         }
         let default = formal.car();
         let value = match default.kind() {
             SexpType::Language if !names_a_formal(default, formals, 0) => {
+                lazy |= reads_variables(default, 0);
                 let mut promises: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-                let value = pure_value(default, function.tag(), &mut promises, 0)?;
-                if !promises.is_empty() {
-                    return None;
-                }
-                value
+                pure_value(default, function.tag(), &mut promises, 0)
+                    .filter(|_| promises.is_empty())
             }
-            _ => default,
+            _ => Some(default),
         };
-        if !matches!(
-            value.kind(),
-            SexpType::Real
-                | SexpType::Integer
-                | SexpType::I64
-                | SexpType::Logical
-                | SexpType::String
-        ) || value.length() != 1
-            || value.attrib() != values::nil()
-        {
+        let Some(value) = value.filter(|value| {
+            matches!(
+                value.kind(),
+                SexpType::Real
+                    | SexpType::Integer
+                    | SexpType::I64
+                    | SexpType::Logical
+                    | SexpType::String
+            ) && value.length() == 1
+                && value.attrib() == values::nil()
+        }) else {
+            annotations::decline(|| {
+                format!(
+                    "the call leaves out `{}`, whose default `{}` is not a constant single value \
+                     the native tier can compute ahead",
+                    values::symbol_name(formal.tag()),
+                    interp::deparse::deparse_first_line(default)
+                )
+            });
             return None;
-        }
+        };
         arguments.push(value);
         formal = formal.cdr();
     }
-    Some((arguments, read))
+    Some((arguments, read, lazy))
+}
+
+/// Whether evaluating `code` reads a variable, apart from the functions it calls by name. Too
+/// deep a tree counts as reading one.
+unsafe fn reads_variables(code: Sexp, depth: usize) -> bool {
+    match code.kind() {
+        SexpType::Symbol => true,
+        SexpType::Language => {
+            depth > MAX_PURE_DEPTH
+                || code.car().kind() != SexpType::Symbol && reads_variables(code.car(), depth + 1)
+                || values::pairlist_items(code.cdr())
+                    .into_iter()
+                    .any(|(_, argument)| reads_variables(argument, depth + 1))
+        }
+        _ => false,
+    }
 }
 
 /// Whether `code` mentions the name of one of `formals`, as a variable or a function. Code that

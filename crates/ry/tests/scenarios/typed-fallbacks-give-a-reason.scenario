@@ -1,0 +1,31 @@
+# Every call of a strict typed function that runs in the interpreter instead of on native code
+# leaves a line under `RY_TYPED_LOG` that names the function and says why, so a slow typed
+# program can be explained from its log. An argument R code wrote stays lazy, as in R, and one
+# the native tier cannot read ahead is the reason; so is code the typed core does not compile.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+| strict = true
+
+file calls.R
+| double_it <- function(x: F64) -> F64 x * 2.0
+| y <- 2.0
+| print(double_it(Num.from_r(sqrt(y))))
+| print(double_it(y))
+| shout <- function(s: Str) -> Str {
+|   loud <- casefold(s, upper = TRUE)
+|   Str.from_r(loud)
+| }
+| print(shout("hi"))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry calls.R
+expect exit 0
+expect stdout "2.828427"
+expect stdout "[1] 4"
+expect stderr "typed: `double_it` runs in the interpreter: argument 1 is `Num.from_r(sqrt(y))`, which R code wrote"
+expect stderr "typed: `shout` runs in the interpreter: no code for [Str]: it uses the value of R's `casefold` directly"
+expect stderr lacks "recorded no reason"
