@@ -695,7 +695,7 @@ the trained profile below, and the native code it reserves room for.
   builtin, or a sibling closure that calls are compiled against directly. A call tests its
   arguments' types on entry; when none match, or a lookup no longer finds what the code was
   compiled against, it runs in tier 0, so the code needs no deoptimization metadata. A passed
-  check is kept until any binding is unlocked (`interp::code_image::unlocks`), once every binding
+  check is kept until any binding is unlocked (`interp::code_image::check_epoch`), once every binding
   it read is locked. Records, whose layouts each process numbers anew, keep a function in the
   interpreter. Two gaps remain. The checker's inferred types are not used yet, so the types are
   guesses. And arguments are read only when they are values, constants or variables, as for the
