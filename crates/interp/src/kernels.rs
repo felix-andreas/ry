@@ -97,7 +97,7 @@ pub unsafe fn binary(
     if !plain(left) || !plain(right) {
         return Ok(None);
     }
-    let (left_length, right_length) = (left.length() as usize, right.length() as usize);
+    let (left_length, right_length) = (values::length(left), values::length(right));
     let count = if left_length == right_length || right_length == 1 {
         left_length
     } else if left_length == 1 {
@@ -219,7 +219,7 @@ unsafe fn complex_binary(
     {
         return Ok(None);
     }
-    let (left_length, right_length) = (left.length() as usize, right.length() as usize);
+    let (left_length, right_length) = (values::length(left), values::length(right));
     let count = if left_length == right_length || right_length == 1 {
         left_length
     } else if left_length == 1 {
@@ -255,10 +255,10 @@ pub unsafe fn unary(
     operand: Sexp,
     destination: Option<Sexp>,
 ) -> R<Option<Sexp>> {
-    if !plain(operand) || operand.length() == 0 {
+    if !plain(operand) || values::length(operand) == 0 {
         return Ok(None);
     }
-    let count = operand.length() as usize;
+    let count = values::length(operand);
     let kind = if function == Math::Abs && operand.kind() != SexpType::Real {
         SexpType::Integer
     } else {
@@ -475,12 +475,12 @@ pub unsafe fn fused(
     }
     let count = leaves
         .iter()
-        .map(|&leaf| leaf.length() as usize)
+        .map(|&leaf| values::length(leaf))
         .max()
         .unwrap_or(0);
     if count < SHORTEST_FUSED
         || leaves.iter().any(|&leaf| {
-            let length = leaf.length() as usize;
+            let length = values::length(leaf);
             length != 1 && length != count
         })
     {
@@ -527,7 +527,7 @@ pub unsafe fn fused(
         };
         elements[index] = element;
         scalar[index] = match *node {
-            Node::Leaf(leaf) => leaves[leaf].length() == 1,
+            Node::Leaf(leaf) => values::length(leaves[leaf]) == 1,
             Node::Binary(_, left, right) | Node::Logic { left, right, .. } => {
                 scalar[left] && scalar[right]
             }
@@ -543,7 +543,7 @@ pub unsafe fn fused(
 
     let leaf_view = |leaf: usize, start: usize, length: usize| {
         let value = leaves[leaf];
-        let range = if value.length() == 1 {
+        let range = if values::length(value) == 1 {
             0..1
         } else {
             start..start + length
