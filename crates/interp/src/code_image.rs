@@ -98,6 +98,10 @@ pub struct NativeHooks {
     /// Gives the closures a record made, in the order its reader made them, the native code the
     /// section `handle` holds for record `entry`.
     pub attach: unsafe fn(u32, u32, &[Sexp]),
+    /// The address of the baseline machine code the section `handle` holds for the body of
+    /// closure `ordinal` of record `entry`, or 0 for none. The code is written for the code
+    /// object the image holds for that closure, which gets it when it is decoded.
+    pub baseline: unsafe fn(u32, u32, u32) -> usize,
     /// Calls `function` through its native code when the arguments fit it; `None` runs the call
     /// in the interpreter.
     pub call: unsafe fn(Sexp, &[crate::builtins::Arg]) -> Option<R<Sexp>>,
@@ -110,12 +114,16 @@ pub struct NativeCandidate {
     pub entry: u32,
     pub ordinal: u32,
     pub closure: Sexp,
+    /// The code object a session decodes from the image for this closure, which the install
+    /// tier compiles; `NULL` when the image holds none.
+    pub code: Sexp,
 }
 
-/// The machine code an install compiled: how many functions it holds, and its section's bytes
-/// for a given offset in the image file.
+/// The machine code an install compiled: how many specialized functions and baseline bodies it
+/// holds, and its section's bytes for a given offset in the image file.
 pub struct NativeBuild {
     pub functions: usize,
+    pub bodies: usize,
     pub encode: Box<dyn Fn(u64) -> Vec<u8>>,
 }
 
@@ -169,7 +177,7 @@ pub unsafe fn set_flags_from_c(object: Sexp, bits: u16) {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryCodeImageRecord", 1, do_record).invisible(),
-    internal("ryCodeImageWrite", 3, do_write),
+    internal("ryCodeImageWrite", 4, do_write),
 ];
 
 const MAGIC: &[u8; 8] = b"RYCODE\x00\x02";
@@ -247,6 +255,8 @@ struct Pending {
     entry: u32,
     start: u32,
     end: u32,
+    /// The install tier's machine code for the code, or 0 for none.
+    baseline: usize,
 }
 
 /// Where an image's native code stands in this process.
@@ -524,10 +534,13 @@ pub unsafe fn read_image_record(database: u32, record: &ImageRecord, hook: Sexp)
     // flushes the database.
     let (value, closures) = serialize::unserialize_with_closures(stream(record), hook)?;
     crate::heap().root(value);
-    if let Err(message) = note_pending(&record.image, record.entry, database, &closures) {
+    let native = native_section(&record.image);
+    if let Err(message) = note_pending(&record.image, record.entry, database, &closures, native) {
         give_up(database, &message);
     }
-    attach_native(&record.image, record.entry, &closures)?;
+    if let (Some(handle), Some(hooks)) = (native, native_hooks()) {
+        (hooks.attach)(handle, record.entry as u32, &closures);
+    }
     Ok(value)
 }
 
@@ -577,6 +590,15 @@ pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
     match decode_pending(&pending, body) {
         Ok(code) => {
             heap.set_cdr(function, code);
+            if pending.baseline != 0 {
+                heap.root(code);
+                let holder = heap.alloc_external_ptr(
+                    pending.baseline as *mut std::ffi::c_void,
+                    nil(),
+                    nil(),
+                )?;
+                heap.set_element(code.cdr(), bytecode::BASELINE, holder);
+            }
             Ok(Some(code))
         }
         Err(message) => {
@@ -593,6 +615,7 @@ unsafe fn note_pending(
     entry: usize,
     database: u32,
     closures: &[Sexp],
+    native: Option<u32>,
 ) -> Result<(), String> {
     let (payload_start, payload) = payload(image, entry)?;
     let mut input = CodeInput {
@@ -606,8 +629,12 @@ unsafe fn note_pending(
     if input.count().map_err(failed)? != closures.len() {
         return Err("a record's closures do not match the database's".to_owned());
     }
-    let mut noted: Vec<(Sexp, Sexp, u32, u32)> = Vec::new();
-    for &closure in closures {
+    let mut noted: Vec<(Sexp, Sexp, u32, u32, usize)> = Vec::new();
+    let baseline = native
+        .zip(native_hooks())
+        .filter(|_| std::env::var_os("RY_INSTALL_TIER").is_none_or(|value| value != "0"))
+        .map(|(handle, hooks)| (handle, hooks.baseline));
+    for (ordinal, &closure) in closures.iter().enumerate() {
         let size = input.count().map_err(failed)?;
         if size == 0 {
             continue;
@@ -625,14 +652,23 @@ unsafe fn note_pending(
         let absolute = |offset: usize| {
             u32::try_from(payload_start + offset).map_err(|_| "a payload lies past 4GB".to_owned())
         };
-        noted.push((body, closure.car(), absolute(start)?, absolute(end)?));
+        let address = baseline.map_or(0, |(handle, baseline)| {
+            baseline(handle, entry as u32, ordinal as u32)
+        });
+        noted.push((
+            body,
+            closure.car(),
+            absolute(start)?,
+            absolute(end)?,
+            address,
+        ));
     }
     if input.position != payload.len() {
         return Err("a record holds more than its closures".to_owned());
     }
     let state = &mut interp().code_image;
     let heap = crate::heap();
-    for (body, formals, start, end) in noted {
+    for (body, formals, start, end, baseline) in noted {
         let pending = Pending {
             image: Rc::clone(image),
             database,
@@ -640,6 +676,7 @@ unsafe fn note_pending(
             entry: entry as u32,
             start,
             end,
+            baseline,
         };
         heap.preserve(body);
         heap.preserve(formals);
@@ -651,15 +688,13 @@ unsafe fn note_pending(
     Ok(())
 }
 
-/// Gives the closures of record `entry` the image's native code for them, mapping the native
-/// section on first use. A section that cannot be mapped warns once and is ignored.
-unsafe fn attach_native(image: &Image, entry: usize, closures: &[Sexp]) -> R<()> {
-    let Some(hooks) = native_hooks() else {
-        return Ok(());
-    };
-    let handle = match image.native.get() {
-        NativeSection::Absent => return Ok(()),
-        NativeSection::Loaded(handle) => handle,
+/// The handle of the image's native section, mapping it on first use. A section that cannot be
+/// mapped warns once and is ignored.
+unsafe fn native_section(image: &Image) -> Option<u32> {
+    let hooks = native_hooks()?;
+    match image.native.get() {
+        NativeSection::Absent => None,
+        NativeSection::Loaded(handle) => Some(handle),
         NativeSection::Waiting(offset, length) => {
             image.native.set(NativeSection::Absent);
             let section = usize::try_from(offset)
@@ -675,22 +710,20 @@ unsafe fn attach_native(image: &Image, entry: usize, closures: &[Sexp]) -> R<()>
             match loaded {
                 Ok(Some(handle)) => {
                     image.native.set(NativeSection::Loaded(handle));
-                    handle
+                    Some(handle)
                 }
-                Ok(None) => return Ok(()),
+                Ok(None) => None,
                 Err(message) => {
                     report_damage(&format!(
                         "cannot use the code image {} ({message}), so its functions run without \
                          its machine code; reinstall the package to repair it",
                         image.path.display()
                     ));
-                    return Ok(());
+                    None
                 }
             }
         }
-    };
-    (hooks.attach)(handle, entry as u32, closures);
-    Ok(())
+    }
 }
 
 /// The payload of `entry` and where it starts in the image.
@@ -924,9 +957,10 @@ fn release_recording(recording: &Recording) {
     }
 }
 
-/// `ryCodeImageWrite(trained, explain, code)`: compiles every recorded closure and writes each
-/// database's image, keeping the run's feedback when `trained`, and with it the machine code of
-/// the closures whose facts need no run. With `explain`, prints what kept each closure from
+/// `ryCodeImageWrite(trained, explain, code, baseline)`: compiles every recorded closure and
+/// writes each database's image, keeping the run's feedback when `trained`, and with it the
+/// machine code of the closures whose facts need no run, and with `baseline` the baseline
+/// machine code of every body the image holds. With `explain`, prints what kept each closure from
 /// machine code. Without `code`, an image holds the records' streams alone: decoding untrained
 /// code and mapping a native section cost a session more than compiling the closures it calls. Returns how many closures were recorded and written, how many native functions
 /// were compiled, and how many closures were left out for each reason.
@@ -934,6 +968,7 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
     let trained = values::as_logical_scalar(call.arg(0)) == 1;
     let explain = values::as_logical_scalar(call.arg(1)) == 1;
     let code = values::as_logical_scalar(call.arg(2)) == 1;
+    let baseline = code && values::as_logical_scalar(call.arg(3)) == 1;
     let state = &mut interp().code_image;
     if state.build.is_empty() {
         return Err(error(
@@ -957,6 +992,7 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
                 trained,
                 explain,
                 code,
+                baseline,
                 &mut summary,
             )
         });
@@ -966,6 +1002,7 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
         ("closures", summary.closures),
         ("written", summary.written),
         ("native", summary.native),
+        ("baseline", summary.baseline),
     ];
     for (reason, count) in &summary.skipped {
         items.push((reason, *count));
@@ -992,6 +1029,8 @@ pub struct Summary {
     pub written: usize,
     /// Native functions compiled, one per closure and argument types.
     pub native: usize,
+    /// Closure bodies given baseline machine code.
+    pub baseline: usize,
     pub skipped: BTreeMap<&'static str, usize>,
 }
 
@@ -1002,6 +1041,7 @@ unsafe fn write_image(
     trained: bool,
     explain: bool,
     code: bool,
+    baseline: bool,
     summary: &mut Summary,
 ) -> R<()> {
     let Some(stamp) = DatabaseStamp::of(database).map_err(error)? else {
@@ -1032,10 +1072,20 @@ unsafe fn write_image(
         for ordinal in 0..length(recorded.closures) / 2 {
             let closure = recorded.closures.element(ordinal * 2);
             if closure.kind() == SexpType::Closure {
+                let body = recorded.closures.element(ordinal * 2 + 1);
+                let decoded = if baseline {
+                    image_code(closure, body, trained)?
+                } else {
+                    nil()
+                };
+                if decoded != nil() {
+                    crate::heap().preserve(decoded);
+                }
                 candidates.push(NativeCandidate {
                     entry: entry as u32,
                     ordinal: ordinal as u32,
                     closure,
+                    code: decoded,
                 });
             }
         }
@@ -1044,8 +1094,14 @@ unsafe fn write_image(
         .then(native_hooks)
         .flatten()
         .and_then(|hooks| (hooks.compile)(&candidates, explain));
+    for candidate in &candidates {
+        if candidate.code != nil() {
+            crate::heap().release(candidate.code);
+        }
+    }
     if let Some(native) = &native {
         summary.native += native.functions;
+        summary.baseline += native.bodies;
     }
     let table: Vec<(u64, u32, &[u8])> = records
         .iter()
@@ -1194,6 +1250,21 @@ unsafe fn compiled_code(closure: Sexp, body: Sexp, trained: bool) -> Result<Vec<
     let mut out = Vec::new();
     encode_code(code, &source, trained, &mut out)?;
     Ok(out)
+}
+
+/// The code object a session decodes from the image for `closure`, read with `body`, or `NULL`
+/// when the image holds none for it. The install tier compiles this object rather than the
+/// closure's own code, because its machine code addresses the constant pool by index and must
+/// match the object the session runs.
+unsafe fn image_code(closure: Sexp, body: Sexp, trained: bool) -> R<Sexp> {
+    if body.kind() != SexpType::Language || bytecode::source_body(closure) != body {
+        return Ok(nil());
+    }
+    let code = match bytecode::compiled_body(closure) {
+        Ok(code) if code.kind() == SexpType::Bytecode => code,
+        _ => return Ok(nil()),
+    };
+    Ok(round_trip(code, body, trained)?.unwrap_or_else(nil))
 }
 
 /// The encoded form of `code`, compiled from `body`, or `None` when it holds something the image

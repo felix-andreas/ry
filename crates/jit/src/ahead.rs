@@ -18,8 +18,15 @@
 //! A sibling still waiting in its lazy-load promise passes: the image matched its database
 //! record by record, so the promise can only make that closure.
 //!
-//! The manifest that names each function's closure, argument types and checks travels in the
-//! native section's metadata. Its layout, integers little-endian:
+//! Every closure body the image holds code for also gets baseline machine code
+//! ([`crate::baseline`]), assembled for the code object a session decodes from the image. That
+//! code is position independent and reads no process address, so a session that decodes the
+//! body attaches it and runs the body as baseline code from its first call, with the run-time
+//! baseline tier's exits and checks unchanged.
+//!
+//! The manifest that names each function's closure, argument types and checks, and each
+//! baseline body's closure, travels in the native section's metadata. Its layout, integers
+//! little-endian:
 //!
 //! | Field | Content |
 //! |---|---|
@@ -28,6 +35,7 @@
 //! | types | parameter count `u8`, a type code per parameter, then the result's type code |
 //! | entry | the exported entry's name, a `u16` length and the bytes |
 //! | checks | `u32` count, then per check the name looked up (`u16` length and bytes) and either `0` and the builtin's name, or `1`, an entry `u32` and an ordinal `u32` |
+//! | bodies | `u32` count, then per baseline body its record entry `u32`, ordinal `u32` and exported name (`u16` length and bytes), sorted by entry and ordinal |
 //!
 //! Type codes are 0 integer, 1 double, 2 logical, 3 integer vector, 4 double vector and 5
 //! logical vector.
@@ -35,6 +43,8 @@
 use {
     crate::{
         analysis::{Speculation, Ty, base_builtin},
+        assembler::Arch,
+        baseline,
         native::{self, Native},
         runtime,
     },
@@ -64,6 +74,7 @@ pub fn install() {
         compile,
         load,
         attach,
+        baseline: baseline_address,
         call,
     });
 }
@@ -110,6 +121,21 @@ struct Specialization {
     checks: Vec<Check>,
 }
 
+/// The baseline machine code of one closure body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Body {
+    entry: u32,
+    ordinal: u32,
+    function: Box<str>,
+}
+
+/// What a native section holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Manifest {
+    specializations: Vec<Specialization>,
+    bodies: Vec<Body>,
+}
+
 /// How a closure fared, for the install's report.
 struct Outcome {
     name: String,
@@ -149,10 +175,11 @@ unsafe fn compile(candidates: &[NativeCandidate], explain: bool) -> Option<Nativ
         .into_iter()
         .flat_map(|outcome| outcome.compiled)
         .collect();
-    if specializations.is_empty() {
+    let (bodies, prefix) = baseline_bodies(candidates, explain);
+    if specializations.is_empty() && bodies.is_empty() {
         return None;
     }
-    let mut code = match object?.finish(&|name| native::helper_address(name).is_some()) {
+    let mut code = match object?.finish(&|name| native::helper_address(name).is_some(), &prefix) {
         Ok(code) => code,
         Err(ssa::Error(why)) => {
             if explain {
@@ -161,11 +188,57 @@ unsafe fn compile(candidates: &[NativeCandidate], explain: bool) -> Option<Nativ
             return None;
         }
     };
-    code.metadata = encode_manifest(&specializations);
+    let manifest = Manifest {
+        specializations,
+        bodies,
+    };
+    code.metadata = encode_manifest(&manifest);
     Some(NativeBuild {
-        functions: specializations.len(),
+        functions: manifest.specializations.len(),
+        bodies: manifest.bodies.len(),
         encode: Box::new(move |base| section::encode(&code, base)),
     })
+}
+
+/// The baseline machine code of every candidate's body, and the functions that hold it, in
+/// the manifest's order. A candidate without code gets none.
+unsafe fn baseline_bodies(
+    candidates: &[NativeCandidate],
+    explain: bool,
+) -> (Vec<Body>, Vec<(Box<str>, Vec<u8>)>) {
+    let mut bodies = Vec::new();
+    let mut prefix = Vec::new();
+    let Some(arch) = Arch::host() else {
+        return (bodies, prefix);
+    };
+    let mut refused: FxHashMap<&'static str, usize> = FxHashMap::default();
+    let mut ordered: Vec<&NativeCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.code != values::nil())
+        .collect();
+    ordered.sort_by_key(|candidate| (candidate.entry, candidate.ordinal));
+    for candidate in ordered {
+        match baseline::assemble(arch, candidate.code) {
+            Ok(bytes) => {
+                let function: Box<str> = format!("body{}", bodies.len()).into();
+                prefix.push((function.clone(), bytes));
+                bodies.push(Body {
+                    entry: candidate.entry,
+                    ordinal: candidate.ordinal,
+                    function,
+                });
+            }
+            Err(reason) => *refused.entry(reason).or_default() += 1,
+        }
+    }
+    if explain {
+        let mut refused: Vec<_> = refused.into_iter().collect();
+        refused.sort();
+        for (reason, count) in refused {
+            println!("baseline code: {count} bodies left out ({reason})");
+        }
+    }
+    (bodies, prefix)
 }
 
 /// The name each candidate is bound to in its namespace, for the report.
@@ -527,7 +600,8 @@ fn ty_of(code: u8) -> Option<Ty> {
     })
 }
 
-fn encode_manifest(specializations: &[Specialization]) -> Vec<u8> {
+fn encode_manifest(manifest: &Manifest) -> Vec<u8> {
+    let specializations = &manifest.specializations;
     let mut out = Vec::new();
     let name = |out: &mut Vec<u8>, name: &str| {
         let bytes = &name.as_bytes()[..name.len().min(u16::MAX as usize)];
@@ -558,11 +632,17 @@ fn encode_manifest(specializations: &[Specialization]) -> Vec<u8> {
             }
         }
     }
+    out.extend_from_slice(&(manifest.bodies.len() as u32).to_le_bytes());
+    for body in &manifest.bodies {
+        out.extend_from_slice(&body.entry.to_le_bytes());
+        out.extend_from_slice(&body.ordinal.to_le_bytes());
+        name(&mut out, &body.function);
+    }
     out
 }
 
 /// Reads a manifest. Any bytes give a manifest or an error, never a read out of bounds.
-fn decode_manifest(bytes: &[u8]) -> Result<Vec<Specialization>, &'static str> {
+fn decode_manifest(bytes: &[u8]) -> Result<Manifest, &'static str> {
     let mut input = Input { bytes, position: 0 };
     let count = input.u32()? as usize;
     if count > bytes.len() / 12 {
@@ -608,10 +688,32 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<Specialization>, &'static str> {
             checks,
         });
     }
+    let body_count = input.u32()? as usize;
+    if body_count > bytes.len() / 10 {
+        return Err("the manifest names more bodies than it holds");
+    }
+    let mut bodies: Vec<Body> = Vec::with_capacity(body_count);
+    for _ in 0..body_count {
+        let body = Body {
+            entry: input.u32()?,
+            ordinal: input.u32()?,
+            function: input.name()?.into(),
+        };
+        if bodies
+            .last()
+            .is_some_and(|last| (last.entry, last.ordinal) >= (body.entry, body.ordinal))
+        {
+            return Err("the manifest's bodies are out of order");
+        }
+        bodies.push(body);
+    }
     if input.position != bytes.len() {
         return Err("the manifest holds more than its functions");
     }
-    Ok(specializations)
+    Ok(Manifest {
+        specializations,
+        bodies,
+    })
 }
 
 struct Input<'a> {
@@ -658,9 +760,11 @@ struct Mapped {
     checks: Vec<(Sexp, Expected)>,
 }
 
-/// A mapped section: its functions by record entry and ordinal.
+/// A mapped section: its functions by record entry and ordinal, and the address of each
+/// baseline body, sorted by record entry and ordinal.
 struct Section {
     functions: FxHashMap<(u32, u32), SmallVec<[Mapped; 2]>>,
+    bodies: Vec<((u32, u32), usize)>,
 }
 
 /// A closure with native code: where its code lies, per function the [`check_epoch`] plus one
@@ -694,13 +798,26 @@ unsafe fn load(path: &Path, offset: u64, bytes: &[u8]) -> Result<Option<u32>, St
     let manifest = decode_manifest(&loaded.metadata).map_err(str::to_owned)?;
     if crate::logging() {
         eprintln!(
-            "jit: mapped {} install-time functions from {}",
-            manifest.len(),
+            "jit: mapped {} install-time functions and {} baseline bodies from {}",
+            manifest.specializations.len(),
+            manifest.bodies.len(),
             path.display()
         );
     }
+    let mut bodies = Vec::with_capacity(manifest.bodies.len());
+    if !manifest.bodies.is_empty() {
+        let arch = Arch::host().ok_or("this host has no baseline backend")?;
+        baseline::publish_step_table(arch)?;
+        for body in manifest.bodies {
+            let address = *loaded
+                .functions
+                .get(&body.function)
+                .ok_or("the manifest names a body the code lacks")?;
+            bodies.push(((body.entry, body.ordinal), address));
+        }
+    }
     let mut functions: FxHashMap<(u32, u32), SmallVec<[Mapped; 2]>> = FxHashMap::default();
-    for specialization in manifest {
+    for specialization in manifest.specializations {
         let address = *loaded
             .functions
             .get(&specialization.function)
@@ -723,8 +840,21 @@ unsafe fn load(path: &Path, offset: u64, bytes: &[u8]) -> Result<Option<u32>, St
             });
     }
     SECTIONS.with_borrow_mut(|sections| {
-        sections.push(Section { functions });
+        sections.push(Section { functions, bodies });
         Ok(Some(sections.len() as u32 - 1))
+    })
+}
+
+/// The address of the baseline body of closure `ordinal` of record `entry` in section
+/// `section`, or 0, for [`NativeHooks::baseline`].
+unsafe fn baseline_address(section: u32, entry: u32, ordinal: u32) -> usize {
+    SECTIONS.with_borrow(|sections| {
+        sections.get(section as usize).map_or(0, |found| {
+            found
+                .bodies
+                .binary_search_by_key(&(entry, ordinal), |&(key, _)| key)
+                .map_or(0, |index| found.bodies[index].1)
+        })
     })
 }
 
@@ -974,8 +1104,19 @@ mod tests {
         names[rng.below(names.len())].into()
     }
 
-    fn random_manifest(rng: &mut SplitMix64) -> Vec<Specialization> {
-        (0..rng.below(4))
+    fn random_manifest(rng: &mut SplitMix64) -> Manifest {
+        let mut entry = 0u32;
+        let bodies = (0..rng.below(4))
+            .map(|index| {
+                entry += 1 + rng.below(3) as u32;
+                Body {
+                    entry,
+                    ordinal: rng.below(8) as u32,
+                    function: format!("body{index}").into(),
+                }
+            })
+            .collect();
+        let specializations = (0..rng.below(4))
             .map(|_| Specialization {
                 entry: rng.next_u64() as u32,
                 ordinal: rng.below(8) as u32,
@@ -998,7 +1139,11 @@ mod tests {
                     })
                     .collect(),
             })
-            .collect()
+            .collect();
+        Manifest {
+            specializations,
+            bodies,
+        }
     }
 
     /// A manifest reads back as written, and damaged bytes give a manifest or an error, never a
@@ -1028,7 +1173,7 @@ mod tests {
                 }
             }
             if let Ok(decoded) = decode_manifest(&bytes) {
-                for specialization in &decoded {
+                for specialization in &decoded.specializations {
                     assert!(specialization.result.is_unboxed());
                 }
                 assert_eq!(decode_manifest(&encode_manifest(&decoded)), Ok(decoded));

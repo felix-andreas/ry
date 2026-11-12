@@ -1670,6 +1670,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
                         "--ry-no-code-image" => options.code_image = false,
+                        "--ry-no-install-tier" => options.install_tier = false,
                         "--ry-explain" => options.explain = true,
                         "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
@@ -1874,6 +1875,9 @@ pub struct InstallOptions {
     /// Writes the compiled code image beside each lazy-load database; `--ry-no-code-image` turns
     /// it off.
     pub code_image: bool,
+    /// Compiles baseline machine code for every closure body the image holds;
+    /// `--ry-no-install-tier` turns it off.
+    pub install_tier: bool,
     /// The workload the code image is trained on before it is written (`--ry-train=`).
     pub training: Training,
     /// Prints what kept each function from install-time machine code (`--ry-explain`).
@@ -1924,6 +1928,7 @@ impl Default for InstallOptions {
             test_load: true,
             driver_flags: Vec::new(),
             code_image: true,
+            install_tier: true,
             training: Training::None,
             explain: false,
         }
@@ -2335,6 +2340,7 @@ fn write_code_image(
                 build.display().to_string(),
                 training,
                 options.explain.to_string(),
+                options.install_tier.to_string(),
             ],
             r_libs,
         )
