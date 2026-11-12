@@ -4438,7 +4438,10 @@ an R function only in these positions:
 
 Each argument of such a call is a ry value that shares R's representation (an `F64`, `Bool` or
 `Str`, or a list of them), an R literal such as `42L`, or `Num.to_r(x)` or `List.to_r(x)` written
-directly as the argument. This function is native:
+directly as the argument. The arguments of a table function follow the same rule, and so do the
+operands of an operator that builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)`; they
+may also be table values and nested table calls
+([Tables in typed code](#tables-in-typed-code)). This function is native:
 
 ```r
 simulate <- function(draws: I64, label: Str) -> F64 {

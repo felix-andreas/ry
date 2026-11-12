@@ -631,8 +631,11 @@ enum Use {
     Unused,
     /// The argument of `Num.from_r` or one of its siblings.
     Converted,
-    /// An argument of the named R function, or of a table function.
+    /// An argument of the named R function.
     Argument(Symbol),
+    /// An argument of a table function, or an operand of an operator that builds a DataFrame
+    /// expression.
+    TableArgument,
 }
 
 enum Callee<'db> {
@@ -644,7 +647,7 @@ enum Callee<'db> {
     Conversion,
     ToR(Symbol),
     Std(Symbol),
-    Table(Symbol),
+    Table,
     Native(Symbol, FunctionType<'db>),
     R(Symbol, ROrigin),
     Computed,
@@ -958,7 +961,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             ExpressionKind::Unary { operator, operand } => match operator {
                 UnaryOperator::Tilde => self.uncompiled(id, Uncompiled::Construct("a formula")),
                 UnaryOperator::Help => self.uncompiled(id, Uncompiled::Construct("a help query")),
-                _ => self.walk(operand, Use::Value),
+                _ => self.walk(operand, self.operand_use(id)),
             },
             ExpressionKind::Binary {
                 operator,
@@ -998,8 +1001,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.scope.truncate(mark);
                 }
                 _ => {
-                    self.walk(lhs, Use::Value);
-                    self.walk(rhs, Use::Value);
+                    let operand = self.operand_use(id);
+                    self.walk(lhs, operand);
+                    self.walk(rhs, operand);
                 }
             },
             ExpressionKind::Call { callee, arguments } => {
@@ -1129,6 +1133,20 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.uncompiled(id, Uncompiled::BranchTypes);
                 }
             }
+        }
+    }
+
+    /// How an operator reads its operands. One that builds a DataFrame expression is a table
+    /// call, so an operand may be what an argument of one may be.
+    fn operand_use(&self, operator: ExprId) -> Use {
+        let db = self.judged.db;
+        let builds_expression = self.ty(operator).is_some_and(
+            |ty| matches!(self.peel(ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Expr"),
+        );
+        if builds_expression {
+            Use::TableArgument
+        } else {
+            Use::Value
         }
     }
 
@@ -1586,7 +1604,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 }
             }
             Callee::ToR(name) => {
-                if !matches!(usage, Use::Argument(_)) {
+                if !matches!(usage, Use::Argument(_) | Use::TableArgument) {
                     self.uncompiled(id, Uncompiled::ToROutsideCall(name));
                 }
                 for &(_, value) in arguments {
@@ -1604,9 +1622,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.dict_entries(module.range(id));
                 }
             }
-            Callee::Table(name) => {
+            Callee::Table => {
                 for &(_, value) in arguments {
-                    self.walk(value, Use::Argument(name));
+                    self.walk(value, Use::TableArgument);
                 }
             }
             Callee::Native(name, function) => {
@@ -1673,14 +1691,6 @@ impl<'a, 'db> Judge<'a, 'db> {
     fn r_position(&mut self, id: ExprId, function: Symbol, origin: ROrigin, usage: Use) {
         match usage {
             Use::Unused | Use::Converted => {}
-            Use::Argument(outer) if gives_table_value(outer.as_str()) => self.block(
-                id,
-                NativeBlockerKind::RValue {
-                    function,
-                    origin,
-                    conversion: self.ty(id).and_then(|ty| self.conversion(ty)),
-                },
-            ),
             Use::Argument(outer) => self.block(
                 id,
                 NativeBlockerKind::NestedRCall {
@@ -1689,7 +1699,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     conversion: self.ty(id).and_then(|ty| self.conversion(ty)),
                 },
             ),
-            Use::Value => self.block(
+            Use::Value | Use::TableArgument => self.block(
                 id,
                 NativeBlockerKind::RValue {
                     function,
@@ -1732,7 +1742,7 @@ fn library_callee<'db>(name: Symbol) -> Callee<'db> {
     } else if TO_R.contains(&text) {
         Callee::ToR(name)
     } else if gives_table_value(text) {
-        Callee::Table(name)
+        Callee::Table
     } else if TABLE_R_CALLS.contains(&text) {
         Callee::R(name, ROrigin::Table)
     } else if text.starts_with(|first: char| first.is_ascii_uppercase()) {

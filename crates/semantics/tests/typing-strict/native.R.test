@@ -813,6 +813,16 @@ large: fn(sales: Sales, least: F64) -> Sales
 largest: fn(sales: Sales) -> Sales
 223..230 warning[unused] `largest` is assigned but never used.
 
+#---- i64_crosses_into_a_table_expression_through_to_r
+#~~~~ script.R
+at_least <- function(sales: DataFrame{units: integer[]}, least: I64) -> DataFrame{units: integer[]} {
+  DataFrame.filter(sales, Expr.col("units") >= Num.to_r(least) & -Expr.col("units") < Num.to_r(0 - least))
+}
+#++++
+== script.R
+at_least: fn(sales: DataFrame{units: integer[]}, least: I64) -> DataFrame{units: integer[]}
+0..8 warning[unused] `at_least` is assigned but never used.
+
 #---- table_call_that_gives_an_r_value
 #~~~~ script.R
 rows <- function(sales: DataFrame{units: integer[]}) -> I64 {

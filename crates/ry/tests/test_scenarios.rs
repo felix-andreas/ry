@@ -328,12 +328,6 @@ fn native_diagnostics_agree_with_the_typed_core() {
     let harness = read(&bench.join("harness.typed.R"));
     for suite in ["kernels", "applications"] {
         for (name, path) in files(bench.join(suite), ".typed.R") {
-            if TYPED_BENCHMARKS_NOT_NATIVE
-                .iter()
-                .any(|(listed, _)| *listed == name)
-            {
-                continue;
-            }
             programs.push(NativeProgram {
                 name,
                 source: format!("# boundary: measure\n{harness}\n{}", read(&path)),
