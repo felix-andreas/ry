@@ -9466,3 +9466,36 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 - **Why.** Compile time is part of typed ry's performance bar (single-pass, Roc-class, far below `rustc`), so an optimization has to be weighed against what it costs to compile, and the cost has to be visible.
 - **Target shape.** With `RY_TYPED_LOG=1`, `typed: compiled for [...] -> ... in N us` gives the time of that function alone: the time of a callee compiled during the caller's compilation is subtracted (`typed::NESTED_COMPILE`), so the lines of a run sum to its total compile time. No clock is read without the log. The typed suite sums the lines per program into `compile_seconds` beside `rustc`'s time for the twin (`tools/bench/bench.py`, `typed_log` and `RustRunner.compile_seconds`), and the benchmarks page shows them as the suite's "Compile time" table.
+
+## One thread-local holds every typed allocation pool
+
+- **Previous shape.** The typed runtime's free lists, large size classes and live-object counter were separate thread-locals, so one allocation read thread-local storage several times, and in `libR.so` each read is a call of `__tls_get_addr`.
+- **Target shape.** `values::Pools` is one thread-local struct holding the free stacks, the large classes and `live`. `object_alloc` and `object_free` resolve it once and pass it down (`block_alloc_in`, `block_free_in`).
+- **Impact.** One thread-local resolution per allocation or free. Its cost still shows in `team_scores` (`ry_box_new` is about 84 instructions), and the next step is in the backlog ("Typed ry against Rust").
+
+## `Str.split` on one byte scans a word at a time
+
+- **Target shape.** `ry_str_split` with a one-byte separator counts the separators first and cuts second, and both passes read the text eight bytes at a time: `values::separators_in_word` XORs the word with the separator repeated in every byte and marks the zero bytes with the carry-free test `!(((d & 0x7f..) + 0x7f..) | d | 0x7f..)`, which sets exactly the high bit of each matching byte. A tail shorter than eight bytes is read through `str_from_bytes`, never past the text. The result list is allocated once at its final length, and each field of at most 15 bytes is built inline by `str_from_bytes` with no allocation.
+- **Why not `memchr`.** Fields in delimited records are short, so a call per separator costs more than the scan; the word loop has no call.
+- **`box_free` walks set bits.** A box's `objects` and `strings` masks say which words hold a reference. `box_free` visits only those words (`trailing_zeros`, clear the lowest bit) instead of testing every word of the box.
+- **Pinned by** the sweep in `test_values::string_functions_follow_r_and_the_standard_library` (every length from 0 to 40 with separators at eight strides, against Rust's `split`).
+
+## A branch on a comparison of two doubles compares once
+
+- **Previous shape.** `if (x > y)` on `F64` lowered to `Op::Compare`, which built a three-valued logical (an unordered test, a select of `NA`), and `Op::Truth`, which tested it for `NA` and again for truth. The loop body of a filter spent most of its instructions there.
+- **Target shape.** `backend::emit_block` recognizes a block that ends in `Compare(op, Dbl, a, b)`, `Truth` of that result and a `Branch` on the truth, and emits the ordered comparison as the branch itself. An ordered comparison that holds proves neither operand is NaN, so the unordered test runs only on the path where it does not hold; `!=` holds for unordered operands, so there the unordered test comes first. The compare's and the truth's locals are still set (to the same 0 or 1), because later blocks may read them.
+- **Compile cost.** A slice pattern on the block's last two instructions, no extra pass.
+- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` (all six operators on both sides, and `0 / 0` compared with `!=` and `<`, where the interpreter answers).
+
+## `List.count_if` with a comparison predicate counts over the whole list
+
+- **Previous shape.** `List.count_if(xs, function(item: F64) -> Bool item > 0.5)` lowered to a loop that called the inlined predicate per item, with an interrupt poll, a data-pointer reload and an `NA` test each time, while `List.count_if(xs > 0.5, function(b) b)` ran the chunked count kernel. The natural spelling was the slow one.
+- **Target shape.** In `Lowerer::walk`, a `count_if` over a `List<F64>` whose predicate is an inline one-parameter function that only compares its item with numbers (`Lowerer::compares_item`: `== != < <= > >=` with the item on one side and a double literal or an `F64` local on the other, joined by `&`, `|`, `!` and parentheses) lowers the predicate's body once with the parameter bound to the list. The body then is the list comparison, and the count is `Op::CountTrue` over its mask, which `typed::fusion` turns into one kernel call. Any other predicate keeps the per-item loop.
+- **Why only `List<F64>` and only comparisons.** Binding the list to the item's name is sound only where every operation on the item means the same elementwise. Comparisons and the logical connectives do; arithmetic on an `I64` item is checked per item and may fail, and a predicate with a call or a `match` has no list form. An `I64` parameter over `List<I64>` is left out because the declared-`I64` lowering of the body differs from a list comparison; add it when a program needs it.
+- **The count kernel tallies a single comparison directly.** `values::count_true` with a one-step program adds the comparison's answers as it compares (`tally_compared`), with no lane written per item, and the general path tallies a chunk's lanes in a byte (a chunk is 128 items, a true lane is 2), so the tally adds whole vectors of lanes.
+- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` (a literal, a local and both operand orders, connectives, a named local predicate, a shadowed name, the empty list, and a computing predicate on the loop path) and `test_values::fused_counts_follow_three_valued_logic`.
+
+## The typed `array_filter` benchmark counts with `List.count_if`
+
+- **Why.** A typed benchmark program and its Rust twin are both written the way the language's users would write them and do the same work. The Rust twin counts with `filter` and `count`, which `rustc` vectorizes; a typed element loop with a float accumulator measured the float-add chain against that, not the language. `array_filter.typed.R` now counts with `List.count_if` and a comparison predicate, the same shape as the twin.
+- **What an element loop costs.** A typed loop that tests each item and adds to an `F64` total is bound by the add chain and the per-item poll, about three times the vectorized count. Typed ry has no autovectorizer and does not get one (compile time is single-pass), so whole-list operations are the fast spelling, as in the standard library's other list functions.

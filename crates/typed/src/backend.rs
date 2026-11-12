@@ -324,6 +324,60 @@ impl Emitter<'_> {
     }
 
     fn emit_block(&mut self, block: &IrBlock) -> Result<(), Refusal> {
+        // A block that ends by comparing two doubles and branching on the answer branches on
+        // the machine comparison itself. Building the logical first, with its `NA` for an
+        // unordered pair, and then testing it costs three times the instructions, and this is
+        // the shape of every `if` and `while` on doubles.
+        if let (
+            [
+                plain @ ..,
+                Inst {
+                    dest: Some(compared),
+                    op: Op::Compare(op, Item::Dbl, a, b),
+                    ..
+                },
+                truth @ Inst {
+                    dest: Some(tested),
+                    op: Op::Truth(source),
+                    ..
+                },
+            ],
+            Terminator::Branch {
+                condition,
+                then,
+                otherwise,
+            },
+        ) = (block.insts.as_slice(), &block.terminator)
+            && source == compared
+            && condition == tested
+        {
+            for inst in plain {
+                self.emit_inst(inst)?;
+            }
+            let (x, y) = (self.one(*a)?, self.one(*b)?);
+            let holds = self.builder.ins().fcmp(float_condition(*op), x, y);
+            let unordered = self.builder.ins().fcmp(FloatCC::Unordered, x, y);
+            // Both locals keep a value for a later reader. An unordered pair gives up below,
+            // so the logical is never the `NA` it would otherwise be.
+            let logical = self.logical(holds);
+            self.set(*compared, &[logical])?;
+            self.set(*tested, &[logical])?;
+            let (then, otherwise) = (self.block(*then)?, self.block(*otherwise)?);
+            if *op == Compare::Ne {
+                // `!=` holds for an unordered pair, so that case is ruled out first.
+                self.fail_if(unordered, &truth.fail_drops)?;
+                self.builder.ins().brif(holds, then, &[], otherwise, &[]);
+            } else {
+                // Every other comparison is false for an unordered pair, so only the path
+                // where it does not hold needs the second test.
+                let ordered = self.builder.create_block();
+                self.builder.ins().brif(holds, then, &[], ordered, &[]);
+                self.builder.switch_to_block(ordered);
+                self.fail_if(unordered, &truth.fail_drops)?;
+                self.builder.ins().jump(otherwise, &[]);
+            }
+            return Ok(());
+        }
         for inst in &block.insts {
             self.emit_inst(inst)?;
         }

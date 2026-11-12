@@ -1199,6 +1199,27 @@ unsafe fn count_true(
                 }
             }
         }
+        // A count of one comparison, the common case, is tallied as the items are compared,
+        // which vectorizes to a compare and a subtraction with no lane written per item.
+        if let [encoded] = *program {
+            let code = encoded & 0xFF;
+            let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
+            let (trues, missing) = if code >= MASK_DBL {
+                let x = operand(left, inputs, lists, &doubles, &[], start, chunk);
+                let y = operand(right, inputs, lists, &doubles, &[], start, chunk);
+                tally_compared(code - MASK_DBL, x, y, f64::is_nan)
+            } else {
+                let x = operand(left, inputs, lists, &wholes, &[], start, chunk);
+                let y = operand(right, inputs, lists, &wholes, &[], start, chunk);
+                tally_compared(code, x, y, |_| false)
+            };
+            if missing {
+                return 1;
+            }
+            count += trues;
+            start += chunk;
+            continue;
+        }
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
             let target = &mut rest[0][..chunk];
@@ -1244,20 +1265,58 @@ unsafe fn count_true(
             0 => &lanes.row(0)[..chunk],
             steps => &buffers[steps - 1][..chunk],
         };
-        let mut trues = 0;
-        let mut missing = false;
+        // A chunk's lanes are tallied in a byte, which a chunk cannot overflow, so the loop
+        // adds whole vectors of lanes where a 64-bit tally widens every lane first.
+        const { assert!(CHUNK <= u8::MAX as usize && LANE_TRUE == 2 && LANE_NA == 1) };
+        let mut trues: u8 = 0;
+        let mut missing: u8 = 0;
         for &item in result {
-            trues += i64::from(item == LANE_TRUE);
-            missing |= item == LANE_NA;
+            trues += item >> 1;
+            missing |= item & 1;
         }
-        if missing {
+        if missing != 0 {
             return 1;
         }
-        count += trues;
+        count += i64::from(trues);
         start += chunk;
     }
     *out = count;
     0
+}
+
+/// How many pairs of two chunks comparison `op` holds for, and whether any item is
+/// `undefined`, which makes its pair `NA`. The match on `op` sits outside the loops so that
+/// each loop compiles to vector code.
+#[inline(always)]
+fn tally_compared<T: PartialOrd + Copy>(
+    op: u32,
+    x: &[T],
+    y: &[T],
+    undefined: impl Fn(T) -> bool + Copy,
+) -> (i64, bool) {
+    #[inline(always)]
+    fn tally<T: Copy>(
+        x: &[T],
+        y: &[T],
+        undefined: impl Fn(T) -> bool,
+        test: impl Fn(&T, &T) -> bool,
+    ) -> (i64, bool) {
+        let mut trues = 0;
+        let mut missing = false;
+        for (x, y) in x.iter().zip(y) {
+            trues += i64::from(test(x, y));
+            missing |= undefined(*x) | undefined(*y);
+        }
+        (trues, missing)
+    }
+    match op {
+        EQ => tally(x, y, undefined, T::eq),
+        NE => tally(x, y, undefined, T::ne),
+        LT => tally(x, y, undefined, T::lt),
+        LE => tally(x, y, undefined, T::le),
+        GT => tally(x, y, undefined, T::gt),
+        _ => tally(x, y, undefined, T::ge),
+    }
 }
 
 /// Comparison `op` of two chunks as lanes, `NA` where either item is `undefined`. The match on

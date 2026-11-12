@@ -28,7 +28,7 @@ rust_source = "tools/bench/typed/array_dot.rs"
 [[programs]]
 id = "array_filter"
 display = "Counting filter"
-summary = "Counts the items above one half in a list of a million doubles, five times: a comparison in a loop."
+summary = "Counts the items above one half in a list of a million doubles, five times: one comparison counted over the whole list."
 typed_source = "tools/bench/kernels/array_filter.typed.R"
 rust_source = "tools/bench/typed/array_filter.rs"
 

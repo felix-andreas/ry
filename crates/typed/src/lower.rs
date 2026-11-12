@@ -3663,6 +3663,37 @@ impl Lowering<'_> {
                 },
             ));
         }
+        // A predicate that only compares the item with numbers means the same for the whole
+        // list as for each item. It is lowered once with its parameter standing for the list,
+        // and the fusion pass then counts from the comparisons' inputs in one pass, where the
+        // loop below would test one item at a time.
+        if counting
+            && ty
+                == (Type::Vector {
+                    item: Item::Dbl,
+                    array: true,
+                })
+            && let Callable::Inline(formals, body, scope) = callable
+            && scope + 1 == self.scopes.len()
+            && let [(name, _)] = rvalues::pairlist_items(formals)[..]
+            && interp::annotations::declared_i64(formals, body).0.first() != Some(&true)
+            && self.compares_item(body, name)
+            && let Some(list) = list
+        {
+            let mut scope = Scope::default();
+            scope.names.insert(name, Binding::Value(list));
+            self.scopes.push(scope);
+            let mask = self.expression(body);
+            self.scopes.pop();
+            let mask = mask?.ok_or(Refusal::new("a predicate that never completes"))?;
+            return Ok(self.builder.emit(
+                Type::I64,
+                Op::CountTrue {
+                    program: SmallVec::new(),
+                    inputs: SmallVec::from_slice(&[mask]),
+                },
+            ));
+        }
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
                 // An empty dictionary's type is the one the step function declares for its state.
@@ -3736,6 +3767,40 @@ impl Lowering<'_> {
         }
         self.next_position(positions);
         Ok(total)
+    }
+
+    /// Whether `body`, a predicate of the one parameter `item` over a `List<F64>`, only compares
+    /// the item with `F64` literals and locals, and joins such comparisons with `&`, `|`, `!`
+    /// and parentheses.
+    unsafe fn compares_item(&self, body: Sexp, item: Sexp) -> bool {
+        if body.kind() != SexpType::Language || body.car().kind() != SexpType::Symbol {
+            return false;
+        }
+        let arguments = rvalues::pairlist_items(body.cdr());
+        if arguments.iter().any(|(tag, _)| tag.kind() != SexpType::Nil) {
+            return false;
+        }
+        let number = |operand: Sexp| match operand.kind() {
+            SexpType::Real => rvalues::reals(operand).len() == 1,
+            SexpType::Symbol => {
+                operand != item
+                    && matches!(
+                        self.lookup(operand),
+                        Some(Binding::Value(local)) if self.builder.ty(local) == Type::Dbl
+                    )
+            }
+            _ => false,
+        };
+        match (&*rvalues::symbol_name(body.car()), &arguments[..]) {
+            ("==" | "!=" | "<" | "<=" | ">" | ">=", &[(_, a), (_, b)]) => {
+                (a == item && number(b)) || (number(a) && b == item)
+            }
+            ("&" | "|", &[(_, a), (_, b)]) => {
+                self.compares_item(a, item) && self.compares_item(b, item)
+            }
+            ("!" | "(", &[(_, a)]) => self.compares_item(a, item),
+            _ => false,
+        }
     }
 
     /// A function argument: a literal or a local function, which inlines, or a typed closure,
