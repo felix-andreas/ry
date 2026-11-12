@@ -280,6 +280,19 @@ pub enum Math {
     RoundAway = 15,
 }
 
+/// A bit operation on the 64-bit two's complement of two `I64`s.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bits {
+    And,
+    Or,
+    Xor,
+    ShiftLeft,
+    /// Shifts right, copying the sign bit in.
+    ShiftRight,
+    /// Shifts right, filling with zeros.
+    ShiftRightZf,
+}
+
 /// A reduction of a vector to a scalar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
@@ -317,6 +330,10 @@ pub enum Op {
     Or(Local, Local),
     /// A scalar function of a double (or, for `Neg` and `Abs`, of an integer).
     Math(Math, Item, Local),
+    /// A bit operation on two `I64`s. A shift fails unless its count is from 0 to 63.
+    Bits(Bits, Local, Local),
+    /// Whether a double is `NaN`, as a `Bool`. It fails on `NA`, which no library function takes.
+    IsNan(Local),
     /// `round(x, digits)` of a scalar double.
     RoundDigits(Local, Local),
     /// An integer, logical or `I64` scalar as a double.
@@ -449,6 +466,7 @@ impl Op {
             Copy(a)
             | Not(a)
             | Math(_, _, a)
+            | IsNan(a)
             | ToDbl(a)
             | ToI64(a)
             | LglToInt(a)
@@ -477,6 +495,7 @@ impl Op {
             | Parse(a)
             | Parses(_, a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
+            | Bits(_, a, b)
             | Compare(_, _, a, b)
             | And(a, b)
             | Or(a, b)
@@ -550,6 +569,7 @@ impl Op {
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,
             Math(..) => true,
+            Bits(op, ..) => !matches!(op, self::Bits::And | self::Bits::Or | self::Bits::Xor),
             // `NA` formats differently in `as.character`, `paste` and `sprintf`, so the
             // interpreter formats it.
             Format(_) | FormatFixed(..) | FormatPadded(..) => true,

@@ -310,6 +310,9 @@ enum Binary {
     Band,
     Bor,
     Bxor,
+    Ishl,
+    Sshr,
+    Ushr,
     Smin,
     Smax,
     Fadd,
@@ -917,7 +920,7 @@ macro_rules! overflows {
 impl Ins<'_> {
     binaries! {
         iadd => Iadd, isub => Isub, imul => Imul, sdiv => Sdiv, srem => Srem, band => Band,
-        bor => Bor, bxor => Bxor, smin => Smin, smax => Smax, fadd => Fadd, fsub => Fsub,
+        bor => Bor, bxor => Bxor, ishl => Ishl, sshr => Sshr, ushr => Ushr, smin => Smin, smax => Smax, fadd => Fadd, fsub => Fsub,
         fmul => Fmul, fdiv => Fdiv,
     }
 

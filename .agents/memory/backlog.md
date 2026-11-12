@@ -129,7 +129,7 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 - **Not compiled natively; the whole function runs in the interpreter:**
   - `List.repeat` with a computed count ("a count that is not a number": `integer_count` in `crates/typed/src/lower.rs` accepts constants only), in vector-for, vector-while, matrix-for, convolution and spectralnorm;
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity`, `List.swap` (fannkuchredux), `List.is_empty`, `Str.to_utf8`, `Dict.empty`, `Dict.to_list`, `Num.bitwise_and`, `Num.bitwise_xor` and `Num.shift_left_by` (mandelbrot).
+  - `List.with_capacity`, `List.swap` (fannkuchredux), `List.is_empty`, `List.concat`, `List.sublist`, `List.take_first`, `List.drop_last`, `List.sort_with`, `Str.to_utf8`, `Str.from_utf8_lossy`, `Dict.empty`, `Dict.insert` and `Dict.to_list` (fasta, knucleotide, pidigits, reversecomplement, mandelbrot_ascii).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
   - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
