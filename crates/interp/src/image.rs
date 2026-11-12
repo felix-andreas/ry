@@ -50,7 +50,7 @@ pub unsafe fn host_environment() -> Option<Sexp> {
 /// The start-up image's format stamp. Its last byte goes up whenever what an image holds or
 /// how it lays it out changes, so that an image from an older format reads as stale and is
 /// written again rather than misread.
-pub const MAGIC: &[u8; 8] = b"RYSTART\x06";
+pub const MAGIC: &[u8; 8] = b"RYSTART\x07";
 
 /// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
 /// format that the same build wrote. A missing or unreadable file is not.
@@ -366,6 +366,8 @@ pub(crate) unsafe fn write(
     layout: Option<&Path>,
     before: &Before,
 ) -> Result<(), String> {
+    interp().globals.native_start = crate::session::native_start_stamp(home)
+        .map_err(|error| format!("checking base R's start-up code failed: {error:?}"))?;
     let order = match layout.map(|layout| layout.join("order")) {
         Some(file) if file.exists() => Some(read_order(&file)?),
         _ => None,
@@ -595,6 +597,8 @@ unsafe fn save_state(roots: &mut Vec<Sexp>) -> Vec<u8> {
         out.u32(root(object));
     }
 
+    out.u64(globals.native_start);
+
     let libraries = &interp().builtin_libraries;
     out.u32(libraries.len() as u32);
     for (package, path) in libraries {
@@ -673,6 +677,8 @@ unsafe fn restore_state(
             .implicit_classes
             .insert((shape, kind), root(&mut input)?);
     }
+
+    globals.native_start = input.u64()?;
 
     let mut libraries = Vec::new();
     for _ in 0..input.u32()? {

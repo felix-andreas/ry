@@ -537,6 +537,11 @@ unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
 /// name). NULL where the R code has to run: another system, no `uname` on `PATH`, or an
 /// `os-release` that is missing, not UTF-8, or names the system only in an unusual way.
 unsafe fn do_os_version(_call: &Call<'_>) -> R<Sexp> {
+    os_version()
+}
+
+/// `utils:::.osVersion()` read natively on Linux, or `NULL` where only base R's code can say.
+pub(crate) unsafe fn os_version() -> R<Sexp> {
     if !cfg!(target_os = "linux") || find_program("uname").is_none() {
         return Ok(nil());
     }
@@ -4912,6 +4917,11 @@ unsafe fn set_locale(category: libc::c_int, name: *const libc::c_char) -> *mut l
     } else {
         libc::setlocale(category, name)
     }
+}
+
+/// `Sys.getlocale("LC_PAPER")`, empty where the platform has no such category.
+pub(crate) unsafe fn paper_locale() -> String {
+    current_locale(LC_PAPER)
 }
 
 unsafe fn current_locale(category: libc::c_int) -> String {

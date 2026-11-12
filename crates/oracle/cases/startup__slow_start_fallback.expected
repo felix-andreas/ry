@@ -1,0 +1,34 @@
+[stdout]
+| -- R_DEFAULT_PACKAGES=NULL 
+| search: .GlobalEnv Autoloads package:base 
+| lib paths: ROOT/lib ROOT/user/4.6 
+| R_LIBS_USER: ROOT/user/4.6 
+| timeout: 60 
+| papersize: a4 
+| editor: 
+| utils loaded: FALSE 
+| locale: C 
+| -- R_DEFAULT_INTERNET_TIMEOUT=17 
+| search: .GlobalEnv package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base 
+| lib paths: ROOT/lib ROOT/user/4.6 
+| R_LIBS_USER: ROOT/user/4.6 
+| timeout: 17 
+| papersize: a4 
+| editor: ed-for-test 
+| utils loaded: TRUE 
+| locale: C 
+| -- R_REPOSITORIES=NULL 
+| search: .GlobalEnv package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base 
+| lib paths: ROOT/lib ROOT/user/4.6 
+| R_LIBS_USER: ROOT/user/4.6 
+| timeout: 60 
+| papersize: a4 
+| editor: ed-for-test 
+| utils loaded: TRUE 
+| locale: C 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

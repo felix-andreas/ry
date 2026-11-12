@@ -628,14 +628,31 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   runtime's sources), and an image of another build is skipped silently, so a development
   checkout starts the slow way after a runtime edit until `just start-image` runs or a home is
   assembled over the tree.
-- **The environment is read again on every start.** After the load, the start clears the options
-  and runs the steps that read the process environment: the C-level options, `.Machine`,
-  `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,
-  grDevices and stats, which set options from the environment only when they are unset. The
-  profile's second `Autoloads` is detached, and utils' `osVersion` binding is unlocked around its
-  hook, which assigns it. What the image holds is what those steps do not touch: base's
-  namespace, the six default namespaces and their attachment, which read no variable outside
+- **The environment is read again on every start.** After the load, the start runs the steps
+  that read the process environment: the C-level options, `.Machine`, `.Platform` and the device
+  variables, then the effects of base R's profile and of the `.onLoad` hooks of utils, grDevices
+  and stats. Those effects are set natively (`session::apply_native_start`): the image keeps the
+  writer's `.Options`, whose order is a slow start's, and the start overwrites in place the
+  options that depend on the environment, sets `R_LIBS_USER` and `R_LIBS_SITE` (expanding `%V`,
+  `%U` and the rest), `.Library`, `.Library.site`, `.libPaths()`, `.popath` and utils'
+  `osVersion`. What the image holds is what those steps do not touch: base's namespace, the six
+  default namespaces and their attachment, which read no variable outside
   `image::LOADING_VARIABLES`. A start that sets one of those runs the slow way.
+- **The native start's guards.** The writer records a stamp only when base R's profile text and
+  the hooks and helpers it replaces (`session::NATIVE_START_CLOSURES`) hash to the GNU R 4.6.2
+  code it reproduces; another base R writes no stamp, and its starts run the profile and hooks as
+  R code. The stamp is the hash of the `etc/repositories` file the image's `repos` option came
+  from. Every start checks the profile's text and that file against it, and runs the R code
+  instead when they differ, off Linux, when `RY_NATIVE_START=0`, when `R_LIBS_USER` or
+  `R_LIBS_SITE` holds `%%`, when `R_LIBS` or `R_LIBS_USER` holds a glob pattern, when
+  `~/.R/repositories` exists, or when a variable it does not reproduce is set
+  (marked `RCode` in `session::START_VARIABLES`, the table of every variable the pinned code
+  reads: `R_DEFAULT_INTERNET_TIMEOUT`, `R_DEFAULT_NETRC`, the session time limits, `R_BATCH`,
+  `_R_RNG_VERSION_`, `R_TRANSLATIONS`, `R_REPOSITORIES`). The R
+  path clears the options first and detaches the profile's second `Autoloads`, and unlocks utils'
+  `osVersion` around its hook. `a_native_start_sets_what_base_r_profile_and_hooks_set` in
+  `crates/libr/tests/test_start_image.rs` compares both paths with a slow start under a dozen
+  environments.
 - **Relocated paths.** The image records the R home it was written in (the base tree's staging
   directory) and its canonical form. The loader moves every string under either prefix to the
   directory the image file really lives in, which is where a slow start's resolved namespace paths

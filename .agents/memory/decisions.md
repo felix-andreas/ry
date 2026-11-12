@@ -7853,6 +7853,46 @@ Each one trades a narrow class of missed errors for a class of false reports see
   (`start-up-image.scenario`). Development builds start slowly after a runtime edit until the
   image is rewritten. Analysis is unaffected: the image is runtime-only.
 
+## A start from the image sets the profile's and hooks' effects natively
+
+- **Previous source of truth.** Every start from the image cleared the options and re-ran base
+  R's profile and the utils, grDevices and stats `.onLoad` hooks as R code, about 6 ms of a 16 ms
+  empty start (parsing the profile, attaching and detaching `Autoloads`, three regex passes per
+  `R_LIBS_*` variable, `read.delim` of the repositories file).
+- **What was structurally weak.** The image already held the writer's `.Options`, in a slow
+  start's order; clearing them and running R code to rebuild the same list repeated work whose
+  result depends on a handful of variables.
+- **Target shape.** `session::native_start` reads those variables and `apply_native_start`
+  overwrites the options in place and sets the library paths, `.popath` and `osVersion`. Every
+  semantic it copies is guarded: the writer records a stamp only when the profile text and the
+  replaced closures hash to the GNU R 4.6.2 code (`BASE_PROFILE_HASH`, `NATIVE_START_HASH`), and
+  fails the write under the bundled base R when they do not, so an upgrade updates the constants;
+  each start rechecks the profile and the repositories file, and runs the R code for any
+  variable or file it does not reproduce (architecture page, "The native start's guards").
+  `RY_NATIVE_START=0` forces the R code and `require` makes a non-native start an error, for tests.
+- **Snapshotted, read at start, identity.** The image holds the writer's options and their
+  order, the base and package bindings, and the stamp. Every start reads the variables
+  `START_VARIABLES` marks `Native` (library variables, paper size, the helper commands, the
+  default device, `HOME`), the locale's paper category, the library directories on disk and
+  `osVersion`; process values (`tempdir()`, the pid, `.Random.seed`, `commandArgs()`,
+  `interactive()`, paths under `R_HOME`) were already computed at start and are not in the image.
+  The stamp joins the image identity through the profile hash and the replaced closures' hash,
+  plus the hash of `R_HOME/etc/repositories`.
+- **Allowlist, not denylist.** `START_VARIABLES` lists every variable the profile and the
+  replaced closures read, each marked `Native`, `RCode` (set and not empty forces the R code),
+  `Loading` (read later by package loading, unaffected) or `Unread` (read on a path the native
+  start never takes). `a_native_start_sets_what_base_r_profile_and_hooks_set` in
+  `crates/libr/tests/test_start_image.rs` extracts every `Sys.getenv` name from the hashed text
+  and fails when one is missing from the list, so a new variable cannot slip through as
+  implicitly native. The oracle case `startup__slow_start_fallback` keeps the R path checked
+  against GNU R.
+- **Frame shadowing bit in the image.** A frame image keeps the bit that marks a symbol bound
+  twice, so the loader no longer builds a hash set per frame to rediscover it. This is the first
+  step of the spilled-frame layout follow-up; it changes the image format with the stamp above.
+- **Impact.** Empty `ry run`, profiling build, best of 15: 16 ms to 10 ms. The state after a
+  native start equals a slow start's (options with values and order, `.libPaths()`, search path,
+  environment, base and global bindings) in every tested environment. No effect on analysis.
+
 ## Installed packages load through native fast paths, not an image
 
 - **Question.** Whether `ry install` should write each installed package's loaded namespace as an

@@ -17,7 +17,6 @@
 
 use {
     crate::object::Sexp,
-    rustc_hash::FxHashSet,
     std::{
         alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
         mem::MaybeUninit,
@@ -645,7 +644,9 @@ impl Frame {
                     (binding.symbol != REMOVED).then_some((binding.symbol, binding.cell))
                 })
                 .collect(),
-            formals: self.formals & !SHADOWED,
+            // The shadowing bit goes into the image with the count, so a load need not look for
+            // a symbol bound twice in every frame it lists.
+            formals: self.formals,
             removed: self.removed,
             table: self.table.as_ref().map(|table| TableImage {
                 heads: table.heads.clone(),
@@ -669,13 +670,10 @@ impl Frame {
                 },
             });
         }
-        let mut filter = 0;
-        let mut seen = FxHashSet::default();
-        let mut shadowed = false;
-        for binding in bindings.iter().filter(|binding| binding.symbol != REMOVED) {
-            filter |= filter_bit(binding.symbol);
-            shadowed |= !seen.insert(binding.symbol);
-        }
+        let filter = bindings
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
+            .fold(0, |filter, binding| filter | filter_bit(binding.symbol));
         let index = (bindings.len() > INDEX_THRESHOLD).then(|| SlotIndex::of(&bindings));
         Frame {
             bindings,
@@ -688,11 +686,7 @@ impl Frame {
                     count: table.count,
                 })
             }),
-            formals: if shadowed {
-                image.formals | SHADOWED
-            } else {
-                image.formals
-            },
+            formals: image.formals,
             removed: image.removed,
             filter,
         }

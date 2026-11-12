@@ -1442,7 +1442,7 @@ pub unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>
 }
 
 /// A binding's value with a forced promise replaced by its value; an unforced promise stays.
-unsafe fn forced_value(value: Sexp) -> Sexp {
+pub(crate) unsafe fn forced_value(value: Sexp) -> Sexp {
     if value.kind() == SexpType::Promise && value.car() != unbound() {
         value.car()
     } else {

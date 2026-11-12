@@ -279,6 +279,10 @@ pub struct Globals {
     /// The environment the host's sessions attach beside base R, as a start-up image carries it
     /// ([`crate::image::ImageHost::environment`]); nil when the session started without one.
     pub host_environment: Sexp,
+    /// What the start-up image recorded for a start that sets the environment's effects
+    /// natively instead of running base R's profile and hooks (`session::native_start_stamp`);
+    /// 0 when the image allows none.
+    pub native_start: u64,
 }
 
 impl Globals {
@@ -294,6 +298,7 @@ impl Globals {
             implicit_classes: rustc_hash::FxHashMap::default(),
             deferred_definitions: Vec::new(),
             host_environment: Sexp::dangling(),
+            native_start: 0,
         }
     }
 

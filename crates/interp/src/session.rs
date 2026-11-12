@@ -121,6 +121,18 @@ unsafe fn start_from_image(home: &str) -> R<()> {
     crate::base_fast_paths::register_native_entries(base_namespace())?;
     crate::base_fast_paths::register_routine_entries()?;
     mark_base_closures()?;
+    if let Some(start) = native_start(home) {
+        define_process_variables()?;
+        apply_native_start(&start)?;
+        crate::profile_summary::mark_ready();
+        return conditions::print_warnings();
+    }
+    // Tests set `RY_NATIVE_START=require` to learn that a start they expect to be native was not.
+    if std::env::var_os("RY_NATIVE_START").is_some_and(|value| value == "require") {
+        return Err(error(
+            "the start from the image could not set the environment natively",
+        ));
+    }
     crate::envir::clear_options()?;
     define_process_variables()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
@@ -142,6 +154,420 @@ unsafe fn start_from_image(home: &str) -> R<()> {
     remove_library_site()?;
     crate::profile_summary::mark_ready();
     conditions::print_warnings()
+}
+
+/// The [`fnv`] hash of GNU R 4.6.2's base profile, `library/base/R/Rprofile`, whose effect a
+/// native start reproduces. Setting `RY_PRINT_FAST_PATH_HASHES` prints the hash when an image
+/// is written.
+const BASE_PROFILE_HASH: u64 = 0xd911_2dcc_e29b_dd0f;
+
+/// The [`stable_hash`] of the formals and body of each closure in [`NATIVE_START_CLOSURES`] in
+/// order, GNU R 4.6.2's.
+const NATIVE_START_HASH: u64 = 0xd52e_0265_9df5_6bce;
+
+/// The closures whose effect at start [`apply_native_start`] reproduces: the `.onLoad` hooks
+/// of the default packages that read the environment, and the helpers they and the profile
+/// call on it.
+pub const NATIVE_START_CLOSURES: &[(&str, &str)] = &[
+    ("utils", ".onLoad"),
+    ("utils", ".get_repositories"),
+    ("utils", ".read_repositories"),
+    ("utils", ".expand_BioC_repository_URLs"),
+    ("grDevices", ".onLoad"),
+    ("grDevices", ".select_device"),
+    ("stats", ".onLoad"),
+    ("base", ".libPaths"),
+    ("base", ".expand_R_libs_env_var"),
+];
+
+/// How a start from the image treats a variable that base R's profile or the closures in
+/// [`NATIVE_START_CLOSURES`] read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StartVariable {
+    /// Read and applied natively.
+    Native,
+    /// When set and not empty, the start runs the profile and the hooks as R code.
+    RCode,
+    /// One of `image::LOADING_VARIABLES`: when set, the start does not use the image at all.
+    Loading,
+    /// Read only off Linux or in an interactive session, neither of which starts natively.
+    Unread,
+}
+
+/// Every variable the pinned profile and closures read by name, and how a start from the image
+/// treats it. It is an allowlist: a native start reproduces the variables marked
+/// [`StartVariable::Native`], and `test_start_image.rs` fails when that code reads a variable
+/// this table does not list.
+pub const START_VARIABLES: &[(&str, StartVariable)] = &[
+    ("R_LIBS", StartVariable::Native),
+    ("R_LIBS_SITE", StartVariable::Native),
+    ("R_LIBS_USER", StartVariable::Native),
+    ("R_PAPERSIZE_USER", StartVariable::Native),
+    ("R_PAPERSIZE", StartVariable::Native),
+    ("R_PRINTCMD", StartVariable::Native),
+    ("DVIPS", StartVariable::Native),
+    ("R_TEXI2DVICMD", StartVariable::Native),
+    ("R_BROWSER", StartVariable::Native),
+    ("R_PDFVIEWER", StartVariable::Native),
+    ("R_UNZIPCMD", StartVariable::Native),
+    ("EDITOR", StartVariable::Native),
+    ("R_DEFAULT_DEVICE", StartVariable::Native),
+    ("HOME", StartVariable::Native),
+    ("R_DEFAULT_INTERNET_TIMEOUT", StartVariable::RCode),
+    ("R_DEFAULT_NETRC", StartVariable::RCode),
+    ("R_SESSION_TIME_LIMIT_CPU", StartVariable::RCode),
+    ("R_SESSION_TIME_LIMIT_ELAPSED", StartVariable::RCode),
+    ("R_BATCH", StartVariable::RCode),
+    ("_R_RNG_VERSION_", StartVariable::RCode),
+    ("R_TRANSLATIONS", StartVariable::RCode),
+    ("R_REPOSITORIES", StartVariable::RCode),
+    ("R_DEFAULT_PACKAGES", StartVariable::Loading),
+    ("R_TESTS", StartVariable::Loading),
+    ("DISPLAY", StartVariable::Unread),
+    ("PATH", StartVariable::Unread),
+    ("R_INTERACTIVE_DEVICE", StartVariable::Unread),
+    ("LOCALAPPDATA", StartVariable::Unread),
+    ("R_COMPILE_AND_INSTALL_PACKAGES", StartVariable::Unread),
+];
+
+/// The stamp the image writer records for a native start ([`crate::values::Globals::native_start`]):
+/// the [`fnv`] hash of the repositories file the image's `repos` option was read from, or 0
+/// when the profile or the hooks are not the code [`NATIVE_START_HASH`] names, or the writer's
+/// `repos` came from elsewhere. Reads no R value it would have to force, so it allocates nothing.
+pub(crate) unsafe fn native_start_stamp(home: &str) -> R<u64> {
+    let Ok(profile) = std::fs::read(format!("{home}/library/base/R/Rprofile")) else {
+        return Ok(0);
+    };
+    let profile_hash = fnv(FNV_OFFSET, &profile);
+    let mut hash = FNV_OFFSET;
+    let registry = crate::heap().known().namespace_registry;
+    for &(package, name) in NATIVE_START_CLOSURES {
+        let namespace = if package == "base" {
+            base_namespace()
+        } else {
+            match crate::heap().frame_cell(registry, values::install(package)?) {
+                Some(cell) => cell.cdr(),
+                None => return Ok(0),
+            }
+        };
+        let function = match crate::heap().frame_cell(namespace, values::install(name)?) {
+            Some(cell) => crate::bytecode::forced_value(cell.cdr()),
+            None => return Ok(0),
+        };
+        if function.kind() != SexpType::Closure {
+            return Ok(0);
+        }
+        stable_hash(function.car(), &mut hash);
+        stable_hash(crate::bytecode::closure_body(function), &mut hash);
+    }
+    if std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some() {
+        eprintln!("base profile {profile_hash:#018x}\nnative start {hash:#018x}");
+    }
+    if profile_hash != BASE_PROFILE_HASH || hash != NATIVE_START_HASH {
+        if crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim() {
+            return Err(error(format!(
+                "base R's profile or start hooks are not the GNU R {} code \
+                 apply_native_start reproduces; update BASE_PROFILE_HASH and NATIVE_START_HASH \
+                 in session.rs (RY_PRINT_FAST_PATH_HASHES=1 prints the hashes)",
+                crate::methods_core::BUNDLED_VERSION.trim()
+            )));
+        }
+        return Ok(0);
+    }
+    if !repositories_file_applies() {
+        return Ok(0);
+    }
+    Ok(std::fs::read(repositories_file()).map_or(0, |text| fnv(FNV_OFFSET, &text).max(1)))
+}
+
+/// What a native start sets, read from the environment before anything changes.
+struct NativeStart {
+    libs_site: String,
+    libs_user: String,
+    library: String,
+    site_library: Vec<String>,
+    lib_paths: Vec<String>,
+    popath: Option<String>,
+    /// The string options the profile and utils' hook set from the environment.
+    options: Vec<(&'static str, String)>,
+    device: Option<String>,
+}
+
+/// What a start from the image sets natively in place of running base R's profile and the
+/// utils, grDevices and stats `.onLoad` hooks, or `None` when the environment asks for
+/// something only that R code does. The image's `.Options` came from the writer's own slow
+/// start, in the order a slow start sets them, so a native start overwrites the values that
+/// depend on the environment in place and the order stays GNU R's.
+unsafe fn native_start(home: &str) -> Option<NativeStart> {
+    let stamp = interp().globals.native_start;
+    if !cfg!(target_os = "linux")
+        || stamp == 0
+        || std::env::var_os("RY_NATIVE_START").is_some_and(|value| value == "0")
+        || START_VARIABLES.iter().any(|&(name, handling)| {
+            handling == StartVariable::RCode
+                && std::env::var_os(name).is_some_and(|value| !value.is_empty())
+        })
+        || !repositories_file_applies()
+    {
+        return None;
+    }
+    // The closures come from the image, which the stamp vouches for; the profile and the
+    // repositories file are read from the home at every start.
+    let profile = std::fs::read(format!("{home}/library/base/R/Rprofile")).ok()?;
+    let repositories = std::fs::read(repositories_file()).ok()?;
+    if fnv(FNV_OFFSET, &profile) != BASE_PROFILE_HASH
+        || fnv(FNV_OFFSET, &repositories).max(1) != stamp
+    {
+        return None;
+    }
+    let variable = |name: &str| -> Option<String> {
+        match std::env::var(name) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => Some(String::new()),
+            Err(std::env::VarError::NotUnicode(_)) => None,
+        }
+    };
+    let r_home = crate::system::r_home();
+    let libs_site = expand_libs_variable(&variable("R_LIBS_SITE")?, &r_home)?;
+    let libs_user = expand_libs_variable(&variable("R_LIBS_USER")?, &r_home)?;
+    let library = format!("{r_home}/library");
+    let site_library: Vec<String> = if libs_site == "NULL" {
+        Vec::new()
+    } else {
+        libs_site
+            .split(':')
+            .filter(|path| is_directory(path))
+            .map(str::to_owned)
+            .collect()
+    };
+    let libs = variable("R_LIBS")?;
+    let user: Vec<&str> = if libs_user == "NULL" {
+        Vec::new()
+    } else {
+        libs_user.split(':').collect()
+    };
+    let mut lib_paths: Vec<String> = Vec::new();
+    for path in libs.split(':').chain(user).filter(|path| !path.is_empty()) {
+        // `.libPaths()` globs each entry; a pattern takes R's own code.
+        if path.contains(['*', '?', '[']) {
+            return None;
+        }
+        lib_paths.push(crate::connections::expand_path(path));
+    }
+    lib_paths.extend(site_library.iter().cloned());
+    lib_paths.push(library.clone());
+    let mut unique: Vec<String> = Vec::new();
+    for path in lib_paths.into_iter().filter(|path| is_directory(path)) {
+        let normalized = std::fs::canonicalize(&path)
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .unwrap_or(path);
+        if !unique.contains(&normalized) {
+            unique.push(normalized);
+        }
+    }
+    let popath = unique.iter().find_map(|library| {
+        let translations = format!("{library}/translations");
+        std::path::Path::new(&format!("{translations}/DESCRIPTION"))
+            .exists()
+            .then_some(translations)
+    });
+    let papersize = match variable("R_PAPERSIZE_USER")? {
+        papersize if !papersize.is_empty() => papersize,
+        _ => match crate::system::paper_locale() {
+            locale if locale.is_empty() => variable("R_PAPERSIZE")?,
+            locale if locale.contains("_US") || locale.contains("_CA") => "letter".to_owned(),
+            _ => "a4".to_owned(),
+        },
+    };
+    let options = vec![
+        ("papersize", papersize),
+        ("printcmd", variable("R_PRINTCMD")?),
+        (
+            "dvipscmd",
+            std::env::var_os("DVIPS").map_or(Some("dvips".to_owned()), |_| variable("DVIPS"))?,
+        ),
+        ("texi2dvi", variable("R_TEXI2DVICMD")?),
+        ("browser", variable("R_BROWSER")?),
+        ("pager", format!("{r_home}/bin/pager")),
+        ("pdfviewer", variable("R_PDFVIEWER")?),
+        ("unzip", variable("R_UNZIPCMD")?),
+        ("editor", variable("EDITOR")?),
+    ];
+    let device = Some(variable("R_DEFAULT_DEVICE")?).filter(|device| !device.is_empty());
+    Some(NativeStart {
+        libs_site,
+        libs_user,
+        library,
+        site_library,
+        lib_paths: unique,
+        popath,
+        options,
+        device,
+    })
+}
+
+/// Sets what base R's profile and the utils, grDevices and stats hooks set from the environment
+/// ([`native_start`]).
+unsafe fn apply_native_start(start: &NativeStart) -> R<()> {
+    // SAFETY: the session starts before any other thread exists.
+    std::env::set_var("R_LIBS_SITE", &start.libs_site);
+    std::env::set_var("R_LIBS_USER", &start.libs_user);
+    crate::envir::set_option(values::install("timeout")?, values::scalar_integer(60)?)?;
+    for (name, value) in &start.options {
+        crate::envir::set_option(values::install(name)?, values::scalar_string(value)?)?;
+    }
+    let grdevices = namespace("grDevices")?;
+    let device = match &start.device {
+        Some(device) => values::scalar_string(device)?,
+        None => eval::value_of(eval::find_var_in_frame(values::install("pdf")?, grdevices)?)?,
+    };
+    crate::envir::set_option(values::install("device")?, device)?;
+    let heap = crate::heap();
+    eval::define(
+        values::install(".Library")?,
+        values::scalar_string(&start.library)?,
+        base_env(),
+    )?;
+    // The profile makes `.Library.site` an active binding over a variable of its closure's
+    // environment, so that a site profile can change it once base is locked.
+    let site = heap
+        .frame_cell(base_env(), values::install(".Library.site")?)
+        .map(|cell| cell.cdr())
+        .filter(|function| function.kind() == SexpType::Closure)
+        .ok_or_else(|| error("the start-up image has no `.Library.site` binding"))?;
+    eval::define(
+        values::install("siteLibrary")?,
+        values::string_vector(&start.site_library)?,
+        site.tag(),
+    )?;
+    let lib_paths = eval::value_of(eval::find_var_in_frame(
+        values::install(".libPaths")?,
+        base_env(),
+    )?)?;
+    eval::define(
+        values::install(".lib.loc")?,
+        values::string_vector(&start.lib_paths)?,
+        lib_paths.tag(),
+    )?;
+    let popath = match &start.popath {
+        Some(popath) => values::scalar_string(popath)?,
+        None => values::string_vector_na(&[None])?,
+    };
+    eval::define(values::install(".popath")?, popath, base_namespace())?;
+    let utils = namespace("utils")?;
+    let os_version = crate::system::os_version()?;
+    if os_version != nil() {
+        let symbol = values::install("osVersion")?;
+        let cell = heap
+            .frame_cell(utils, symbol)
+            .ok_or_else(|| error("utils has no `osVersion` binding"))?;
+        heap.set_cdr(cell, os_version);
+    } else {
+        eval_text(
+            "local({ namespace <- asNamespace(\"utils\"); \
+             unlockBinding(\"osVersion\", namespace); \
+             assign(\"osVersion\", namespace$.osVersion(), envir = namespace); \
+             lockBinding(\"osVersion\", namespace) })",
+            base_env(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The namespace of the loaded package `name`.
+unsafe fn namespace(name: &str) -> R<Sexp> {
+    let registry = crate::heap().known().namespace_registry;
+    crate::heap()
+        .frame_cell(registry, values::install(name)?)
+        .map(|cell| cell.cdr())
+        .filter(|namespace| namespace.kind() == SexpType::Environment)
+        .ok_or_else(|| error(format!("the start-up image has no `{name}` namespace")))
+}
+
+/// Whether utils' hook reads `R_HOME/etc/repositories`: `R_REPOSITORIES` is unset or empty and
+/// there is no `~/.R/repositories`.
+fn repositories_file_applies() -> bool {
+    std::env::var_os("R_REPOSITORIES").is_none_or(|value| value.is_empty()) && {
+        let home = std::env::var("HOME").unwrap_or_default();
+        !std::path::Path::new(&format!("{home}/.R/repositories")).is_file()
+    }
+}
+
+fn repositories_file() -> String {
+    format!("{}/etc/repositories", crate::system::r_home())
+}
+
+fn is_directory(path: &str) -> bool {
+    !path.is_empty() && std::path::Path::new(path).is_dir()
+}
+
+/// `.expand_R_libs_env_var()` on Linux: each `%V`, `%v`, `%p`, `%a`, `%o`, `%U` and `%S` in
+/// `text` expands in that order, then `%%` becomes `%`. `None` when `text` holds `%%`, whose
+/// handling by the regular expressions base R uses this does not reproduce.
+fn expand_libs_variable(text: &str, r_home: &str) -> Option<String> {
+    if !text.contains('%') {
+        return Some(text.to_owned());
+    }
+    if text.contains("%%") {
+        return None;
+    }
+    let version = crate::system::r_version();
+    let arch = std::env::consts::ARCH;
+    let platform = format!("{arch}-pc-linux-gnu");
+    let short = format!("{}.{}", version.major, version.minor);
+    let home = crate::connections::expand_path("~");
+    let home = std::fs::canonicalize(&home)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .unwrap_or(home);
+    let expansions = [
+        ('V', version.number()),
+        ('v', short.clone()),
+        ('p', platform.clone()),
+        ('a', arch.to_owned()),
+        ('o', "linux-gnu".to_owned()),
+        ('U', format!("{home}/R/{platform}-library/{short}")),
+        ('S', format!("{r_home}/site-library")),
+    ];
+    let mut text = text.to_owned();
+    for (spec, expansion) in expansions {
+        text = expand_spec(&text, spec, &expansion);
+    }
+    Some(text.replace("%%", "%"))
+}
+
+/// `gsub("(^|[^%])(%%)*%<spec>", "\\1\\2<expansion>", text)` for a `text` without `%%`: a `%`
+/// followed by `spec` expands when it opens the text or follows a character no earlier match
+/// took.
+fn expand_spec(text: &str, spec: char, expansion: &str) -> String {
+    let characters: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    let percent_spec =
+        |at: usize| characters.get(at) == Some(&'%') && characters.get(at + 1) == Some(&spec);
+    while index < characters.len() {
+        if index == 0 && percent_spec(0) {
+            out.push_str(expansion);
+            index = 2;
+        } else if characters[index] != '%' && percent_spec(index + 1) {
+            out.push(characters[index]);
+            out.push_str(expansion);
+            index += 3;
+        } else {
+            out.push(characters[index]);
+            index += 1;
+        }
+    }
+    out
+}
+
+/// FNV-1a over `bytes`, continuing from `hash`.
+fn fnv(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// The options and base variables that depend on this process: the C-level options,
