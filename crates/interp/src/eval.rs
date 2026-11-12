@@ -4577,12 +4577,20 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     if values::inherits(sequence, "factor") {
         sequence = crate::coerce::factor_as_character(sequence)?;
     }
-    // Numbers are read one element at a time through `vector_element`, as GNU R's loop reads them
-    // through `INTEGER_ELT` and `REAL_ELT`, so `for (i in 1:1e9)` never expands the sequence.
-    let sequence = if matches!(
-        sequence.kind(),
-        SexpType::Logical | SexpType::Integer | SexpType::Real
-    ) {
+    // A compact sequence is stepped through by its first element and increment, as compiled
+    // loops do. Other numbers are read one element at a time through `vector_element`, as GNU
+    // R's loop reads them through `INTEGER_ELT` and `REAL_ELT`, so no ALTREP number vector is
+    // expanded before the first iteration.
+    let steps = if sequence.is_altrep() {
+        (interp().hooks.compact_sequence_steps)(sequence)
+    } else {
+        None
+    };
+    let sequence = if steps.is_some()
+        || matches!(
+            sequence.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        ) {
         sequence
     } else {
         values::materialize(sequence)?
@@ -4624,14 +4632,18 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     let mark = heap.handle_mark();
     for index in 0..count {
         crate::heap().release_handles(mark);
-        let element = match sequence.kind() {
-            SexpType::List | SexpType::Expression => Ok(sequence.element(index)),
-            SexpType::Pairlist | SexpType::Language => {
+        let element = match (steps, sequence.kind()) {
+            (Some((first, step)), SexpType::Integer) => {
+                values::scalar_integer((first + step * index as f64) as i32)
+            }
+            (Some((first, step)), _) => values::scalar_real(first + step * index as f64),
+            (None, SexpType::List | SexpType::Expression) => Ok(sequence.element(index)),
+            (None, SexpType::Pairlist | SexpType::Language) => {
                 let value = cell.car();
                 cell = cell.cdr();
                 Ok(value)
             }
-            _ => crate::subset::vector_element(sequence, index),
+            (None, _) => crate::subset::vector_element(sequence, index),
         };
         match element
             .and_then(|element| define(variable, element, env))
