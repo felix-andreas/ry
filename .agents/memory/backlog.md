@@ -127,10 +127,9 @@ left, in order of expected gain:
 Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
 
 - **Not compiled natively; the whole function runs in the interpreter:**
-  - a list literal, `[]` or `[x, i]`, which calls `.ry_array` (bounce, binarytrees, nbody, fasta, pidigits, scalar-while);
-  - `List.repeat` with a computed count ("a count that is not a number": `integer_count` in `crates/typed/src/lower.rs` accepts constants only), in vector-for, vector-while, matrix-for, convolution and spectralnorm;
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity`, `List.swap` (fannkuchredux), `List.is_empty`, `Str.to_utf8`, `Dict.empty`, `Dict.to_list`, `Num.bitwise_and`, `Num.bitwise_xor` and `Num.shift_left_by` (mandelbrot).
+  - `List.with_capacity`, `List.sort_with`, `Dict.empty`, `Dict.insert` and `Dict.to_list` (fasta, knucleotide, reversecomplement);
+  - a record with a `List` field (pidigits' `Int`; see "A record cannot hold a `List` field" above).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
   - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
@@ -259,6 +258,11 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: one probe to intern a new string (Track C, strings)
 
 - **`mk_char` probes the string table twice for a string it does not hold.** `find` misses, then `intern_new` calls `StringTable::insert`, which walks the same probe sequence again to find the empty slot (`crates/heap/src/heap.rs`, `crates/heap/src/strings.rs`). A find-or-insert entry that returns the empty slot from the miss would save the second walk. Measured on the report workload (single process, release, callgrind): `paste` and `paste0` run 240k times on scalars that mostly build new strings, and interning costs about 470 Ir per call (`find` 105, `scan` 68, `intern_new` 274), of which the second probe is about 100 Ir per call. The slot must stay valid across the allocation in `new_char`, so the entry has to be re-derived when that allocation ran a collection (which sweeps dead strings from the table) or when the insert has to grow the table.
+
+## Open: a dense id for interned strings (strings track)
+
+- S3 method lookup walks the calling function frames below the top environment on every dispatch, by name (`method_scope` and `lookup_in_scope` in `crates/interp/src/dispatch.rs`, about 260 and 180 instructions per call). It is most of the dispatch cost left in the validation workload, where `format()` dispatches from inside `vapply`. Closure frames in fixed slots could answer "no binding of this name in any function frame" without hashing, which belongs to the closure-frame work, not to dispatch (`decisions.md`, "S3 methods are found through one row per method symbol").
+- S3 dispatch maps each (generic, class) pair to its `generic.class` symbol through a hash map keyed by the generic's symbol and the class `CHARSXP` (`MethodCache::names` in `crates/interp/src/dispatch.rs`, about 69 instructions per lookup, 0.7% of the objects workload). A dense id per interned `CHARSXP`, stored in the string, would let that become an index, and would serve every other table keyed by an interned string. Interning the class as a symbol instead costs more than the hash (`decisions.md`, "S3 methods are found through one row per method symbol").
 
 ## Open: base R kernels against GNU R
 
@@ -1099,7 +1103,7 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
   interned it, and made `.Generic` with `mk_char`: `mk_char`, `install_char`, `method_symbol`,
   `char_str` and their mallocs were about 7.5% of `timeseries`. `MethodCache::names` maps the
   symbol pair to the name.
-- **The method cache flushed on every collection.** Now a GC root, keyed only on the binding epoch.
+- **The method cache flushed on every collection.** The S3 method rows are GC roots, valid under each method symbol's lookup stamp.
 - **`.Call` interned four control-argument names per call** (0.5% of `timeseries`).
 - **Tier-0 dispatch** is one loop over op words that carry their operand count, lookup sites
   keep slot hints into the frame, function lookups skip frames that cannot bind the symbol, and

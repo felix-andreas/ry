@@ -238,7 +238,11 @@ fn evaluator_survives_young_gc_stress() {
                     Err(failure) => failed.push(format!("`{code}` failed: {}", message(failure))),
                 }
             }
-            assert!(failed.is_empty(), "under young GC stress:\n{}", failed.join("\n"));
+            assert!(
+                failed.is_empty(),
+                "under young GC stress:\n{}",
+                failed.join("\n")
+            );
         }
     });
 }
