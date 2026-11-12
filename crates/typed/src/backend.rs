@@ -26,8 +26,9 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC, MemFlagsData, SigRef,
-        Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine, Value, Variable,
+        AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC,
+        MemFlagsData, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine,
+        Value, Variable,
         types::{F64, I32, I64},
     },
     std::sync::atomic::AtomicBool,
@@ -94,7 +95,7 @@ pub fn compile(
     callees: &[Callee],
     r_calls: &[usize],
 ) -> Result<Code, Refusal> {
-    ssa::with_module(|module| -> Result<Code, Refusal> {
+    ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
         let id = module.declare(&own_signature)?;

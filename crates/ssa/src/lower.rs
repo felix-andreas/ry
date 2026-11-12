@@ -37,31 +37,59 @@ pub struct Module {
     builder_context: FunctionBuilderContext,
 }
 
-thread_local! {
-    /// The session's modules. One is enough; a compilation that starts while another holds the
-    /// module, as when the optimizing tier compiles a typed callee, takes a second one.
-    static MODULES: RefCell<Vec<Module>> = const { RefCell::new(Vec::new()) };
+/// The register allocator a module compiles with. Cranelift fixes it per module, so each
+/// allocator has its own pool of modules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Allocator {
+    /// One linear pass. Its code spills more, which costs little in code that mostly calls
+    /// runtime helpers, and its compile time grows linearly with the function, where the
+    /// backtracking allocator's grows faster: on a 38,000-instruction body it takes 17 ms
+    /// against 100 ms.
+    SinglePass,
+    /// The backtracking allocator, for code whose speed rests on keeping values in registers.
+    Backtracking,
 }
 
-/// Runs `f` with a code module, creating one on first use.
-pub fn with_module<T, E: From<Error>>(f: impl FnOnce(&mut Module) -> Result<T, E>) -> Result<T, E> {
-    let taken = MODULES.with_borrow_mut(Vec::pop);
+thread_local! {
+    /// The session's modules, one pool per allocator. One module per pool is enough; a
+    /// compilation that starts while another holds the module, as when the optimizing tier
+    /// compiles a typed callee, takes a second one.
+    static MODULES: [RefCell<Vec<Module>>; 2] = const {
+        [RefCell::new(Vec::new()), RefCell::new(Vec::new())]
+    };
+}
+
+/// Runs `f` with a code module that allocates registers with `allocator`, creating one on
+/// first use.
+pub fn with_module<T, E: From<Error>>(
+    allocator: Allocator,
+    f: impl FnOnce(&mut Module) -> Result<T, E>,
+) -> Result<T, E> {
+    let pool = allocator as usize;
+    let taken = MODULES.with(|pools| pools[pool].borrow_mut().pop());
     let mut module = match taken {
         Some(module) => module,
-        None => Module::new()?,
+        None => Module::new(allocator)?,
     };
     let result = f(&mut module);
-    MODULES.with_borrow_mut(|modules| modules.push(module));
+    MODULES.with(|pools| pools[pool].borrow_mut().push(module));
     result
 }
 
 impl Module {
-    fn new() -> Result<Self, Error> {
+    fn new(allocator: Allocator) -> Result<Self, Error> {
         let mut flags = settings::builder();
         let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
             flags.set("opt_level", "speed")?;
             flags.set("use_colocated_libcalls", "false")?;
             flags.set("is_pic", "false")?;
+            flags.set(
+                "regalloc_algorithm",
+                match allocator {
+                    Allocator::SinglePass => "single_pass",
+                    Allocator::Backtracking => "backtracking",
+                },
+            )?;
             // The verifier rechecks every function and costs as much as the rest of compilation,
             // so only debug builds, where the tests run, pay for it.
             flags.set(
