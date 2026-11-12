@@ -3786,6 +3786,21 @@ first lines R had already read, leaving R mid-command.
   errors for unterminated strings. `deparseRd` reads the same tree.
 - **`iconv` goes through the C library's `iconv`** rather than a Rust crate, because GNU R's
   results (which names it accepts, how `sub` substitutes, transliteration) are glibc's.
+- **UTF-8 to UTF-8 copies its valid prefix** (`platform::Iconv::convert`, used by both `Riconv`
+  and `iconv()`). glibc decodes and re-encodes at about 30 instructions a byte; validating with
+  `str::from_utf8` and copying costs 1.2 a byte on ASCII and 5.7 on dense non-ASCII text.
+  `processx` converts every child-output chunk this way, which made it the largest single entry
+  in vctrs', rlang's and purrr's test runs. glibc still converts whatever follows the strictly
+  valid prefix, because it accepts more than strict UTF-8 (code points past U+10FFFF, five-byte
+  forms) and reports a cut-off invalid sequence as `EINVAL`; UTF-8 is stateless, so its answer
+  equals one call over the whole input. A full output stops at the last whole character with
+  `E2BIG`, as glibc does. The copy applies only when both names spell UTF-8 (in any case,
+  with or without the hyphen). `Riconv_open` resolves `""` to the codeset of the current
+  `LC_CTYPE` (`platform::native_codeset`) before that test, because GNU R passes `""` straight
+  to `iconv_open`, where it names the locale's codeset; under `LC_CTYPE=C` that is ASCII, and
+  under a Latin-1 locale it is ISO-8859-1. Pinned by
+  `platform::tests::utf8_identity_matches_glibc` and the oracle cases
+  `strings__riconv_utf8_identity` and `strings__riconv_native_encoding`.
 - **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
   code that libR and the interpreter both run. No effect on static analysis.
 
@@ -8906,7 +8921,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why not make `enter` cheaper instead.** `enter`'s cost is the price of catching an unwind and saving state; it cannot be both general and free. Splitting success from failure is the shape GNU R itself has (its setters check and then store), and it keeps the one error path in one place.
 - **Pinned.** `crates/libr/tests/test_api_boundary.rs` fuzzes every direct path against the slow path (`ry_set_slow_paths_only`) on random objects, with GC stress on a quarter of the seeds and base R loaded so it can build delayed and active bindings, comparing results, the mutated object and its attribute order with `R_compute_identical`. Its callgrind test holds every touched entry point to an instruction budget no higher than the same loop with direct paths switched off (`RY_API_BENCH_SLOW=1` measures that).
 - **Heap allocation errors are built lazily.** The allocator's `ok_or(HeapError::...)` chains became `let ... else` returns: the eager form constructed and dropped a `HeapError` on every allocation, about a dozen instructions per `allocVector`.
-- **Not on this path.** `Riconv`, which `processx` calls to convert child output to UTF-8 while `rlang`'s tests run, costs about 1.8 million instructions per call and is most of that suite's remaining boundary share. It belongs to the string and encoding layer, not to the call boundary.
+- **Not on this path.** `Riconv`, which `processx` calls to convert child output to UTF-8 while `rlang`'s tests run, belongs to the string and encoding layer, not to the call boundary; UTF-8 to UTF-8 copies its valid prefix ("`iconv` goes through the C library's `iconv`").
 - **Not changed.** Attributes stay a pairlist on the object. A dense attribute table would make lookups cheaper still, but it changes the image format; it is the follow-up in `backlog.md`.
 - **Closed: no further entry point is worth a direct path.** After `Rf_duplicate`'s, the whole C API boundary is 0.44% of the `testthat` application's instructions, and its largest entry, `R_existsVarInFrame`, is 0.08%. In the package test suites (release build, one process with `TESTTHAT_PARALLEL=false`) the largest remaining entries outside the string layer are small:
 
