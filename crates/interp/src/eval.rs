@@ -4581,11 +4581,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     // loops do. Other numbers are read one element at a time through `vector_element`, as GNU
     // R's loop reads them through `INTEGER_ELT` and `REAL_ELT`, so no ALTREP number vector is
     // expanded before the first iteration.
-    let steps = if sequence.is_altrep() {
-        (interp().hooks.compact_sequence_steps)(sequence)
-    } else {
-        None
-    };
+    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
     let sequence = if steps.is_some()
         || matches!(
             sequence.kind(),

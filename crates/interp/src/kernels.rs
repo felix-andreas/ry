@@ -1657,7 +1657,8 @@ impl<O> Reader<O> for Sequence<i32> {
     // The sequence's elements are within the integer range, so the step never overflows.
     #[inline(always)]
     fn read(self, index: usize, _own: O) -> i32 {
-        self.first.wrapping_add(self.step.wrapping_mul(index as i32))
+        self.first
+            .wrapping_add(self.step.wrapping_mul(index as i32))
     }
 }
 

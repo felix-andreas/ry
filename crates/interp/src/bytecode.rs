@@ -1333,7 +1333,6 @@ pub unsafe fn value_kind(value: Sexp) -> u32 {
     }
 }
 
-
 // The compiler.
 
 struct Compiler {

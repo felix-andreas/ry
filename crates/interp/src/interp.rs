@@ -704,7 +704,10 @@ pub fn compact_sequence_classes() -> Option<[Sexp; 2]> {
     // SAFETY: single-threaded access, as for `heap`.
     unsafe {
         let state = &*STATE.0.get();
-        state.interp.as_ref().map(|interp| interp.compact_sequence_classes)
+        state
+            .interp
+            .as_ref()
+            .map(|interp| interp.compact_sequence_classes)
     }
 }
 
