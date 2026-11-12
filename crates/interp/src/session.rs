@@ -56,7 +56,11 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         )
     {
         match crate::image::load(host, &home) {
-            Ok(true) => return start_from_image(&home),
+            Ok(true) => {
+                let started = start_from_image(&home);
+                crate::image::touch::finish_start_up();
+                return started;
+            }
             Ok(false) => {}
             Err(crate::image::LoadError::Untouched(message)) => {
                 write_console(
@@ -78,8 +82,13 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
 
 /// Starts a session the slow way in the process's environment and writes its start-up image to
 /// `path`, as the base tree's build does. Fails when start-up warned, since a start from the
-/// image would not print the warning.
-pub unsafe fn write_start_image(host: crate::image::ImageHost, path: &std::path::Path) -> R<()> {
+/// image would not print the warning. `layout` is the directory of the touch profile that lays
+/// the image out ([`crate::image::write`]).
+pub unsafe fn write_start_image(
+    host: crate::image::ImageHost,
+    path: &std::path::Path,
+    layout: Option<&std::path::Path>,
+) -> R<()> {
     interp().interactive = false;
     prepare_process();
     let home = crate::system::r_home();
@@ -88,7 +97,7 @@ pub unsafe fn write_start_image(host: crate::image::ImageHost, path: &std::path:
         return Err(error("start-up warned, so it cannot be imaged"));
     }
     interp().globals.host_environment = (host.environment)()?;
-    crate::image::write(&host, &home, path, &before).map_err(error)
+    crate::image::write(&host, &home, path, layout, &before).map_err(error)
 }
 
 /// The process state every start sets before R code runs: the C library's locale, the system

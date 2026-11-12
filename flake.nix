@@ -16,6 +16,12 @@
     crane.url = "git+https://github.com/ipetkov/crane?shallow=1";
   };
 
+  # .github/workflows/cachix.yml pushes the x86_64-linux package and dev shell here.
+  nixConfig = {
+    extra-substituters = [ "https://ry.cachix.org" ];
+    extra-trusted-public-keys = [ "ry.cachix.org-1:6OKbqSFUFIsagxwxTo06JWHSEWuEtQp4kgQtR/TuVyY=" ];
+  };
+
   outputs =
     {
       self,

@@ -1321,7 +1321,16 @@ pub(crate) unsafe fn call_inlined_internal(
     args: &[Arg],
     env: Sexp,
 ) -> R<Sexp> {
-    call_builtin_checked(definition, call, op, args, env, None, call)
+    // The wrapper's frame is gone, so its call is what the internal's errors and warnings
+    // report, as they would from inside the closure.
+    let state = interp();
+    let outer =
+        state
+            .assignment_call
+            .replace((crate::heap().known().unbound, call, state.frames.len()));
+    let result = call_builtin_checked(definition, call, op, args, env, None, call);
+    interp().assignment_call = outer;
+    result
 }
 
 /// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the
@@ -1685,6 +1694,10 @@ unsafe fn collect_evaluated_args(
             } else {
                 eval(expression, env)?
             };
+            // A variable's value comes back unrooted, held only by its binding, and a later
+            // argument can rebind it: in `c(x, {x <- 5; 3})` the old `x` is then held by `args`
+            // alone, which the collector cannot see.
+            crate::heap().root(value);
             args.push(Arg {
                 tag: arguments.tag(),
                 value,
@@ -3078,10 +3091,12 @@ unsafe fn run_frame_general(
     impl Drop for NamespaceLoad {
         fn drop(&mut self) {
             crate::heap().leave_namespace_load();
+            crate::image::touch::leave_namespace_load();
         }
     }
     let _namespace_load = (function == state.namespace_loader).then(|| {
         crate::heap().enter_namespace_load();
+        crate::image::touch::enter_namespace_load();
         NamespaceLoad
     });
     let result = signature.map(|signature| {

@@ -294,8 +294,11 @@ extension adds a debugger, a console, a data viewer and a plot panel.
 
 ## Performance and status
 
-ry's runtime is faster than GNU R on loops and recursion and slower on call-heavy code, and typed
-code in strict mode is faster again. [Benchmarks](/benchmarks) has the numbers.
+ry's runtime is faster than GNU R on each of its benchmark suites taken as a whole, and on most
+programs in them. The margin is widest on scalar loops and narrowest on call-heavy code and
+package test suites. A few allocation-heavy programs, such as fannkuch-redux and building binary
+trees, run at GNU R's speed or slower. Typed code in strict mode is faster again.
+[Benchmarks](/benchmarks) has the numbers.
 
 ry is in beta. The checker, language server, formatter and loader are ready for daily use, and
 diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's runtime is incomplete: a

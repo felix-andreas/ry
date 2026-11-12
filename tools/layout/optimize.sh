@@ -211,7 +211,18 @@ fi
 # plain strip and double the file. Only those go: the dynamic relocations stay.
 objcopy --remove-relocations='*' "$runtime"
 strip --strip-unneeded "$runtime"
-"$optimized/$rcmd" start-image "$base" --libr "$runtime" > /dev/null
+# The start image is laid out in the order the training runs first touch its objects: a first
+# write numbers the objects, the runs record their touches against that image, and the second
+# write places each object by its first touch (tools/layout/image_order.py).
+echo "optimize: start image layout" >&2
+rm -rf "$work/image-layout"
+mkdir -p "$work/image-layout"
+"$optimized/$rcmd" start-image "$base" --libr "$runtime" --layout "$work/image-layout" > /dev/null
+RY_BASE_R="$base" RY_LIBR="$runtime" python3 -I tools/layout/train.py "$optimized/$ry" \
+	--image-touch "$work/image-layout/touch"
+python3 -I tools/layout/image_order.py "$work/image-layout/ids" "$work/image-layout/touch/"*.touch \
+	> "$work/image-layout/order"
+"$optimized/$rcmd" start-image "$base" --libr "$runtime" --layout "$work/image-layout" > /dev/null
 
 echo "optimize: ry with the runtime and base R embedded" >&2
 # A fresh log, because cargo replays the warnings of units it does not rebuild.

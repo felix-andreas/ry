@@ -30,8 +30,8 @@ use {
             check_code_image_round_trip, check_element_access_agreement,
             check_environment_agreement, check_fused_agreement, check_image_bodies_round_trip,
             check_lazy_load_record, check_lowering_input, check_quickening_agreement,
-            check_render_drawing, check_resume_at_every_pc, check_unserialize_input,
-            with_interpreter,
+            check_render_drawing, check_resume_at_every_pc, check_shadowing_agreement,
+            check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -197,6 +197,11 @@ fn fuzz_element_access_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| {
         check_element_access_agreement(&mut SplitMix64(seed))
     });
+}
+
+#[test]
+fn fuzz_shadowed_guards_agree_with_the_ast_evaluator() {
+    for_each_seed(600, |seed| check_shadowing_agreement(&mut SplitMix64(seed)));
 }
 
 #[test]

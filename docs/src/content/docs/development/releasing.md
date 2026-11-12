@@ -56,10 +56,10 @@ and the first six hex digits of its hash (`just nightly-name` prints it, for exa
 workflow sets `RY_BUILD`. The workflow does not run `release-check`, builds no editor extension, and
 publishes nothing to the Marketplace.
 
-A nightly is a normal release created with `--latest=false`, not a pre-release. The Zed extension
-installs the newest release whose pre-release flag is set, so a pre-release nightly would reach Zed
-users; a non-pre-release with `--latest=false` is invisible to it and leaves GitHub's "latest"
-alone. The tag pattern of `release.yml` does not match `nightly.*` tags. `just nightly-publish NAME`
+A nightly is a GitHub pre-release created with `--latest=false`, so it never becomes GitHub's
+"latest" release and `releases/latest` keeps pointing at the newest full release. The Zed extension
+installs the newest release that is not a pre-release (`pre_release: false` in
+`editors/zed/src/lib.rs`), so nightlies never reach Zed users. The tag pattern of `release.yml` does not match `nightly.*` tags. `just nightly-publish NAME`
 publishes `release/NAME` and then deletes all but the newest five `nightly.` releases and their
 tags, so the releases page stays readable. It runs locally too, with `gh` signed in.
 
@@ -181,9 +181,9 @@ The VS Code extension is published once per platform, each copy bundling that pl
 plus one copy without a binary (`ry.vsix`) for every other platform. Every copy carries a
 `LICENSE` that combines the extension's MIT licence with ry's `LICENSE`, and
 `THIRD_PARTY_NOTICES`. The Zed extension ships no binary: it downloads the matching archive from the newest
-GitHub pre-release (`pre_release: true` in `editors/zed/src/lib.rs`, which matches pre-releases
-only), and it is published to Zed's registry separately. Flip that flag in the same change as the
-first stable release, or Zed keeps serving the last beta.
+full GitHub release (`pre_release: false` in `editors/zed/src/lib.rs`, which matches full releases
+only). It is not in Zed's registry yet, and publishing it there is a separate step. 0.4.4 is the
+first full release, so publish the Zed extension no earlier than 0.4.4, or it serves 0.1.1.
 
 ## Version numbers
 
@@ -199,7 +199,8 @@ version that differs from any of the three.
 1. On a clean main, run `just release-dry-run`. It packages this machine's archive, installs it into
    a scratch directory, smoke-tests it (`tools/smoke-test.sh`), packages the VS Code extension and
    builds the nix package.
-2. Run `just try` and read every step's output.
+2. Run `just try` and read every step's output. `crates/oracle/known_failures.toml` must be
+   empty, intermittent entries included ([Testing](/development/testing#known-oracle-failures)).
 3. Write the release's entry on the [news page](/news).
 4. Run `just bump-version X.Y.Z-beta` (it commits), and push.
 5. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the

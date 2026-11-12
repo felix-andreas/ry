@@ -16,7 +16,7 @@
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
 use {
-    crate::object::Sexp,
+    crate::object::{Sexp, gp},
     rustc_hash::FxHashSet,
     std::{
         alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
@@ -90,6 +90,22 @@ pub struct Frame {
 #[inline(always)]
 fn filter_bit(symbol: Sexp) -> u64 {
     1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
+}
+
+/// Every binding a frame gains passes here, which is what makes [`gp::BOUND_ELSEWHERE`] sound:
+/// the base frames keep their bindings on the symbols and never insert. A detached frame (see
+/// [`gp::DETACHED`]) marks nothing, because no lookup from an attached environment passes it, and
+/// it marks its whole frame once it is attached ([`Frame::mark_bound_elsewhere`]). That keeps
+/// `.ArgsEnv`, `.GenericArgsEnv` and other tables under the empty environment from marking every
+/// primitive. The test before the store keeps a symbol's header clean when the bit is set.
+#[inline(always)]
+fn mark_bound_elsewhere(symbol: Sexp) {
+    // SAFETY: a frame holds only interned symbols, which live as long as the heap.
+    unsafe {
+        if !symbol.has_gp(gp::BOUND_ELSEWHERE) {
+            symbol.set_gp_bits(gp::BOUND_ELSEWHERE, true);
+        }
+    }
 }
 
 /// Where machine code finds a frame's fields: the baseline tier probes a lookup site's hinted
@@ -323,6 +339,24 @@ impl Frame {
         self.live().map(|binding| binding.cell)
     }
 
+    /// Each live binding's symbol and cell, in slot order.
+    pub(crate) fn symbols_and_cells(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.live()
+            .flat_map(|binding| [binding.symbol, binding.cell])
+    }
+
+    /// Points each binding at the cell `forward` returns for its cell, for a writer that moves
+    /// cells. The symbols stay, so the index, the table and the filter stay valid.
+    pub(crate) fn forward_cells(&mut self, forward: &dyn Fn(Sexp) -> Option<Sexp>) {
+        for binding in self.bindings.iter_mut() {
+            if binding.symbol != REMOVED
+                && let Some(moved) = forward(binding.cell)
+            {
+                binding.cell = moved;
+            }
+        }
+    }
+
     /// The cells a minor collection must mark in this frame as a remembered parent: those past
     /// the slots it found old last time (see [`Spilled::scanned`]).
     pub(crate) fn unscanned_cells(&self) -> impl Iterator<Item = Sexp> + '_ {
@@ -485,7 +519,10 @@ impl Frame {
     /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
     /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
     /// first match in GNU R's frame list does.
-    pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
+    pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp, attached: bool) {
+        if attached {
+            mark_bound_elsewhere(symbol);
+        }
         if self.filter & filter_bit(symbol) != 0 && self.find_position(symbol).is_some() {
             self.formals |= SHADOWED;
         }
@@ -510,17 +547,25 @@ impl Frame {
     /// [`INDEX_THRESHOLD`] bindings takes the general path, which builds the index. Only
     /// duplicate formals bind a symbol twice, and they are rare, so the duplicate scan runs only
     /// when a symbol's filter bit is already set.
-    pub(crate) fn insert_formals(&mut self, cells: &[Sexp], symbols: impl Iterator<Item = Sexp>) {
+    pub(crate) fn insert_formals(
+        &mut self,
+        cells: &[Sexp],
+        symbols: impl Iterator<Item = Sexp>,
+        attached: bool,
+    ) {
         if self.index.is_some()
             || self.table.is_some()
             || self.bindings.len() + cells.len() > INDEX_THRESHOLD
         {
             for (symbol, &cell) in symbols.zip(cells) {
-                self.insert(symbol, cell);
+                self.insert(symbol, cell, attached);
             }
             return;
         }
         for (symbol, &cell) in symbols.zip(cells) {
+            if attached {
+                mark_bound_elsewhere(symbol);
+            }
             let bit = filter_bit(symbol);
             if self.filter & bit != 0
                 && self.bindings.iter().any(|binding| binding.symbol == symbol)
@@ -529,6 +574,17 @@ impl Frame {
             }
             self.filter |= bit;
             self.bindings.push(Binding { symbol, cell });
+        }
+    }
+
+    /// Marks every symbol the frame binds, when its environment becomes attached.
+    pub(crate) fn mark_bound_elsewhere(&self) {
+        for binding in self
+            .bindings
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
+        {
+            mark_bound_elsewhere(binding.symbol);
         }
     }
 
@@ -639,7 +695,7 @@ impl Frame {
     }
 
     /// The frame an image stored, with a removed slot's cell set to `nil`.
-    pub(crate) fn from_image(image: FrameImage, nil: Sexp) -> Frame {
+    pub(crate) fn from_image(image: FrameImage, nil: Sexp, attached: bool) -> Frame {
         let mut bindings = Bindings::new();
         bindings.reserve_exact(image.slots.len());
         for slot in &image.slots {
@@ -655,6 +711,9 @@ impl Frame {
         let mut seen = FxHashSet::default();
         let mut shadowed = false;
         for binding in bindings.iter().filter(|binding| binding.symbol != REMOVED) {
+            if attached {
+                mark_bound_elsewhere(binding.symbol);
+            }
             filter |= filter_bit(binding.symbol);
             shadowed |= !seen.insert(binding.symbol);
         }

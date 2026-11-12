@@ -649,6 +649,56 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   cache by every process that loads the image, and a page is copied when it is first written.
   The objects carry their tenured bits, so no minor or intermediate collection traces them and a
   major collection's marking leaves their headers alone.
+- **Base R's closures arrive compiled.** Just before writing, the writer compiles afresh every
+  closure bound in base's namespace and the six default namespaces
+  (`bytecode::compile_namespaces_for_image`), and the image keeps that code. A lazy-load binding
+  start-up never forced stays a promise. Every other code object ran during start-up and carries
+  the writer's inline caches, type feedback and profile, so the image stores its source instead.
+  A session therefore runs base R's functions as bytecode from their first call without
+  compiling them, and the pages of code it never calls stay in the shared page cache.
+- **Objects are laid out in touch order.** Before writing, the writer numbers every live object
+  with a stable id and moves every movable small object into dense pages in a recorded order of
+  first touch, so the pages a session reads at start-up are adjacent and the code it never runs
+  sits together at the end. Fixed objects, symbols, environments, ALTREP objects and the objects
+  that existed before start-up keep their addresses: frame filters, slot indexes, hash tables
+  and layout tags hash symbol addresses, and the precondition digest covers the rest. Large
+  objects go to the large section in the same order. Without an order the writer still
+  compacts, in id order. Nothing is advised, because reading only the touched pages makes each
+  page its own read and slows a cold start.
+- **The touch profile.** The layout build (`tools/layout/optimize.sh`) writes the image twice,
+  and three files in a layout directory carry the profile from the first write to the second.
+  None of them is part of the image or the repository: the loader never reads them, and the
+  layout build records a fresh profile for the binary it is building, so a change that
+  renumbers the image's objects cannot leave a stale order behind. Every other image write
+  (`just start-image`, the base tree's build, tests, CI, and the release builds other than
+  x86-64 Linux, which have no recorder) passes no layout directory and lays the image out in id
+  order, which removes the holes but not the scattering. Each step below refuses a file
+  recorded for another image or numbering instead of using it.
+  - `ids`, written by the first write (`ry-rcmd start-image BASE --libr FILE --layout DIR`), is
+    little-endian `u64`s: the image's header checksum, the digest of its numbering (the object
+    count and each object's size, by id), then each object's address and size, by id. Ids come
+    from a depth-first walk over each object's handles (and an environment's bound symbols and
+    values), seeded in this order: fixed objects, global roots, the precious set, the heap's
+    globals, weak references, untracked objects, symbols sorted by name, interned strings sorted
+    by bytes, then every other live object by address. The same start-up therefore numbers the
+    same objects the same way in both writes.
+  - A touch file comes from each training run of `tools/layout/train.py --image-touch DIR`,
+    which sets `RY_IMAGE_TOUCH=FILE`. The runtime then protects the mapped image (x86-64 Linux
+    only) and writes `image HEX`, the loaded image's header checksum, followed by one line per
+    first touch of a 16-byte granule: the address in hex and a phase, 0 for start-up, 1 inside a
+    namespace load, 2 otherwise. The mix adds an empty program to the training programs.
+  - `order` comes from `tools/layout/image_order.py`, which refuses a touch file whose image
+    line differs from the checksum in `ids`. It writes `numbering HEX`, copied from `ids`, then
+    one decimal id per line, sorted by the earliest phase any run touched the object in, then by
+    its earliest position relative to the run's length, then by id. The second write reads
+    `order` and fails when the numbering differs from its own; ids it does not list follow in id
+    order. An order only ranks objects, so one that names the wrong objects still gives a correct
+    image, only a less compact one.
+  - Writing the same base tree twice gives the same image bytes: the writer zeroes every byte
+    the live objects do not determine (spare vector capacity, write-barrier cards, slot tails,
+    and the process-local fields below) and places the intern table's entries in address order.
+    Strings that name the base tree's path are part of the numbering, so training and the
+    second write use the same tree at the same path.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment
@@ -659,10 +709,10 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 - **Process-local state lives beside the pages.** The few fields that hold a process's own
   addresses are cleared in the written pages and restored by the loader: environment frames whose
   bindings spilled into memory outside the heap, external pointers to builtin routines (carried
-  as tokens), and the native tables of the fixed ALTREP classes, which keep the loader's. The
+  as tokens), and the contents of the fixed primitives and ALTREP classes, which keep the
+  loader's. The
   metadata carries the intern and symbol tables, the precious set, the global roots and the
-  counters. Weak-pair lists load empty, and compiled closure bodies are written as their source,
-  since the bytecode tier recompiles them.
+  counters. Weak-pair lists load empty.
 - **The writer refuses what it cannot carry.** Writing fails, and so does the base tree's build,
   when start-up left interpreter state behind (warnings, a call in progress, `.Random.seed` in the
   global environment, a new record layout, an open graphics device; `image::check_empty`), an
