@@ -50,7 +50,8 @@ The quality bar is four things.
 ## Open: tier-0 liveness maps (low priority, correctness only)
 
 - A tier-0 register a frame has stopped using keeps its object alive until the frame returns, so a finalizer can run later than in GNU R for a variable that is dead before its scope ends. `Op::EndStatement` already clears each statement's temporaries, and clearing the register window on every grow keeps finalizer timing equal to GNU R's on the pinned cases (`decisions.md`, "Tier-0 call entry").
-- Per-safepoint liveness maps would close the rest. As a speed lever they are worth little: they remove only the register fill, about 16 of `grow_registers`' 57 instructions per call, roughly 0.3 points of `testthat_full` Ir.
+- Per-safepoint liveness maps (stack maps) would close the rest, and they are the only exact way to remove the per-call register fill, which costs about 1% of `validation_full` Ir (104M in `grow_registers`). Do this together with any GC or JIT stack-map work, because the JIT will want the same maps.
+- Skipping the fill without them is unsound as R semantics. The collector marks the whole register file up to its length, so a word that a returned call left in the next call's window keeps its object alive until the window writes that word, and a finalizer GNU R runs in that window's `gc()` runs late (`gc__register_window_frees_returned_temporaries` fails on such a build).
 - Tier-1 deopt does not need them. Each deopt block is generated from the plan's liveness bitset at compile time, and compiled code keeps every boxed value in tier 0's register window or the frame, both of which are roots.
 
 ## Open: the baseline tier and JIT on against JIT off
@@ -62,6 +63,7 @@ the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and 
 (`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons"). What is
 left, in order of expected gain:
 
+- Take a speedup ceiling from plain callgrind self cost, never from a run with `RY_PROFILE_SUMMARY`. The summary hooks call `top_env` from `profile_summary::enter_closure`, about 1.1% of `validation_full`, which rescaling the shares by the total does not remove.
 - One copy of each instruction handler: the baseline's step functions duplicate tier 0's
   handlers, and on `testthat` they add more I1 misses than `execute_code` sheds. Sharing one
   `exec_*` body per op was tried and reverted: with every body inlined into tier 0 it still ran
