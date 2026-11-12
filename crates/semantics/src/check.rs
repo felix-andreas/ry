@@ -1077,24 +1077,28 @@ fn check_item_in<'db>(
         // The declaration as written decides whether a function is judged, so a formal the
         // author left untyped keeps the function out.
         let mut signatures: FxHashMap<ExprId, FunctionType<'db>> = FxHashMap::default();
+        let mut detached: FxHashSet<ExprId> = FxHashSet::default();
         let declared_function = |annotation: &Annotation<'db>| {
             if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
                 return None;
             }
             match annotation.declared.as_ref()?.body.kind(db) {
-                TyKind::Function(function) => Some(function.clone()),
+                TyKind::Function(function) => Some((function.clone(), annotation.inline_signature)),
                 _ => None,
             }
         };
         for id in module.expression_ids() {
             match *module.kind(id) {
                 ExpressionKind::Function { .. } => {
-                    if let Some(function) = context
+                    if let Some((function, inline)) = context
                         .expression_annotations
                         .get(&id)
                         .and_then(declared_function)
                     {
                         signatures.insert(id, function);
+                        if !inline {
+                            detached.insert(id);
+                        }
                     }
                 }
                 ExpressionKind::Assign { value, .. }
@@ -1106,13 +1110,16 @@ fn check_item_in<'db>(
                     } else {
                         None
                     };
-                    if let Some(function) = context
+                    if let Some((function, inline)) = context
                         .expression_annotations
                         .get(&id)
                         .or(item_annotation)
                         .and_then(declared_function)
                     {
                         signatures.insert(value, function);
+                        if !inline {
+                            detached.insert(value);
+                        }
                     }
                 }
                 _ => {}
@@ -1132,6 +1139,7 @@ fn check_item_in<'db>(
                     Some(context.table.resolve(db, ty))
                 },
                 signatures: &signatures,
+                detached: &detached,
             })
         }
     } else {
@@ -8721,7 +8729,8 @@ impl<'db> Checker<'db, '_> {
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
         ];
-        let class_of = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+        // Resolved fully, so an alias of a class dispatches as the class it names.
+        let class_of = |ty: Ty<'db>| match self.table.resolve(self.db, ty).kind(self.db) {
             TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
             _ => None,
         };
@@ -12055,8 +12064,15 @@ impl<'db> Checker<'db, '_> {
             return operand.ty;
         }
         match self.recorded.get(&value) {
-            Some(&ty) if !is_expr_type(self.db, ty) => self.table.resolve(self.db, ty),
-            _ => operand.ty,
+            Some(&ty) => {
+                let ty = self.table.resolve(self.db, ty);
+                if is_expr_type(self.db, ty) {
+                    operand.ty
+                } else {
+                    ty
+                }
+            }
+            None => operand.ty,
         }
     }
 
@@ -12071,7 +12087,8 @@ impl<'db> Checker<'db, '_> {
         if let Some(column) = self.frame_expression(value, columns, frame) {
             return Some(column);
         }
-        let ty = *self.recorded.get(&value)?;
+        // Resolved first, so an alias of `Expr` reads as the expression it names.
+        let ty = self.table.resolve(self.db, *self.recorded.get(&value)?);
         if is_expr_type(self.db, ty) {
             return None;
         }

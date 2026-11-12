@@ -4379,9 +4379,6 @@ construct that would send it to the interpreter instead, under one of two codes:
 
 A native function with neither finding runs natively. This is a `native` error:
 
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
 ```r
 label_width <- function(label: Str) -> I64 {
   width <- nchar(label)
@@ -4389,21 +4386,6 @@ label_width <- function(label: Str) -> I64 {
 }
 print(label_width("native"))
 ```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: fn(label: Str) -> I64
-label_width <- function(label) {
-  width <- nchar(label)
-  Num.from_r(width)
-}
-print(label_width("native"))
-```
-
-</TabItem>
-</Tabs>
 
 ```text ry check typing strict
 native
@@ -4421,7 +4403,10 @@ type: `double`, `integer`, `character`, `logical`, R vectors such as `double[]`,
 
 **Which functions are judged.** A function literal is a native function when every parameter is
 annotated with a ry type, the declared result is a ry type, `NULL` or left out, and at least one of
-them is a ry type. Inline and `#:` comment annotations count the same.
+them is a ry type. A signature written in a `#:` comment, or on the name the function is assigned
+to, is judged by the same rules. The runtime compiles a function only from the types written on its
+parameters and its result, so such a function also gets an `interpreted` warning that asks for the
+inline form.
 
 A function with an R type anywhere in its signature is a *boundary function*. It is where R values
 and ry values meet, it runs in the interpreter when it has to, and it is not judged. So an R type in
@@ -4477,7 +4462,9 @@ expression it flows into.
 fits the R function's result type, when the checker knows it.
 
 **An R call inside the arguments of another R call.** R evaluates an argument only when the function
-reads it, so native code cannot run the two calls in a fixed order:
+reads it, so native code cannot run the two calls in a fixed order. A conversion around the inner
+call does not change that, and neither does a table function on the outside, so
+`cat(Str.from_r(format(amount)))` is reported the same way:
 
 ```r
 report <- function(label: Str, amount: F64) -> NULL {
@@ -4589,22 +4576,40 @@ interpreted
 | a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
 | a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
 | a standard library function without native code, such as `List.reverse` | a loop or another standard library function |
-| a call of a typed function with named arguments, or one that leaves a default out | pass every argument by position |
+| a signature in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters and the result |
+| a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
+| a standard library function called with a `ry::` prefix | the name without the prefix |
+| an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |
 | a local function defined inside a branch or a loop, and `return` inside a local function | define it once at the top, and end it with its value |
 | a name first set inside a branch or a loop and read after it | set it before the branch |
-| a variable that holds values of different types, branches of different types, and a variable that holds a tag and is assigned again | a new name for each value |
+| a variable, a parameter or a loop variable that holds values of different types, branches that set a name to different types, and a variable that holds a tag and is assigned again | a new name for each value |
+| the value of an `if` without `else` | an `else` branch that gives a value of the same type |
+| `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
+| a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
+| a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
+| an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
 | a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
 | `try` | `match` on the result, and return the `:Err` from its arm |
 | a `match` on a list or a scalar (so every list pattern), a nested pattern, and an arm with an `if` guard | match a tag, a record or a tuple, and test inside the arm |
 | a read of a global that holds a ry value, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
 
-The rule covers the function's body. How R code calls a native function is not checked: a call from
-the interpreter that passes a record, a tuple, a function, or an argument that is neither a
-constant nor a variable runs that one call in the interpreter, and so does a call of a function that
-returns a `Dict` or a `Set`. `RY_TYPED_LOG=1` prints each such
-call with its reason.
+The rule covers the function's body. How R code calls a native function is not checked, so these
+calls from the interpreter run in the interpreter with no finding:
+
+- a call that passes a record, a tuple, a list literal, a function, or any argument that is neither
+  a constant nor a variable;
+- a call that passes a variable to a native function that calls R, because that R code could change
+  the variable before R would read the argument;
+- the first call of a native function that calls an R function R has not loaded yet, such as
+  `stats::rnorm`, or that converts a value whose type the code does not tell, such as
+  `List.from_r(kept$price)`: the interpreter runs that call once, which loads the function or
+  gives the type, and later calls run natively;
+- a call of a function that returns a `Dict` or a `Set`.
+
+A native function called from another native function has none of these limits.
+`RY_TYPED_LOG=1` prints each such call with its reason.
 
 ### Diagnostics
 

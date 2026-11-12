@@ -235,7 +235,7 @@ fn typed_fallbacks(stderr: &str) -> Vec<(&str, &str)> {
 /// program, the top-level function, and a part of the typed core's reason. Each is a gap in the
 /// typed core, because the `native` rule accepts what the function does. An entry that stops
 /// falling back fails the test, so the list only shrinks.
-const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 7] = [
+const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 6] = [
     (
         "pinned-r-statement-tails",
         "loop_tail",
@@ -265,11 +265,6 @@ const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 7] = [
         "pinned-r-statement-tails",
         "match_arms",
         "it uses the value of R's `cat` directly",
-    ),
-    (
-        "pinned-from-r-of-base-function",
-        "label_width",
-        "it calls `Num.from_r` of a value typed code computed",
     ),
 ];
 
@@ -521,10 +516,15 @@ fn native_diagnostics_agree_with_the_typed_core() {
                 })
                 .and_then(|(_, owner)| *owner)
                 .unwrap_or(function);
-            if boundary.contains(&function)
-                || blocked.contains(&function)
-                || (reason.contains(CALLEE_REFUSED) && !blocked.is_empty())
-            {
+            // A function falls back with its callee, which is the one that has the finding.
+            let calls_blocked = reason.contains(CALLEE_REFUSED)
+                && lines.iter().zip(&owners).any(|(line, owner)| {
+                    *owner == Some(function)
+                        && blocked.iter().any(|callee| {
+                            *callee != function && line.contains(&format!("{callee}("))
+                        })
+                });
+            if boundary.contains(&function) || blocked.contains(&function) || calls_blocked {
                 continue;
             }
             let exception = NATIVE_CHECK_EXCEPTIONS

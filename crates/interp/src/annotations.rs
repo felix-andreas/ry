@@ -233,6 +233,7 @@ pub unsafe fn restore_signature(function: Sexp, carried: Sexp) -> R<()> {
         || names.kind() != SexpType::String
         || slots < FIRST_FORMAL_SLOT
         || values::length(texts) != slots
+        || values::length(names) + FIRST_FORMAL_SLOT != slots
     {
         return Ok(());
     }
