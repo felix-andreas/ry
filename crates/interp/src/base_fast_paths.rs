@@ -29,32 +29,32 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("ryMatchArg", 0, do_match_arg),
-    internal("ryStopifnot", 0, do_stopifnot),
-    internal("rySetdiff", 0, do_setdiff),
-    internal("ryIntersect", 0, do_intersect),
-    internal("ryStructure", 0, do_structure),
-    internal("rySysGetenv", 0, do_sys_getenv),
-    internal("rySysSetenv", 0, do_sys_setenv),
-    internal("rySysWhich", 0, do_sys_which),
-    internal("ryFormatDefault", 0, do_format_default),
-    internal("ryFormatC", 0, do_format_c),
-    internal("ryPmax", 0, do_pmax),
-    internal("ryDeparse", 0, do_deparse),
-    internal("ryDeparseOpts", 0, do_deparse_opts),
-    internal("ryReduce", 0, do_reduce),
-    internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
-    internal("ryMessage", 0, do_message),
-    internal("ryWarning", 0, do_warning),
-    internal("rySignalCondition", 0, do_signal_condition),
-    internal("ryTryCatch", 0, do_try_catch),
-    internal("ryTryCatchList", 0, do_try_catch_list),
-    internal("ryDoTryCatch", 0, do_do_try_catch),
-    internal("ryWithRestarts", 0, do_with_restarts),
-    internal("ryWithOneRestart", 0, do_with_one_restart),
-    internal("ryDoWithOneRestart", 0, do_do_with_one_restart),
-    internal("ryTryInvokeRestart", 0, do_try_invoke_restart),
-    internal("ryInvokeRestart", 0, do_invoke_restart_named),
+    internal("ryMatchArg", 0, do_match_arg).prologue(),
+    internal("ryStopifnot", 0, do_stopifnot).prologue(),
+    internal("rySetdiff", 0, do_setdiff).prologue(),
+    internal("ryIntersect", 0, do_intersect).prologue(),
+    internal("ryStructure", 0, do_structure).prologue(),
+    internal("rySysGetenv", 0, do_sys_getenv).prologue(),
+    internal("rySysSetenv", 0, do_sys_setenv).prologue(),
+    internal("rySysWhich", 0, do_sys_which).prologue(),
+    internal("ryFormatDefault", 0, do_format_default).prologue(),
+    internal("ryFormatC", 0, do_format_c).prologue(),
+    internal("ryPmax", 0, do_pmax).prologue(),
+    internal("ryDeparse", 0, do_deparse).prologue(),
+    internal("ryDeparseOpts", 0, do_deparse_opts).prologue(),
+    internal("ryReduce", 0, do_reduce).prologue(),
+    internal("ryAssignNativeRoutines", 0, do_assign_native_routines).prologue(),
+    internal("ryMessage", 0, do_message).prologue(),
+    internal("ryWarning", 0, do_warning).prologue(),
+    internal("rySignalCondition", 0, do_signal_condition).prologue(),
+    internal("ryTryCatch", 0, do_try_catch).prologue(),
+    internal("ryTryCatchList", 0, do_try_catch_list).prologue(),
+    internal("ryDoTryCatch", 0, do_do_try_catch).prologue(),
+    internal("ryWithRestarts", 0, do_with_restarts).prologue(),
+    internal("ryWithOneRestart", 0, do_with_one_restart).prologue(),
+    internal("ryDoWithOneRestart", 0, do_do_with_one_restart).prologue(),
+    internal("ryTryInvokeRestart", 0, do_try_invoke_restart).prologue(),
+    internal("ryInvokeRestart", 0, do_invoke_restart_named).prologue(),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -1326,7 +1326,7 @@ pub(crate) fn decline() -> R<Sexp> {
 
 /// The frame of the closure whose prologue is running: its environment, or a slot frame that
 /// has none, whose formals the helpers below read from its slots so the frame stays without one.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClosureFrame {
     Env(Sexp),
     Slots(usize),
@@ -1335,10 +1335,16 @@ pub(crate) enum ClosureFrame {
 impl ClosureFrame {
     /// The frame the builtin `call` was made from.
     pub(crate) unsafe fn of(call: &Call<'_>) -> ClosureFrame {
-        if call.rho != nil() || call.frame == crate::NO_SLOTS {
-            ClosureFrame::Env(call.rho)
+        ClosureFrame::running(call.rho, call.frame)
+    }
+
+    /// The frame of code running with environment `env` and slot owner `slot_owner`, as a
+    /// builtin it calls sees it.
+    pub(crate) fn running(env: Sexp, slot_owner: u32) -> ClosureFrame {
+        if env != nil() || slot_owner == crate::NO_SLOTS {
+            ClosureFrame::Env(env)
         } else {
-            ClosureFrame::Slots(call.frame as usize)
+            ClosureFrame::Slots(slot_owner as usize)
         }
     }
 
@@ -1356,7 +1362,16 @@ impl ClosureFrame {
 }
 
 /// Finishes the call of the closure whose frame is `frame` with `value`, as `return(value)`.
+/// A prologue that compiled code runs through [`crate::bytecode::Op::Prologue`] hands the value
+/// back to that instruction, which returns it from the activation, so neither a `return()` jump
+/// nor the environment a slot frame would need as its target is made.
 pub(crate) unsafe fn finish(frame: ClosureFrame, value: Sexp, visible: bool) -> R<Sexp> {
+    let state = interp();
+    if state.prologue.is_some_and(|marked| marked.resolve() == frame.resolve()) {
+        state.prologue = None;
+        state.visible = visible;
+        return Ok(value);
+    }
     let env = match frame.resolve() {
         Err(env) => env,
         Ok(index) => eval::pending_env(index)?,

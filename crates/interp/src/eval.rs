@@ -1180,7 +1180,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             {
                 return Ok(value);
             }
-            call_builtin(definition, call, function, &args, env)
+            let reusable = if definition.reuses_first_argument {
+                temporary_argument(arguments, &args, env)?
+            } else {
+                None
+            };
+            call_builtin_reusing(definition, call, function, &args, env, reusable)
         }
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
@@ -1216,6 +1221,57 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
+}
+
+/// The argument of a builtin call that only the call holds, which the builtin may then write
+/// its result into, as compiled code does with `Op::Arithmetic`'s reuse bits: the fresh result
+/// of a binary element-wise operator call (in `x * 2 + 1`, the value of `x * 2`) that no
+/// counted reference holds. The operator must be the base builtin, since a closure bound to
+/// `*` may return a value something uncounted holds, and it must take two arguments, since
+/// unary `+` returns its operand. Of two candidates the wider type wins, as the result's type
+/// is the wider operand's.
+unsafe fn temporary_argument(arguments: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    let width = |value: Sexp| match value.kind() {
+        SexpType::Complex => 2,
+        SexpType::Real => 1,
+        _ => 0,
+    };
+    let mut best: Option<Sexp> = None;
+    let mut list = arguments;
+    for arg in args {
+        if list.kind() != SexpType::Pairlist {
+            return Ok(None);
+        }
+        let expression = list.car();
+        list = list.cdr();
+        if expression == symbols().dots {
+            return Ok(None);
+        }
+        let value = arg.value;
+        if value.refcount() != 0
+            || !matches!(
+                value.kind(),
+                SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+            )
+            || value.length() <= 1
+            || expression.kind() != SexpType::Language
+            || expression.car().kind() != SexpType::Symbol
+            || expression.cdr().kind() != SexpType::Pairlist
+            || expression.cdr().cdr().kind() != SexpType::Pairlist
+            || expression.cdr().cdr().cdr() != nil()
+            || best.is_some_and(|best| width(best) >= width(value))
+        {
+            continue;
+        }
+        let operator = find_fun(expression.car(), env)?;
+        if operator.kind() == SexpType::Builtin && builtin_def(operator)?.reuses_first_argument {
+            best = Some(value);
+        }
+    }
+    if list != nil() || args.iter().filter(|arg| Some(arg.value) == best).count() > 1 {
+        return Ok(None);
+    }
+    Ok(best)
 }
 
 /// A pairlist's items as arguments, unevaluated, as a special receives them.
@@ -2623,6 +2679,16 @@ pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
         panic!("a slot frame's activation outlived its frame");
     };
     frame_env(index, cause)
+}
+
+/// The environment that stands for the slot frame whose header register is `header` while it
+/// has none: the pending one its closures hold, or `nil` when it made none.
+pub unsafe fn pending_env_of(header: usize) -> Sexp {
+    let frames = &interp().frames;
+    frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+        .map_or(nil(), |index| frames[index].pending)
 }
 
 /// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals

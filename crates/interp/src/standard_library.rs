@@ -836,7 +836,8 @@ unsafe fn whole(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
 
 unsafe fn count(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usize> {
     let number = whole(call, parameter, value)?;
-    usize::try_from(number).map_err(|_| wrong(call, parameter, "zero or more", value))
+    usize::try_from(number)
+        .map_err(|_| call.error(format!("`{parameter}` must be zero or more, not {number}")))
 }
 
 /// A length-one string that is not `NA`.
@@ -2579,17 +2580,15 @@ unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
 /// The bytes of a list of numbers from 0 to 255.
 unsafe fn utf8_bytes(call: &Call<'_>, bytes: Sexp) -> R<Vec<u8>> {
     let mut decoded = Vec::new();
-    for item in list_elements(call, "bytes", bytes)? {
+    for (position, item) in list_elements(call, "bytes", bytes)?.into_iter().enumerate() {
         let byte = whole(call, "bytes", item)?;
         match u8::try_from(byte) {
             Ok(byte) => decoded.push(byte),
             Err(_) => {
-                return Err(wrong(
-                    call,
-                    "bytes",
-                    "a list of numbers from 0 to 255",
-                    item,
-                ));
+                return Err(call.error(format!(
+                    "`bytes` must hold numbers from 0 to 255, but item {} is {byte}",
+                    position + 1
+                )));
             }
         }
     }
@@ -2686,16 +2685,15 @@ unsafe fn str_from_utf16_lossy(call: &Call<'_>) -> R<Sexp> {
 /// The code units of a list of numbers from 0 to 65535.
 unsafe fn utf16_units(call: &Call<'_>, units: Sexp) -> R<Vec<u16>> {
     let mut decoded = Vec::new();
-    for item in list_elements(call, "units", units)? {
-        match u16::try_from(whole(call, "units", item)?) {
+    for (position, item) in list_elements(call, "units", units)?.into_iter().enumerate() {
+        let unit = whole(call, "units", item)?;
+        match u16::try_from(unit) {
             Ok(unit) => decoded.push(unit),
             Err(_) => {
-                return Err(wrong(
-                    call,
-                    "units",
-                    "a list of numbers from 0 to 65535",
-                    item,
-                ));
+                return Err(call.error(format!(
+                    "`units` must hold numbers from 0 to 65535, but item {} is {unit}",
+                    position + 1
+                )));
             }
         }
     }
@@ -3464,8 +3462,12 @@ unsafe fn bits_value(call: &Call<'_>, value: i32) -> R<Sexp> {
     scalar_integer(value)
 }
 
-/// A bitwise operation on two integers' two's-complement bits.
+/// A bitwise operation on two integers' two's-complement bits: 64 of them when either is an
+/// `I64`, otherwise the 32 of an R integer.
 unsafe fn bitwise(call: &Call<'_>, operation: fn(i32, i32) -> i32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [first, second] = arguments(call, ["first", "second"])?;
     let first = integer_argument(call, "first", first)?;
     let second = integer_argument(call, "second", second)?;
@@ -3485,12 +3487,19 @@ unsafe fn num_bitwise_xor(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn num_bitwise_not(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number] = arguments(call, ["number"])?;
     bits_value(call, !integer_argument(call, "number", number)?)
 }
 
-/// Shifts an integer's bits by `bits`, from 0 to 31.
+/// Shifts an integer's bits by `bits`: from 0 to 63 when either is an `I64`, otherwise from 0 to
+/// 31.
 unsafe fn shift(call: &Call<'_>, operation: fn(i32, u32) -> i32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number, bits] = arguments(call, ["number", "bits"])?;
     let number = integer_argument(call, "number", number)?;
     let bits = whole(call, "bits", bits)?;
