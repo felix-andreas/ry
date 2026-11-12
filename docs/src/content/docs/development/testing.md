@@ -506,16 +506,33 @@ size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic,
 grow only by about what the change adds. Resident text is checked on the shipped layout
 (`tools/layout/optimize.sh`) when a release is cut.
 
-Layout moves single-program wall time too, so judge a wall regression on one program by what
-callgrind counts. Run the program on both builds under `valgrind --tool=callgrind --cache-sim=yes
---branch-sim=yes` and compare instructions (`Ir`), simulated branch mispredictions and simulated
-cache misses. A regression that shows in those counts is real. A wall regression without them
-blocks a change only when it reproduces on two layouts: the change's build, and the change's build
-plus a no-op exported function (the control), which shifts the code placed after it. The public
-suite's `lapply` program shows why. Three builds ran it in the same instruction count (within
-0.1%), yet its simulated indirect-branch mispredictions were 0.6M, 8.6M and 10.6M, and the no-op
-function alone made the difference between the last two. Wall time followed the layout: the
-8.6M build ran `lapply` about 25% slower than the 0.6M build.
+Layout moves single-program wall time too, and with it callgrind's simulated branch mispredictions
+and cache misses. Only the instruction count (`Ir`) holds still. So judge a regression on one
+program by `Ir` from `valgrind --tool=callgrind --cache-sim=yes --branch-sim=yes` on both builds:
+a rise in `Ir` is real. A wall regression, or a rise in simulated mispredictions or cache misses,
+without a rise in `Ir` blocks a change only when it reproduces on two layouts: the change's build,
+and the change's build plus a no-op exported function (the control), which shifts the code placed
+after it. On the public suite's `lapply` program, one source built several ways gave:
+
+| `libR` layout | `Ir` | Indirect mispredictions | Conditional mispredictions | I1 misses |
+| --- | ---: | ---: | ---: | ---: |
+| plain release | 6,650.6M | 8.6M | 16.6M | 69.4M |
+| plain release + control | 6,650.6M | 10.6M | 12.2M | 68.3M |
+| functions and blocks aligned | 6,645.4M | 10.6M | 14.5M | 23.4M |
+| aligned + control | 6,645.4M | 8.6M | 16.1M | 27.8M |
+| PGO and BOLT | 5,256.3M | 0.54M | 29.2M | 2.75M |
+| PGO and BOLT + control, same profile | 5,256.3M | 0.55M | 28.7M | 2.74M |
+| PGO and BOLT + control, own profile | 5,256.3M | 5.45M | 24.2M | 2.76M |
+
+Wall time can follow these counts: a build with 8.6M indirect mispredictions ran `lapply` about
+25% slower than one with 0.6M at the same `Ir`. Two layouts were tried as a way to take the noise
+out of benchmark builds, and neither does. Aligning functions to 64 bytes and blocks to 32
+(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) grows
+`libR.so`'s `.text` by 24 MB (27%), and the control swings the counts as far as before. The
+shipped layout (`tools/layout/optimize.sh`, applied to `libR` for this table) holds still under
+the control only when both builds reuse one training profile. A build that trains its own
+profile, as every release does, gets a different function order and the swing returns. Benchmark
+builds therefore stay plain release builds, and the control is the test for a layout effect.
 
 Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
 loads only into the runtime build that wrote it, and any other build silently ignores it, so that
