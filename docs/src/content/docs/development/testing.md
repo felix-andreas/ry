@@ -445,18 +445,20 @@ engine, because a failure there reproduces on every host. A beta release require
 empty, intermittent entries included.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
-a case needs a package that is not installed (a case names its packages in a leading
-`# oracle: requires` comment). It lists each such case and exits 1. Install the packages into the
-corpus library with `just corpus`, which the oracle searches by itself ([Corpus and
-oracle](/development/corpus-and-oracle)). For a deliberately partial local run, `--allow-skips`
-skips those cases and marks every summary line `PARTIAL`:
+a case needs a package that is not installed or a locale that is not generated. A case names them
+in a leading `# oracle: requires` comment: packages by name (`# oracle: requires knitr, rmarkdown`)
+and a locale it switches to as `# oracle: requires locale en_US.ISO-8859-1`. The run lists each
+such case and exits 1. Install the packages into the corpus library with `just corpus`, which the
+oracle searches by itself ([Corpus and oracle](/development/corpus-and-oracle)), and generate the
+locales with `sudo tools/dev-setup.sh` (or `tools/oracle-locales.sh` alone). For a deliberately
+partial local run, `--allow-skips` skips those cases and marks every summary line `PARTIAL`:
 
 ```
 skip    cases/datatable__fread.R: needs bit64
 skip    cases/packages__xts_keeps_source_rownames.R: needs xts
 ok      cases/arith__complex_math.R
 ok      cases/base__match_arg_native.R
-PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package)
+PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package or locale)
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
@@ -531,8 +533,10 @@ out of benchmark builds, and neither does. Aligning functions to 64 bytes and bl
 `libR.so`'s `.text` by 24 MB (27%), and the control swings the counts as far as before. The
 shipped layout (`tools/layout/optimize.sh`, applied to `libR` for this table) holds still under
 the control only when both builds reuse one training profile. A build that trains its own
-profile, as every release does, gets a different function order and the swing returns. Benchmark
-builds therefore stay plain release builds, and the control is the test for a layout effect.
+profile, as every release does, gets a different function order and the swing returns. The builds
+that judge a change therefore stay plain release builds, and the control is the test for a layout
+effect. The published suites measure the shipped layout itself: they are recorded on the release
+archive (`bench.py --release`, see [Benchmarks](/benchmarks/#how-it-was-measured)).
 
 Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
 loads only into the runtime build that wrote it, and any other build silently ignores it, so that
@@ -542,7 +546,9 @@ images except `just base-r`, or a package library's except reinstalling the pack
 that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
 therefore refuses to start when a binary under test would load a code image another build wrote, or
 when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
-`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it.
+`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it. A release archive
+under `--release` extracts its runtime and base R into a cache directory of its own, so it loads
+the images it shipped, and any image in a package library that another build wrote stops the run.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with

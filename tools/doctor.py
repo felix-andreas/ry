@@ -8,6 +8,7 @@ sources libR links, which `ry`, `libR.so` and the start-up image each embed. A b
 carry the identity of the working tree was built from other sources.
 """
 
+import locale
 import mmap
 import os
 import pathlib
@@ -37,6 +38,7 @@ def main():
     if r:
         check_oracle_packages(r)
         check_libraries(r)
+    check_oracle_locales()
     corpus_complete = check_corpus()
     check_cache(corpus_complete)
     check_binaries()
@@ -160,6 +162,30 @@ def check_oracle_packages(r):
         report("warn", "oracle packages", f"rlang {versions['rlang']}, not {RLANG_VERSION}: the rlang cases and trace_back fuzzing skip", "sudo tools/dev-setup.sh")
     else:
         report("ok", "oracle packages", ", ".join(f"{p} {versions[p]}" for p in ORACLE_PACKAGES))
+
+
+def check_oracle_locales():
+    """The locales oracle cases switch to, as their `# oracle: requires locale` lines name them."""
+    needed = set()
+    for case in sorted((root / "crates/oracle/cases").glob("*.R")):
+        for line in case.read_text(errors="replace").splitlines():
+            if not line.startswith("#"):
+                break
+            if line.startswith("# oracle: requires "):
+                needed.update(item.strip().removeprefix("locale ").strip()
+                              for item in line.removeprefix("# oracle: requires ").split(",")
+                              if item.strip().startswith("locale "))
+    missing = []
+    for name in sorted(needed):
+        try:
+            locale.setlocale(locale.LC_CTYPE, name)
+        except locale.Error:
+            missing.append(name)
+    locale.setlocale(locale.LC_CTYPE, "")
+    if missing:
+        report("FAIL", "oracle locales", f"not generated: {', '.join(missing)} (`oracle compare` refuses to run)", "sudo tools/dev-setup.sh")
+    else:
+        report("ok", "oracle locales", ", ".join(sorted(needed)) or "none needed")
 
 
 def check_libraries(r):

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">ry speed-up over GNU R by benchmark suite</title>
-<desc id="d">Geometric mean speed-up over GNU R. Public R JIT benchmarks: GNU R 1.00x, ry 2.66x; Package test suites: GNU R 1.00x, ry 1.91x; Numeric kernels: GNU R 1.00x, ry 4.75x, ry typed 14x; Application workloads: GNU R 1.00x, ry 1.95x, ry typed 21x.</desc>
+<desc id="d">Geometric mean speed-up over GNU R. Public R JIT benchmarks: GNU R 1.00x, ry 2.66x; Package test suites: GNU R 1.00x, ry 1.91x; Numeric kernels: GNU R 1.00x, ry 4.81x, ry typed 15x; Application workloads: GNU R 1.00x, ry 1.95x, ry typed 21x.</desc>
 <rect x="16" y="12" width="12" height="12" rx="2" fill="#7d838c"/>
 <text x="34" y="22.5" font-size="13" fill="#e6edf3">GNU R</text>
 <rect x="92" y="12" width="12" height="12" rx="2" fill="#3987e5"/>
@@ -20,10 +20,10 @@
 <text x="289.0" y="278" font-size="13" text-anchor="middle" fill="#e6edf3">Package test suites</text>
 <path d="M399.0 256V250.8a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
 <text x="421.0" y="240.8" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
-<path d="M449.0 256V216.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
-<text x="471.0" y="206.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">4.75x</text>
-<path d="M499.0 256V127.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
-<text x="521.0" y="117.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">14x</text>
+<path d="M449.0 256V215.7a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
+<text x="471.0" y="205.7" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">4.81x</text>
+<path d="M499.0 256V120.3a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
+<text x="521.0" y="110.3" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">15x</text>
 <text x="471.0" y="278" font-size="13" text-anchor="middle" fill="#e6edf3">Numeric kernels</text>
 <path d="M581.0 256V250.8a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
 <text x="603.0" y="240.8" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
