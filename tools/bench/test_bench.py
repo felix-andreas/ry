@@ -151,7 +151,8 @@ class TypedSuite(unittest.TestCase):
         self.assertEqual(results["geomean"]["ry_typed"], {"median": 1.0, "low": 1.0, "high": 1.0, "programs": 2})
         self.assertEqual(results["programs"][0]["seconds"], {"rust": 0.011, "ry_typed": 0.022})
         self.assertEqual(bench.ratio_label(results, "ry_typed"), "ry typed / Rust")
-        self.assertNotIn("peak_mib", results["programs"][0])
+        # `VmHWM` starts afresh at `exec`, so a Rust program's peak is its own and is recorded.
+        self.assertEqual(results["programs"][0]["peak_mib"], {"rust": 1.0, "ry_typed": 1.0})
         self.assertEqual(results["programs"][0]["compile_seconds"], {"rust": 0.25, "ry_typed": 0.002})
 
     def test_a_program_rust_finishes_too_fast_to_time_stays_out_of_the_mean(self):
