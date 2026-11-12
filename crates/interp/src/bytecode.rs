@@ -1760,6 +1760,9 @@ pub mod feedback {
     pub const BRANCH_TAKEN: u16 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    /// A `GetVar` read an active binding, so every read there must call the binding again.
+    /// Compiled code records it, and the bit says nothing about the value's type.
+    pub const ACTIVE_BINDING: u16 = 1 << 13;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -2277,7 +2280,10 @@ const SWITCH_NAME_ARMS: usize = 1;
 /// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
 /// alternative, which is an error).
 const SWITCH_POSITION_ARMS: usize = 2;
-/// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
+/// Where it keeps, for arms 0, 1, 2, ..., the constant pool index of the integer scalar
+/// [`Op::SwitchArm`] returns for that arm. The arm tests compare those scalars by identity, and a
+/// code image keeps each pool entry as one object but does not keep an object shared between two
+/// constants, so the table names the scalars by pool index rather than holding them.
 const SWITCH_NUMBERS: usize = 3;
 /// Where it keeps the `switch` call, which its errors name.
 const SWITCH_CALL: usize = 4;
@@ -2323,19 +2329,14 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
     }
     let name_arms = values::integer_vector(&name_arms)?;
     let position_arms = values::integer_vector(&position_arms)?;
-    let mut numbers = Vec::with_capacity(arms.len() + 1);
-    for number in 0..=arms.len() {
-        numbers.push(values::scalar_integer(number as i32)?);
-    }
-    let numbers = values::list_vector(&numbers)?;
+    let numbers = values::integer_vector(&vec![0; arms.len() + 1])?;
     let table = values::list_vector(&[name_vector, name_arms, position_arms, numbers, call])?;
     Ok((table, arms))
 }
 
 /// The arm number a `switch` runs for `selector`, from the table [`switch_table`] built, with
 /// the special's errors.
-unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
-    let numbers = table.element(SWITCH_NUMBERS);
+unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(text) => {
@@ -2364,7 +2365,7 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
             _ => 0,
         },
     };
-    Ok(numbers.element(arm as usize))
+    Ok(arm as usize)
 }
 
 /// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
@@ -4699,12 +4700,23 @@ impl Compiler {
             "switch" => {
                 self.expression(args[0].1, dst)?;
                 let (table, arms) = switch_table(call, &args[1..])?;
-                let numbers = table.element(SWITCH_NUMBERS);
+                let mut numbers = Vec::with_capacity(arms.len() + 1);
+                for arm in 0..=arms.len() {
+                    numbers.push(self.constant(values::scalar_integer(arm as i32)?));
+                }
+                for (slot, &number) in table
+                    .element(SWITCH_NUMBERS)
+                    .slice_mut::<i32>()
+                    .iter_mut()
+                    .zip(&numbers)
+                {
+                    *slot = number as i32;
+                }
                 let table = self.constant(table);
                 self.emit(Op::SwitchArm, &[dst, dst, table]);
                 let mut done = Vec::with_capacity(arms.len());
                 for (index, body) in arms.iter().enumerate() {
-                    let number = self.constant(numbers.element(index + 1));
+                    let number = numbers[index + 1];
                     let skip = self.emit_patchable(Op::BranchUnlessSame, &[dst, number, 0]);
                     self.expression(*body, dst)?;
                     done.push(self.emit_patchable(Op::Jump, &[0]));
@@ -5850,7 +5862,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (0..length(names))
                             .all(|name| names.element(name).kind() == SexpType::Symbol)
                 }
-                Switch => valid_switch_table(constant(value)?),
+                Switch => valid_switch_table(constant(value)?, &constant),
                 Cache => value < caches,
                 Target => is_start(value),
                 Loop => value < loops,
@@ -5955,7 +5967,10 @@ unsafe fn valid_fusion_program(
 }
 
 /// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
-unsafe fn valid_switch_table(table: Sexp) -> bool {
+unsafe fn valid_switch_table<'a>(
+    table: Sexp,
+    constant: impl Fn(usize) -> Result<Sexp, &'a str>,
+) -> bool {
     if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
         return false;
     }
@@ -5968,7 +5983,7 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
         || length(name_arms) != length(names)
         || position_arms.kind() != SexpType::Integer
         || length(position_arms) == 0
-        || numbers.kind() != SexpType::List
+        || numbers.kind() != SexpType::Integer
         || table.element(SWITCH_CALL).kind() != SexpType::Language
     {
         return false;
@@ -5976,7 +5991,12 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms)
+    values::ints(numbers).iter().all(|&index| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| constant(index).ok())
+            .is_some_and(|number| number.kind() == SexpType::Integer && length(number) == 1)
+    }) && values::ints(name_arms)
         .iter()
         .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
@@ -6449,6 +6469,13 @@ pub unsafe fn lookup_hints(code: Sexp) -> *mut u32 {
 /// Records `value`'s kind as type feedback for the instruction at `pc`.
 pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
     record_feedback(code.cdr(), pc, value);
+}
+
+/// Marks the `GetVar` at `pc` as one that called an active binding.
+pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
+    if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
+        *bits |= i32::from(feedback::ACTIVE_BINDING);
+    }
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
@@ -9887,8 +9914,10 @@ unsafe fn op_move(_state: &mut Activation<'_, '_>, instruction: Instruction) -> 
 
 #[inline(always)]
 unsafe fn op_switch_arm(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let value = switch_arm(instruction.input(1), state.constant(instruction, 2))?;
-    instruction.output(0, value);
+    let table = state.constant(instruction, 2);
+    let arm = switch_arm(instruction.input(1), table)?;
+    let number = values::ints(table.element(SWITCH_NUMBERS))[arm] as usize;
+    instruction.output(0, pool_constant(state, number));
     Ok(Flow::Next)
 }
 

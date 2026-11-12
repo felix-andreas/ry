@@ -38,6 +38,7 @@ use {
         },
     },
     heap::{
+        HeapError,
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
         records::{Fields, Layout, NativeKind},
     },
@@ -332,6 +333,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.pow_int", num_pow_int),
     library("Num.sqrt", num_sqrt),
     library("Num.log", num_log),
+    library("Num.exp", num_exp),
     library("Num.asin", num_asin),
     library("Num.acos", num_acos),
     library("Num.is_nan", num_is_nan),
@@ -2467,6 +2469,15 @@ unsafe fn str_repeat(call: &Call<'_>) -> R<Sexp> {
     let [string, times] = arguments(call, ["string", "count"])?;
     let string = text(call, "string", string)?;
     let times = count(call, "count", times)?;
+    // A result past R's limit on a string's bytes fails before it is built, which would
+    // otherwise ask for gigabytes only to give them back.
+    if string
+        .len()
+        .checked_mul(times)
+        .is_none_or(|total| total > i32::MAX as usize)
+    {
+        return Err(HeapError::StringTooLong.into());
+    }
     scalar_string(&string.repeat(times))
 }
 
@@ -3422,6 +3433,13 @@ unsafe fn num_log(call: &Call<'_>) -> R<Sexp> {
         )));
     }
     scalar_real(value.ln())
+}
+
+unsafe fn num_exp(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
+    real_function(call, f64::exp)
 }
 
 /// An inverse sine or cosine, whose argument must lie in `[-1, 1]`.

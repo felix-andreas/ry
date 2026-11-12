@@ -8,6 +8,10 @@
 # ry checks a package before GNU R loads it, so the load never waits for a verdict.
 .ry_await_verdict <- function() invisible()
 
+# A GNU R process has no loader of ry's until the session installs one, so a profile cannot
+# attach it, and a test runner's worker process loads the package its own way.
+.ry_attach_call <- NULL
+
 .ry_sources <- function(state, plan) {
   if (is.null(state$texts)) {
     state$texts <- new.env(parent = emptyenv())

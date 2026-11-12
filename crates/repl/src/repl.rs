@@ -212,7 +212,9 @@ pub struct RuntimeFlags {
 }
 
 impl RuntimeFlags {
-    fn bits(self) -> std::ffi::c_int {
+    /// The flags as `ry_run` takes them, which is also how a process hands them to the R
+    /// processes it starts (`rcmd::front_end::PROJECT_FLAGS_VARIABLE`).
+    pub fn bits(self) -> std::ffi::c_int {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
             | (std::ffi::c_int::from(self.strict) << 2)

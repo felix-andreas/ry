@@ -8,12 +8,12 @@ import { parse } from 'smol-toml';
 
 const manifests = import.meta.glob('../../../tools/bench/*/suite.toml', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const resultFiles = import.meta.glob('../../../tools/bench/*/results.json', { import: 'default', eager: true }) as Record<string, unknown>;
-const sourceFiles = import.meta.glob('../../../tools/bench/**/*.R', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+const sourceFiles = import.meta.glob(['../../../tools/bench/**/*.R', '../../../tools/bench/typed/*.rs'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
 export const repository = 'https://github.com/felix-andreas/ry/blob/main';
 
 // The order of the summary, the page and the README.
-const suiteOrder = ['public', 'packages', 'kernels', 'applications'];
+const suiteOrder = ['public', 'packages', 'kernels', 'applications', 'typed'];
 
 export type Interval = { median: number; low?: number; high?: number };
 export type Flag = { kind: string; engine?: string; reason?: string };
@@ -26,7 +26,9 @@ export type Meta = {
   ryCommit?: string;
   // The release archive measured, when the numbers come from one (`bench.py --release`).
   release?: { tag: string; archive: string; sha256: string };
-  gnuR: { version: string; blas?: string };
+  // The build of the suite's baseline: GNU R, or the Rust compiler and the flags it ran with.
+  gnuR?: { version: string; blas?: string };
+  rust?: { version: string; flags: string };
   machine: { cpu: string; cores?: number; kernel?: string };
   rounds: number;
   seed?: number;
@@ -39,6 +41,7 @@ export type Program = {
   summary?: string;
   source?: string;
   typedSource?: string;
+  rustSource?: string;
   group?: string;
   version?: string;
   // Absent for a program the suite defines but the results file does not hold.
@@ -48,6 +51,8 @@ export type Measurement = {
   seconds: Record<string, number>;
   ratio: Record<string, Interval>;
   peakMib?: Record<string, number>;
+  // What each engine spent compiling the program, where the suite records it.
+  compileSeconds?: Record<string, number>;
   tests?: Record<string, TestCounts>;
   flags: Flag[];
   failures: Failure[];
@@ -55,9 +60,16 @@ export type Measurement = {
 export type Results = {
   // Engine keys in the order of the results file. `engineLabel` gives each one's name.
   engines: string[];
+  // The engine every ratio of the suite compares with.
+  baseline: string;
+  // A `speedup` is the baseline's time over the engine's, so above 1x the engine is faster. A
+  // `slowdown` is the engine's time over the baseline's, so 1x is the baseline's speed and lower
+  // is faster.
+  ratioKind: RatioKind;
   geomean: Record<string, Interval & { programs: number }>;
   meta: Meta;
 };
+export type RatioKind = 'speedup' | 'slowdown';
 export type Suite = {
   id: string;
   name: string;
@@ -69,8 +81,16 @@ export type Suite = {
   results?: Results;
 };
 
-// The engine every ratio divides by: a ratio above 1x means the engine ran faster than GNU R.
-export const baseline = 'gnu_r';
+// The baseline of a results file that names none is GNU R, and its ratios are speed-ups.
+const gnuR = 'gnu_r';
+
+export function baselineOf(suite: Suite): string {
+  return suite.results?.baseline ?? gnuR;
+}
+
+export function ratioKindOf(suite: Suite): RatioKind {
+  return suite.results?.ratioKind ?? 'speedup';
+}
 
 // Each results file names its engines, so the labels come from the runner.
 const engineLabels = new Map<string, string>();
@@ -85,13 +105,25 @@ export function suite(id: string): Suite | undefined {
   return suites.find((candidate) => candidate.id === id);
 }
 
+// The fragment that links to a suite's section of the benchmarks page, as a Markdown heading of
+// the suite's name would get.
+export function sectionAnchor(suite: Suite): string {
+  return suite.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
 export function measuredSuites(): Suite[] {
   return suites.filter((candidate) => candidate.results !== undefined);
 }
 
-// The engines a suite compares against GNU R, in the order of its results file.
+// The measured suites that compare ry with GNU R. Their speed-ups share one scale, so the summary
+// table, the landing page and the README chart show them together.
+export function gnuRSuites(): Suite[] {
+  return measuredSuites().filter((candidate) => baselineOf(candidate) === gnuR);
+}
+
+// The engines a suite compares against its baseline, in the order of its results file.
 export function comparedEngines(suite: Suite): string[] {
-  return (suite.results?.engines ?? []).filter((engine) => engine !== baseline);
+  return (suite.results?.engines ?? []).filter((engine) => engine !== baselineOf(suite));
 }
 
 export function measuredPrograms(suite: Suite): (Program & { measurement: Measurement })[] {
@@ -121,6 +153,16 @@ export function seconds(value: number): string {
   return `${value.toFixed(3)} s`;
 }
 
+// One unit for all of a suite's times, as in the runner's own table: milliseconds where the suite
+// times programs that finish in a few.
+export function timeText(suite: Suite): (value: number) => string {
+  return tooShortSeconds(suite) < 0.001 ? (value) => `${(value * 1000).toFixed(3)} ms` : seconds;
+}
+
+function tooShortSeconds(suite: Suite): number {
+  return suite.results?.meta.tooShortSeconds ?? 0.1;
+}
+
 export function mebibytes(value: number): string {
   return `${value.toFixed(0)} MiB`;
 }
@@ -139,32 +181,35 @@ export function flagText(flag: Flag): string {
   return `${flag.kind.replaceAll('_', ' ')}${engine}${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
 }
 
-// A ratio rests on the engine's time and on GNU R's, so a flag on either one marks it.
-export function ratioFlags(measurement: Measurement, engine: string): Flag[] {
+// A ratio rests on the engine's time and on the baseline's, so a flag on either one marks it.
+export function ratioFlags(measurement: Measurement, engine: string, baseline: string): Flag[] {
   return measurement.flags.filter((flag) => flag.engine === undefined || flag.engine === engine || flag.engine === baseline);
 }
 
-// Whether a program is too short to count: GNU R, whose time measures the work, finished it under
-// the floor. A short time on a ry engine is the speed-up being measured, so it is flagged but counts.
-export function isTooShort(measurement: Measurement): boolean {
+// Whether a program is too short to count: the baseline, whose time measures the work, finished it
+// under the floor. A short time on a ry engine is the speed being measured, so it is flagged but counts.
+export function isTooShort(measurement: Measurement, baseline: string): boolean {
   return measurement.flags.some((flag) => flag.kind === 'too_short' && (flag.engine === undefined || flag.engine === baseline));
 }
 
-export function flagNotes(programs: Program[], floor = 0.1): string[] {
+export function flagNotes(suite: Suite, programs: Program[]): string[] {
+  const baseline = baselineOf(suite);
+  const shortest = tooShortSeconds(suite);
+  const floor = shortest < 0.001 ? `${Number((shortest * 1000).toPrecision(3))} ms` : `${shortest} s`;
   const flags = programs.flatMap((program) => program.measurement?.flags ?? []);
   const kinds = new Set(flags.map((flag) => flag.kind));
   const notes: string[] = [];
-  if (programs.some((program) => program.measurement !== undefined && isTooShort(program.measurement))) {
-    notes.push(`A program marked too short on GNU R finishes there in under ${floor} s, which is too little work for a stable ratio, so every geometric mean leaves it out.`);
+  if (programs.some((program) => program.measurement !== undefined && isTooShort(program.measurement, baseline))) {
+    notes.push(`A program marked too short on ${engineLabel(baseline)} finishes there in under ${floor}, which is too little work for a stable ratio, so every geometric mean leaves it out.`);
   }
   if (flags.some((flag) => flag.kind === 'too_short' && flag.engine !== undefined && flag.engine !== baseline)) {
-    notes.push(`A time marked too short on a ry engine is under ${floor} s. That speed is what the suite measures, so it counts in the geometric mean.`);
+    notes.push(`A time marked too short on a ry engine is under ${floor}. That speed is what the suite measures, so it counts in the geometric mean.`);
   }
   if (kinds.has('typed_refused')) notes.push('A program marked typed code partly refused has code the typed core refused, which runs in the interpreter instead; the flag gives the refusal.');
   if (kinds.has('wide_interval')) notes.push("A program marked wide interval varied so much between rounds that its ratio's interval is wide; read its median with care.");
   if (kinds.has('tests_differ')) notes.push('A package marked tests differ passed a different number of tests on ry than on GNU R; the flag gives both counts.');
   if (programs.some((program) => (program.measurement?.failures.length ?? 0) > 0)) {
-    notes.push('A program marked fails did not run to the end on that engine, so it has no speed-up there and every geometric mean leaves it out; the mark gives the last line of its error.');
+    notes.push(`A program marked fails did not run to the end on that engine, or printed another result than ${engineLabel(baseline)}, so it has no ${ratioKindOf(suite) === 'slowdown' ? 'ratio' : 'speed-up'} there and every geometric mean leaves it out; the mark gives the reason.`);
   }
   return notes;
 }
@@ -180,7 +225,11 @@ export function suiteMetadata(suite: Suite): string {
       : meta.ryCommit === undefined
         ? ''
         : ` at ry ${shortCommit(meta.ryCommit)}`;
-  return `Measured on ${meta.date.slice(0, 10)}${build} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${meta.rounds} paired rounds.`;
+  const against =
+    meta.rust !== undefined
+      ? `against Rust ${meta.rust.version}, compiled with rustc ${meta.rust.flags},`
+      : `with GNU R ${meta.gnuR?.version ?? 'of an unrecorded version'}`;
+  return `Measured on ${meta.date.slice(0, 10)}${build} ${against} on ${machine(meta)}; ${meta.rounds} paired rounds.`;
 }
 
 // A commit as its first nine hex digits, keeping a marker such as `-dirty` that follows the hash.
@@ -195,8 +244,8 @@ export function machine(meta: Meta): string {
   return parts.join(', ');
 }
 
-// One measured suite's headline: ry's geometric-mean speed-up over GNU R, untyped and, where the
-// suite has a typed column, typed in strict mode. tools/bench/readme.py writes the same numbers into
+// The headline of one measured suite that compares ry with GNU R: ry's geometric-mean speed-up,
+// untyped and, where the suite has a typed column, typed in strict mode. tools/bench/readme.py writes the same numbers into
 // the READMEs, and the landing page draws them as bars.
 export type SuiteSpeed = {
   id: string;
@@ -210,7 +259,7 @@ export type SuiteSpeed = {
 };
 
 export function suiteSpeeds(): SuiteSpeed[] {
-  return measuredSuites().map((suite) => {
+  return gnuRSuites().map((suite) => {
     const geomean = suite.results?.geomean ?? {};
     return {
       id: suite.id,
@@ -228,16 +277,30 @@ export function suiteSpeeds(): SuiteSpeed[] {
 // different BLAS, which makes their ratios incomparable with each other.
 export function mixedMachines(): boolean {
   const machines = new Set(
-    measuredSuites().map((suite) => {
+    gnuRSuites().map((suite) => {
       const meta = suite.results?.meta;
-      return JSON.stringify([meta?.machine.cpu, meta?.machine.kernel, meta?.gnuR.blas]);
+      return JSON.stringify([meta?.machine.cpu, meta?.machine.kernel, meta?.gnuR?.blas]);
     }),
   );
   return machines.size > 1;
 }
 
-// One row per measured suite: what it is and ry's geometric-mean speed against GNU R, untyped and
-// typed in strict mode.
+// One sentence per measured suite whose ratios are slowdowns, which the summary table of speed-ups
+// cannot hold: the suite's geometric mean and how to read it.
+export function slowdownSummaries(): string[] {
+  return measuredSuites()
+    .filter((suite) => ratioKindOf(suite) === 'slowdown')
+    .flatMap((suite) => {
+      const engine = comparedEngines(suite)[0];
+      const mean = suite.results?.geomean[engine];
+      if (mean === undefined) return [];
+      const baseline = engineLabel(baselineOf(suite));
+      return [`${suite.name}: ${engineLabel(engine)} takes ${formatRatio(mean.median)} ${baseline}'s time, the geometric mean over ${mean.programs} ${suite.summary}. Here 1x is ${baseline}'s speed, and lower is faster.`];
+    });
+}
+
+// One row per measured suite that compares ry with GNU R: what it is and ry's geometric-mean speed
+// against GNU R, untyped and typed in strict mode.
 export const summaryColumns = ['Suite', 'What it is', 'ry vs GNU R', 'ry typed'];
 
 export function summaryRows(): string[][] {
@@ -259,32 +322,43 @@ export function summaryMarkdown(): string {
     '',
     summaryNote,
     '',
+    ...slowdownSummaries().flatMap((sentence) => [sentence, '']),
     ...measuredSuites().map((suite) => `- ${suite.name}: ${lowercaseFirst(suiteMetadata(suite))}`),
   ].join('\n');
 }
 
-// A bar chart of speed relative to GNU R: one row per program, one bar per engine, on a logarithmic
-// axis centred on 1x, so 10x faster and 10x slower are bars of the same length.
+// A bar chart of a suite's ratios to its baseline: one row per program, one bar per engine, on a
+// logarithmic axis centred on 1x, so 10x faster and 10x slower are bars of the same length.
+// `measure` names what a bar shows, and `axisNote` says which side of 1x is faster.
 export type ChartBar = { engine: string; ratio?: Interval; faded: boolean; title: string };
 export type ChartRow = { label: string; id?: string; href?: string; flags: string[]; bars: ChartBar[]; summary?: boolean };
-export type Chart = { caption: string; engines: string[]; rows: ChartRow[]; notes: string[]; metadata: string };
+export type Chart = { caption: string; measure: string; axisNote: string; engines: string[]; rows: ChartRow[]; notes: string[]; metadata: string };
 
 // One chart per group, or one for the whole suite when it has no groups.
 export function suiteCharts(suite: Suite): Chart[] {
   const engines = comparedEngines(suite);
   const programs = measuredPrograms(suite);
   const groups = suite.groups.length === 0 ? [undefined] : suite.groups;
+  const baseline = engineLabel(baselineOf(suite));
+  const slowdown = ratioKindOf(suite) === 'slowdown';
+  // The fastest program comes first either way, and a program without a ratio last.
+  const rank = (row: ChartRow) => {
+    const median = row.bars[0]?.ratio?.median;
+    return median === undefined ? Infinity : slowdown ? median : -median;
+  };
   const charts: Chart[] = groups.flatMap((group) => {
     const members = group === undefined ? programs : programs.filter((program) => program.group === group.id);
     if (members.length === 0) return [];
-    const rows: ChartRow[] = members
-      .map((program) => chartRow(program, engines))
-      .sort((a, b) => (b.bars[0]?.ratio?.median ?? 0) - (a.bars[0]?.ratio?.median ?? 0));
+    const rows: ChartRow[] = members.map((program) => chartRow(suite, program, engines)).sort((a, b) => rank(a) - rank(b));
     return [{
       caption: group === undefined ? suite.name : `${suite.name}: ${group.name}`,
+      measure: slowdown ? `time relative to ${baseline}'s` : `speed-up over ${baseline}`,
+      axisNote: slowdown
+        ? `Time relative to ${baseline}'s on a log scale: 1x is ${baseline}'s speed, a bar to the right of it is slower than ${baseline}, to the left faster.`
+        : `Speed relative to ${baseline} on a log scale: a bar to the right of 1x is faster than ${baseline}, to the left slower.`,
       engines,
       rows,
-      notes: flagNotes(members, suite.results?.meta.tooShortSeconds),
+      notes: flagNotes(suite, members),
       metadata: suiteMetadata(suite),
     }];
   });
@@ -293,23 +367,26 @@ export function suiteCharts(suite: Suite): Chart[] {
   return charts;
 }
 
-function chartRow(program: Program & { measurement: Measurement }, engines: string[]): ChartRow {
+function chartRow(suite: Suite, program: Program & { measurement: Measurement }, engines: string[]): ChartRow {
   const { measurement } = program;
-  const gnuR = measurement.seconds[baseline];
+  const baseline = baselineOf(suite);
+  const baselineTime = measurement.seconds[baseline];
+  const time = timeText(suite);
+  const source = program.source ?? program.typedSource;
   return {
     label: program.display,
     id: program.id === program.display ? undefined : program.id,
-    href: program.source === undefined ? undefined : sourceUrl(program.source),
+    href: source === undefined ? undefined : sourceUrl(source),
     flags: [...measurement.failures.map(failureText), ...measurement.flags.map(flagText)],
     bars: engines.map((engine) => {
       const ratio = measurement.ratio[engine];
-      const time = measurement.seconds[engine];
+      const engineTime = measurement.seconds[engine];
       const failure = measurement.failures.find((candidate) => candidate.engine === engine || candidate.engine === baseline);
       const title = ratio === undefined
         ? `${program.display}, ${engineLabel(engine)}: ${failure === undefined ? 'not measured' : failureText(failure)}`
-        : `${program.display}, ${engineLabel(engine)}: ${formatInterval(ratio)} the speed of GNU R` +
-          (time === undefined || gnuR === undefined ? '' : `, ${seconds(time)} against ${seconds(gnuR)}`);
-      return { engine, ratio, faded: isTooShort(measurement), title };
+        : `${program.display}, ${engineLabel(engine)}: ${formatInterval(ratio)} the ${ratioKindOf(suite) === 'slowdown' ? 'time' : 'speed'} of ${engineLabel(baseline)}` +
+          (engineTime === undefined || baselineTime === undefined ? '' : `, ${time(engineTime)} against ${time(baselineTime)}`);
+      return { engine, ratio, faded: isTooShort(measurement, baseline), title };
     }),
   };
 }
@@ -340,7 +417,7 @@ export function chartMarkdown(suite: Suite): string {
   return suiteCharts(suite)
     .map((chart) =>
       [
-        `${chart.caption}, speed-up over GNU R:`,
+        `${chart.caption}, ${chart.measure}:`,
         '',
         `| program | ${chart.engines.map(engineLabel).join(' | ')} |`,
         `| --- |${chart.engines.map(() => ' ---: |').join('')}`,
@@ -349,7 +426,7 @@ export function chartMarkdown(suite: Suite): string {
           return `| ${label} | ${row.bars.map((bar) => (bar.ratio === undefined ? 'n/a' : formatInterval(bar.ratio))).join(' | ')} |`;
         }),
         '',
-        [...chart.notes, chart.metadata].join(' '),
+        [chart.axisNote, ...chart.notes, chart.metadata].join(' '),
       ].join('\n'),
     )
     .join('\n\n');
@@ -363,26 +440,35 @@ export function tableViews(suite: Suite): TableView[] {
   const engines = suite.results?.engines ?? [];
   const compared = comparedEngines(suite);
   const programs = measuredPrograms(suite);
+  const baseline = baselineOf(suite);
+  const slowdown = ratioKindOf(suite) === 'slowdown';
+  const time = timeText(suite);
   const name = (program: Program) => `${program.display}${program.version === undefined ? '' : ` ${program.version}`}`;
   const views: TableView[] = [{
     label: 'Time',
-    columns: ['program', ...engines.map(engineLabel), ...compared.map((engine) => `${engineLabel(engine)}, speed-up`)],
+    columns: [
+      'program',
+      ...engines.map(engineLabel),
+      ...compared.map((engine) => (slowdown ? `${engineLabel(engine)} / ${engineLabel(baseline)}` : `${engineLabel(engine)}, speed-up`)),
+    ],
     rows: programs.map((program) => [
       name(program),
       ...engines.map((engine) => {
         const value = program.measurement.seconds[engine];
-        return value === undefined ? 'n/a' : seconds(value);
+        return value === undefined ? 'n/a' : time(value);
       }),
       ...compared.map((engine) => {
         const ratio = program.measurement.ratio[engine];
         const flags = [
           ...program.measurement.failures.filter((failure) => failure.engine === engine || failure.engine === baseline).map(failureText),
-          ...ratioFlags(program.measurement, engine).map(flagText),
+          ...ratioFlags(program.measurement, engine, baseline).map(flagText),
         ];
         return `${ratio === undefined ? 'n/a' : formatInterval(ratio)}${flags.length === 0 ? '' : ` (${flags.join(', ')})`}`;
       }),
     ]),
-    note: 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.',
+    note: slowdown
+      ? `Each time is the median over the rounds. Each ratio is the median of the per-round ratios of the engine's time over ${engineLabel(baseline)}'s, with its 95% interval in parentheses.`
+      : 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.',
   }];
   if (programs.some((program) => program.measurement.peakMib !== undefined)) {
     views.push({
@@ -396,6 +482,19 @@ export function tableViews(suite: Suite): TableView[] {
         }),
       ]),
       note: "Peak memory is the peak resident set size of the whole process, R's startup included.",
+    });
+  }
+  const compiled = programs.filter((program) => program.measurement.compileSeconds !== undefined);
+  if (compiled.length > 0) {
+    const milliseconds = (value: number | undefined) => (value === undefined ? 'n/a' : `${(value * 1000).toFixed(1)} ms`);
+    views.push({
+      label: 'Compile time',
+      columns: ['program', ...engines.map(engineLabel)],
+      rows: [
+        ...compiled.map((program) => [name(program), ...engines.map((engine) => milliseconds(program.measurement.compileSeconds?.[engine]))]),
+        ['total', ...engines.map((engine) => milliseconds(compiled.reduce((sum, program) => sum + (program.measurement.compileSeconds?.[engine] ?? 0), 0)))],
+      ],
+      note: `Compile time is outside every timed run. ${engineLabel(baseline)}'s is one rustc process per program. The typed core's is the sum over the functions it compiled, as RY_TYPED_LOG reports them.`,
     });
   }
   if (programs.some((program) => program.measurement.tests !== undefined)) {
@@ -438,19 +537,34 @@ export function programCode(path: string | undefined): string | undefined {
   const text = sourceText(path);
   if (text === undefined) return undefined;
   const lines = text.split('\n');
-  const start = lines.findIndex((line) => !line.startsWith('#'));
+  const start = lines.findIndex((line) => !line.startsWith('#') && !line.startsWith('//'));
   return lines.slice(Math.max(start, 0)).join('\n').trim();
 }
 
-// A program's headline number: ry's speed-up on the untyped program.
-export function programRatio(program: Program): string {
+// The versions of a program a reader can open, in the order the page shows them.
+export type ProgramVersion = { label: string; path: string; language: string; code?: string };
+
+export function programVersions(program: Program): ProgramVersion[] {
+  const versions: [string, string | undefined, string][] = [
+    ['Plain R', program.source, 'r'],
+    ['Typed', program.typedSource, 'r'],
+    ['Rust', program.rustSource, 'rust'],
+  ];
+  return versions.flatMap(([label, path, language]) => (path === undefined ? [] : [{ label, path, language, code: programCode(path) }]));
+}
+
+// A program's headline number: the ratio of the first engine its suite compares with the
+// baseline, which is ry's speed-up on the untyped program, or typed ry's time over Rust's.
+export function programRatio(suite: Suite, program: Program): string {
   const measurement = program.measurement;
   if (measurement === undefined) return 'not in the committed results';
+  const baseline = baselineOf(suite);
   const failure = measurement.failures[0];
   if (failure !== undefined) return failure.engine === baseline ? `fails on ${engineLabel(baseline)} too` : `fails on ${engineLabel(failure.engine)}`;
-  const ratio = measurement.ratio.ry;
+  const ratio = measurement.ratio[comparedEngines(suite)[0]];
   if (ratio === undefined) return '';
-  return `${formatRatio(ratio.median)}${isTooShort(measurement) ? ' (too short)' : ''}`;
+  const reading = ratioKindOf(suite) === 'slowdown' ? ` ${engineLabel(baseline)}'s time` : '';
+  return `${formatRatio(ratio.median)}${reading}${isTooShort(measurement, baseline) ? ' (too short)' : ''}`;
 }
 
 // Programs listed by group, each group with its upstream source and licence.
@@ -467,11 +581,12 @@ export function programsMarkdown(suite: Suite, headingLevel: number): string {
         ? []
         : [`${heading} ${group.name}`, '', [group.description, group.url && `Source: ${group.url}`, group.license && `Licence: ${group.license}.`].filter(Boolean).join(' '), ''];
       const entries = programs.map((program) => {
-        const lines = [`- **${program.display}** ([\`${program.id}\`](${sourceUrl(program.source ?? suite.directory)}), ${programRatio(program)}): ${program.summary ?? ''}`];
-        const untyped = programCode(program.source);
-        const typed = programCode(program.typedSource);
-        if (typed !== undefined && untyped !== undefined) {
-          lines.push('', '  Plain R:', '', '  ```r', ...untyped.split('\n').map((line) => `  ${line}`), '  ```', '', '  Typed:', '', '  ```r', ...typed.split('\n').map((line) => `  ${line}`), '  ```');
+        const versions = programVersions(program);
+        const lines = [`- **${program.display}** ([\`${program.id}\`](${sourceUrl(versions[0]?.path ?? suite.directory)}), ${programRatio(suite, program)}): ${program.summary ?? ''}`];
+        if (versions.length > 1 && versions.every((version) => version.code !== undefined)) {
+          for (const version of versions) {
+            lines.push('', `  ${version.label}:`, '', `  \`\`\`${version.language}`, ...(version.code ?? '').split('\n').map((line) => `  ${line}`), '  ```');
+          }
         }
         return lines.join('\n');
       });
@@ -484,14 +599,16 @@ export function programsMarkdown(suite: Suite, headingLevel: number): string {
 // because the line under each of the suite's charts and tables gives them.
 export function methodRows(): { columns: string[]; rows: string[][] } {
   return {
-    columns: ['Suite', 'Reproduce', 'GNU R', 'Engines', 'Samples'],
+    columns: ['Suite', 'Reproduce', 'Baseline', 'Engines', 'Samples'],
     rows: measuredSuites().map((suite) => {
       const meta = suite.results?.meta;
-      const blas = meta?.gnuR.blas?.split('/').pop();
+      const blas = meta?.gnuR?.blas?.split('/').pop();
       return [
         suite.name,
         `\`just bench ${suite.id} --release ARCHIVE --write\``,
-        `${meta?.gnuR.version ?? ''}${blas === undefined ? '' : `, BLAS \`${blas}\``}`,
+        meta?.rust !== undefined
+          ? `Rust ${meta.rust.version}, \`rustc ${meta.rust.flags}\``
+          : `GNU R ${meta?.gnuR?.version ?? ''}${blas === undefined ? '' : `, BLAS \`${blas}\``}`,
         (suite.results?.engines ?? []).map(engineLabel).join(', '),
         `${meta?.rounds} paired rounds${meta?.extraRounds ? `, ${meta.extraRounds} more for each wide interval` : ''}${meta?.seed === undefined ? '' : `, seed ${meta.seed}`}`,
       ];
@@ -518,17 +635,20 @@ type Manifest = {
   summary: string;
   harness?: string;
   groups?: Group[];
-  programs?: { id: string; display: string; summary?: string; source?: string; typed_source?: string; group?: string; version?: string }[];
+  programs?: { id: string; display: string; summary?: string; source?: string; typed_source?: string; rust_source?: string; group?: string; version?: string }[];
 };
 
 type RawResults = {
   schema: number;
   engines: Record<string, string>;
+  baseline?: string;
+  ratio_kind?: RatioKind;
   meta: {
     date: string;
     ry_commit?: string | null;
     release?: { tag: string; archive: string; sha256: string } | null;
-    gnu_r: { version: string; blas?: string | null };
+    gnu_r?: { version: string; blas?: string | null } | null;
+    rust?: { version: string; flags: string } | null;
     machine: { cpu: string; cores?: number | null; kernel?: string | null };
     rounds: number;
     extra_rounds?: number | null;
@@ -541,6 +661,7 @@ type RawResults = {
     seconds: Record<string, number>;
     ratio: Record<string, Interval>;
     peak_mib?: Record<string, number>;
+    compile_seconds?: Record<string, number>;
     tests?: Record<string, TestCounts>;
     flags?: Flag[];
     failures?: Failure[];
@@ -562,6 +683,7 @@ function loadSuites(): Suite[] {
       summary: program.summary,
       source: program.source,
       typedSource: program.typed_source,
+      rustSource: program.rust_source,
       group: program.group,
       version: program.version,
       measurement: measurement(byId.get(program.id)),
@@ -582,7 +704,13 @@ function loadSuites(): Suite[] {
       programs,
       results: results === undefined
         ? undefined
-        : { engines: Object.keys(results.engines), geomean: results.geomean, meta: meta(results.meta) },
+        : {
+            engines: Object.keys(results.engines),
+            baseline: results.baseline ?? gnuR,
+            ratioKind: results.ratio_kind ?? 'speedup',
+            geomean: results.geomean,
+            meta: meta(results.meta),
+          },
     } satisfies Suite;
   });
   for (const [index, entry] of loaded.entries()) {
@@ -595,7 +723,7 @@ function loadSuites(): Suite[] {
 
 function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
   if (program === undefined) return undefined;
-  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
 }
 
 function meta(raw: RawResults['meta']): Meta {
@@ -604,7 +732,8 @@ function meta(raw: RawResults['meta']): Meta {
     date: raw.date,
     ryCommit: raw.ry_commit ?? undefined,
     release: raw.release ?? undefined,
-    gnuR: { version: raw.gnu_r.version, blas: raw.gnu_r.blas ?? undefined },
+    gnuR: raw.gnu_r == null ? undefined : { version: raw.gnu_r.version, blas: raw.gnu_r.blas ?? undefined },
+    rust: raw.rust ?? undefined,
     machine: { cpu: raw.machine.cpu, cores: raw.machine.cores ?? undefined, kernel: raw.machine.kernel ?? undefined },
     rounds: raw.rounds,
     seed: raw.seed ?? undefined,

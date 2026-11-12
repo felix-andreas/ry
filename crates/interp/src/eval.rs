@@ -93,7 +93,13 @@ pub unsafe fn eval_symbol_reporting(
     if let Some(index) = dot_dot_index(symbol) {
         return dot_dot_value(index, env);
     }
-    let value = find_var(symbol, env)?;
+    // The empty symbol is `R_MissingArg`, whose value in GNU R is itself, so evaluating it is
+    // a missing argument without a name rather than an unbound object.
+    let value = if symbol == missing_arg() {
+        symbol
+    } else {
+        find_var(symbol, env)?
+    };
     if value == unbound() {
         return Err(error_in(
             lexical(),
@@ -101,10 +107,12 @@ pub unsafe fn eval_symbol_reporting(
         ));
     }
     if value == missing_arg() {
-        return Err(error(format!(
-            "argument \"{}\" is missing, with no default",
-            symbol_name(symbol)
-        )));
+        let name = symbol_name(symbol);
+        return Err(error(if name.is_empty() {
+            "argument is missing, with no default".to_string()
+        } else {
+            format!("argument \"{name}\" is missing, with no default")
+        }));
     }
     if value.kind() == SexpType::Promise {
         let forced = force_promise(value)?;
@@ -178,6 +186,7 @@ pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
 /// The value of a binding cell, calling an active binding's function.
 pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
     if cell.has_gp(gp::ACTIVE_BINDING) {
+        interp().active_binding_reads += 1;
         let function = cell.cdr();
         let value = apply(nil(), function, &[], values::global_env())?;
         return Ok(value);
@@ -4689,6 +4698,14 @@ unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
         return Ok(value);
     }
     loop {
+        // All of the loop's state is in `env`, so the compiled loop starts over at the condition
+        // exactly where the tree walker stands between two iterations.
+        if iterations == bytecode::LOOP_COMPILE_ITERATIONS
+            && let Some(value) = bytecode::run_loop(call.call, None, env)?
+        {
+            return Ok(value);
+        }
+        iterations += 1;
         let condition = scope(|| eval(call.arg(0), env))?;
         if !as_condition(condition, call.call)? {
             break;
@@ -5014,7 +5031,9 @@ pub(crate) unsafe fn switch_alternative(
     alternatives: &[Arg],
 ) -> R<Option<Sexp>> {
     let selector = switch_selector(selector, call)?;
-    if alternatives.is_empty() {
+    // The warning is about the call as written: `switch(x, ...)` names its alternatives even
+    // when the caller's `...` turns out to be empty.
+    if values::pairlist_length(call.cdr()) < 2 {
         crate::conditions::warning_call(call, "'switch' with no alternatives")?;
     }
     let missing = missing_arg();
