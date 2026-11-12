@@ -201,6 +201,8 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
         if MODE.with(Cell::get) == Mode::Force || analysis::shape(machine.code).may_run_natively() {
             return true;
         }
+        #[cfg(feature = "census")]
+        interp::census::refused(machine.code, analysis::NEVER_NATIVE);
         if logging() {
             eprintln!(
                 "jit: not recording {}: {}",
@@ -275,6 +277,8 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                 Some(compiled)
             }
             Err(Refusal(reason)) => {
+                #[cfg(feature = "census")]
+                interp::census::refused(machine.code, reason);
                 if logging() {
                     eprintln!(
                         "jit: not compiling {} at its first call: {reason}",
@@ -413,6 +417,8 @@ unsafe fn compiled_for<'a>(
                 Some(compiled)
             }
             Err(Refusal(reason)) => {
+                #[cfg(feature = "census")]
+                interp::census::refused(machine.code, reason);
                 if logging() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
@@ -775,7 +781,11 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         let activation_address: *mut Activation = &mut activation;
         let pending = std::ptr::addr_of!((*activation_address).pending);
         interp().held_unwinds.push(pending);
+        #[cfg(feature = "census")]
+        let census = interp::census::enter_native(machine.code);
         let result: *mut Header = (compiled.entry)(activation_address);
+        #[cfg(feature = "census")]
+        drop(census);
         let held = interp().held_unwinds.pop();
         debug_assert_eq!(held, Some(pending), "compiled code entries nest");
         drop(running);

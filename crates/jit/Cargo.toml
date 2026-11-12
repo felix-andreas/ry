@@ -9,6 +9,10 @@ publish = false
 [lib]
 path = "src/jit.rs"
 
+[features]
+# The native-share census (`RY_CENSUS`), for measurement builds only.
+census = ["interp/census"]
+
 [dependencies]
 bumpalo = "3.20"
 hashbrown = { workspace = true, features = ["nightly"] }

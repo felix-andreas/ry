@@ -36,6 +36,8 @@ pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
+#[cfg(feature = "census")]
+pub mod census;
 pub mod code_image;
 pub mod coerce;
 pub mod combine;

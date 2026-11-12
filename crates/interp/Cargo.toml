@@ -9,6 +9,10 @@ publish = false
 [lib]
 path = "src/interp.rs"
 
+[features]
+# The native-share census (`RY_CENSUS`), for measurement builds only.
+census = []
+
 [dependencies]
 heap = { path = "../heap" }
 rcmd = { path = "../rcmd" }

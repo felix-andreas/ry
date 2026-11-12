@@ -354,6 +354,9 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
     }
+    // A body that compiles at this call counts as an AST body only until its code starts.
+    #[cfg(feature = "census")]
+    let _census = crate::census::enter_tree(function, body);
     if !worth_compiling(body) {
         return eval::eval(body, env);
     }
@@ -5448,6 +5451,8 @@ pub unsafe fn run_slots(function: Sexp, header: usize) -> R<Sexp> {
 /// Runs `code` in the activation whose header register is `header` and whose own registers
 /// start at `base`, after the header and any slots.
 unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Sexp> {
+    #[cfg(feature = "census")]
+    let _census = crate::census::enter_code(function, code);
     let heap = crate::heap();
     heap.root(code);
     let mark = heap.handle_mark();
