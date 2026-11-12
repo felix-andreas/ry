@@ -568,7 +568,7 @@ top-packages-setup:
 # Build the top packages from source on ry and run their tests under both runtimes: `just top-packages [--jobs N] [PKG...]`.
 top-packages *args:
     cargo build -q --release -p ry-lang -p libr -p rcmd -p oracle
-    ./target/release/ry-rcmd assemble .corpus-top/ry-home --include crates/libr/include --libr target/release/libR.so
+    ./target/release/ry-rcmd assemble .corpus-top/ry-home --include crates/libr/include --libr target/release/libR.so --base "${R_HOME:-target/base-r}"
     ./target/release/oracle install --corpus .corpus-top --timeout 3600 $(cat .corpus-top/install.txt)
     ORACLE_RY=$PWD/target/release/ry ./target/release/oracle packages --corpus .corpus-top --installed {{ args }}
 
