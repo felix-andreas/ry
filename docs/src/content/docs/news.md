@@ -5,6 +5,14 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Parallel tests
+
+`ry test --jobs N` runs the test files in `N` worker processes, and a package that sets `Config/testthat/parallel: true` uses every core without the flag. The workers load the package through ry's lazy loader under the project's `ry.toml`, so they need neither pkgload nor every import installed. On the finance benchmark code base (501 test files, 43,011 expectations, 4 cores) the suite takes 84 s with four workers against 252 s in one process. See [the CLI reference](/reference/cli#parallel-tests).
+
+### httpuv and plumber serve requests
+
+`R_getVarEx()` returns its default when that default is a C `NULL`, which is how Rcpp asks whether a name is bound in an environment. httpuv builds each request that way, so an in-process server answered every request with "object 'REQUEST_METHOD' not found".
+
 ### Faster formatC
 
 A scalar `formatC()` call takes about 40% fewer instructions: its native path calls the formatting code directly instead of building R arguments for it, and reads `options(OutDec)` without calling `getOption()` when `decimal.mark` is left out. The report benchmark, which formats 20,000 account numbers with `formatC()`, takes 12% fewer instructions.

@@ -299,6 +299,17 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
+- **`ry test` workers under `--runtime gnu-r` still load with pkgload**, eagerly and without
+  `ry.toml`'s switches, because a GNU R worker has no `.Internal(ryLoaderAttach())`. Attaching the
+  GNU R loader in the worker hook (source `gnur.R` from the binary) would close it.
+- **`ry test` in one process sources the testthat helpers twice**: once by the load, into
+  `package:<name>`, and once by `test_dir()`, into the test environment. `devtools::test()`
+  sources them once, because it loads with `helpers = FALSE`. `load_all()` takes `helpers` for
+  the workers already; the main process's load (`crates/ry/src/load.rs`) and the watch reload
+  need it too, without losing the reload's "a helper changed" signal.
+- **`ry test --watch --jobs N` restarts its workers on every rerun.** testthat's parallel runner
+  starts workers per `test_dir()` call, so each rerun pays worker startup and a lazy load per
+  worker. Keeping the workers alive across reruns needs a queue of our own.
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
 - **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op
@@ -2797,6 +2808,22 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
+- **Audit `libr` entry points for arguments C code passes as `NULL`.** `R_getVarEx`'s default
+  was the one found (`decisions.md`, "A C API argument that may be a C `NULL` is typed
+  `Option<Sexp>`"); a `Sexp` parameter that receives `NULL` is undefined behaviour, not an error.
+  Grep the corpus's `src/` for calls with a literal `NULL` in a `SEXP` position and type each as
+  `Option<Sexp>`.
+- **Install-time native code: the gaps.** The image's native section is written
+  (`crates/jit/src/ahead.rs`), but it compiles only scalar numeric closures for guessed argument
+  types (annotations, constant defaults, then double, integer and logical shapes), not the
+  checker's inferred types, which the install cannot query yet. Records are refused because each
+  process numbers record layouts anew. Coverage on real packages is small (rlang 16 of 1,294
+  functions, cli 28 of 897, testthat 13 of 1,101): the refusals are about the value domain
+  (`...`, strings, lists, base functions native code lacks, calls of closures that are not
+  native), not about missing facts, so checker types and argument facts lift only a few dozen
+  functions per package. Baseline code for every body from its first entry measured 8.06G
+  against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
+  until baseline code inlines fast paths.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by

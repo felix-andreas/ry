@@ -305,12 +305,40 @@ output is testthat's own reporter's, and the command exits with `1` when a test 
   The pattern matches the name without a leading `test-` or `test_` and without the extension, so
   `--filter '^parse$'` selects `test-parse.R` and `test_parse.R`.
 - `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
+- `--jobs N` (or `-j N`) runs the test files in `N` worker processes, one file at a time in each,
+  and `--jobs 1` runs them in the `ry test` process. See [Parallel tests](#parallel-tests).
 - `--watch` keeps running: after every edit under `R/`, `src/`, `data/`, `inst/`, `tests/`,
   `DESCRIPTION` or `NAMESPACE` it reloads only what changed (rebuilding compiled code after a
   `src/` edit), runs first the test files the edit can affect, and then the rest. It learns of
   edits from the operating system's file notifications, so it costs nothing while you type. A file is affected
   when you edited it, or when it mentions a function whose definition reaches a changed one. An
   edit to a helper or setup file, or a reload that has to run top-level code, reruns everything.
+
+### Parallel tests
+
+Workers are testthat's own parallel runner, so a package set up for it needs no change:
+`Config/testthat/start-first` in `DESCRIPTION` orders the files, `testthat::is_parallel()` is
+`TRUE` in a worker, and each worker runs `tests/testthat/setup*.R` and the helpers once. Each
+worker is a separate R process, so test files must not depend on state another file leaves behind.
+
+| You write | Files run in |
+| --- | --- |
+| `ry test --jobs 4` | 4 workers |
+| `ry test --jobs 1` | the `ry test` process |
+| `ry test`, and `DESCRIPTION` has `Config/testthat/parallel: true` and `Config/testthat/edition: 3` | one worker per core |
+| `ry test` otherwise | the `ry test` process |
+
+A run never starts more workers than it has test files, and one test file runs without workers.
+Without `--jobs`, testthat's own switches apply as they do under `devtools::test()`: the
+`TESTTHAT_PARALLEL` environment variable overrides `DESCRIPTION`, and `TESTTHAT_CPUS` or
+`options(Ncpus =)` sets the worker count in place of the core count.
+
+A worker loads the package the way `ry test` itself does, lazily and under the project's
+`ry.toml`, so it needs neither pkgload nor every package in `Imports` installed. With
+`--runtime gnu-r`, workers load the package with `pkgload::load_all()`, as under testthat alone.
+
+`--profile-summary` measures one process, so it runs the files without workers, and combining it
+with more than one job is an error.
 
 ## document
 
