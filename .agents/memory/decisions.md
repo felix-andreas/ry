@@ -6097,7 +6097,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   | group-by q2 | 0.18 | 0.91 |
   | group-by q3 | 1.25 | 1.47 |
   | group-by q4 | 0.82 | 0.22 |
-  | group-by q5 | 1.32 | 1.30 |
+  | group-by q5 | 1.32 | 1.26 |
   | group-by q6 | 0.86 | 2.59 |
   | group-by q7 | 0.62 | 1.80 |
   | group-by q8 | 2.08 | 7.82 |
@@ -6121,7 +6121,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **What streaming does better**, kept as work for the kernels (`backlog.md`, "Open: DataFrame"):
   group-by q4 (three double means over 100 groups), where ry adds doubles in row order as
   data.table does and Polars sums per morsel, and group-by q1 and join q1 and q3 by 10 to 35%.
-  Group-by q5 is a tie.
+  Group-by q5 is level (1.26 s against 1.32 s).
 - **Impact.** No engine switch and no second execution path; the `streaming` feature of Polars is
   a dev-dependency of `crates/table` for the bench driver alone.
 
