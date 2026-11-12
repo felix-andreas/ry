@@ -2984,6 +2984,19 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- :Many([]); FUNCTION(x) }",
             ],
         ),
+        // A tag from R of a shape the annotation rejects, such as `:One(2.5)` for `:One(I64)`,
+        // gives up for that shape alone: the function keeps its code for the calls after it. A
+        // whole double converts to the declared `I64` as the interpreter's return check does.
+        (
+            "function(t: :One(I64) | :Two) -> I64 match (t) { :One(x) => x\n :Two => 0i64 }",
+            &[
+                "{ x <- :One(3i64); FUNCTION(x) }",
+                "{ x <- :One(2.5); FUNCTION(x) }",
+                "{ x <- :One(2); FUNCTION(x) }",
+                "{ x <- :One(\"s\"); FUNCTION(x) }",
+                "{ x <- :Two; FUNCTION(x) }",
+            ],
+        ),
         // Lists of lists, of strings and of tags convert too, and a list whose items differ
         // in type is released before the call falls back.
         (
