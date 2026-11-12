@@ -50,7 +50,7 @@ pub unsafe fn host_environment() -> Option<Sexp> {
 /// The start-up image's format stamp. Its last byte goes up whenever what an image holds or
 /// how it lays it out changes, so that an image from an older format reads as stale and is
 /// written again rather than misread.
-pub const MAGIC: &[u8; 8] = b"RYSTART\x07";
+pub const MAGIC: &[u8; 8] = b"RYSTART\x08";
 
 /// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
 /// format that the same build wrote. A missing or unreadable file is not.
@@ -194,13 +194,13 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     };
     let fill = |offset: u64, length: u64| {
         let file = &file;
-        move |memory: &mut [u8]| -> Result<(), ImageError> {
-            if memory.len() as u64 != length {
+        move |memory: &mut [u8], at: usize| -> Result<(), ImageError> {
+            if at as u64 + memory.len() as u64 > length {
                 return Err(ImageError::Invalid(
                     "its pages differ in size from their memory".to_owned(),
                 ));
             }
-            fill_from(file, memory, offset)
+            fill_from(file, memory, offset + at as u64)
         }
     };
     let roots = heap()
