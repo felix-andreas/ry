@@ -8764,7 +8764,19 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Rejected: a nursery sized by survival.** Doubling the nursery (up to 64 MB) while a minor collection promotes more than a fifth of its bytes saved only another 0.6% of `records`' instructions on top of the prediction, and raised its peak RSS from 111 to 141 MB; the rule is no peak RSS regression per worker, and four parallel workers would pay it four times. Bounding the growth by the live set buys nothing, because the small-object trigger is already `max(young_limit, old_small_bytes / 2)`.
 - **Dense precious set.** `Roots.precious` was an `FxHashMap<Sexp, u32>`, probed on every frame release to ask whether the environment was preserved. It is `Precious { objects, counts }`, two parallel vectors, plus `flag_bits::PRECIOUS` in the header, so the hot question is a flag test. The index is not stored in the header because every gc bit is taken and flag bit 7 was the only spare one; `R_ReleaseObject` scans from the newest entry, as GNU R's precious list does, and the packages that preserve many objects (Rcpp, cpp11) keep their own linked lists and preserve only the list head.
 - **Measured** (callgrind, `RY_BENCH_REPEAT=2`, against main): `records` 7,028M to 6,366M instructions (-9.4%), `maybe_collect` 964M to 632M, `escalate_if_full` 720M to 391M; per process at `RY_BENCH_REPEAT=4`, intermediate collections 5 to 2 (26 minor and 5 major on both). Peak RSS on `records` 111 to 97 MB (not profiled; it comes with the skipped intermediate collections); the testthat workload 73.7 MB on both (copies made the same way). The testthat workload 2,813.4M to 2,802.7M instructions with the JIT on and 2,812.2M to 2,802.1M off (the precious-set probe; its 9 minor collections are unchanged).
-- **What is left toward a tenth of the collection time.** The minor collections on `records` (26 per process at `RY_BENCH_REPEAT=4`) trace old objects again from the remembered set; a slot-precise remembered set is the next step, then the per-object tracing cost (about 150 to 200 instructions per traced object in `trace`).
+- **Minor-collection cost by source: nothing in marking is worth building.** A measurement-only probe split each minor collection by where marking starts, with phase times that sum to the collector total (per-build R home, single process, `RY_BENCH_REPEAT=2`, collection counts unchanged by the probe).
+
+  | phase | testthat_full (9 minor, 15.9 ms, 2.2% of the run) | package load of 11 packages (2 minor, 5.3 ms) |
+  |---|---|---|
+  | root marking (`InterpRoots::trace`, root stacks, sources) | 1.41 ms, 8.9% | 0.21 ms, 3.9% |
+  | tracing from roots | 1.74 ms, 10.9%, 47.9k objects | 2.13 ms, 39.9%, 68.2k objects |
+  | remembered carded vectors | 0.07 ms, 0.4% | 0.12 ms, 2.3% |
+  | remembered environments | 0.27 ms, 1.7% | 0.34 ms, 6.4% |
+  | other remembered objects, traced whole | 1.96 ms, 12.3%, 7.7k old parents | 1.25 ms, 23.4%, 11.2k old parents |
+  | escaped set | 0 (no escaped object reaches a minor collection) | 0 |
+  | after marking (weak references, returned frames, sweep) | 10.44 ms, 65.7% | 1.28 ms, 24.0% |
+
+  The bar for a structural change is 2% of testthat_full. The whole remembered set is about 0.3% of it and the escaped set is empty, so neither a slot-precise remembered set nor a more precise escaped set is built; the old objects a package load traces in its minor collections come from the remembered set (closures, strings, pairlists, calls, lists) and from roots, not from escaped objects. Roots are about 0.45% and `InterpRoots::trace` alone about 0.2%. The largest piece is the work after marking, about 1.45% of testthat_full, which caps any one of its sub-steps below the bar, so it was not split further (`backlog.md`, "Open: collector throughput").
 
 ## Parse data as dense columns
 

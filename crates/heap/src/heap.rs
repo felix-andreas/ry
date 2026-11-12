@@ -226,9 +226,10 @@ pub struct Heap {
     allocation_reporter: Option<fn(usize) -> bool>,
     report_threshold: usize,
     /// The file `RY_GC_LOG` names, which receives one line per collection: its kind, its
-    /// elapsed time in nanoseconds and the bytes of small objects and large vectors it found
-    /// young and the old generation's bytes after it. Measuring pause distributions over a whole test suite needs every pause, which
-    /// `gc.time()`'s totals cannot give.
+    /// elapsed time in nanoseconds, the bytes of small objects and large vectors it found young,
+    /// the old generation's bytes after it and the process id, since a test suite's worker
+    /// processes append to the same file. Measuring pause distributions over a whole test suite
+    /// needs every pause, which `gc.time()`'s totals cannot give.
     pause_log: Option<std::fs::File>,
     /// How many namespace loads are running ([`Heap::enter_namespace_load`]).
     namespace_loads: u32,
@@ -3802,9 +3803,9 @@ impl Heap {
                 Collection::Major => "major",
             };
             let line = format!(
-                "{kind} {} {young} {young_large} {}\n",
+                "{kind} {} {young} {young_large} {old_bytes} {}\n",
                 started.elapsed().as_nanos(),
-                old_bytes
+                std::process::id()
             );
             if let Err(error) = log.write_all(line.as_bytes()) {
                 panic!("cannot write the collection log RY_GC_LOG names: {error}");
