@@ -53,3 +53,7 @@ ed <- function(x) switch(x, a = "A", )
 print(w(ed("z")))
 end <- function(x) switch(x, a = 1, "d", b = )
 for (i in 1:3) print(w(withVisible(end("b"))))
+# A selector in latin1 picks the arm its text names, whatever the encodings.
+season <- function(x) switch(x, "\u00e9t\u00e9" = "summer", "other")
+latin <- iconv("\u00e9t\u00e9", "UTF-8", "latin1")
+for (i in 1:3) print(c(Encoding(latin), season(latin), season("\u00e9t\u00e9")))
