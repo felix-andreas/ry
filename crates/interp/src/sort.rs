@@ -2504,7 +2504,7 @@ fn hashed_matches<K: TableKey>(
     x_key: impl Fn(usize) -> K,
     out: &mut [i32],
 ) -> bool {
-    let mut table = PositionTable::new();
+    let mut table = PositionTable::new(table_count);
     for index in 0..table_count {
         let key = table_key(index);
         if table.find_or_insert(key, index, &table_key).is_none() && !key.exact() {
@@ -2531,7 +2531,7 @@ fn hashed_duplicates<K: TableKey>(
     first_only: bool,
     key_at: impl Fn(usize) -> K,
 ) -> Option<Bits> {
-    let mut table = PositionTable::new();
+    let mut table = PositionTable::new(count);
     let mut duplicated = Bits::new(count);
     let mut flag = |index: usize, base: usize| -> Option<u64> {
         let key = key_at(index);
@@ -2698,9 +2698,10 @@ impl TableKey for Sexp {
 /// An open-addressing hash table from keys to the first position that holds them. Slots store
 /// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes.
 /// Probing is linear over a power-of-two array kept at most half full, and the slot comes from
-/// the hash's high bits. The table starts with 32 slots on the stack and doubles as distinct
-/// keys arrive, so its size follows the distinct keys, not the elements: a million strings with
-/// four distinct values probe 32 slots that stay in L1.
+/// the hash's high bits. The table starts with two slots per element, so a vector of up to
+/// [`PositionTable::PRESIZED`] / 2 elements never rehashes, and doubles past that cap only as
+/// distinct keys arrive: a million strings with four distinct values zero 256 KB once and probe
+/// four cache lines of it, where sizing by elements would take 8 MB.
 struct PositionTable {
     slots: SmallVec<[u32; 32]>,
     shift: u32,
@@ -2708,10 +2709,15 @@ struct PositionTable {
 }
 
 impl PositionTable {
-    fn new() -> Self {
+    /// The most slots a table starts with. Growing by doubling rehashes every stored key and
+    /// zeroes each new array, which costs more than zeroing this many slots up front.
+    const PRESIZED: usize = 1 << 16;
+
+    fn new(count: usize) -> Self {
+        let size = (2 * count).clamp(32, Self::PRESIZED).next_power_of_two();
         Self {
-            slots: smallvec![0; 32],
-            shift: 64 - 5,
+            slots: smallvec![0; size],
+            shift: 64 - size.trailing_zeros(),
             filled: 0,
         }
     }
