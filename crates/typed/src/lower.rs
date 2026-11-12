@@ -73,13 +73,28 @@ pub struct RCall {
     /// The typed closure's environment, which the conversions run in.
     pub env: Sexp,
     pub arguments: SmallVec<[RArgument; 4]>,
-    /// The `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r` call the result goes
-    /// through and the type it gives, or `None` when the call is a statement whose value is
-    /// unused.
-    pub result: Option<(Conversion, Type)>,
+    pub result: RResult,
     /// Whether the call is `stop()`, which raises an error and never returns, so it cannot
     /// change a variable a lazy argument reads before R would force it.
     pub diverges: bool,
+    /// Whether the call changes nothing a second run of it would see: a table function
+    /// ([`interp::dataframe::gives_table_value`]) or a read of a table's column. Code that gives
+    /// up after one may run again in the interpreter, no lazy argument can observe it, and it
+    /// may stand inside another call's arguments.
+    pub effect_free: bool,
+}
+
+/// What compiled code does with the value of an [`RCall`].
+#[derive(Clone, Copy)]
+pub enum RResult {
+    /// The call is a statement, whose value is unused.
+    Unused,
+    /// The value goes through this `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`
+    /// call, which gives this type.
+    Converted(Conversion, Type),
+    /// The call is one of the table API's that gives a table value
+    /// ([`interp::dataframe::gives_table_value`]), which the code holds as it is.
+    Table,
 }
 
 /// An argument of an [`RCall`]: a native value of `ty`, passed through `conversion` when the
@@ -330,12 +345,14 @@ struct Lowering<'c> {
 }
 
 /// Where typed code may call an R function: where the value is unused, where a conversion
-/// gives it a ry type, or as `stop()`, which never returns.
+/// gives it a ry type, as `stop()`, which never returns, or anywhere when the function is one of
+/// the table API's that gives a table value.
 #[derive(Clone, Copy)]
 enum RUse {
     Unused,
     Converted(Conversion),
     Diverges,
+    Table,
 }
 
 /// An argument of a call, by name or position.
@@ -1000,6 +1017,10 @@ impl Lowering<'_> {
             self.r_use = r_use;
             return self.builtin(&name, call, function).map(Some);
         }
+        if is_table_function(&speculation) {
+            self.speculations.push(speculation);
+            return self.r_call(call, function, RUse::Table).map(Some);
+        }
         if function.kind() == SexpType::Closure && interp::annotations::is_typed(function) {
             self.speculations.push(speculation);
             let arguments = Arguments::of(call);
@@ -1016,14 +1037,11 @@ impl Lowering<'_> {
         Err(r_value_refusal(head))
     }
 
-    /// A call of the R function `function`, whose value is unused or converted as `r_use` says.
+    /// A call of the R function `function`, whose value is used as `r_use` says.
     unsafe fn r_call(&mut self, call: Sexp, function: Sexp, r_use: RUse) -> Result<Local, Refusal> {
         let name = || interp::deparse::deparse_first_line(call.car());
-        let result = match r_use {
-            RUse::Unused | RUse::Diverges => None,
-            RUse::Converted(conversion) => Some((conversion, conversion_type(conversion)?)),
-        };
-        let diverges = matches!(r_use, RUse::Diverges);
+        let result = r_result(r_use)?;
+        let table = matches!(r_use, RUse::Table);
         let calls = self.r_calls.len();
         let mut arguments: SmallVec<[RArgument; 4]> = SmallVec::new();
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
@@ -1069,34 +1087,126 @@ impl Lowering<'_> {
             values.push(value);
         }
         // R evaluates arguments lazily, in the order the function asks for them, and compiled
-        // code computes them first, which only agrees while computing them calls no R function.
-        if self.r_calls.len() != calls {
+        // code computes them first, which only agrees while computing them calls no R function
+        // that could tell.
+        if self.r_calls[calls..].iter().any(|site| !site.effect_free) {
             return Err(Refusal(Cow::Owned(format!(
                 "it calls R inside the arguments of R's `{}`, whose order R's lazy arguments \
                  decide: compute the inner call into a variable first",
                 name()
             ))));
         }
+        Ok(self.r_site(call, function, (r_use, result), table, arguments, values))
+    }
+
+    /// Emits the call of the R function `function` with the arguments `arguments`, whose values
+    /// are `values`.
+    fn r_site(
+        &mut self,
+        call: Sexp,
+        function: Sexp,
+        (r_use, result): (RUse, RResult),
+        effect_free: bool,
+        arguments: SmallVec<[RArgument; 4]>,
+        values: SmallVec<[Local; 4]>,
+    ) -> Local {
         self.r_calls.push(RCall {
             function,
             call,
             env: self.env,
             arguments,
             result,
-            diverges,
+            diverges: matches!(r_use, RUse::Diverges),
+            effect_free,
         });
         let site = self.r_calls.len() - 1;
-        Ok(match result {
-            None => {
+        match result {
+            RResult::Unused => {
                 self.builder.push(None, Op::CallR(site, values));
                 self.builder.emit(Type::Null, Op::Const(Constant::Null))
             }
-            Some((_, ty)) => {
+            RResult::Converted(_, ty) => {
                 let dest = self.builder.emit(ty, Op::CallR(site, values));
                 self.converted = Some(dest);
                 dest
             }
-        })
+            RResult::Table => self.builder.emit(Type::Table, Op::CallR(site, values)),
+        }
+    }
+
+    /// A read of the column `name` of the table `table`, as R's `[[` reads it. The column is an R
+    /// vector, so the read stands where a call of R may.
+    unsafe fn column(
+        &mut self,
+        call: Sexp,
+        r_use: Option<RUse>,
+        table: (Sexp, Local),
+        name: (Sexp, Local),
+    ) -> Result<Local, Refusal> {
+        let Some(r_use) = r_use else {
+            return Err(Refusal::new(
+                "it uses a column of a table directly, and a column is an R vector: read it \
+                 inside `List.from_r`, which gives it a ry type",
+            ));
+        };
+        if self.builder.ty(name.1) != Type::Str {
+            return Err(Refusal::new(
+                "a column of a table read by something other than its name",
+            ));
+        }
+        let read = rvalues::install("[[")
+            .ok()
+            .and_then(|symbol| resolve_function(symbol, self.env))
+            .filter(|speculation| is_base_function(speculation))
+            .ok_or(Refusal::new("`[[` is not R's own"))?;
+        self.speculations.push(read);
+        let result = r_result(r_use)?;
+        let arguments = [table, name]
+            .iter()
+            .map(|&(code, value)| RArgument {
+                tag: rvalues::nil(),
+                code,
+                ty: self.builder.ty(value),
+                conversion: None,
+            })
+            .collect();
+        let values = SmallVec::from_slice(&[table.1, name.1]);
+        Ok(self.r_site(
+            call,
+            read.function,
+            (r_use, result),
+            true,
+            arguments,
+            values,
+        ))
+    }
+
+    /// Whether the code `code` gives a table value, as far as its form tells: a variable that
+    /// holds one, a call of a table function, or an operator on one. Arithmetic lowers a whole
+    /// tree of operators at once, so it has to know before it lowers an operand.
+    unsafe fn is_table(&self, code: Sexp) -> bool {
+        match code.kind() {
+            SexpType::Symbol => matches!(
+                self.lookup(code),
+                Some(Binding::Value(local)) if self.builder.ty(local) == Type::Table
+            ),
+            SexpType::Language if code.car().kind() == SexpType::Symbol => {
+                let head = code.car();
+                let name = rvalues::symbol_name(head);
+                if self.lookup(head).is_some() {
+                    return false;
+                }
+                if name == "(" || is_operator(&name) {
+                    return rvalues::pairlist_items(code.cdr())
+                        .iter()
+                        .any(|&(_, operand)| self.is_table(operand));
+                }
+                resolve_function(head, self.env).is_some_and(|speculation| {
+                    is_table_function(&speculation) || returns_table(speculation.function)
+                })
+            }
+            _ => false,
+        }
     }
 
     /// `Num.to_r(value)` or `List.to_r(value)`, as the value and the conversion.
@@ -1915,6 +2025,11 @@ impl Lowering<'_> {
         // Only this call may be an R call; the calls in its arguments are used as values.
         let r_use = self.r_use.take();
         let arguments = Arguments::of(call);
+        // An operator with a table expression among its operands builds an expression, which
+        // R's own operator does through the expression's method.
+        if is_operator(name) && arguments.items.iter().any(|&(_, code)| self.is_table(code)) {
+            return self.r_call(call, function, RUse::Table);
+        }
         match name {
             "+" | "-" | "*" | "/" | "^" | "%%" | "%/%" => {
                 let operands: SmallVec<[Sexp; 4]> = arguments.positional().collect();
@@ -2609,26 +2724,38 @@ impl Lowering<'_> {
                     .emit(Type::Str, Op::FormatPadded(value, width, zero)))
             }
             "sprintf" => {
-                let [format, value] = arguments.exactly(2)?[..] else {
-                    return Err(Refusal::new("a `sprintf` of an unsupported form"));
+                let fixed_decimals = |format: &str| {
+                    format
+                        .strip_prefix("%.")
+                        .and_then(|rest| rest.strip_suffix('f'))
+                        .and_then(|digits| digits.parse::<i32>().ok())
+                        .filter(|&digits| (0..=15).contains(&digits))
                 };
-                let format =
-                    constant_string(format).ok_or(Refusal::new("a computed `sprintf` format"))?;
+                let known = match arguments.exactly(2).as_deref() {
+                    Ok(&[format, value]) => constant_string(format)
+                        .filter(|format| {
+                            matches!(format.as_str(), "%d" | "%s")
+                                || fixed_decimals(format).is_some()
+                        })
+                        .map(|format| (format, value)),
+                    _ => None,
+                };
+                // R formats every other form, where the call is one R may make.
+                let Some((format, value)) = known else {
+                    return match r_use {
+                        Some(r_use) => self.r_call(call, function, r_use),
+                        None => Err(Refusal::new(
+                            "a `sprintf` format the typed core does not know",
+                        )),
+                    };
+                };
                 let value = self.value(value)?;
                 let ty = self.builder.ty(value);
-                match (format.as_str(), ty) {
-                    ("%d", Type::Int) | ("%s", Type::Int | Type::Dbl | Type::Str) => {
+                match (format.as_str(), fixed_decimals(&format), ty) {
+                    ("%d", _, Type::Int) | ("%s", _, Type::Int | Type::Dbl | Type::Str) => {
                         self.as_string(value)
                     }
-                    (format, Type::Dbl | Type::Int) => {
-                        let decimals = format
-                            .strip_prefix("%.")
-                            .and_then(|rest| rest.strip_suffix('f'))
-                            .and_then(|digits| digits.parse::<i32>().ok())
-                            .filter(|&digits| (0..=15).contains(&digits))
-                            .ok_or(Refusal::new(
-                                "a `sprintf` format the typed core does not know",
-                            ))?;
+                    (_, Some(decimals), Type::Dbl | Type::Int) => {
                         let value = self.as_double(value)?;
                         Ok(self
                             .builder
@@ -2694,8 +2821,18 @@ impl Lowering<'_> {
                 let [vector, index] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("an index of an unsupported form"));
                 };
+                let code = vector;
                 let vector = self.value(vector)?;
                 let ty = self.builder.ty(vector);
+                if ty == Type::Table {
+                    if name == "[" {
+                        return Err(Refusal::new(
+                            "a `[` of a table, which typed code reads with the table API's verbs",
+                        ));
+                    }
+                    let name = self.value(index)?;
+                    return self.column(call, r_use, (code, vector), (index, name));
+                }
                 if let Type::Record(shape) = ty {
                     // A tuple's item is a field, at a position the code spells as a constant.
                     let positional = interp::heap()
@@ -2807,10 +2944,8 @@ impl Lowering<'_> {
                 let [object, field] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `$`"));
                 };
+                let code = object;
                 let object = self.value(object)?;
-                let Type::Record(shape) = self.builder.ty(object) else {
-                    return Err(Refusal::new("a `$` of something other than a record"));
-                };
                 let symbol = match field.kind() {
                     SexpType::Symbol => field,
                     SexpType::String => {
@@ -2819,6 +2954,13 @@ impl Lowering<'_> {
                         rvalues::install(&text).map_err(|_| Refusal::new("a field name"))?
                     }
                     _ => return Err(Refusal::new("a `$` of a computed field")),
+                };
+                if self.builder.ty(object) == Type::Table {
+                    let name = self.string(&rvalues::symbol_name(symbol));
+                    return self.column(call, r_use, (code, object), (field, name));
+                }
+                let Type::Record(shape) = self.builder.ty(object) else {
+                    return Err(Refusal::new("a `$` of something other than a record"));
                 };
                 let index = interp::heap()
                     .layouts
@@ -3031,6 +3173,10 @@ impl Lowering<'_> {
                 };
                 if identity {
                     return Ok(value);
+                }
+                // A count such as `nchar(x)` is an R integer the typed core computed itself.
+                if name == "Num.from_r" && ty == Type::Int {
+                    return self.to_i64(value);
                 }
                 Err(Refusal(Cow::Owned(format!(
                     "it calls `{name}` of a value typed code computed, which the typed core does \
@@ -5475,10 +5621,10 @@ unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
         ".ry_match" => {
             tails.push(expression);
             for &(_, arm) in args.iter().skip(1) {
-                if arm.kind() == SexpType::Language {
-                    if let Some(&(_, body)) = rvalues::pairlist_items(arm.cdr()).last() {
-                        tail_matches(body, tails);
-                    }
+                if arm.kind() == SexpType::Language
+                    && let Some(&(_, body)) = rvalues::pairlist_items(arm.cdr()).last()
+                {
+                    tail_matches(body, tails);
                 }
             }
         }
@@ -5495,6 +5641,15 @@ unsafe fn r_value_refusal(head: Sexp) -> Refusal {
          a ry type",
         interp::deparse::deparse_first_line(head)
     )))
+}
+
+/// What compiled code does with the value of an R call used as `r_use` says.
+unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
+    Ok(match r_use {
+        RUse::Unused | RUse::Diverges => RResult::Unused,
+        RUse::Converted(conversion) => RResult::Converted(conversion, conversion_type(conversion)?),
+        RUse::Table => RResult::Table,
+    })
 }
 
 /// The type a conversion of what an R call returns gives: fixed for `Str.from_r` and
@@ -5580,6 +5735,59 @@ unsafe fn loaded_namespace(package: Sexp) -> Option<Sexp> {
     (namespace.kind() == SexpType::Environment).then_some(namespace)
 }
 
+/// Whether `name` is an operator the table API's expressions define.
+fn is_operator(name: &str) -> bool {
+    matches!(
+        name,
+        "+" | "-"
+            | "*"
+            | "/"
+            | "^"
+            | "%%"
+            | "%/%"
+            | "=="
+            | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "!"
+            | "&"
+            | "|"
+    )
+}
+
+/// Whether a call resolved to one of the table API's functions that gives a table value: the
+/// `ry` namespace's own function of that name, which `package:ry` binds too.
+unsafe fn is_table_function(speculation: &Speculation) -> bool {
+    if !interp::dataframe::gives_table_value(&rvalues::symbol_name(speculation.symbol)) {
+        return false;
+    }
+    let Ok(package) = rvalues::install("ry") else {
+        return false;
+    };
+    let heap = interp::heap();
+    loaded_namespace(package)
+        .and_then(|namespace| heap.frame_cell(namespace, speculation.symbol))
+        .is_some_and(|cell| cell.cdr() == speculation.function)
+}
+
+/// Whether `function` is a typed closure that declares a table value as its result.
+unsafe fn returns_table(function: Sexp) -> bool {
+    function.kind() == SexpType::Closure
+        && interp::annotations::return_annotation(function).is_some_and(|declared| {
+            let name = declared
+                .trim()
+                .split(|next: char| !next.is_alphanumeric())
+                .next()
+                .unwrap_or_default();
+            matches!(
+                name,
+                "Expr" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+            )
+        })
+}
+
 unsafe fn is_base_function(speculation: &Speculation) -> bool {
     let function = speculation.function;
     match function.kind() {
@@ -5610,11 +5818,14 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
             let mut value = cell.cdr();
             if value.kind() == SexpType::Promise {
                 if value.car() == rvalues::unbound() {
-                    // Base binds its closures to lazy-load promises, which only read the
-                    // function from the package database, so forcing one is safe. A promise
-                    // anywhere else may run arbitrary code. A load that fails leaves the call to
-                    // the interpreter, which raises the error itself.
-                    if env != heap.known().base_env && env != heap.known().base_namespace {
+                    // An installed package binds its closures to lazy-load promises, which only
+                    // read the function from the package database, so forcing one is safe. A
+                    // promise of anything else may run arbitrary code. A load that fails leaves
+                    // the call to the interpreter, which raises the error itself.
+                    let reads_database = env == heap.known().base_env
+                        || env == heap.known().base_namespace
+                        || matches!(interp::serialize::lazy_record_header(value), Ok(Some(_)));
+                    if !reads_database {
                         return None;
                     }
                     value = interp::eval::force_promise(value).ok()?;
