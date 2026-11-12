@@ -58,6 +58,9 @@ pub enum Type {
     },
     /// An R list whose elements are scalars of these items.
     List(Item),
+    /// ry's `Set` of these items: their distinct values in first-insertion order, held in a list
+    /// object, which never crosses back to R.
+    Set(Item),
     Dict {
         key: Item,
         value: Item,
@@ -76,6 +79,7 @@ impl Type {
             Type::Str
                 | Type::Vector { .. }
                 | Type::List(_)
+                | Type::Set(_)
                 | Type::Dict { .. }
                 | Type::Record(_)
                 | Type::Tag(_)
@@ -88,6 +92,7 @@ impl Type {
             self,
             Type::Vector { .. }
                 | Type::List(_)
+                | Type::Set(_)
                 | Type::Dict { .. }
                 | Type::Record(_)
                 | Type::Tag(_)
@@ -344,6 +349,13 @@ pub enum Op {
     Range(Local, Local),
     /// `rep(value, times)`.
     Repeat(Local, Local),
+    /// `x[mask]` of a vector and a logical vector of the same length. Fails on any other length
+    /// and on an `NA` in the mask.
+    Select(Local, Local),
+    /// `Set.from_list`: the distinct items of a list, in first-occurrence order.
+    Unique(Local),
+    /// `List.sort_asc`, or `List.sort_desc` when true, of a numeric list. Fails on `NA` or NaN.
+    Sort(Local, bool),
     /// Elementwise arithmetic where at least one operand is a vector. The item type is the
     /// operands', which the lowering has made equal.
     VectorArith(Arith, Item, Local, Local),
@@ -443,6 +455,8 @@ impl Op {
             | Coerce(a, _)
             | Reduce(_, _, a)
             | Relabel(a, _)
+            | Unique(a)
+            | Sort(a, _)
             | Text(_, a)
             | VectorText(_, a)
             | Format(a)
@@ -466,6 +480,7 @@ impl Op {
             | Same(a, b)
             | Step(a, b)
             | Repeat(a, b)
+            | Select(a, b)
             | VectorArith(_, _, a, b)
             | VectorCompare(_, _, a, b)
             | VectorLogic(_, a, b)
@@ -499,7 +514,7 @@ impl Op {
         use Op::*;
         match self {
             Copy(_) | Relabel(..) | Coerce(..) | VectorNot(_) | VectorMath(..) | Text(..)
-            | VectorText(..) => position == 0,
+            | VectorText(..) | Unique(_) | Sort(..) => position == 0,
             VectorArith(..) | VectorCompare(..) | VectorLogic(..) => position < 2,
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
@@ -520,7 +535,9 @@ impl Op {
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
             | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
-            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) => false,
+            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_) => {
+                false
+            }
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,
