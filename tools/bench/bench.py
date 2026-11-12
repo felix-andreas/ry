@@ -47,15 +47,15 @@ missing ones. `--partial` runs anyway: the summary and results.json say the run 
 the missing packages, and `--write` refuses such a run.
 
 A start-up image and a package's code image load only into the build of ry that wrote them, and a
-build that cannot load them starts the slow way, which costs up to a sixth more instructions and
-several MB more memory. Builds that share a base R tree each keep their own images there
-(crates/rcmd/src/images.rs), and a build writes its images the first time it starts. Before the
-first suite, bench.py starts each ry build once, so no timed process pays for writing them, and
-stops when a package in the corpus library or `R_LIBS` has only another build's code image, naming
-the packages to reinstall (`refuse_foreign_images`). Every ry process runs with `RY_IMAGE_LOG=1`,
-and one that reports an unused image or writes images fails, so a run never compares a fast start
-with a slow one. A build whose runtime predates `RY_IMAGE_LOG` cannot report one, so bench.py
-refuses it.
+build that cannot load them starts the slow way: a start that calls `stats::median` runs 8 times the
+instructions (306 million rather than 37) and peaks 9 MiB higher. Builds that share a base R tree
+each keep their own images there (crates/rcmd/src/images.rs), and a build writes its images the
+first time it starts. Before the first suite, bench.py starts each ry build once, so no timed
+process pays for writing them, and stops when a package in the corpus library or `R_LIBS` has only
+another build's code image, naming the packages to reinstall (`refuse_foreign_images`). Every ry
+process runs with `RY_IMAGE_LOG=1`, and one that reports an unused image or writes images fails, so
+a run never compares a fast start with a slow one. A build whose runtime predates `RY_IMAGE_LOG`
+cannot report one, so bench.py refuses it.
 
 The typed suite needs rustc and no GNU R. Its engines are Rust, the baseline, and ry typed: each
 program's `<name>.typed.R` runs as in the kernels and applications suites, and its Rust twin

@@ -109,7 +109,7 @@ pub(crate) fn applies(interactive: bool, profiles: bool) -> bool {
 /// Reports on standard error, when `RY_IMAGE_LOG` is set, why a start-up or code image built
 /// for this R home went unused, so a benchmark can refuse a run that measured a slow start
 /// (`tools/bench/bench.py`). Images are tied to the build that wrote them, so two builds sharing
-/// one R home differ by up to a sixth of their start-up cost without a visible sign otherwise.
+/// one R home could otherwise differ eightfold in start-up instructions without a visible sign.
 /// A deliberate opt-out ([`applies`], `RY_CODE_IMAGE=0`) and a package installed without a code
 /// image are not reported: neither is a build mismatch.
 pub(crate) fn report_unused(reason: &str) {
