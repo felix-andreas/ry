@@ -198,6 +198,34 @@ code.
 The acceptance rule is the RSS rule: anonymous RSS and start-image RSS on `testthat_full` and
 `empty` must not grow.
 
+## Copied libraries: CPU and build
+
+Library trees move between machines (an renv cache, a Docker layer, a shared NFS library), so a
+native section must never run where it cannot.
+
+- **CPU.** The install tier emits code for a fixed baseline, never the host's own features:
+  x86-64-v2 (SSE4.2, POPCNT, CMPXCHG16B), the level `ssa::section` already targets
+  (`TARGET_X86_64_V2`). The section records its target, and the loader checks it against the
+  processor (`section::host_runs`) before mapping. A section for a level the processor lacks is
+  ignored silently and the package runs in tier 0 and the run-time JIT, so a copied library never
+  dies on `SIGILL`. Vector kernels that want AVX2 or AVX-512 select a variant at run time inside
+  the runtime's own helpers, which the code calls through the link table, so the section itself
+  stays at the baseline. aarch64 gets the ARMv8.0 baseline with its own target number once
+  `ssa::section` has a linker for it; until then an aarch64 install writes no native section.
+- **Build.** The whole code image is keyed by the runtime build that wrote it: the identity covers
+  the ry commit, so it covers the link table's helper list and order, the Cranelift version and
+  the tier-0 instruction set together. With build-keyed names (#490) the file name carries the build
+  too (`R/<pkg>.<build>.ryc`), so builds sharing a library each keep their own image. The link table
+  is also resolved by helper name, so a section that names a helper this build lacks is refused
+  even under a matching identity. Base R's identity does not key the section: base objects are
+  reached by name through the cell table, and a name that resolves to something else fails its
+  proof row and takes the generic path.
+- **On a mismatch** the section is ignored and the package runs in tier 0, silently, because a
+  copied library is normal and not damage; `RY_IMAGE_LOG=1` (#490) names each image a session ignores
+  and why. A damaged section (a hash mismatch) warns once on the console, as damaged images do today.
+  The repair for either is to reinstall the package with this build; whether `ry` should offer a
+  command that rewrites a library's images in place is an open question below.
+
 ## Base and recommended packages
 
 `testthat_full` also spends time in base closures (`tryCatch`, `match.arg`, `vapply`'s R-level
@@ -224,6 +252,21 @@ and package library written by its own build:
 - anonymous and start-image RSS on `empty` and `testthat_full`;
 - install time and image size for rlang, cli and testthat.
 
+Native share counts a sample as native when the innermost frame that belongs to R code is machine
+code (install tier, tier 1 or a native function), including the time in builtins and runtime
+helpers that machine code called. It is pending T0's confirmation that its sampler classifies the
+same way, so that the numbers here and in T0's tables mean the same thing.
+
+The first build passes when, on the cloud VM:
+
+| Measure | Pass line |
+| --- | --- |
+| native share, `testthat_full` / rlang / cli | at least 80% each |
+| `testthat_full` instructions and paired wall time | below main |
+| anonymous and start-image RSS, `empty` and `testthat_full` | not above main |
+| image size (the whole `.ryc`) | at most 2x main's, for rlang, cli and testthat |
+| install time of rlang | at most 2x main's, and at most 20 s more |
+
 ## Open questions
 
 - **Which operations to make native first.** The order comes from T0's sampler, taken on tier 0
@@ -234,5 +277,8 @@ and package library written by its own build:
   its own Cranelift context, keeps a large package's install within that range.
 - **Image size.** Machine code is larger than tier-0 code; how much larger, and whether rarely
   called closures should share a smaller generic stub, is measured on the first build.
+- **A command to rewrite images.** A library copied from another build or CPU runs in tier 0
+  until each package is reinstalled; a `ry` command that rewrites every image of a library in place
+  would make that one step.
 - **Packages loaded with `ry load`.** Their namespaces are not installed, so they get no
   install-tier code; whether the loader should compile and cache it is a separate question.
