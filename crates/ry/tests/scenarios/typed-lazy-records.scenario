@@ -1,0 +1,50 @@
+# A typed record or tag that R holds stays a typed-core value until R reads into it. R sees
+# the same value either way: printing, `$`, `identical()`, a collection, and passing the value
+# back to typed code all behave as they do for a record R built itself.
+
+requires ry-runtime
+
+file lazy.R
+| type Node = :Num(value: F64) | :Neg(inner: Node) | :Add(left: Node, right: Node)
+| alias Point = Record{x: F64, label: Str, tags: List<Str>}
+|
+| build <- function(depth: I64, seed: I64) -> Node {
+|   if (depth == 0) return(@Node(:Num(value = Num.to_f64(seed %% 10 + 1))))
+|   left <- build(depth - 1, (seed * 7) %% 1009 + 1)
+|   if (seed %% 5 == 0) return(@Node(:Neg(inner = left)))
+|   right <- build(depth - 1, (seed * 13) %% 1013 + 3)
+|   @Node(:Add(left = left, right = right))
+| }
+| evaluate <- function(node: Node) -> F64 {
+|   match (node) {
+|     :Num(value = v) => v
+|     :Neg(inner = e) => -evaluate(e)
+|     :Add(left = a, right = b) => evaluate(a) + evaluate(b)
+|   }
+| }
+| point <- function(x: F64) -> Point (x = x, label = "p", tags = ["a", "b"])
+| shift <- function(p: Point) -> Point (..p, x = p$x + 1)
+|
+| tree <- build(4, 8)
+| print(evaluate(tree))
+| invisible(gc())
+| print(evaluate(tree))
+| print(identical(tree, tree))
+| print(identical(build(3, 8), build(3, 8)))
+| print(identical(build(3, 8), build(3, 9)))
+| p <- point(1)
+| q <- shift(p)
+| print(q$x)
+| print(q$tags)
+| print(shift(q))
+| print(identical(shift(p), q))
+| small <- build(2, 8)
+| print(small)
+| print(evaluate(small))
+| trees <- lapply(1:3, function(i) build(3, i))
+| invisible(gc())
+| print(vapply(trees, evaluate, 0))
+
+run ry run --runtime ry lazy.R
+expect exit 0
+expect stdout "[1] 0\n[1] 0\n[1] TRUE\n[1] TRUE\n[1] FALSE\n[1] 2\n[\"a\", \"b\"]\n(label = \"p\", tags = [\"a\", \"b\"], x = 3)\n[1] TRUE\n:Add(left = :Add(left = :Num(value = 1), right = :Num(value = 5)), \n    right = :Add(left = :Num(value = 1), right = :Num(value = 2)))\n[1] 9\n[1] 33 -6 10\n"

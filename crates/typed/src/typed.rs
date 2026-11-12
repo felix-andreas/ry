@@ -40,12 +40,14 @@ use {
         values::{Boxed, List, Str},
     },
     heap::{
+        Collection,
         object::{INTEGER_PREFIX, LOGICAL_PREFIX, Sexp, SexpType, Slot, gp},
         records::NativeKind,
         strings::Encoding,
     },
     interp::{
-        annotations::decline, builtins::Arg, bytecode::TypedCall, unwind::Unwind, values as rvalues,
+        annotations::decline, builtins::Arg, bytecode::TypedCall, records::NativeValues,
+        unwind::Unwind, values as rvalues,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
@@ -97,6 +99,8 @@ thread_local! {
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
+    /// The live native objects at which [`from_box`] next runs a collection.
+    static NATIVE_COLLECTION_AT: Cell<i64> = const { Cell::new(NATIVE_COLLECTION_FLOOR) };
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
     /// did anything visible first.
     static R_CALLS: Cell<u64> = const { Cell::new(0) };
@@ -859,8 +863,20 @@ unsafe fn to_box_inner(
     if value.is_object() || value.attrib() != rvalues::nil() {
         return Err(CLASSED);
     }
-    let layout = value.record_layout();
     let kind = interp::records::native_kind(value);
+    // A record typed code made and R never filled shares its box, so passing it back is free.
+    if value.is_lazy_record() {
+        let boxed = value.lazy_record_value();
+        values::ry_list_dup(boxed as *mut List);
+        let shape = (*(boxed as *const Boxed)).shape;
+        let item = if kind == NativeKind::Tag {
+            Item::Tag(shapes::ANY)
+        } else {
+            Item::Record(shape)
+        };
+        return Ok((boxed, item));
+    }
+    let layout = value.record_layout();
     if matches!(kind, NativeKind::Dict | NativeKind::Set) {
         return Err(COLLECTION);
     }
@@ -1072,25 +1088,45 @@ unsafe fn list_of_objects(
     common.map(|item| (list, item)).ok_or(EMPTY_LIST)
 }
 
-/// The R value of the box `boxed`, deeply: a record, tuple or tag of the box's layout.
+/// The R value of the box `boxed`, which stays owned by the caller: a lazy record of the box's
+/// layout that shares the box, so a value R only passes back to typed code is never converted.
+/// R fills it one level at a time as it reads fields ([`settle`]).
 unsafe fn from_box(boxed: u64) -> Result<Sexp, Unwind> {
-    from_box_at(boxed, 0)
-}
-
-/// [`from_box`] at `depth` levels below the value converted.
-unsafe fn from_box_at(boxed: u64, depth: u32) -> Result<Sexp, Unwind> {
-    if depth % STACK_CHECK_LEVELS == 0 {
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
-            from_box_inner(boxed, depth)
-        })
-    } else {
-        from_box_inner(boxed, depth)
+    let (layout, fields) = shapes::fields((*(boxed as *const Boxed)).shape);
+    if fields.is_empty() {
+        let heap = interp::heap();
+        let record = heap.alloc_record_slots(layout, &[])?;
+        heap.root(record);
+        return Ok(record);
     }
+    // A lazy record keeps its whole native tree alive while the R heap sees one small record,
+    // so trees R drops would never make the collector run. Native objects past a limit run a
+    // minor collection, and the limit doubles past what survives, so values typed code holds
+    // itself cost collections only geometrically often.
+    if values::ry_live_objects() > NATIVE_COLLECTION_AT.get() {
+        interp::heap().collect(Collection::Minor);
+        NATIVE_COLLECTION_AT.set((values::ry_live_objects() * 2).max(NATIVE_COLLECTION_FLOOR));
+    }
+    values::ry_list_dup(boxed as *mut List);
+    interp::records::alloc_lazy(layout, fields.len(), boxed, NATIVE_VALUES)
+        .inspect_err(|_| values::ry_list_drop(boxed as *mut List))
 }
 
-unsafe fn from_box_inner(boxed: u64, depth: u32) -> Result<Sexp, Unwind> {
-    let pointer = boxed as *const u8;
-    let (layout, fields) = shapes::fields((*(pointer as *const Boxed)).shape);
+/// The fewest live native objects at which [`from_box`] runs a collection.
+const NATIVE_COLLECTION_FLOOR: i64 = 1 << 20;
+
+/// How R fills the lazy records [`from_box`] makes and releases their boxes.
+const NATIVE_VALUES: NativeValues = NativeValues {
+    settle,
+    release: release_box,
+};
+
+/// Fills the lazy record `record` from its box. Scalars and strings become slots, and a record,
+/// tuple or tag field becomes a lazy record of its own, so reading one field of a deep tree
+/// converts one level.
+unsafe fn settle(record: Sexp) -> Result<(), Unwind> {
+    let pointer = record.lazy_record_value() as *const u8;
+    let (_, fields) = shapes::fields((*(pointer as *const Boxed)).shape);
     let mut slots: SmallVec<[Slot; 4]> = SmallVec::new();
     let mut at = pointer.add(values::BOX_FIELDS) as *const u64;
     for item in fields {
@@ -1112,15 +1148,18 @@ unsafe fn from_box_inner(boxed: u64, depth: u32) -> Result<Sexp, Unwind> {
                 lo: word,
                 hi: *at.add(1),
             })?),
-            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box_at(word, depth + 1)?),
+            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box(word)?),
             Item::Array(_) => Slot::Handle(to_r(Type::of_item(item), [word, 0])?),
         });
         at = at.add(shapes::item_words(item) as usize);
     }
-    let heap = interp::heap();
-    let record = heap.alloc_record_slots(layout, &slots)?;
-    heap.root(record);
-    Ok(record)
+    interp::heap().settle_record(record, &slots);
+    Ok(())
+}
+
+/// Drops the reference a lazy record held to its box.
+unsafe fn release_box(boxed: u64) {
+    values::ry_list_drop(boxed as *mut List)
 }
 
 /// A rooted character vector holding `string`.

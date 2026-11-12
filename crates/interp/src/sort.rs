@@ -2695,6 +2695,17 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
             x.record_layout() == y.record_layout()
                 && standard_library::collections_identical(x, y, flags)
         }
+        // Two records over the same typed-core value are identical without filling either.
+        SexpType::Record if x.is_lazy_record() || y.is_lazy_record() => {
+            (x.is_lazy_record()
+                && y.is_lazy_record()
+                && x.lazy_record_value() == y.lazy_record_value())
+                || (x.record_layout() == y.record_layout() && {
+                    records::settle_uncollected(x);
+                    records::settle_uncollected(y);
+                    identical(x, y, flags)
+                })
+        }
         SexpType::Record => {
             x.record_layout() == y.record_layout()
                 && (0..x.record_slot_count()).all(|index| {
