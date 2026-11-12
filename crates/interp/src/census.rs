@@ -46,6 +46,8 @@ struct Body {
     native_entries: u64,
     /// The JIT's refusal reasons for the body, in order.
     refusals: Vec<&'static str>,
+    /// The instructions a refused plan handed to tier 0, as the JIT labels them.
+    steps: String,
 }
 
 /// Restores the body that ran before a hook replaced it, when the hooked activation ends.
@@ -133,6 +135,18 @@ pub fn refused(code: Sexp, reason: &'static str) {
     });
 }
 
+/// The JIT planned `code` and would hand the instructions `steps` to tier 0.
+pub fn steps(code: Sexp, steps: String) {
+    if !on() {
+        return;
+    }
+    BODIES.with(|bodies| {
+        if let Some(body) = bodies.borrow_mut().get_mut(&(code.as_ptr() as usize)) {
+            body.steps = steps;
+        }
+    });
+}
+
 /// Writes the census `RY_CENSUS` names, if any: one row per body, then one per sampled key that
 /// is not a body (`top` for time outside every closure body).
 ///
@@ -160,7 +174,7 @@ pub unsafe fn finish() {
         }
     }
     let mut out = String::from(
-        "key\tkind\tsource\tcalls\tnative_entries\ttier_state\tsamples_interp\tsamples_native\trefusals\tname\n",
+        "key\tkind\tsource\tcalls\tnative_entries\ttier_state\tsamples_interp\tsamples_native\trefusals\tsteps\tname\n",
     );
     BODIES.with(|bodies| {
         for (&key, body) in bodies.borrow().iter() {
@@ -186,12 +200,13 @@ pub unsafe fn finish() {
             // Writing to a `String` cannot fail.
             if writeln!(
                 out,
-                "{key:x}\t{}\t{:x}\t{}\t{}\t{tier_state}\t{interp_samples}\t{native_samples}\t{}\t{name}",
+                "{key:x}\t{}\t{:x}\t{}\t{}\t{tier_state}\t{interp_samples}\t{native_samples}\t{}\t{}\t{name}",
                 if tree { "tree" } else { "code" },
                 body.source,
                 body.calls,
                 body.native_entries,
                 refusals.join("|"),
+                body.steps,
             )
             .is_err()
             {
@@ -203,7 +218,7 @@ pub unsafe fn finish() {
         let kind = if key == 0 { "top" } else { "unknown" };
         if writeln!(
             out,
-            "{key:x}\t{kind}\t0\t0\t0\t0\t{interp_samples}\t{native_samples}\t\t{kind}"
+            "{key:x}\t{kind}\t0\t0\t0\t0\t{interp_samples}\t{native_samples}\t\t\t{kind}"
         )
         .is_err()
         {
