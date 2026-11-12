@@ -547,11 +547,25 @@ pub enum Effect {
     /// Reads and writes only its registers, and never signals a condition.
     Pure,
     /// Runs no R code unless one of these registers holds an object or an ALTREP vector (whose
-    /// methods a package may write in R), or a calling handler is established, since a warning
-    /// runs the handler; in each case it is opaque.
+    /// methods a package may write in R) or an environment (whose promises and active bindings
+    /// a read may run), or a calling handler is established, since a warning runs the handler;
+    /// in each case it is opaque.
     PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
+}
+
+/// Whether a [`Action::Step`] first offers its instruction to tier 0's fast handler for it
+/// (`bytecode::fast_step`), which runs an element read or store without the step's write-back,
+/// validation and reload when its shape applies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fast {
+    No,
+    /// A read of `[`, `[[` or `$`, which writes only its destination register.
+    Read,
+    /// A store into this slot's vector, which the handler finds in the frame and changes in
+    /// place.
+    Store(usize),
 }
 
 /// Scalar arithmetic the JIT does inline.
@@ -888,11 +902,17 @@ pub enum Action<'a> {
         args: &'a [Argument],
         dst: usize,
     },
+    /// Runs a fast-path prologue in tier 0 as an opaque step, returning its value from compiled
+    /// code when it finishes the call.
+    Prologue {
+        dst: usize,
+    },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
         effect: Effect,
         objects: &'a [usize],
         dst: Option<(usize, Ty)>,
+        fast: Fast,
     },
     /// Runs an [`Op::Fused`] pass in tier 0, reading the call operands it evaluated ahead from
     /// `reads`. When the pass computes the expression, `dst` holds its value, checked to be of
@@ -1287,7 +1307,8 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SetSrcref
             | Op::Resume
             | Op::Fused
-            | Op::Unfused => false,
+            | Op::Unfused
+            | Op::Prologue => false,
         };
         native += usize::from(counts);
         pc += 1 + count;
@@ -1349,13 +1370,15 @@ fn native(action: &Action<'_>) -> bool {
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
 /// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
 /// has never run, because code compiled without that type runs the instruction in tier 0 for
-/// as long as it lives.
+/// as long as it lives. A `shared` plan speculates only on lookups that every enclosure resolves
+/// the same way (see `runtime::SHARED`).
 pub unsafe fn plan<'a>(
     arena: Arena<'a>,
     code: Sexp,
     formals: Sexp,
     enclosure: Sexp,
     patient: bool,
+    shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
@@ -1370,6 +1393,7 @@ pub unsafe fn plan<'a>(
         arena,
         code,
         enclosure,
+        shared,
         feedback: values::ints(constants.element(FEEDBACK)),
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
@@ -1603,6 +1627,7 @@ struct Builder<'a> {
     arena: Arena<'a>,
     code: Sexp,
     enclosure: Sexp,
+    shared: bool,
     feedback: &'a [i32],
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
@@ -2140,7 +2165,22 @@ impl<'a> Builder<'a> {
                         state.visible = Some(true);
                         self.slot_read(state, operand(0), operand(1), layout, index, feedback)
                     }
-                    _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
+                    // `$` runs R code only through a method of an object or an environment's
+                    // promise or active binding, which the observed check sends the opaque way.
+                    _ => {
+                        let subject = self.slice(
+                            [operand(1)]
+                                .into_iter()
+                                .filter(|&register| !state.registers[register].is_plain()),
+                        );
+                        self.fast_step(
+                            state,
+                            Some((operand(0), feedback)),
+                            subject,
+                            Effect::PureUnlessObserved,
+                            Fast::Read,
+                        )
+                    }
                 }
             }
             Op::Item => {
@@ -2265,6 +2305,10 @@ impl<'a> Builder<'a> {
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
+            Op::Prologue => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque);
+                Action::Prologue { dst: operand(0) }
+            }
             // Only tier 0 decides whether the binding owns the value it updates in place.
             Op::CallBuiltinRebinding => self.opaque_step(
                 state,
@@ -2549,6 +2593,7 @@ impl<'a> Builder<'a> {
                 effect: Effect::Pure,
                 objects: &[],
                 dst: None,
+                fast: Fast::No,
             },
             // Compiled code keeps boxed values in the same register window as tier 0, so it
             // clears the finished statement's registers too, or they would keep its temporaries
@@ -2584,6 +2629,7 @@ impl<'a> Builder<'a> {
                     effect: Effect::Pure,
                     objects: &[],
                     dst: Some((operand(0), ty)),
+                    fast: Fast::No,
                 }
             }
             Op::SubAssign => {
@@ -2632,8 +2678,13 @@ impl<'a> Builder<'a> {
                         Ty::Bottom => Ty::Boxed,
                         ty => ty,
                     };
-                    let action =
-                        self.opaque_step(state, Some((operand(0), refine)), &[], Effect::Opaque);
+                    let action = self.fast_step(
+                        state,
+                        Some((operand(0), refine)),
+                        &[],
+                        Effect::Opaque,
+                        Fast::Store(slot),
+                    );
                     state.visible = Some(false);
                     action
                 }
@@ -2831,7 +2882,8 @@ impl<'a> Builder<'a> {
                 if symbol.kind() != SexpType::Symbol || self.locals.contains(&symbol) {
                     return None;
                 }
-                let found = resolve_variable(symbol, self.enclosure)?;
+                let found =
+                    resolve_variable(symbol, self.enclosure).filter(|found| self.portable(found))?;
                 let function = found.function;
                 expected = Some((callback, function));
                 speculation = Some(found);
@@ -3578,7 +3630,8 @@ impl<'a> Builder<'a> {
             None => self.speculate(symbol),
             Some(env) if env == self.enclosure => self.speculate(symbol),
             Some(env) => {
-                let speculation = resolve_function(symbol, env)?;
+                let speculation =
+                    resolve_function(symbol, env).filter(|found| self.portable(found))?;
                 let function = speculation.function;
                 self.speculations.push(speculation);
                 Some(function)
@@ -3616,6 +3669,48 @@ impl<'a> Builder<'a> {
             effect,
             objects,
             dst,
+            fast: Fast::No,
+        }
+    }
+
+    /// [`Self::opaque_step`] for an instruction tier 0's fast handler may run instead. That path
+    /// leaves every variable as it was, except that a store's own variable is reloaded, since the
+    /// handler changed its vector in the frame; the state after is the join of both paths.
+    fn fast_step(
+        &mut self,
+        state: &mut State<'a>,
+        dst: Option<(usize, Ty)>,
+        objects: &'a [usize],
+        effect: Effect,
+        fast: Fast,
+    ) -> Action<'a> {
+        let mut kept = List::new_in(self.arena);
+        kept.extend(state.slots.iter().copied());
+        // The handler stores into the frame's object in place, so only an unboxed copy of the
+        // variable goes stale.
+        if let Fast::Store(slot) = fast
+            && let Some(kept) = kept.get_mut(slot)
+            && kept.ty.in_variables()
+        {
+            kept.status |= status::NOT_LOADED;
+        }
+        let action = self.opaque_step(state, dst, objects, effect);
+        for (slot, kept) in state.slots.iter_mut().zip(kept.iter()) {
+            *slot = slot.join(*kept);
+        }
+        match action {
+            Action::Step {
+                effect,
+                objects,
+                dst,
+                ..
+            } => Action::Step {
+                effect,
+                objects,
+                dst,
+                fast,
+            },
+            action => action,
         }
     }
 
@@ -3807,20 +3902,34 @@ impl<'a> Builder<'a> {
                 Effect::PureUnlessObserved,
             ));
         }
+        // Tier 0's fast handler takes only a scalar index, which feedback types as a scalar, so
+        // an index typed as a vector has not been one at this site and would only pay for the
+        // handler's decline.
+        let fast = if count == 2
+            && matches!(name, "[" | "[[")
+            && !matches!(
+                types[1],
+                Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::IntArr | Ty::DblArr | Ty::LglArr | Ty::List
+            ) {
+            Fast::Read
+        } else {
+            Fast::No
+        };
         if PURE_BUILTINS.contains(&name) {
             let objects = self.slice(
                 args.iter()
                     .copied()
                     .filter(|&register| !state.registers[register].is_plain()),
             );
-            return Ok(self.opaque_step(
+            return Ok(self.fast_step(
                 state,
                 Some((dst, feedback)),
                 objects,
                 Effect::PureUnlessObserved,
+                fast,
             ));
         }
-        Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque))
+        Ok(self.fast_step(state, Some((dst, feedback)), &[], Effect::Opaque, fast))
     }
 
     /// Whether `function` is effect-free (see `interp::effects`), so a direct call may bind its
@@ -3832,14 +3941,23 @@ impl<'a> Builder<'a> {
             return safe;
         }
         let safe = match effects::effect_free_lookups(function) {
-            Ok(Some(lookups)) => {
+            Ok(Some(lookups)) if lookups.iter().all(|lookup| self.portable(lookup)) => {
                 self.speculations.extend(lookups);
                 true
             }
-            Ok(None) | Err(_) => false,
+            Ok(_) | Err(_) => false,
         };
         self.frame_safe.insert(function, safe);
         safe
+    }
+
+    /// Whether a shared plan may keep `speculation`: the lookup starts from the enclosure or a
+    /// long-lived environment and ends in a long-lived one, so it resolves the same way from
+    /// every enclosure that shares the code. A plan that is not shared keeps every speculation.
+    unsafe fn portable(&self, speculation: &Speculation) -> bool {
+        !self.shared
+            || ((speculation.env == self.enclosure || crate::long_lived(speculation.env))
+                && crate::owner(speculation).is_some_and(|env| crate::long_lived(env)))
     }
 
     /// Whether the activation's own frame may bind `symbol`.
@@ -3853,7 +3971,8 @@ impl<'a> Builder<'a> {
         if let Some(found) = self.speculated.get(&symbol) {
             return *found;
         }
-        let found = resolve_function(symbol, self.enclosure);
+        let found = resolve_function(symbol, self.enclosure)
+            .filter(|speculation| self.portable(speculation));
         let function = found.as_ref().map(|speculation| speculation.function);
         if let Some(speculation) = found {
             self.speculations.push(speculation);
@@ -4235,7 +4354,8 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         | Op::Ast
         | Op::Closure
         | Op::Missing
-        | Op::Namespace => kill(operand(0), live),
+        | Op::Namespace
+        | Op::Prologue => kill(operand(0), live),
         Op::Internal => {
             kill(operand(0), live);
             for register in operand(3)..operand(3) + operand(4) {

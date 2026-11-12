@@ -440,7 +440,8 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
         if env.kind() != SexpType::Environment {
             return Err(call.error("replacement object is not an environment"));
         }
-        let copy = values::triple(SexpType::Closure, object.car(), object.cdr(), env)?;
+        let body = crate::bytecode::body_to_copy(object)?;
+        let copy = values::triple(SexpType::Closure, object.car(), body, env)?;
         values::copy_attributes(object, copy)?;
         return Ok(copy);
     }
@@ -2220,7 +2221,7 @@ unsafe fn do_body_code(call: &Call<'_>) -> R<Sexp> {
     if function.kind() != SexpType::Closure {
         return Ok(nil());
     }
-    crate::bytecode::compiled_body(function)
+    Ok(crate::bytecode::compiled_body(function)?.unwrap_or(function.cdr()))
 }
 
 unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {

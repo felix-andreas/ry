@@ -1,0 +1,31 @@
+# Typed code builds a dictionary from `Dict.empty()` natively when its keys and values are `I64`,
+# `F64` or `Str`, including an R string key such as `"z"`. The checker settles the key and value
+# types, and the dictionary is laid out by them before the first insert.
+
+requires ry-runtime
+
+file dicts.R
+| counts <- function(words: List<Str>) -> List<Tuple{Str, I64}> {
+|   table <- Dict.empty()
+|   for (w in words) {
+|     table <- if (Dict.contains(table, w)) Dict.insert(table, w, 1i64) else Dict.insert(table, w, 2i64)
+|   }
+|   table <- Dict.remove(table, "c")
+|   table <- Dict.insert(table, "z", 9i64)
+|   Dict.to_list(table)
+| }
+| sizes <- function(n: I64) -> F64 {
+|   table <- Dict.empty()
+|   for (i in List.range(1, n)) table <- Dict.insert(table, i %% 7i64, Num.to_f64(i) / 2f64)
+|   List.sum(Dict.values(table)) + Num.to_f64(List.sum(Dict.keys(table))) + Num.to_f64(Dict.len(table))
+| }
+| words <- List.from_r(c("a", "b", "a", "c", "d", "b"))
+| print(counts(words))
+| print(sizes(20i64))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry dicts.R
+expect exit 0
+expect stdout "[(\"a\", 1i64), (\"b\", 1i64), (\"d\", 2i64), (\"z\", 9i64)]\n[1] 87.5"
+expect stderr "typed: compiled for [Vector { item: Str, array: true }] -> Vector { item: Record(0), array: true }"
+expect stderr "typed: compiled for [I64] -> Dbl"

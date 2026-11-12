@@ -357,6 +357,28 @@ pub enum NativeValueKind {
     List,
 }
 
+/// What only the checker knows about a value the runtime builds empty: the storage of a list's
+/// items, or the key and value types of a dictionary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum Empty {
+    List(ListItems),
+    /// A `Dict` of `I64`, `F64` or `Str` keys and values, the ones typed code holds unboxed.
+    Dict {
+        key: ListItems,
+        value: ListItems,
+    },
+}
+
+impl Empty {
+    /// The name `.ry_items` takes: `"I64"` for a list, `"Dict<Str, I64>"` for a dictionary.
+    pub fn name(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Empty::List(items) => items.name().into(),
+            Empty::Dict { key, value } => format!("Dict<{}, {}>", key.name(), value.name()).into(),
+        }
+    }
+}
+
 /// The run-time storage of a ry list's items, for a list the runtime may build empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum ListItems {
@@ -421,12 +443,14 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
-    /// The list expressions whose item type only this check knows: an empty `[]`, and a call to
-    /// a library function whose result items come from a callback rather than from a list it
-    /// was given (`List.map`). An empty list is stored by its items' storage, and one built
-    /// from no items is `logical`, so the code ry's runtime runs passes each of these through
-    /// `.ry_items` with the item type (`preflight` in the `ry` crate). In id order.
-    pub typed_lists: ThinVec<(ExprId, ListItems)>,
+    /// The expressions whose item types only this check knows: an empty `[]`, a call to a
+    /// library function whose result items come from a callback rather than from a list it was
+    /// given (`List.map`), and a library call that builds a dictionary from no entries
+    /// (`Dict.empty()`). An empty list is stored by its items' storage, and one built from no
+    /// items is `logical`, and typed code lays a dictionary out by its key and value types, so
+    /// the code ry's runtime runs passes each of these through `.ry_items` with the types
+    /// (`preflight` in the `ry` crate). In id order.
+    pub typed_empties: ThinVec<(ExprId, Empty)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// one-shot check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
@@ -989,7 +1013,7 @@ fn check_item_in<'db>(
                 .then_some(id)
         })
         .collect();
-    let mut typed_lists: ThinVec<(ExprId, ListItems)> = recorded
+    let mut typed_empties: ThinVec<(ExprId, Empty)> = recorded
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| {
@@ -1005,9 +1029,10 @@ fn check_item_in<'db>(
                                 .globals
                                 .and_then(|globals| globals.library_candidates(name))
                                 .is_some_and(|candidates| {
-                                    candidates
-                                        .iter()
-                                        .any(|scheme| builds_fresh_items(db, scheme))
+                                    candidates.iter().any(|scheme| {
+                                        builds_fresh_items(db, scheme)
+                                            || builds_empty_dict(db, scheme)
+                                    })
                                 })
                     }
                     _ => false,
@@ -1018,10 +1043,27 @@ fn check_item_in<'db>(
                 return None;
             }
             let ty = context.table.resolve(db, (*slot)?);
-            list_items(db, crate::types::array_element(db, ty)?).map(|items| (id, items))
+            if let Some((key, value)) = crate::types::dict_entries(db, ty) {
+                let scalar = |ty| list_items(db, ty).filter(|&items| items != ListItems::RyValues);
+                // A dictionary key is always a single value, so an R string key such as `"a"` is
+                // held as a `Str`, the value the runtime hashes it as.
+                let key = match key.kind(db) {
+                    TyKind::Scalar(Atomic::Character) => Some(ListItems::Str),
+                    _ => scalar(key),
+                };
+                return Some((
+                    id,
+                    Empty::Dict {
+                        key: key?,
+                        value: scalar(value)?,
+                    },
+                ));
+            }
+            list_items(db, crate::types::array_element(db, ty)?)
+                .map(|items| (id, Empty::List(items)))
         })
         .collect();
-    typed_lists.sort_unstable_by_key(|(id, _)| id.index());
+    typed_empties.sort_unstable_by_key(|(id, _)| id.index());
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
@@ -1127,7 +1169,7 @@ fn check_item_in<'db>(
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         i64_literals,
-        typed_lists,
+        typed_empties,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,
@@ -19088,6 +19130,20 @@ fn builds_fresh_items<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
             .iter()
             .chain(function.named.iter().map(|parameter| &parameter.ty))
             .any(|&parameter| crate::types::array_element(db, parameter) == Some(item))
+}
+
+/// Whether a library function returns a `Dict` and takes none, so only the checker knows its
+/// key and value types (`Dict.empty`, `Dict.with_capacity`).
+fn builds_empty_dict<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
+    let TyKind::Function(function) = scheme.body.kind(db) else {
+        return false;
+    };
+    crate::types::dict_entries(db, function.ret).is_some()
+        && !function
+            .positional
+            .iter()
+            .chain(function.named.iter().map(|parameter| &parameter.ty))
+            .any(|&parameter| crate::types::dict_entries(db, parameter).is_some())
 }
 
 /// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's
