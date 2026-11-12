@@ -3139,6 +3139,18 @@ pub(crate) unsafe fn gather(
                 && (is_reference(arg.value)
                     || reads_variables(bytecode::source_of_body(arg.value.cdr()), 0));
             let Some(value) = promise_value(arg.value, &mut read, 0) else {
+                let source = bytecode::source_of_body(arg.value.cdr());
+                if source.kind() == SexpType::Language && source.car() == values::symbols().function
+                {
+                    annotations::decline(|| {
+                        format!(
+                            "argument {} is a function R code wrote, and typed code takes \
+                             functions only from typed code",
+                            position + 1
+                        )
+                    });
+                    return None;
+                }
                 annotations::decline(|| {
                     format!(
                         "argument {} is `{}`, which R code wrote, so it stays lazy until the \
