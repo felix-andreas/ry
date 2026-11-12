@@ -51,6 +51,8 @@ export type Measurement = {
   seconds: Record<string, number>;
   ratio: Record<string, Interval>;
   peakMib?: Record<string, number>;
+  // What each engine spent compiling the program, where the suite records it.
+  compileSeconds?: Record<string, number>;
   tests?: Record<string, TestCounts>;
   flags: Flag[];
   failures: Failure[];
@@ -483,6 +485,19 @@ export function tableViews(suite: Suite): TableView[] {
       note: "Peak memory is the peak resident set size of the whole process, R's startup included.",
     });
   }
+  const compiled = programs.filter((program) => program.measurement.compileSeconds !== undefined);
+  if (compiled.length > 0) {
+    const milliseconds = (value: number | undefined) => (value === undefined ? 'n/a' : `${(value * 1000).toFixed(1)} ms`);
+    views.push({
+      label: 'Compile time',
+      columns: ['program', ...engines.map(engineLabel)],
+      rows: [
+        ...compiled.map((program) => [name(program), ...engines.map((engine) => milliseconds(program.measurement.compileSeconds?.[engine]))]),
+        ['total', ...engines.map((engine) => milliseconds(compiled.reduce((sum, program) => sum + (program.measurement.compileSeconds?.[engine] ?? 0), 0)))],
+      ],
+      note: `Compile time is outside every timed run. ${engineLabel(baseline)}'s is one rustc process per program. The typed core's is the sum over the functions it compiled, as RY_TYPED_LOG reports them.`,
+    });
+  }
   if (programs.some((program) => program.measurement.tests !== undefined)) {
     views.push({
       label: 'Tests',
@@ -647,6 +662,7 @@ type RawResults = {
     seconds: Record<string, number>;
     ratio: Record<string, Interval>;
     peak_mib?: Record<string, number>;
+    compile_seconds?: Record<string, number>;
     tests?: Record<string, TestCounts>;
     flags?: Flag[];
     failures?: Failure[];
@@ -708,7 +724,7 @@ function loadSuites(): Suite[] {
 
 function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
   if (program === undefined) return undefined;
-  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
 }
 
 function meta(raw: RawResults['meta']): Meta {

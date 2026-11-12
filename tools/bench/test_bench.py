@@ -116,6 +116,9 @@ class NoRefusals:
     def typed_refusal(self, program, engine):
         return None
 
+    def compile_seconds(self, program):
+        return {"rust": 0.25, "ry_typed": 0.002}
+
 
 class TypedSuite(unittest.TestCase):
     def setUp(self):
@@ -157,6 +160,7 @@ class TypedSuite(unittest.TestCase):
         self.assertEqual(results["programs"][0]["seconds"], {"rust": 0.011, "ry_typed": 0.022})
         self.assertEqual(bench.ratio_label(results, "ry_typed"), "ry typed / Rust")
         self.assertNotIn("peak_mib", results["programs"][0])
+        self.assertEqual(results["programs"][0]["compile_seconds"], {"rust": 0.25, "ry_typed": 0.002})
 
     def test_a_program_rust_finishes_too_fast_to_time_stays_out_of_the_mean(self):
         floor = bench.RUST_SHORT
@@ -174,8 +178,14 @@ class TypedSuite(unittest.TestCase):
         wrong, close = results["programs"]
         self.assertEqual(wrong["failures"], [{"engine": "ry_typed", "reason": "checksum 8, Rust printed 7"}])
         self.assertEqual(wrong["ratio"], {})
+        self.assertNotIn("compile_seconds", wrong)
         self.assertNotIn("failures", close)
         self.assertEqual(results["geomean"]["ry_typed"]["programs"], 1)
+
+    def test_reads_the_compile_time_off_a_typed_log_line(self):
+        compiled = bench.COMPILED.search("typed: compiled for [List(Str), List(F64)] -> F64 in 2693 us")
+        self.assertEqual(compiled["microseconds"], "2693")
+        self.assertIsNone(bench.COMPILED.search("typed: `pipeline` runs in the interpreter: it calls `paste`"))
 
     def test_a_rust_program_reports_what_the_typed_harness_reports(self):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
@@ -190,6 +200,8 @@ class TypedSuite(unittest.TestCase):
         rust = bench.Engine("rust", "Rust", None, dict(os.environ, RY_BENCH_REPEAT="4"))
         result = runner.run(program, rust)
         self.assertEqual(result["checksum"], "42")
+        self.assertGreater(runner.compile_seconds(program)["rust"], 0.0)
+        self.assertNotIn("ry_typed", runner.compile_seconds(program))
         self.assertGreaterEqual(result["cold"], 0.0)
         self.assertGreaterEqual(result["seconds"], 0.0)
         refused = runner.run(program, bench.Engine("rust", "Rust", None, dict(os.environ, RY_BENCH_REPEAT="none")))

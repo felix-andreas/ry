@@ -157,6 +157,12 @@ table, because the runner cannot read a peak below its own memory use, and a Rus
 less than that; the two suites above give the memory of the typed programs. Reproducing the suite
 needs `rustc` and no GNU R.
 
+Compile time is outside every timed run too, and the suite reports it in a table of its own,
+because typed ry compiles a function the first time it is called and has to stay fast at it. The
+Rust column is one `rustc` process per program. The typed column is the time the typed core spent
+compiling the program's functions, summed from the `compiled for ... in N us` lines that
+`RY_TYPED_LOG=1` prints.
+
 <details>
 <summary>The numbers: milliseconds</summary>
 

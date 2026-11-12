@@ -52,6 +52,7 @@ use {
     std::{
         borrow::Cow,
         cell::{Cell, RefCell},
+        time::{Duration, Instant},
     },
 };
 
@@ -96,6 +97,8 @@ thread_local! {
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
+    /// How long the compilations nested in the one under way took, measured only for the log.
+    static NESTED_COMPILE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
     /// did anything visible first.
     static R_CALLS: Cell<u64> = const { Cell::new(0) };
@@ -311,13 +314,24 @@ unsafe fn compiled_or_refusal(
             "it is called while its own code is being compiled",
         ));
     }
+    // The clock is read only for the log. A function's time leaves out the callees compiled
+    // while it was lowered, which log their own, so the logged times add up to the time the
+    // session spent compiling.
+    let started = interp::annotations::typed_logging().then(Instant::now);
+    let outer = NESTED_COMPILE.replace(Duration::ZERO);
     let result = compile(function, params);
+    let total = started.map_or(Duration::ZERO, |started| started.elapsed());
+    let own = total.saturating_sub(NESTED_COMPILE.replace(outer + total));
     COMPILING.with_borrow_mut(|compiling| compiling.remove(&key));
     let compiled = match result {
         Ok(compiled) => {
             interp::heap().add_global_root(function);
-            if interp::annotations::typed_logging() {
-                eprintln!("typed: compiled for {params:?} -> {:?}", compiled.result);
+            if started.is_some() {
+                eprintln!(
+                    "typed: compiled for {params:?} -> {:?} in {} us",
+                    compiled.result,
+                    own.as_micros()
+                );
             }
             Ok(&*Box::leak(Box::new(compiled)))
         }
