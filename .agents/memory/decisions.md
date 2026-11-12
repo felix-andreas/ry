@@ -9277,3 +9277,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** Typed `log_rank` drops from 0.213 s to 0.112 s median on a plain release build (untyped ry 0.227 s), with the same checksum.
 - **Pinned by** `typed-mask-counts.scenario` and `fused_counts_follow_three_valued_logic` in `crates/typed/tests/test_values.rs`, a seeded model of R's three-valued logic.
 
+## A uniquely owned Array grows in place
+
+- **Previous shape.** `owned_list` in `crates/interp/src/standard_library.rs` excluded Arrays (ry lists built by `[]`, `List.from_r` or typed code), so every `List.append`, `List.set`, `List.concat` or `List.swap` on one copied and re-checked all its items. A loop of appends was quadratic: 40,000 took about 25 s, although the standard-library page promises amortized constant time.
+- **Target shape.** The same ownership rule as for R lists (`owned`: refcount 0, or the reusable binding with refcount 1) applies to a non-empty Array. An update first checks the new item against the Array's storage without allocating (`arrays::holds_item`), then stores it in place (`arrays::store_item`) or appends into spare capacity, doubling into a resizable copy when it runs out (`append_owned`). A value that does not fit takes the copying path, which reports the error and never sees a half-updated Array. An empty Array is `logical(0)` until its first item decides its storage, so it always takes the copying path once. The moves journal (`crates/interp/src/moves.rs`) covers Arrays too, recording replaced items so a failing helper restores the original.
+- **Why not a separate List representation.** An Array is already the one storage of a ry list in both the interpreter and typed code (typed `List.append` is `Op::Push`, which grows a uniquely held list in place), so the fix is ownership, not a new type.
+- **Impact.** Two million interpreted appends to `[]` take about 0.2 s. rcp `list-for` and `list-while` get typed ports (`tools/bench/public/rcp/*.typed.R`) that run in about 0.015 s, against about 0.35 s untyped.
+- **Pinned by** the Array growth and `move_undo` cases in `crates/interp/tests/test_standard_library.rs`.

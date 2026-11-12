@@ -31,6 +31,7 @@
 
 use {
     crate::{
+        arrays,
         builtins::Arg,
         eval::{self, Args},
         interp, records, standard_library,
@@ -359,9 +360,9 @@ unsafe fn end_all() -> R<()> {
     Ok(())
 }
 
-/// How many entries `value` has, when it is a value a move handles: a dictionary, a set, or a
-/// plain list, which an update may grow in place. An Array or a list with attributes is never
-/// updated in place, so moving one gains nothing.
+/// How many entries `value` has, when it is a value a move handles: a dictionary, a set, a plain
+/// list or an Array, which an update may grow in place. A list with attributes is never updated
+/// in place, so moving one gains nothing.
 unsafe fn extent(value: Sexp) -> Option<usize> {
     match value.kind() {
         SexpType::Record
@@ -375,6 +376,7 @@ unsafe fn extent(value: Sexp) -> Option<usize> {
         SexpType::List if !value.is_array() && !value.is_altrep() && value.attrib() == nil() => {
             Some(values::length(value))
         }
+        _ if value.is_array() => Some(values::length(value)),
         _ => None,
     }
 }
@@ -384,6 +386,14 @@ unsafe fn extent(value: Sexp) -> Option<usize> {
 unsafe fn original(entry: &Move) -> R<Sexp> {
     if entry.replaced.is_empty() && extent(entry.value) == Some(entry.entries) {
         return Ok(entry.value);
+    }
+    if entry.value.is_array() {
+        // The replaced items were read out as fresh values, which the copy stores back.
+        let copy = arrays::slice(entry.value, 0, entry.entries)?;
+        for &(position, old) in entry.replaced.iter().rev() {
+            arrays::store_item(copy, old, position);
+        }
+        return Ok(copy);
     }
     if entry.value.kind() == SexpType::List {
         let mut items: Vec<Sexp> = (0..entry.entries)
