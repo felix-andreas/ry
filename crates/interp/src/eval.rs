@@ -1176,7 +1176,7 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             let args = evaluate_args(arguments, env, definition.keep_missing, call)?;
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {
                 return Ok(value);
             }
@@ -1873,7 +1873,7 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
             }
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &forced, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &forced, env)?
             {
                 return Ok(value);
             }
@@ -1926,7 +1926,7 @@ pub unsafe fn apply_closure(
         return Ok(value);
     }
     if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, supplied)? {
+        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
             return value;
         }
     }
@@ -1952,6 +1952,7 @@ unsafe fn try_native_typed(
     call: Sexp,
     function: Sexp,
     args: &[Arg],
+    sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Option<R<Sexp>>> {
     if supplied.is_some() {
@@ -1966,7 +1967,12 @@ unsafe fn try_native_typed(
         crate::annotations::log_interpreted_because(call, "no native tier is loaded");
         return Ok(None);
     };
-    let value = (tier.call)(function, args);
+    let value = (tier.call)(&bytecode::TypedCall {
+        call,
+        function,
+        args,
+        sys_parent,
+    });
     if value.is_none() {
         crate::annotations::log_interpreted(call);
     }
@@ -2031,7 +2037,7 @@ pub unsafe fn apply_closure_owning(
         return Ok(value);
     }
     if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, supplied)? {
+        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
             return value;
         }
     }
@@ -3012,6 +3018,34 @@ pub unsafe fn enter(
             depth: 0,
         }),
     }
+}
+
+/// Runs `body` in a frame for the call `typed` describes, with a new environment enclosed by the
+/// closure's. Compiled typed code has no frame of its own and runs each R call it makes this
+/// way, so `stop()`, `sys.call()` and `parent.frame()` there see the call the interpreter makes.
+pub unsafe fn run_in_frame(
+    typed: &bytecode::TypedCall<'_>,
+    body: impl FnOnce(Sexp) -> R<()>,
+) -> R<()> {
+    let env = values::new_env(typed.function.tag())?;
+    let caller = if typed.sys_parent == nil() {
+        interp().slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    let (depth, sampled) = push_frame(
+        typed.call,
+        typed.function,
+        env,
+        typed.sys_parent,
+        typed.args,
+        &[],
+        crate::NO_SLOTS,
+        0,
+        caller,
+    );
+    let result = sampled.and_then(|()| body(env)).map(|()| nil());
+    leave(depth, result).map(|_| ())
 }
 
 /// Finishes the call [`enter`] pushed at `depth` once its body has ended with `result`: it
@@ -5050,7 +5084,7 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     };
     if definition.generic != Generic::None
         && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?, None)?
+            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
     {
         return Ok(value);
     }
@@ -5239,8 +5273,7 @@ pub unsafe fn call_with_values(call: Sexp, function: Sexp, values: &[Sexp], env:
     let definition = builtin_def(function)?;
     args.extend(values.iter().map(|&value| Arg { tag: nil(), value }));
     if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
     {
         return Ok(value);
     }
@@ -5303,7 +5336,7 @@ pub unsafe fn force_and_call_with(
                     return apply_call(call, function, arguments, env);
                 }
                 return match dispatch::dispatch_evaluated_subject(
-                    definition, call, function, arguments, value, env, &mut args, None,
+                    definition, call, function, arguments, value, env, &mut args,
                 )? {
                     Some(value) => Ok(value),
                     None => call_builtin(definition, call, function, &args, env),
@@ -5322,7 +5355,7 @@ pub unsafe fn force_and_call_with(
             )?;
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {
                 return Ok(value);
             }
@@ -5792,8 +5825,7 @@ unsafe fn reuse_first_argument(
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
     if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
     {
         return Ok(value);
     }

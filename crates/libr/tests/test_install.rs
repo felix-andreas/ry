@@ -27,14 +27,8 @@ fn home() -> &'static PathBuf {
         // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test,
         // for the profile the test itself runs in.
         let profile_directory = profile_directory();
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
-        if profile_directory
-            .file_name()
-            .is_some_and(|name| name == "release")
-        {
-            build.arg("--release");
-        }
+        let mut build = syntax::testing::cargo_build(&profile_directory);
+        build.args(["-p", "rcmd", "--bin", "ry-rcmd"]);
         assert!(
             build.status().expect("cargo build").success(),
             "building ry-rcmd failed"
