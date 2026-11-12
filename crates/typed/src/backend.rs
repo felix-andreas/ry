@@ -16,8 +16,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, Block as IrBlock, Compare, Constant, Function, Inst, Item, Local, Math, Op,
-            Reduce, Terminator, Text, Type,
+            Arith, Bits, Block as IrBlock, Compare, Constant, Function, Inst, Item, Local, Math,
+            Op, Reduce, Terminator, Text, Type,
         },
         lower::SELF,
         shapes, values,
@@ -89,7 +89,11 @@ fn signature(params: &[Type], result: Type) -> Signature {
 }
 
 /// Compiles `function`, whose calls of other functions index `callees`.
-pub fn compile(function: &Function, callees: &[Callee], r_calls: &[usize]) -> Result<Code, Refusal> {
+pub fn compile(
+    function: &Function,
+    callees: &[Callee],
+    r_calls: &[usize],
+) -> Result<Code, Refusal> {
     ssa::with_module(|module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
@@ -693,6 +697,37 @@ impl Emitter<'_> {
                 };
                 SmallVec::from_slice(&[value])
             }
+            Op::Bits(op, a, b) => {
+                let (x, y) = (self.one(*a)?, self.one(*b)?);
+                if matches!(op, Bits::ShiftLeft | Bits::ShiftRight | Bits::ShiftRightZf) {
+                    // An unsigned comparison also catches a negative count.
+                    let out_of_range =
+                        self.builder
+                            .ins()
+                            .icmp_imm_u(IntCC::UnsignedGreaterThan, y, 63);
+                    self.fail_if(out_of_range, &inst.fail_drops)?;
+                }
+                let ins = self.builder.ins();
+                let value = match op {
+                    Bits::And => ins.band(x, y),
+                    Bits::Or => ins.bor(x, y),
+                    Bits::Xor => ins.bxor(x, y),
+                    Bits::ShiftLeft => ins.ishl(x, y),
+                    Bits::ShiftRight => ins.sshr(x, y),
+                    Bits::ShiftRightZf => ins.ushr(x, y),
+                };
+                SmallVec::from_slice(&[value])
+            }
+            Op::IsNan(a) => {
+                let x = self.one(*a)?;
+                let unordered = self.builder.ins().fcmp(FloatCC::Unordered, x, x);
+                let bits = self.builder.ins().bitcast(I64, MemFlagsData::new(), x);
+                let payload = self.builder.ins().band_imm_u(bits, 0xFFFF_FFFF);
+                let marked = self.builder.ins().icmp_imm_u(IntCC::Equal, payload, 1954);
+                let na = self.builder.ins().band(unordered, marked);
+                self.fail_if(na, &inst.fail_drops)?;
+                SmallVec::from_slice(&[self.logical(unordered)])
+            }
             Op::RoundDigits(a, digits) => {
                 let (x, digits) = (self.one(*a)?, self.one(*digits)?);
                 let rounded =
@@ -741,10 +776,11 @@ impl Emitter<'_> {
             Op::LglToInt(a) => SmallVec::from_slice(&[self.one(*a)?]),
             Op::CountOfI64(a) => {
                 let x = self.one(*a)?;
-                let outside = self
-                    .builder
-                    .ins()
-                    .icmp_imm_u(IntCC::UnsignedGreaterThan, x, i64::from(i32::MAX));
+                let outside = self.builder.ins().icmp_imm_u(
+                    IntCC::UnsignedGreaterThan,
+                    x,
+                    i64::from(i32::MAX),
+                );
                 self.fail_if(outside, &inst.fail_drops)?;
                 SmallVec::from_slice(&[self.builder.ins().ireduce(I32, x)])
             }
@@ -1899,9 +1935,12 @@ impl Emitter<'_> {
             .iter()
             .enumerate()
             .map(|(position, &machine)| {
-                self.builder
-                    .ins()
-                    .stack_load(I64, machine, slot, output_offset + 8 * position as i32)
+                self.builder.ins().stack_load(
+                    I64,
+                    machine,
+                    slot,
+                    output_offset + 8 * position as i32,
+                )
             })
             .collect())
     }

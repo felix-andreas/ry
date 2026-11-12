@@ -16,8 +16,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, BlockId, Builder, Compare, Constant, Item, Local, Math, Op, Reduce, Terminator,
-            Text, Type,
+            Arith, Bits, BlockId, Builder, Compare, Constant, Item, Local, Math, Op, Reduce,
+            Terminator, Text, Type,
         },
         shapes, values,
     },
@@ -2021,6 +2021,96 @@ impl Lowering<'_> {
                 let maximum = name == "Num.max";
                 self.extreme(maximum, a, b)
             }
+            "Num.abs" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.abs`"));
+                };
+                let a = self.value(a)?;
+                match self.builder.ty(a) {
+                    Type::I64 => Ok(self
+                        .builder
+                        .emit(Type::I64, Op::Math(Math::Abs, Item::I64, a))),
+                    Type::Dbl => {
+                        // The library refuses `NaN` and `NA`.
+                        self.fail_if_nan(a);
+                        Ok(self
+                            .builder
+                            .emit(Type::Dbl, Op::Math(Math::Abs, Item::Dbl, a)))
+                    }
+                    _ => Err(Refusal::new(
+                        "a `Num.abs` of something other than an I64 or F64",
+                    )),
+                }
+            }
+            "Num.pow_int" => {
+                let [base, exponent] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.pow_int`"));
+                };
+                let base = self.value(base)?;
+                let exponent = self.value(exponent)?;
+                if self.builder.ty(base) != Type::I64 && self.builder.ty(exponent) != Type::I64 {
+                    return Err(Refusal::new("a `Num.pow_int` of R numbers"));
+                }
+                self.arith(Arith::Pow, base, exponent)
+            }
+            "Num.bitwise_and"
+            | "Num.bitwise_or"
+            | "Num.bitwise_xor"
+            | "Num.shift_left_by"
+            | "Num.shift_right_by"
+            | "Num.shift_right_zf_by" => {
+                let [a, b] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed bit operation"));
+                };
+                let a = self.value(a)?;
+                let b = self.value(b)?;
+                // On R numbers the library works on 32 bits, which the typed core does not.
+                if self.builder.ty(a) != Type::I64 && self.builder.ty(b) != Type::I64 {
+                    return Err(Refusal::new("a bit operation on R numbers"));
+                }
+                let a = self.to_i64(a)?;
+                let b = self.to_i64(b)?;
+                let op = match &*name {
+                    "Num.bitwise_and" => Bits::And,
+                    "Num.bitwise_or" => Bits::Or,
+                    "Num.bitwise_xor" => Bits::Xor,
+                    "Num.shift_left_by" => Bits::ShiftLeft,
+                    "Num.shift_right_by" => Bits::ShiftRight,
+                    _ => Bits::ShiftRightZf,
+                };
+                Ok(self.builder.emit(Type::I64, Op::Bits(op, a, b)))
+            }
+            "Num.bitwise_not" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.bitwise_not`"));
+                };
+                let a = self.value(a)?;
+                if self.builder.ty(a) != Type::I64 {
+                    return Err(Refusal::new("a bit operation on R numbers"));
+                }
+                let ones = self.builder.emit(Type::I64, Op::Const(Constant::I64(-1)));
+                Ok(self.builder.emit(Type::I64, Op::Bits(Bits::Xor, a, ones)))
+            }
+            "Num.compare" => {
+                let [a, b] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.compare`"));
+                };
+                let a = self.value(a)?;
+                let b = self.value(b)?;
+                self.compare_numbers(a, b)
+            }
+            "Num.is_nan" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.is_nan`"));
+                };
+                let a = self.value(a)?;
+                if self.builder.ty(a) != Type::Dbl {
+                    return Err(Refusal::new(
+                        "a `Num.is_nan` of something other than an F64",
+                    ));
+                }
+                Ok(self.builder.emit(Type::Bool, Op::IsNan(a)))
+            }
             "Num.sqrt" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `Num.sqrt`"));
@@ -2528,6 +2618,7 @@ impl Lowering<'_> {
             "List.append" => self.append(&arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
+            ".ry_update" => self.update(&arguments),
             "$" => {
                 let [object, field] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `$`"));
@@ -3014,6 +3105,49 @@ impl Lowering<'_> {
         fields.sort_by_key(|&(slot, _)| slot);
         let fields: SmallVec<[Local; 4]> = fields.iter().map(|&(_, field)| field).collect();
         self.boxed(layout, tag.is_some(), &fields)
+    }
+
+    /// `(..record, name = value, ...)`: a new record with the base's fields, the named ones
+    /// replaced. A later value for the same name wins, as in the interpreter.
+    unsafe fn update(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let Some(((None, base), fields)) = arguments.items.split_first() else {
+            return Err(Refusal::new("a malformed record update"));
+        };
+        let base = self.value(*base)?;
+        let Type::Record(shape) = self.builder.ty(base) else {
+            return Err(Refusal::new("an update of something other than a record"));
+        };
+        let layout = shapes::shape(shape).layout;
+        let names: SmallVec<[Sexp; 4]> = interp::heap()
+            .layouts
+            .get(layout)
+            .map(|layout| layout.names().iter().copied().collect())
+            .ok_or(Refusal::new("a record without a layout"))?;
+        let mut replaced: SmallVec<[Option<Local>; 4]> = SmallVec::from_elem(None, names.len());
+        for (name, value) in fields {
+            let name = name
+                .as_deref()
+                .ok_or(Refusal::new("a record update field without a name"))?;
+            let symbol = rvalues::install(name).map_err(|_| Refusal::new("a field name"))?;
+            let index = names
+                .iter()
+                .position(|&field| field == symbol)
+                .ok_or(Refusal::new(
+                    "an update of a field the record does not have",
+                ))?;
+            let value = self.value(*value)?;
+            if let Some(slot) = replaced.get_mut(index) {
+                *slot = Some(value);
+            }
+        }
+        let mut values: SmallVec<[Local; 4]> = SmallVec::new();
+        for (index, replacement) in replaced.into_iter().enumerate() {
+            values.push(match replacement {
+                Some(value) => value,
+                None => self.field(base, shape, index)?,
+            });
+        }
+        self.boxed(layout, false, &values)
     }
 
     /// A new box of `layout` holding `fields` in slot order, a tag when `tagged`.
@@ -3774,7 +3908,7 @@ impl Lowering<'_> {
         let ty = self.builder.ty(value);
         let keeps_integers = matches!(op, Math::Neg | Math::Abs);
         match ty {
-            Type::I64 if op == Math::Neg => {
+            Type::I64 if keeps_integers => {
                 Ok(self.builder.emit(Type::I64, Op::Math(op, Item::I64, value)))
             }
             Type::Int if keeps_integers => {
@@ -3813,6 +3947,65 @@ impl Lowering<'_> {
     /// `Num.min(a, b)` or `Num.max(a, b)`. With an `I64` both are `I64`s; two R integers stay
     /// integers, and otherwise both are doubles. The first wins a tie, and `NA` or `NaN` is an
     /// error the interpreter raises.
+    /// `Num.compare(a, b)`: `:LT`, `:EQ` or `:GT`. Two `I64`s, or an `I64` and an R number that
+    /// converts exactly, compare as integers, and two R numbers as doubles; the library refuses
+    /// `NaN` and `NA`.
+    unsafe fn compare_numbers(&mut self, a: Local, b: Local) -> Result<Local, Refusal> {
+        let item = match (self.builder.ty(a), self.builder.ty(b)) {
+            (Type::I64, _) | (_, Type::I64) => Item::I64,
+            (Type::Int | Type::Dbl, Type::Int | Type::Dbl) => Item::Dbl,
+            _ => {
+                return Err(Refusal::new(
+                    "a `Num.compare` of something other than numbers",
+                ));
+            }
+        };
+        let (a, b) = if item == Item::I64 {
+            (self.to_i64(a)?, self.to_i64(b)?)
+        } else {
+            let (a, b) = (self.as_double(a)?, self.as_double(b)?);
+            self.fail_if_nan(a);
+            self.fail_if_nan(b);
+            (a, b)
+        };
+        let less = self.tag("LT", &[])?;
+        let equal = self.tag("EQ", &[])?;
+        let greater = self.tag("GT", &[])?;
+        let union = [less, equal, greater]
+            .iter()
+            .try_fold(None, |union: Option<Type>, &tag| {
+                let ty = self.builder.ty(tag);
+                match union {
+                    None => Some(Some(ty)),
+                    Some(union) => joined(union, ty).map(Some),
+                }
+            })
+            .flatten()
+            .ok_or(Refusal::new("a comparison result"))?;
+        let result = self.builder.local(union);
+        let join = self.builder.block();
+        for (condition, tag) in [(Compare::Lt, less), (Compare::Gt, greater)] {
+            let test = self
+                .builder
+                .emit(Type::Lgl, Op::Compare(condition, item, a, b));
+            let test = self.builder.emit(Type::Bool, Op::Truth(test));
+            let (taken, next) = (self.builder.block(), self.builder.block());
+            self.builder.terminate(Terminator::Branch {
+                condition: test,
+                then: taken,
+                otherwise: next,
+            });
+            self.builder.switch_to(taken);
+            self.builder.push(Some(result), Op::Copy(tag));
+            self.builder.terminate(Terminator::Jump(join));
+            self.builder.switch_to(next);
+        }
+        self.builder.push(Some(result), Op::Copy(equal));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        Ok(result)
+    }
+
     unsafe fn extreme(&mut self, maximum: bool, a: Local, b: Local) -> Result<Local, Refusal> {
         let op = if maximum { Arith::Max } else { Arith::Min };
         match (self.builder.ty(a), self.builder.ty(b)) {
