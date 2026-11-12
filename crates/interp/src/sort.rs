@@ -2634,7 +2634,8 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         }
         SexpType::String => {
             length(x) == length(y)
-                && (0..length(x)).all(|index| chars_equal(x.element(index), y.element(index)))
+                && (0..length(x))
+                    .all(|index| values::same_string(x.element(index), y.element(index)))
         }
         SexpType::Raw => values::raws(x) == values::raws(y),
         SexpType::I64 => x.slice::<i64>() == y.slice::<i64>(),
@@ -2686,7 +2687,7 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         SexpType::ExternalPtr => {
             !flags.external_pointer_as_reference && x.external_address() == y.external_address()
         }
-        SexpType::Char => chars_equal(x, y),
+        SexpType::Char => values::same_string(x, y),
         SexpType::Object => true,
         SexpType::Record
             if matches!(records::native_kind(x), NativeKind::Dict | NativeKind::Set) =>
@@ -2806,16 +2807,6 @@ fn reals_identical(left: f64, right: f64, flags: &IdenticalFlags) -> bool {
     } else {
         left.to_bits() == right.to_bits()
     }
-}
-
-/// Whether two `CHARSXP`s hold the same string. The string cache makes equal strings of one
-/// encoding the same object, so only strings of different encodings need their text compared.
-unsafe fn chars_equal(left: Sexp, right: Sexp) -> bool {
-    if left == right {
-        return true;
-    }
-    let na = na_string();
-    left != na && right != na && char_str(left) == char_str(right)
 }
 
 /// `.Internal(merge(xinds, yinds, all.x, all.y))`: `merge.data.frame` codes each row by its key's
