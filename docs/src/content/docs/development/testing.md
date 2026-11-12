@@ -428,6 +428,22 @@ listed failure as `known` without its diff and ends with one line per engine:
 ry-jit-gctorture: 409 passed, 16 failed (16 known, 0 new), 0 skipped
 ```
 
+A crash under a gctorture engine (`ry-gctorture`, `ry-gctorture-young` or `ry-jit-gctorture`) can
+depend on the host or on timing, because it depends on where the collector happens to run. For
+such an entry, `intermittent = true` makes a passing case not fail the run. The case prints as
+`ok ... (listed as intermittent)`, counts as passed, and is tallied on its own line:
+
+```
+ok      cases/print__deparse_undefined_s4_class.R [ry-jit-gctorture] (listed as intermittent)
+known   cases/base__match_arg_native.R [ry-jit-gctorture]: aborts: after a deopt exit, ... (area jit)
+ry-jit-gctorture: 1 passed, 1 failed (1 known, 0 new), 0 skipped
+ry-jit-gctorture: intermittent, passed here: 1
+```
+
+A run where it fails reports it as known. The oracle refuses `intermittent` under any other
+engine, because a failure there reproduces on every host. A beta release requires the file to be
+empty, intermittent entries included.
+
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
 a case needs a package that is not installed (a case names its packages in a leading
 `# oracle: requires` comment). It lists each such case and exits 1. Install the packages into the
@@ -444,8 +460,8 @@ PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package)
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
-The oracle refuses a file whose entry names an unknown engine, a missing case, or the same case and
-engine twice, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+The oracle refuses a file whose entry names an unknown engine, a missing case, the same case and
+engine twice, or `intermittent` outside the gctorture engines, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
 
 ### The table engine
 
@@ -475,6 +491,16 @@ the executable's directory, its base R tree with every package's `.ryc`, ry's ca
 the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
+
+Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
+loads only into the runtime build that wrote it, and any other build silently ignores it, so that
+build starts on the slow path and runs the package without its compiled code. A start rewrites a
+stale start-up image and the base packages' images, but nothing rewrites the recommended packages'
+images except `just base-r`, or a package library's except reinstalling the package. Two builds
+that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
+therefore refuses to start when a binary under test would load a code image another build wrote, or
+when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
+`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with

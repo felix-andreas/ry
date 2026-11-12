@@ -354,15 +354,36 @@ impl StringTable {
     /// a growth step taken while the old slots are still live briefly costs both. Each entry's
     /// hash is read from its string, in slot order, so the reads are independent and overlap.
     unsafe fn rebuild(&mut self) {
+        let old = std::mem::take(&mut self.slots);
+        unsafe {
+            self.place(
+                old.into_iter()
+                    .filter(|&slot| slot != EMPTY && slot != TOMBSTONE),
+            )
+        };
+    }
+
+    /// Rebuilds the table with its entries placed in address order, so that where each entry
+    /// lands depends only on which strings are live and not on the order they were interned or
+    /// removed in. An image's intern table is then the same for the same live strings.
+    pub unsafe fn canonicalize(&mut self) {
+        let mut live: Vec<u64> = self
+            .slots
+            .iter()
+            .copied()
+            .filter(|&slot| slot != EMPTY && slot != TOMBSTONE)
+            .collect();
+        live.sort_unstable_by_key(|&slot| slot & ADDRESS_MASK);
+        unsafe { self.place(live) };
+    }
+
+    unsafe fn place(&mut self, live: impl IntoIterator<Item = u64>) {
         let wanted = ((self.len + 1) * 8 / 5)
             .next_power_of_two()
             .max(INITIAL_SLOTS);
-        let old = std::mem::replace(&mut self.slots, vec![EMPTY; wanted]);
+        self.slots = vec![EMPTY; wanted];
         let mask = wanted - 1;
-        for slot in old {
-            if slot == EMPTY || slot == TOMBSTONE {
-                continue;
-            }
+        for slot in live {
             let hash = unsafe { unpack(slot).char_hash() };
             let mut index = home(hash, mask);
             while self.slots[index] != EMPTY {

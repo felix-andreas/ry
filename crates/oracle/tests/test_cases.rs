@@ -9,11 +9,11 @@
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
-        check_build, diff, engine_from_environment, expected_path, find_cases, gnu_r_available,
-        gnu_r_build, installed_packages, known_failure, known_failures,
-        libraries_ahead_of_reference, parse, render, runnable_cases, ry_runtime_available,
-        write_build,
+        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine, Verdict,
+        check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
+        gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
+        libraries_ahead_of_reference, parse, parse_known_failures, render, runnable_cases,
+        ry_runtime_available, verdict, write_build,
     },
     std::{
         ffi::OsStr,
@@ -131,14 +131,19 @@ fn second_engine_matches_gnu_r() {
                     .map(|difference| format!("{}\n{difference}", case.display()))
             }
         };
-        match (failure, known_failure(&known, &case, &name)) {
-            (Some(_), Some(entry)) => eprintln!("known {}: {}", case.display(), entry.reason),
-            (Some(failure), None) => failures.push(failure),
-            (None, Some(_)) => failures.push(format!(
+        let entry = known_failure(&known, &case, &name);
+        match verdict(failure.is_some(), entry) {
+            Verdict::Known => {
+                if let Some(entry) = entry {
+                    eprintln!("known {}: {}", case.display(), entry.reason);
+                }
+            }
+            Verdict::New => failures.extend(failure),
+            Verdict::ListedButPassing => failures.push(format!(
                 "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
                 case.display()
             )),
-            (None, None) => {}
+            Verdict::Passed | Verdict::IntermittentPassed => {}
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -149,6 +154,75 @@ fn second_engine_matches_gnu_r() {
 fn known_failures_are_valid() {
     if let Err(error) = known_failures() {
         panic!("{error}");
+    }
+}
+
+/// A crash that depends on the host or on timing is listed as intermittent, and its case passing
+/// does not fail the run, while any other listed case that passes does, so its fix deletes it.
+#[test]
+fn a_passing_intermittent_entry_does_not_fail_the_run() {
+    let known = parse_known_failures(
+        r#"
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts under the collector on some hosts"
+intermittent = true
+
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-gctorture"
+area = "gc"
+reason = "aborts under the collector"
+"#,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let case = case_directory().join("base__match_arg_native.R");
+    let intermittent = known_failure(&known, &case, "ry-jit-gctorture");
+    let plain = known_failure(&known, &case, "ry-gctorture");
+
+    assert_eq!(verdict(false, intermittent), Verdict::IntermittentPassed);
+    assert!(!fails_run(verdict(false, intermittent)));
+    assert_eq!(verdict(true, intermittent), Verdict::Known);
+    assert!(!fails_run(verdict(true, intermittent)));
+
+    assert_eq!(verdict(false, plain), Verdict::ListedButPassing);
+    assert!(fails_run(verdict(false, plain)));
+    assert_eq!(verdict(true, plain), Verdict::Known);
+    assert!(!fails_run(verdict(true, plain)));
+
+    assert!(fails_run(verdict(true, None)));
+    assert!(!fails_run(verdict(false, None)));
+}
+
+/// Only a collector-stress engine's crash may be intermittent: a failure under any other engine
+/// reproduces on every host, so the file refuses the mark there.
+#[test]
+fn intermittent_is_refused_outside_the_gctorture_engines() {
+    let entry = |engine: &str| {
+        format!(
+            "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"{engine}\"\n\
+             area = \"jit\"\nreason = \"crashes\"\nintermittent = true\n"
+        )
+    };
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for engine in ["ry", "ry-tier0", "ry-jit"] {
+        let error = parse_known_failures(&entry(engine), directory)
+            .expect_err("an intermittent entry under an engine without gctorture");
+        assert!(
+            error.contains(&format!(
+                "`base__match_arg_native` under `{engine}` is marked intermittent, which only an \
+                 entry under ry-gctorture, ry-gctorture-young, ry-jit-gctorture may be"
+            )),
+            "{error}"
+        );
+    }
+    for engine in ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"] {
+        if let Err(error) = parse_known_failures(&entry(engine), directory) {
+            panic!("{error}");
+        }
     }
 }
 
