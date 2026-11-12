@@ -775,7 +775,7 @@ pub(crate) unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
         return Ok(nil());
     }
     let from_last = flag(call.arg(2), "'fromLast' must be TRUE or FALSE")?;
-    let duplicated = duplicated_elements(x, call.arg(1), from_last, "unique")?;
+    let duplicated = duplicated_elements(x, call.arg(1), from_last, false, "unique")?;
     let kept = duplicated.len - duplicated.count();
     crate::subset::select_positions(x, duplicated.clear_positions(), kept)
 }
@@ -786,7 +786,7 @@ unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
     if x == nil() {
         return alloc(SexpType::Logical, 0);
     }
-    let duplicated = duplicated_elements(x, call.arg(1), from_last, "duplicated")?;
+    let duplicated = duplicated_elements(x, call.arg(1), from_last, false, "duplicated")?;
     let result = values::alloc_uninit(SexpType::Logical, duplicated.len)?;
     for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
         *slot = i32::from(duplicated.contains(index));
@@ -800,7 +800,7 @@ unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
     if x == nil() {
         return values::scalar_integer(0);
     }
-    let duplicated = duplicated_elements(x, call.arg(1), from_last, "anyDuplicated")?;
+    let duplicated = duplicated_elements(x, call.arg(1), from_last, true, "anyDuplicated")?;
     let found = if from_last {
         duplicated.last()
     } else {
@@ -2283,11 +2283,13 @@ unsafe fn incomparable_keys<'a>(incomparables: Sexp, kind: SexpType) -> R<Option
 }
 
 /// Which elements of `x` repeat an earlier one (a later one with `from_last`). Lists compare
-/// their elements with `identical()`.
+/// their elements with `identical()`. With `first_only`, only the first duplicate in visiting
+/// order is sure to be flagged, and a hashed scan may stop there.
 unsafe fn duplicated_elements(
     x: Sexp,
     incomparables: Sexp,
     from_last: bool,
+    first_only: bool,
     what: &str,
 ) -> R<Bits> {
     if !x.kind().is_vector() {
@@ -2303,7 +2305,7 @@ unsafe fn duplicated_elements(
     };
     if incomparables.is_none()
         && let Some(keys) = plain_keys(x)
-        && let Some(flags) = duplicate_flags(keys, from_last)
+        && let Some(flags) = duplicate_flags(keys, from_last, first_only)
     {
         return Ok(flags);
     }
@@ -2420,8 +2422,9 @@ unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mu
 }
 
 /// Which elements repeat an earlier one (a later one with `from_last`), or `None` when strings
-/// that are not ASCII make pointer equality inexact.
-unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Option<Bits> {
+/// that are not ASCII make pointer equality inexact. `first_only` as for
+/// [`duplicated_elements`].
+unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool, first_only: bool) -> Option<Bits> {
     match keys {
         PlainKeys::Integer(values) => {
             if let Some(range) = DenseRange::of(values, values.len()) {
@@ -2430,13 +2433,15 @@ unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool) -> Option<Bits> 
                     !seen.insert(range.slot(values[index]))
                 }));
             }
-            hashed_duplicates(values.len(), from_last, |index| values[index])
+            hashed_duplicates(values.len(), from_last, first_only, |index| values[index])
         }
         PlainKeys::Real(values) => {
-            hashed_duplicates(values.len(), from_last, |index| real_key(values[index]))
+            hashed_duplicates(values.len(), from_last, first_only, |index| {
+                real_key(values[index])
+            })
         }
         PlainKeys::Interned(strings) => {
-            hashed_duplicates(strings.len(), from_last, |index| strings[index])
+            hashed_duplicates(strings.len(), from_last, first_only, |index| strings[index])
         }
     }
 }
@@ -2496,17 +2501,16 @@ fn hashed_matches<K: TableKey>(
     x_key: impl Fn(usize) -> K,
     out: &mut [i32],
 ) -> bool {
-    let mut table = PositionTable::new(table_count);
-    let mut probe = table.probe();
+    let mut table = PositionTable::new();
     for index in 0..table_count {
         let key = table_key(index);
-        if probe.find_or_insert(key, index, &table_key).is_none() && !key.exact() {
+        if table.find_or_insert(key, index, &table_key).is_none() && !key.exact() {
             return false;
         }
     }
     for (index, position) in out.iter_mut().enumerate() {
         let key = x_key(index);
-        *position = match probe.find(key, &table_key) {
+        *position = match table.find(key, &table_key) {
             Some(found) => found as i32 + 1,
             None if key.exact() => 0,
             None => return false,
@@ -2515,30 +2519,46 @@ fn hashed_matches<K: TableKey>(
     true
 }
 
-/// `None` when a distinct key is not [`TableKey::exact`].
+/// `None` when a distinct key is not [`TableKey::exact`]. Each word of flags is built in a
+/// register over its 64 elements and stored once. With `first_only` the scan stops after the
+/// first word, in visiting order, that holds a duplicate, which is all `anyDuplicated()` reads.
 fn hashed_duplicates<K: TableKey>(
     count: usize,
     from_last: bool,
+    first_only: bool,
     key_at: impl Fn(usize) -> K,
 ) -> Option<Bits> {
-    let mut table = PositionTable::new(count);
-    let mut probe = table.probe();
+    let mut table = PositionTable::new();
     let mut duplicated = Bits::new(count);
-    let mut visit = |index: usize| {
+    let mut flag = |index: usize, base: usize| -> Option<u64> {
         let key = key_at(index);
-        if probe.find_or_insert(key, index, &key_at).is_some() {
-            duplicated.insert(index);
-            true
-        } else {
-            key.exact()
+        match table.find_or_insert(key, index, &key_at) {
+            Some(_) => Some(1 << (index - base)),
+            None if key.exact() => Some(0),
+            None => None,
         }
     };
-    let complete = if from_last {
-        (0..count).rev().all(&mut visit)
-    } else {
-        (0..count).all(&mut visit)
-    };
-    complete.then_some(duplicated)
+    let words = duplicated.words.len();
+    for step in 0..words {
+        let word_index = if from_last { words - 1 - step } else { step };
+        let base = word_index * 64;
+        let span = base..(base + 64).min(count);
+        let mut word = 0;
+        if from_last {
+            for index in span.rev() {
+                word |= flag(index, base)?;
+            }
+        } else {
+            for index in span {
+                word |= flag(index, base)?;
+            }
+        }
+        duplicated.words[word_index] = word;
+        if first_only && word != 0 {
+            break;
+        }
+    }
+    Some(duplicated)
 }
 
 /// `flag(index)` for each of `count` indices, visited first to last or, with `from_last`, last
@@ -2679,41 +2699,26 @@ impl TableKey for Sexp {
 }
 
 /// An open-addressing hash table from keys to the first position that holds them. Slots store
-/// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes and
-/// a table over `n` keys is at most `16 n` bytes. Probing is linear over a power-of-two array at
-/// most half full, and the slot comes from the hash's high bits. A loop borrows the slots once
-/// through [`PositionTable::probe`], so each lookup indexes a plain slice.
+/// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes.
+/// Probing is linear over a power-of-two array kept at most half full, and the slot comes from
+/// the hash's high bits. The table starts with 32 slots on the stack and doubles as distinct
+/// keys arrive, so its size follows the distinct keys, not the elements: a million strings with
+/// four distinct values probe 32 slots that stay in L1.
 struct PositionTable {
-    /// A small table, the usual `x %in% c("a", "b")`, stays on the stack.
     slots: SmallVec<[u32; 32]>,
     shift: u32,
+    filled: usize,
 }
 
 impl PositionTable {
-    fn new(count: usize) -> Self {
-        let bits = (2 * count.max(8)).next_power_of_two().trailing_zeros();
+    fn new() -> Self {
         Self {
-            slots: smallvec![0; 1 << bits],
-            shift: 64 - bits,
+            slots: smallvec![0; 32],
+            shift: 64 - 5,
+            filled: 0,
         }
     }
 
-    fn probe(&mut self) -> Probe<'_> {
-        Probe {
-            mask: self.slots.len() - 1,
-            slots: &mut self.slots,
-            shift: self.shift,
-        }
-    }
-}
-
-struct Probe<'a> {
-    slots: &'a mut [u32],
-    mask: usize,
-    shift: u32,
-}
-
-impl Probe<'_> {
     /// The position of the first key equal to `key`, or `None` after recording `position` for
     /// it.
     fn find_or_insert<K: TableKey>(
@@ -2722,11 +2727,34 @@ impl Probe<'_> {
         position: usize,
         key_at: impl Fn(usize) -> K,
     ) -> Option<usize> {
+        let slots: &mut [u32] = &mut self.slots;
+        let mask = slots.len() - 1;
         let mut slot = (key.table_hash() >> self.shift) as usize;
         loop {
-            let stored = self.slots[slot & self.mask];
+            let stored = slots[slot & mask];
             if stored == 0 {
-                self.slots[slot & self.mask] = position as u32 + 1;
+                break;
+            }
+            if key_at(stored as usize - 1) == key {
+                return Some(stored as usize - 1);
+            }
+            slot += 1;
+        }
+        slots[slot & mask] = position as u32 + 1;
+        self.filled += 1;
+        if 2 * self.filled > self.slots.len() {
+            self.grow(key_at);
+        }
+        None
+    }
+
+    fn find<K: TableKey>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
+        let slots: &[u32] = &self.slots;
+        let mask = slots.len() - 1;
+        let mut slot = (key.table_hash() >> self.shift) as usize;
+        loop {
+            let stored = slots[slot & mask];
+            if stored == 0 {
                 return None;
             }
             if key_at(stored as usize - 1) == key {
@@ -2736,17 +2764,19 @@ impl Probe<'_> {
         }
     }
 
-    fn find<K: TableKey>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
-        let mut slot = (key.table_hash() >> self.shift) as usize;
-        loop {
-            let stored = self.slots[slot & self.mask];
-            if stored == 0 {
-                return None;
+    /// Doubles the slots and reinserts every stored position, whose keys are distinct.
+    #[cold]
+    fn grow<K: TableKey>(&mut self, key_at: impl Fn(usize) -> K) {
+        let doubled = smallvec![0; 2 * self.slots.len()];
+        let old = std::mem::replace(&mut self.slots, doubled);
+        self.shift -= 1;
+        let mask = self.slots.len() - 1;
+        for stored in old.into_iter().filter(|&stored| stored != 0) {
+            let mut slot = (key_at(stored as usize - 1).table_hash() >> self.shift) as usize;
+            while self.slots[slot & mask] != 0 {
+                slot += 1;
             }
-            if key_at(stored as usize - 1) == key {
-                return Some(stored as usize - 1);
-            }
-            slot += 1;
+            self.slots[slot & mask] = stored;
         }
     }
 }

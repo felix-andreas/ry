@@ -30,4 +30,10 @@ print(match(utf8, c("x", latin))); print(duplicated(c(latin, utf8)))
 print(match(c("NA", NA), c(NA, "NA")))
 print(anyDuplicated(c("NA", NA))); print(unique(c(NA, "NA", NA_character_)))
 print(unique(factor(c("b", "a", "b")))); print(match(factor("b"), factor(c("a", "b"))))
+words <- c(as.character(1:200), "70", "150", as.character(201:300))
+reals <- c(as.numeric(1:200) / 4, 70 / 4, 150 / 4, 201:300 / 4)
+for (v in list(words, reals)) {
+  print(anyDuplicated(v)); print(anyDuplicated(v, fromLast = TRUE)); print(which(duplicated(v)))
+  print(which(duplicated(v, fromLast = TRUE))); print(length(unique(v)))
+}
 invisible(NULL)
