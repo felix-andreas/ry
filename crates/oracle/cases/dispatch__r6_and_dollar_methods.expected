@@ -1,0 +1,18 @@
+[stdout]
+| [1] 15
+| [1] 15
+| [1] "Counter" "R6"     
+| [1] "intercepted"
+| [1] "intercepted"
+| [1] 15
+| [1] 12
+| [1] "Loud"    "Counter" "R6"     
+| [1] "frame method" "1"           
+| [1] "frame method"  "global method"
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1
