@@ -56,6 +56,9 @@ libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 heap = { path = "../heap" }
 sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
+# `db_benchmark --polars-streaming` compares ry's kernels with Polars' streaming engine, which the
+# library itself does not use.
+polars = { version = "0.55", default-features = false, features = ["streaming"] }
 
 [[bench]]
 name = "db_benchmark"
