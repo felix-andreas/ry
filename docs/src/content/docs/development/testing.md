@@ -531,8 +531,10 @@ out of benchmark builds, and neither does. Aligning functions to 64 bytes and bl
 `libR.so`'s `.text` by 24 MB (27%), and the control swings the counts as far as before. The
 shipped layout (`tools/layout/optimize.sh`, applied to `libR` for this table) holds still under
 the control only when both builds reuse one training profile. A build that trains its own
-profile, as every release does, gets a different function order and the swing returns. Benchmark
-builds therefore stay plain release builds, and the control is the test for a layout effect.
+profile, as every release does, gets a different function order and the swing returns. The builds
+that judge a change therefore stay plain release builds, and the control is the test for a layout
+effect. The published suites measure the shipped layout itself: they are recorded on the release
+archive (`bench.py --release`, see [Benchmarks](/benchmarks/#how-it-was-measured)).
 
 Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
 loads only into the runtime build that wrote it, and any other build silently ignores it, so that
@@ -542,7 +544,9 @@ images except `just base-r`, or a package library's except reinstalling the pack
 that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
 therefore refuses to start when a binary under test would load a code image another build wrote, or
 when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
-`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it.
+`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it. A release archive
+under `--release` extracts its runtime and base R into a cache directory of its own, so it loads
+the images it shipped, and any image in a package library that another build wrote stops the run.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
