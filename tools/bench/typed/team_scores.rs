@@ -1,7 +1,10 @@
+// Parses 60,000 "name,age,score,team" rows, rejects the invalid ones, and totals the valid
+// scores per team in a hash map. A parsed person borrows its name and team from its row.
+mod harness;
+
+use harness::measure;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::hint::black_box;
-use std::time::Instant;
 
 #[allow(dead_code)]
 struct Person<'a> {
@@ -52,21 +55,4 @@ fn main() {
         })
         .collect();
     measure("team_scores", || team_scores(black_box(&rows)));
-}
-
-fn measure<T: PartialEq + Display>(name: &str, mut run: impl FnMut() -> T) {
-    let started = Instant::now();
-    let value = black_box(run());
-    let cold = started.elapsed().as_secs_f64();
-    let mut best = f64::INFINITY;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let again = black_box(run());
-        best = best.min(started.elapsed().as_secs_f64());
-        if again != value {
-            eprintln!("the benchmark is not deterministic");
-            std::process::exit(1);
-        }
-    }
-    println!("{name} {value} {best:.4} {cold:.4}");
 }
