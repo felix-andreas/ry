@@ -2296,7 +2296,7 @@ impl Heap {
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
         if !env.has_gp(gp::FUNCTION_FRAME) || symbol.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
-            bump_symbol_epoch(symbol);
+            bump_symbol_epoch(&mut self.enclosure_epoch, symbol);
         }
         if self.is_symbol_frame(env) {
             self.store(symbol, symbol.cdr(), cell);
@@ -2383,7 +2383,7 @@ impl Heap {
         for binding in bindings {
             if binding.symbol.has_gp(gp::WATCHED) {
                 self.binding_epoch += 1;
-                bump_symbol_epoch(binding.symbol);
+                bump_symbol_epoch(&mut self.enclosure_epoch, binding.symbol);
             }
         }
         Ok(())
@@ -2400,7 +2400,7 @@ impl Heap {
             // A watched cell is one some lookup was compiled against, and compiled code checks
             // its speculations by the symbol's stamp alone while that stamp stays put, so a new
             // value has to move the stamp.
-            bump_symbol_epoch(cell.car());
+            bump_symbol_epoch(&mut self.enclosure_epoch, cell.car());
         }
         self.store(cell, cell.cdr(), value);
         cell.set_cdr_unbarriered(value);
@@ -2635,7 +2635,7 @@ impl Heap {
             return Err(HeapError::LockedEnvironmentRemove);
         }
         self.binding_epoch += 1;
-        bump_symbol_epoch(symbol);
+        bump_symbol_epoch(&mut self.enclosure_epoch, symbol);
         if self.is_symbol_frame(env) {
             let cell = symbol.cdr();
             if cell.kind() != SexpType::Binding {
@@ -2713,7 +2713,7 @@ impl Heap {
         }
         for env in differing() {
             for symbol in (*bindings(env)).symbols() {
-                bump_symbol_epoch(symbol);
+                bump_symbol_epoch(&mut self.enclosure_epoch, symbol);
             }
         }
         true
@@ -2733,7 +2733,16 @@ impl Heap {
     /// what a walk for `symbol` finds (see [`Heap::set_enclosure`]), so a cell cached under an
     /// unchanged stamp is still the one a fresh walk would find.
     pub unsafe fn lookup_stamp(&self, symbol: Sexp) -> u64 {
-        symbol.symbol_payload().epoch.get() + self.enclosure_epoch
+        u64::from(symbol.symbol_payload().epoch.get()) + self.enclosure_epoch
+    }
+
+    /// Raises `symbol`'s own share of its lookup stamp to `epoch`, so a test can reach the wrap
+    /// of that share without four billion definitions. Lowering it would let a stamp repeat.
+    #[doc(hidden)]
+    pub unsafe fn raise_symbol_epoch(&mut self, symbol: Sexp, epoch: u32) {
+        let share = &symbol.symbol_payload().epoch;
+        assert!(epoch >= share.get(), "a symbol's stamp share only grows");
+        share.set(epoch);
     }
 
     /// The first binding of `symbol` on the search path, from the global environment to the
@@ -2763,6 +2772,16 @@ impl Heap {
             env = env.enclosure();
         }
         None
+    }
+
+    /// The symbol's row in the interpreter's S3 method table, if it has one.
+    pub unsafe fn method_row(&self, symbol: Sexp) -> Option<u32> {
+        symbol.symbol_payload().method_row.get().checked_sub(1)
+    }
+
+    /// Gives `symbol` the row `row` in the interpreter's S3 method table.
+    pub unsafe fn set_method_row(&self, symbol: Sexp, row: u32) {
+        symbol.symbol_payload().method_row.set(row + 1);
     }
 
     /// See the field: an unchanged epoch means no binding outside a function frame appeared or
@@ -4958,9 +4977,17 @@ unsafe fn mark_enclosing(env: Sexp) {
     }
 }
 
-unsafe fn bump_symbol_epoch(symbol: Sexp) {
+/// Moves `symbol`'s lookup stamp. When its own share wraps, the heap's share takes the carry, so
+/// the stamp still grows and never repeats a value a cache may hold.
+pub(crate) unsafe fn bump_symbol_epoch(enclosure_epoch: &mut u64, symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
-    epoch.set(epoch.get() + 1);
+    match epoch.get().checked_add(1) {
+        Some(next) => epoch.set(next),
+        None => {
+            epoch.set(0);
+            *enclosure_epoch += 1 << 32;
+        }
+    }
 }
 
 /// Writes a fresh triple-shaped object's three fields, which a fresh object needs no write
@@ -4981,6 +5008,7 @@ unsafe fn fill_triple(object: Sexp, kind: SexpType, first: Sexp, second: Sexp, t
         std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
         std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
         std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
+        std::ptr::addr_of_mut!((*symbol).method_row).write(Cell::new(0));
     }
 }
 

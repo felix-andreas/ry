@@ -1,0 +1,61 @@
+# Typed code builds lists from literals natively: `[a, b]`, and an empty `[]` that a loop of
+# `List.append` fills. An empty list of records takes its item type from the first record
+# appended to it; code that reads its items before that runs in the interpreter, with a reason.
+
+requires ry-runtime
+
+file lists.R
+| alias Point = Record{x: F64, y: F64}
+|
+| points <- function(n: I64) -> F64 {
+|   built <- []
+|   for (i in List.range(1, n)) {
+|     built <- List.append(built, (x = Num.to_f64(i), y = 0.5f64))
+|   }
+|   List.sum(List.map(built, \(p: Point) p$x + p$y))
+| }
+|
+| squares <- function(n: I64) -> List<I64> {
+|   out <- []
+|   for (i in List.range(1, n)) out <- List.append(out, i * i)
+|   out
+| }
+|
+| pair <- function(a: F64) -> List<F64> [a, a * 2, 3f64]
+|
+| words <- function(n: I64) -> List<Str> {
+|   out <- ["start"]
+|   for (i in List.range(1, n)) out <- List.append(out, f"w{i}")
+|   out
+| }
+|
+| print(points(4))
+| print(squares(4))
+| print(typeof(squares(0)))
+| print(pair(1.5))
+| print(words(2))
+|
+| nothing <- function(n: I64) -> List<Point> {
+|   out <- []
+|   out
+| }
+| print(typeof(nothing(1)))
+|
+| early <- function(n: I64) -> I64 {
+|   out <- []
+|   total <- 0
+|   for (i in List.range(1, n)) {
+|     for (p in out) total <- total + Num.round(p$x)
+|     out <- List.append(out, (x = Num.to_f64(i), y = 0f64))
+|   }
+|   total
+| }
+| print(early(3))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry lists.R
+expect exit 0
+expect stdout "[1] 12\n[1i64, 4i64, 9i64, 16i64]\n[1] \"I64\"\n[1.5, 3, 3]\n[\"start\", \"w1\", \"w2\"]\n[1] \"list\"\n4i64"
+expect stderr "typed: compiled for [I64] -> Vector { item: I64, array: true }"
+expect stderr "typed: compiled for [Dbl] -> Vector { item: Dbl, array: true }"
+expect stderr "typed: `early` runs in the interpreter: no code for [I64]: an empty list read before anything shows its item type"

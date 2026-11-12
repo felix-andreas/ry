@@ -469,10 +469,18 @@ pub(crate) struct TripleObject {
 #[repr(C)]
 pub(crate) struct SymbolObject {
     pub triple: TripleObject,
-    pub epoch: Cell<u64>,
+    /// The symbol's share of its lookup stamp. It is 32 bits so that it and `method_row` share
+    /// one word and a symbol fits a 64-byte slot; a wrap adds 2^32 to the heap's share instead,
+    /// so every symbol's stamp only grows ([`crate::Heap::lookup_stamp`]).
+    pub epoch: Cell<u32>,
+    /// One plus the symbol's row in the interpreter's table of S3 method resolutions, or 0 for
+    /// none. The table lives outside the heap, so a loaded image starts without rows.
+    pub method_row: Cell<u32>,
     pub global_cell: Cell<Option<Sexp>>,
     pub global_stamp: Cell<u64>,
 }
+
+const _: () = assert!(size_of::<SymbolObject>() == 64);
 
 #[repr(C)]
 pub(crate) struct EnvironmentObject {
@@ -1300,9 +1308,9 @@ impl Sexp {
     pub(crate) unsafe fn reset_symbol_caches(self) {
         unsafe {
             let symbol = self.symbol_payload();
-            symbol.epoch.set(symbol.epoch.get() + 1);
             symbol.global_cell.set(None);
             symbol.global_stamp.set(u64::MAX);
+            symbol.method_row.set(0);
         }
     }
 
