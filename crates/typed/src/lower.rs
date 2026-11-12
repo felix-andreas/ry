@@ -1563,7 +1563,6 @@ impl Lowering<'_> {
         Ok(result)
     }
 
-    /// The loop header that checks for an interrupt and the condition block after it.
     /// Opens a loop over the positions of `held`, a list the caller holds for the whole loop,
     /// and leaves the builder in the loop's body.
     fn positions(&mut self, held: Local) -> Positions {
@@ -1620,6 +1619,7 @@ impl Lowering<'_> {
         self.builder.switch_to(exit);
     }
 
+    /// Opens the block a loop jumps back to, which checks for an interrupt first.
     fn loop_header(&mut self) -> BlockId {
         let header = self.builder.block();
         self.builder.terminate(Terminator::Jump(header));
@@ -3616,9 +3616,7 @@ impl Lowering<'_> {
         let (positions, element) = match (range, list) {
             (Some((start, end, _)), _) => {
                 let positions = self.count_up(start, end);
-                let element = self
-                    .builder
-                    .emit(Type::I64, Op::Copy(positions.counter));
+                let element = self.builder.emit(Type::I64, Op::Copy(positions.counter));
                 (positions, element)
             }
             (None, Some(list)) => {

@@ -630,9 +630,10 @@ impl Op {
             Const(_) | Copy(_) | Compare(..) | Not(_) | And(..) | Or(..) | ToDbl(_)
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
-            | Same(..) | Step(..) | ItemAt(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
-            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
-            | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_) | DictValues(_) => false,
+            | Same(..) | Step(..) | ItemAt(..) | Construct(..) | Field(..) | ShapeOf(_)
+            | ByteCount(_) | Split(..) | Parses(..) | DictContains(..) | DictRemove(..)
+            | Push(..) | Unique(_) | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_)
+            | DictValues(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

@@ -120,8 +120,10 @@ fn unbox_once(function: &mut Function) -> bool {
                 }
             }
         }
-        if let Terminator::Branch { condition: local, .. } | Terminator::Return(local) =
-            body.terminator
+        if let Terminator::Branch {
+            condition: local, ..
+        }
+        | Terminator::Return(local) = body.terminator
             && boxes[local.0 as usize] != NONE
         {
             kept.insert(boxes[local.0 as usize] as usize);
@@ -279,7 +281,11 @@ impl Dominators {
     /// Whether every path from the entry to `block` passes through `dominator`, which holds for
     /// every block when the entry does not reach `block` at all.
     fn dominates(&self, dominator: u32, block: u32) -> bool {
-        let reached = |block: u32| self.immediate.get(block as usize).is_some_and(|&up| up != NONE);
+        let reached = |block: u32| {
+            self.immediate
+                .get(block as usize)
+                .is_some_and(|&up| up != NONE)
+        };
         if !reached(block) {
             return true;
         }

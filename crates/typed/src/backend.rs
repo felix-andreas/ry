@@ -210,15 +210,18 @@ fn frees() -> Result<Frees, Refusal> {
     if let Some(frees) = FREES.get() {
         return Ok(frees);
     }
-    let frees = ssa::with_module(Allocator::Backtracking, |module| -> Result<Frees, Refusal> {
-        let string = preserving(module, address!(values::ry_str_free))?;
-        let object = preserving(module, address!(values::ry_list_free))?;
-        module.finalize()?;
-        Ok(Frees {
-            string: module.address(string),
-            object: module.address(object),
-        })
-    })?;
+    let frees = ssa::with_module(
+        Allocator::Backtracking,
+        |module| -> Result<Frees, Refusal> {
+            let string = preserving(module, address!(values::ry_str_free))?;
+            let object = preserving(module, address!(values::ry_list_free))?;
+            module.finalize()?;
+            Ok(Frees {
+                string: module.address(string),
+                object: module.address(object),
+            })
+        },
+    )?;
     FREES.set(Some(frees));
     Ok(frees)
 }

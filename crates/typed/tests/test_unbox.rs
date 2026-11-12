@@ -74,7 +74,10 @@ fn a_read_sees_the_field_as_it_was_at_the_construction() {
     let variable = builder.emit(Type::Dbl, Op::Copy(Local(0)));
     let record = construct(&mut builder, shape, &[variable, variable]);
     // The variable the box was built from changes before the box is read.
-    builder.push(Some(variable), Op::Math(typed::ir::Math::Neg, Item::Dbl, variable));
+    builder.push(
+        Some(variable),
+        Op::Math(typed::ir::Math::Neg, Item::Dbl, variable),
+    );
     let read = builder.emit(Type::Dbl, Op::Field(record, shape, 0));
     builder.terminate(Terminator::Return(read));
     let mut function = builder.function;

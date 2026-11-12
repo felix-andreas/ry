@@ -40,6 +40,7 @@ use {
         cmp,
         fmt::{self, Write},
         hash::{BuildHasher, Hasher},
+        mem::MaybeUninit,
         ptr::{self, null_mut},
         slice,
         sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -729,6 +730,48 @@ pub unsafe extern "C" fn ry_elementwise(
     0
 }
 
+/// Chunks on the stack, one per row, of which a kernel reads only the rows it has filled.
+/// Declaring them as zeroed arrays would clear every row on every call, which costs more than a
+/// short list's whole program.
+struct Rows<T, const N: usize>(MaybeUninit<[[T; CHUNK]; N]>);
+
+impl<T: Copy, const N: usize> Rows<T, N> {
+    fn new() -> Rows<T, N> {
+        Rows(MaybeUninit::uninit())
+    }
+
+    /// Fills row `row` with copies of `value`.
+    fn fill(&mut self, row: usize, value: T) {
+        assert!(row < N);
+        // SAFETY: the row is inside the array, and writing does not read what was there.
+        unsafe {
+            (self.0.as_mut_ptr() as *mut [T; CHUNK])
+                .add(row)
+                .write([value; CHUNK]);
+        }
+    }
+
+    /// Row `row`, which must be filled.
+    unsafe fn row(&self, row: usize) -> &[T; CHUNK] {
+        debug_assert!(row < N);
+        &*(self.0.as_ptr() as *const [T; CHUNK]).add(row)
+    }
+
+    /// Row `row`, which must be filled, to write.
+    unsafe fn row_mut(&mut self, row: usize) -> &mut [T; CHUNK] {
+        debug_assert!(row < N);
+        &mut *(self.0.as_mut_ptr() as *mut [T; CHUNK]).add(row)
+    }
+
+    /// The first `rows` rows, cleared to zero bytes, which must be a value of `T`.
+    unsafe fn cleared(&mut self, rows: usize) -> &mut [[T; CHUNK]] {
+        assert!(rows <= N);
+        let first = self.0.as_mut_ptr() as *mut [T; CHUNK];
+        ptr::write_bytes(first, 0, rows);
+        slice::from_raw_parts_mut(first, rows)
+    }
+}
+
 /// The operand slice of item chunk `start..start + chunk`: an input list's items, a scalar's
 /// copies, or an earlier step's chunk.
 #[inline(always)]
@@ -736,7 +779,7 @@ unsafe fn operand<'a, T: Copy>(
     index: usize,
     inputs: &[u64],
     lists: u32,
-    scalars: &'a [[T; CHUNK]],
+    scalars: &'a Rows<T, ELEMENTWISE_INPUTS>,
     done: &'a [[T; CHUNK]],
     start: usize,
     chunk: usize,
@@ -747,9 +790,13 @@ unsafe fn operand<'a, T: Copy>(
         let list = inputs[index] as *const List;
         raw_slice(((*list).data as *const T).add(start), chunk)
     } else {
-        &scalars[index][..chunk]
+        &scalars.row(index)[..chunk]
     }
 }
+
+/// One step of a fused program over a chunk: `target[i] = left[i] op right[i]`. False when the
+/// step fails, which hands the call to the interpreter.
+type Step<T> = unsafe fn(u32, &mut [T], &[T], &[T]) -> bool;
 
 unsafe fn elementwise_dbl(
     program: &[u32],
@@ -759,13 +806,19 @@ unsafe fn elementwise_dbl(
     result: *mut List,
     out: *mut u64,
 ) -> u32 {
-    let mut scalars = [[0.0f64; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut step_chunk: Step<f64> = step_dbl_baseline;
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        step_chunk = step_dbl_avx2;
+    }
+    let mut scalars = Rows::<f64, ELEMENTWISE_INPUTS>::new();
     for (index, &word) in inputs.iter().enumerate() {
         if lists & (1 << index) == 0 {
-            scalars[index] = [f64::from_bits(word); CHUNK];
+            scalars.fill(index, f64::from_bits(word));
         }
     }
-    let mut buffers = [[0.0f64; CHUNK]; ELEMENTWISE_STEPS];
+    let mut buffers = Rows::<f64, ELEMENTWISE_STEPS>::new();
+    let buffers = buffers.cleared(program.len());
     let mut total = LongDouble::ZERO;
     let last = program.len() - 1;
     let mut start = 0;
@@ -773,7 +826,12 @@ unsafe fn elementwise_dbl(
         let chunk = CHUNK.min(length - start);
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
-            let target = &mut rest[0][..chunk];
+            // The last step of a program that gives a list writes the list's items.
+            let target = if step == last && !result.is_null() {
+                slice::from_raw_parts_mut(((*result).data as *mut f64).add(start), chunk)
+            } else {
+                &mut rest[0][..chunk]
+            };
             let left = operand(
                 encoded as usize >> 8 & 0xFF,
                 inputs,
@@ -792,38 +850,12 @@ unsafe fn elementwise_dbl(
                 start,
                 chunk,
             );
-            let pairs = target.iter_mut().zip(left.iter().zip(right));
-            let mut lost = false;
-            match encoded & 0xFF {
-                ADD => pairs.for_each(|(slot, (&x, &y))| *slot = x + y),
-                SUB => pairs.for_each(|(slot, (&x, &y))| *slot = x - y),
-                MUL => pairs.for_each(|(slot, (&x, &y))| *slot = x * y),
-                DIV => pairs.for_each(|(slot, (&x, &y))| *slot = x / y),
-                POW => pairs.for_each(|(slot, (&x, &y))| *slot = power(x, y)),
-                MOD => pairs.for_each(|(slot, (&x, &y))| {
-                    // A quotient too large for the remainder to mean anything makes R warn.
-                    lost |= modulus_loses_accuracy(x, y);
-                    *slot = real_modulo(x, y);
-                }),
-                IDIV => pairs.for_each(|(slot, (&x, &y))| *slot = real_integer_divide(x, y)),
-                _ => return 1,
-            }
-            let undefined = target
-                .iter()
-                .fold(false, |found, &value| found | value.is_nan());
-            if lost || undefined {
+            if !step_chunk(encoded & 0xFF, target, left, right) {
                 return 1;
             }
         }
-        let items = &buffers[last][..chunk];
         if result.is_null() {
-            total = add_all(total, items);
-        } else {
-            ptr::copy_nonoverlapping(
-                items.as_ptr(),
-                ((*result).data as *mut f64).add(start),
-                chunk,
-            );
+            total = add_all(total, &buffers[last][..chunk]);
         }
         start += chunk;
     }
@@ -831,6 +863,58 @@ unsafe fn elementwise_dbl(
         *out = (0.0 + total.to_f64()).to_bits();
     }
     0
+}
+
+/// [`step_dbl`] for the instruction set every x86-64 machine has.
+unsafe fn step_dbl_baseline(op: u32, target: &mut [f64], left: &[f64], right: &[f64]) -> bool {
+    step_dbl(op, target, left, right)
+}
+
+/// [`step_dbl`] compiled for AVX2, which works on four doubles at a time where the baseline
+/// instruction set works on two.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn step_dbl_avx2(op: u32, target: &mut [f64], left: &[f64], right: &[f64]) -> bool {
+    step_dbl(op, target, left, right)
+}
+
+/// A step over doubles, which fails on a `NaN` result, an unknown `op`, or a modulus whose
+/// quotient is too large for the remainder to mean anything (R warns there). The slices are
+/// parameters, so the compiler knows they do not overlap and each arm's loop becomes vector
+/// code.
+#[inline(always)]
+fn step_dbl(op: u32, target: &mut [f64], left: &[f64], right: &[f64]) -> bool {
+    #[inline(always)]
+    fn fill(
+        target: &mut [f64],
+        left: &[f64],
+        right: &[f64],
+        combine: impl Fn(f64, f64) -> f64,
+    ) -> bool {
+        let mut undefined = false;
+        for (slot, (&x, &y)) in target.iter_mut().zip(left.iter().zip(right)) {
+            let value = combine(x, y);
+            undefined |= value.is_nan();
+            *slot = value;
+        }
+        !undefined
+    }
+    match op {
+        ADD => fill(target, left, right, |x, y| x + y),
+        SUB => fill(target, left, right, |x, y| x - y),
+        MUL => fill(target, left, right, |x, y| x * y),
+        DIV => fill(target, left, right, |x, y| x / y),
+        POW => fill(target, left, right, power),
+        MOD => {
+            let lost = left
+                .iter()
+                .zip(right)
+                .any(|(&x, &y)| modulus_loses_accuracy(x, y));
+            !lost && fill(target, left, right, real_modulo)
+        }
+        IDIV => fill(target, left, right, real_integer_divide),
+        _ => false,
+    }
 }
 
 unsafe fn elementwise_i64(
@@ -841,13 +925,19 @@ unsafe fn elementwise_i64(
     result: *mut List,
     out: *mut u64,
 ) -> u32 {
-    let mut scalars = [[0i64; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut step_chunk: Step<i64> = step_i64_baseline;
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        step_chunk = step_i64_avx2;
+    }
+    let mut scalars = Rows::<i64, ELEMENTWISE_INPUTS>::new();
     for (index, &word) in inputs.iter().enumerate() {
         if lists & (1 << index) == 0 {
-            scalars[index] = [word as i64; CHUNK];
+            scalars.fill(index, word as i64);
         }
     }
-    let mut buffers = [[0i64; CHUNK]; ELEMENTWISE_STEPS];
+    let mut buffers = Rows::<i64, ELEMENTWISE_STEPS>::new();
+    let buffers = buffers.cleared(program.len());
     let mut total: i64 = 0;
     let last = program.len() - 1;
     let mut start = 0;
@@ -855,7 +945,11 @@ unsafe fn elementwise_i64(
         let chunk = CHUNK.min(length - start);
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
-            let target = &mut rest[0][..chunk];
+            let target = if step == last && !result.is_null() {
+                slice::from_raw_parts_mut(((*result).data as *mut i64).add(start), chunk)
+            } else {
+                &mut rest[0][..chunk]
+            };
             let left = operand(
                 encoded as usize >> 8 & 0xFF,
                 inputs,
@@ -874,39 +968,17 @@ unsafe fn elementwise_i64(
                 start,
                 chunk,
             );
-            let pairs = target.iter_mut().zip(left.iter().zip(right));
-            let mut overflow = false;
-            let apply = |combine: fn(i64, i64) -> (i64, bool)| {
-                for (slot, (&x, &y)) in pairs {
-                    let (value, overflowed) = combine(x, y);
-                    overflow |= overflowed;
-                    *slot = value;
-                }
-            };
-            match encoded & 0xFF {
-                ADD => apply(i64::overflowing_add),
-                SUB => apply(i64::overflowing_sub),
-                MUL => apply(i64::overflowing_mul),
-                _ => return 1,
-            }
-            if overflow {
+            if !step_chunk(encoded & 0xFF, target, left, right) {
                 return 1;
             }
         }
-        let items = &buffers[last][..chunk];
         if result.is_null() {
-            for &item in items {
+            for &item in &buffers[last][..chunk] {
                 let Some(next) = total.checked_add(item) else {
                     return 1;
                 };
                 total = next;
             }
-        } else {
-            ptr::copy_nonoverlapping(
-                items.as_ptr(),
-                ((*result).data as *mut i64).add(start),
-                chunk,
-            );
         }
         start += chunk;
     }
@@ -914,6 +986,45 @@ unsafe fn elementwise_i64(
         *out = total as u64;
     }
     0
+}
+
+/// [`step_i64`] for the instruction set every x86-64 machine has.
+unsafe fn step_i64_baseline(op: u32, target: &mut [i64], left: &[i64], right: &[i64]) -> bool {
+    step_i64(op, target, left, right)
+}
+
+/// [`step_i64`] compiled for AVX2, whose 64-bit integer compares the overflow tests of `+`
+/// and `-` need to run as vector code.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn step_i64_avx2(op: u32, target: &mut [i64], left: &[i64], right: &[i64]) -> bool {
+    step_i64(op, target, left, right)
+}
+
+/// A step over `I64` items, which fails on overflow or an unknown `op`.
+#[inline(always)]
+fn step_i64(op: u32, target: &mut [i64], left: &[i64], right: &[i64]) -> bool {
+    #[inline(always)]
+    fn fill(
+        target: &mut [i64],
+        left: &[i64],
+        right: &[i64],
+        combine: impl Fn(i64, i64) -> (i64, bool),
+    ) -> bool {
+        let mut overflow = false;
+        for (slot, (&x, &y)) in target.iter_mut().zip(left.iter().zip(right)) {
+            let (value, overflowed) = combine(x, y);
+            overflow |= overflowed;
+            *slot = value;
+        }
+        !overflow
+    }
+    match op {
+        ADD => fill(target, left, right, i64::overflowing_add),
+        SUB => fill(target, left, right, i64::overflowing_sub),
+        MUL => fill(target, left, right, i64::overflowing_mul),
+        _ => false,
+    }
 }
 
 /// A step of a [`ry_count_true`] program: `MASK_I64 + op` and `MASK_DBL + op` compare two
@@ -1057,20 +1168,22 @@ unsafe fn count_true(
         let defined = if item != 0 { LANE_TRUE } else { LANE_FALSE };
         if item == NA_LOGICAL { LANE_NA } else { defined }
     };
-    let mut wholes = [[0i64; CHUNK]; ELEMENTWISE_INPUTS];
-    let mut doubles = [[0.0f64; CHUNK]; ELEMENTWISE_INPUTS];
-    let mut lanes = [[0u8; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut wholes = Rows::<i64, ELEMENTWISE_INPUTS>::new();
+    let mut doubles = Rows::<f64, ELEMENTWISE_INPUTS>::new();
+    // A logical input's row holds a scalar's lane, or the lanes of a list's current chunk.
+    let mut lanes = Rows::<u8, ELEMENTWISE_INPUTS>::new();
     for (index, &word) in inputs.iter().enumerate() {
-        if lists & (1 << index) == 0 {
-            match roles[index] {
-                MaskRole::I64 => wholes[index] = [word as i64; CHUNK],
-                MaskRole::Dbl => doubles[index] = [f64::from_bits(word); CHUNK],
-                MaskRole::Logical => lanes[index] = [lane(word as i32); CHUNK],
-                MaskRole::Unused => {}
-            }
+        let scalar = lists & (1 << index) == 0;
+        match roles[index] {
+            MaskRole::I64 if scalar => wholes.fill(index, word as i64),
+            MaskRole::Dbl if scalar => doubles.fill(index, f64::from_bits(word)),
+            MaskRole::Logical if scalar => lanes.fill(index, lane(word as i32)),
+            MaskRole::Logical => lanes.fill(index, LANE_FALSE),
+            _ => {}
         }
     }
-    let mut buffers = [[0u8; CHUNK]; ELEMENTWISE_STEPS];
+    let mut buffers = Rows::<u8, ELEMENTWISE_STEPS>::new();
+    let buffers = buffers.cleared(program.len());
     let mut count: i64 = 0;
     let mut start = 0;
     while start < length {
@@ -1081,7 +1194,7 @@ unsafe fn count_true(
                     ((*(word as *const List)).data as *const i32).add(start),
                     chunk,
                 );
-                for (slot, &item) in lanes[index].iter_mut().zip(items) {
+                for (slot, &item) in lanes.row_mut(index).iter_mut().zip(items) {
                     *slot = lane(item);
                 }
             }
@@ -1095,7 +1208,7 @@ unsafe fn count_true(
                 if index >= input_count {
                     &done[index - input_count][..chunk]
                 } else {
-                    &lanes[index][..chunk]
+                    &lanes.row(index)[..chunk]
                 }
             };
             match code {
@@ -1128,7 +1241,7 @@ unsafe fn count_true(
             }
         }
         let result = match program.len() {
-            0 => &lanes[0][..chunk],
+            0 => &lanes.row(0)[..chunk],
             steps => &buffers[steps - 1][..chunk],
         };
         let mut trues = 0;

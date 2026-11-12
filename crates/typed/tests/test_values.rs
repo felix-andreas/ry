@@ -427,6 +427,159 @@ fn comparisons_and_logic_follow_r() {
     assert_eq!(live(), before);
 }
 
+/// Fused arithmetic against the same steps run one item at a time: random programs of `+`, `-`,
+/// `*` and `/` over `F64` or `I64` lists and scalars, as a list and as a sum, over lists that
+/// cross chunk boundaries. A `NaN` result, an `I64` overflow, a length mismatch and an empty
+/// list result give up.
+#[test]
+fn fused_arithmetic_agrees_with_one_item_at_a_time() {
+    let mut rng = Rng::from_env();
+    let before = live();
+    for _ in 0..iterations(400) {
+        let doubles = rng.below(2) == 0;
+        let sum = rng.below(2) == 0;
+        let length = [0, 1, 7, 127, 128, 129, 300][rng.below(7)];
+        // An item as its word: a double's bits or an `I64`. Doubles are halves, so a sum of
+        // products is exact and does not depend on the order or width of the additions.
+        let item = |rng: &mut Rng| -> u64 {
+            match rng.below(60) {
+                0 if doubles => f64::NAN.to_bits(),
+                0 => (i64::MAX - 1) as u64,
+                _ if doubles => (rng.below(11) as f64 / 2.0 - 2.5).to_bits(),
+                _ => (rng.below(7) as i64 - 3) as u64,
+            }
+        };
+        // Each input is a list of its items, or one item for a scalar.
+        let mut inputs: Vec<Vec<u64>> = Vec::new();
+        let mut lists = 0u32;
+        for index in 0..1 + rng.below(4) {
+            if index == 0 || rng.below(3) != 0 {
+                // The first input is a list of the usual length, so a longer one is a mismatch.
+                let size = if index > 0 && rng.below(30) == 0 {
+                    length + 1
+                } else {
+                    length
+                };
+                inputs.push((0..size).map(|_| item(&mut rng)).collect());
+                lists |= 1 << index;
+            } else {
+                inputs.push(vec![item(&mut rng)]);
+            }
+        }
+        let fits =
+            (0..inputs.len()).all(|index| lists & 1 << index == 0 || inputs[index].len() == length);
+        let mut program: Vec<u32> = Vec::new();
+        // Each step's items, or `None` once a step fails.
+        let mut done: Option<Vec<Vec<u64>>> = fits.then(Vec::new);
+        for step in 0..1 + rng.below(5) {
+            let reach = inputs.len() + step;
+            let (left, right) = (rng.below(reach), rng.below(reach));
+            // A sum of quotients would depend on how wide the additions are.
+            let op = rng.below(if doubles && !sum { 4 } else { 3 }) as u32;
+            program.push(op | (left as u32) << 8 | (right as u32) << 16);
+            let Some(steps) = &mut done else { continue };
+            let read = |operand: usize, at: usize| match inputs.get(operand) {
+                Some(items) if lists & 1 << operand != 0 => items[at],
+                Some(items) => items[0],
+                None => steps[operand - inputs.len()][at],
+            };
+            let items: Option<Vec<u64>> = (0..length)
+                .map(|at| {
+                    let (x, y) = (read(left, at), read(right, at));
+                    if doubles {
+                        let (x, y) = (f64::from_bits(x), f64::from_bits(y));
+                        let value = match op {
+                            ADD => x + y,
+                            SUB => x - y,
+                            MUL => x * y,
+                            _ => x / y,
+                        };
+                        (!value.is_nan()).then_some(value.to_bits())
+                    } else {
+                        let (x, y) = (x as i64, y as i64);
+                        match op {
+                            ADD => x.checked_add(y),
+                            SUB => x.checked_sub(y),
+                            _ => x.checked_mul(y),
+                        }
+                        .map(|value| value as u64)
+                    }
+                })
+                .collect();
+            match items {
+                Some(items) => steps.push(items),
+                None => done = None,
+            }
+        }
+        let expected: Option<Vec<u64>> = match done.as_ref().and_then(|steps| steps.last()) {
+            Some(items) if sum && doubles => {
+                let total = items
+                    .iter()
+                    .fold(0.0, |total, &item| total + f64::from_bits(item));
+                Some(vec![total.to_bits()])
+            }
+            Some(items) if sum => items
+                .iter()
+                .try_fold(0i64, |total, &item| total.checked_add(item as i64))
+                .map(|total| vec![total as u64]),
+            Some(items) if length > 0 => Some(items.clone()),
+            _ => None,
+        };
+        unsafe {
+            let kind = if doubles { DBL } else { I64 };
+            let words: Vec<u64> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, items)| {
+                    if lists & 1 << index == 0 {
+                        return items[0];
+                    }
+                    items
+                        .iter()
+                        .fold(ry_list_new(kind as u32, 0), |list, &item| {
+                            ry_list_push(list, 1, item, 0)
+                        }) as u64
+                })
+                .collect();
+            let mut out = 0u64;
+            let status = ry_elementwise(
+                kind as u32,
+                program.as_ptr(),
+                program.len() as u32,
+                words.as_ptr(),
+                words.len() as u32,
+                lists,
+                sum as u32,
+                &mut out,
+            );
+            let found: Option<Vec<u64>> = (status == 0).then(|| {
+                if sum {
+                    return vec![out];
+                }
+                let list = out as *mut List;
+                let length = (*list).length as usize;
+                let items = std::slice::from_raw_parts((*list).data as *const u64, length).to_vec();
+                ry_list_drop(list);
+                items
+            });
+            assert_eq!(
+                found.as_ref().map(|items| &items[..items.len().min(8)]),
+                expected.as_ref().map(|items| &items[..items.len().min(8)]),
+                "the first items of program {program:?} over {} inputs of length {length}, \
+                 lists {lists:#b}, sum {sum}, doubles {doubles}",
+                inputs.len()
+            );
+            assert!(found == expected, "program {program:?}, length {length}");
+            for (index, &word) in words.iter().enumerate() {
+                if lists & 1 << index != 0 {
+                    ry_list_drop(word as *mut List);
+                }
+            }
+        }
+    }
+    assert_eq!(live(), before);
+}
+
 /// A fused count against R's three-valued logic item by item: random comparisons of `I64` and
 /// double lists and scalars, combined with `&`, `|` and `!`, over lists that cross chunk
 /// boundaries, with `NA`, `NaN` and a length mismatch, which give up.
