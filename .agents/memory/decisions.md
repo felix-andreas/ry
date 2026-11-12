@@ -9295,6 +9295,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - The check also looks one level into a plain list argument (`runtime::jit_elements_observed`), because `paste` receives its `...` as `list(...)` and dispatches `as.character` on each element. A list nested deeper converts without dispatch.
 - The list holds only internals whose base closure body is a single `.Internal` call, which are the only ones the compiler inlines. `lapply`, `vapply` and other internals that run callbacks stay opaque.
 - Pinned by `pure_internals_write_back_before_dispatching_on_an_object` (`crates/jit/tests/test_tiers.rs`), whose methods read the loop variable through `dynGet`.
+
+## A loop header forgets which variables are loaded, and keeping them is not worth it
+
+- At a loop header every variable may be unloaded, because an on-stack-replacement entry starts there with the frame as the only truth. Once the first iteration has loaded a variable, a read in compiled code costs a check of its run-time status and one branch (`codegen.rs` `load_slot`), not a helper call.
+- Keeping variables loaded across the header, with the entry loading them from the frame and declining on a promise, active binding or type mismatch, saved 0.85% of instructions on `integer_loop` and under 0.02% on the other 18 kernels. It was not merged: the gain did not pay for a new way for loop entry to decline.
+- `convolve` in the convolution kernels compiled to identical code with and without it. `as.double` runs as an opaque tier-0 step there, so `a` and `b` are unloaded before the loop. Loading variables before a loop would save the same one branch per read.
 ## Published benchmarks measure the release archive
 
 - **Previous shape.** `just bench <suite> --write` recorded a plain `cargo build --release` of the working tree. The Linux release is profile-guided and laid out by BOLT (`tools/layout/optimize.sh`), so the published numbers measured a build nobody downloads. At one commit, the shipped archive beat a plain build of it by 1.12x on `lapply` (process wall) and 1.30x on the validation workload (median warm run), medians of 15 interleaved runs each.
