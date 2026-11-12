@@ -19,7 +19,10 @@ use {
         strings::Encoding,
     },
     interp::platform,
-    std::ffi::{CString, c_char, c_int, c_void},
+    std::{
+        ffi::{CString, c_char, c_int, c_void},
+        path::Path,
+    },
 };
 
 /// What GNU R calls `DllInfo`. Packages mostly hold pointers to it, but some read GNU R's
@@ -160,6 +163,8 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     let opened = rebound_copy(source)?.unwrap_or_else(|| source.to_owned());
     #[cfg(not(target_os = "macos"))]
     let opened = source.to_owned();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    open_reference_blas();
     let c_path = CString::new(opened.as_str()).map_err(|_| error("invalid library path"))?;
     let mut handle = std::ptr::null_mut();
     let mut load_error = 0;
@@ -222,6 +227,35 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
         with_native_scope(|| ry_call_init(init, dll.cast()))?;
     }
     Ok(dll)
+}
+
+/// Opens GNU R's reference BLAS and LAPACK, once, before the first package library. A GNU R
+/// built with them links every compiled package to `libRblas.so` and `libRlapack.so`, which its
+/// launcher puts on `LD_LIBRARY_PATH`. Once ry has opened its copies beside the libR in use (else
+/// the R home's), the loader matches such a package's dependency to them by soname. They open
+/// locally, so their symbols never take precedence over another library's BLAS.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_reference_blas() {
+    static OPENED: std::sync::Once = std::sync::Once::new();
+    OPENED.call_once(|| {
+        let libr = platform::library_path(load_library as *const c_void)
+            .and_then(|path| Path::new(&path).parent().map(Path::to_owned));
+        let home = Path::new(&interp::system::r_home()).join("lib");
+        for name in ["libRblas.so", "libRlapack.so"] {
+            let Some(file) = libr
+                .iter()
+                .chain([&home])
+                .map(|directory| directory.join(name))
+                .find(|file| file.is_file())
+            else {
+                continue;
+            };
+            if platform::open_library(&platform::path_text(&file), false).is_err() {
+                // A package that needs the library then fails with the loader's own message,
+                // which names it.
+            }
+        }
+    });
 }
 
 /// `dyn.unload(path)`: runs the library's `R_unload_<name>` and drops it from the loaded

@@ -323,9 +323,10 @@ Smaller gaps:
   - strict mode can still report inside a statement that failed to parse.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.
-- The Zed extension downloads the newest pre-release's archive (`editors/zed/src/lib.rs`), and
-  0.4.0-beta has only the Linux one, so on macOS and Windows the download fails until a release
-  ships every platform. The install page tells users there to put `ry` on `PATH`.
+- The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
+  (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
+  no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
+  archive or the download fails on the missing ones.
 
 ## Open: what `ry check` still reports on the GNU R corpus
 
@@ -2479,9 +2480,11 @@ tagging fences `r` for Zed if that proves distant.
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
   Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
-- **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
-  rather than the newest build, and the installation page names the tag in each URL. Promoting a
-  release would let the docs recommend `latest` instead.
+- **After 0.4.4 publishes, rewrite installation.md line ~25 to use `releases/latest`.** Every
+  release before 0.4.4 is a pre-release, so `releases/latest/` resolves to the old `0.1.1` tag and
+  the installation page names the tag in each URL. 0.4.4 is the first full release, and nightlies
+  are pre-releases with `--latest=false`, so from then on `releases/latest` is the newest full
+  release.
 - **The README's diagnostics are not checked.** `docs/` samples are tests (`test_docs`), but the
   two diagnostics in `README.md` and `editors/code/README.md` are pasted text that goes stale when
   a message or blame range changes; re-capture them after such a change.
@@ -2754,9 +2757,16 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
-- **The base packages have no code image.** GNU R's build makes `stats`, `utils` and the other
-  base packages' lazy-load databases without `R CMD INSTALL`, so their closures compile at first
-  call; the recommended packages, which `tools/base-r/build.sh` installs, do get images.
+- **Symbols are not compacted with the start image.** Symbols keep their addresses because frame
+  filters, slot indexes, hash tables and record layout tags hash them (decisions.md, "The start
+  image is compacted in touch order at write time"). Moving them too needs every such table rebuilt
+  after the move; an empty start still touches 821 image pages where perfect packing would touch
+  about 480.
+- **Unforced base bindings still compile at run time.** The start image holds compiled code for
+  every closure bound in a loaded namespace, but lazy-load bindings that start-up never forces
+  (most of stats and utils) are fetched and compiled when a session first calls them. Forcing them
+  all at image write would move that cost to the build, at the price of a larger image; measure
+  the image size and a full collection's page touches before doing it.
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
   because the pending check is dropped at exit. A function without parameters whose body is a
