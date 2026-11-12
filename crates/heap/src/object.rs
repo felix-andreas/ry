@@ -220,31 +220,26 @@ impl SexpType {
     }
 
     /// Bytes per element, for the vector types only.
+    #[inline]
     pub fn element_size(self) -> Option<usize> {
-        Some(match self {
-            SexpType::Char | SexpType::Raw => 1,
-            SexpType::Logical | SexpType::Integer => 4,
-            SexpType::Real | SexpType::I64 => 8,
-            SexpType::Complex => 16,
-            SexpType::String | SexpType::List | SexpType::Expression => size_of::<Sexp>(),
-            _ => return None,
-        })
+        match KIND_TRAITS[self as usize] & ELEMENT_BYTES {
+            0 => None,
+            bytes => Some(bytes as usize),
+        }
+    }
+
+    /// Whether marking an object of this type, when it has no attributes and is not ALTREP,
+    /// reaches nothing else: a CHARSXP or an atomic vector other than a character vector.
+    #[inline]
+    pub fn holds_no_references(self) -> bool {
+        KIND_TRAITS[self as usize] & LEAF != 0
     }
 
     /// The shape of the payload after the header. An ALTREP instance reports a vector type but
     /// has the triple shape, so callers that walk objects check `is_altrep` first.
+    #[inline]
     pub fn shape(self) -> Shape {
-        if self.is_vector() {
-            return Shape::Vector;
-        }
-        match self {
-            SexpType::Environment => Shape::Environment,
-            SexpType::ExternalPtr => Shape::ExternalPtr,
-            SexpType::WeakRef => Shape::WeakRef,
-            SexpType::Builtin | SexpType::Special => Shape::Primitive,
-            SexpType::Record => Shape::Record,
-            _ => Shape::Triple,
-        }
+        SHAPES[self as usize]
     }
 }
 
@@ -258,6 +253,44 @@ pub enum Shape {
     Primitive,
     Record,
 }
+
+/// Per-type facts the collector reads for every object it marks, packed so that one load of a
+/// constant table answers them instead of a chain of comparisons: the element size in the low
+/// bits ([`ELEMENT_BYTES`], zero for a non-vector) and the [`LEAF`] bit.
+const KIND_TRAITS: [u8; 32] = {
+    let mut traits = [0u8; 32];
+    traits[SexpType::Char as usize] = 1 | LEAF;
+    traits[SexpType::Raw as usize] = 1 | LEAF;
+    traits[SexpType::Logical as usize] = 4 | LEAF;
+    traits[SexpType::Integer as usize] = 4 | LEAF;
+    traits[SexpType::Real as usize] = 8 | LEAF;
+    traits[SexpType::I64 as usize] = 8 | LEAF;
+    traits[SexpType::Complex as usize] = 16 | LEAF;
+    traits[SexpType::String as usize] = size_of::<Sexp>() as u8;
+    traits[SexpType::List as usize] = size_of::<Sexp>() as u8;
+    traits[SexpType::Expression as usize] = size_of::<Sexp>() as u8;
+    traits
+};
+const ELEMENT_BYTES: u8 = 0x1f;
+const LEAF: u8 = 0x80;
+
+const SHAPES: [Shape; 32] = {
+    let mut shapes = [Shape::Triple; 32];
+    let mut code = 0;
+    while code < 32 {
+        if KIND_TRAITS[code] & ELEMENT_BYTES != 0 {
+            shapes[code] = Shape::Vector;
+        }
+        code += 1;
+    }
+    shapes[SexpType::Environment as usize] = Shape::Environment;
+    shapes[SexpType::ExternalPtr as usize] = Shape::ExternalPtr;
+    shapes[SexpType::WeakRef as usize] = Shape::WeakRef;
+    shapes[SexpType::Builtin as usize] = Shape::Primitive;
+    shapes[SexpType::Special as usize] = Shape::Primitive;
+    shapes[SexpType::Record as usize] = Shape::Record;
+    shapes
+};
 
 /// The header every object starts with. Sixteen bytes on a 64-bit target.
 #[repr(C)]
