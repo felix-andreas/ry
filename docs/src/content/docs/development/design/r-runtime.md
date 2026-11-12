@@ -1372,8 +1372,9 @@ treats them in two ways, depending on whether a guarantee exists:
 
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
-  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. Only
-  inline annotations reach the runtime; `#:` comments are invisible to it.
+  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. The
+  runtime reads the signature wherever it is written: inline, on the assigned name, or in the
+  `#:` block above.
 - **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
   imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
   on purpose), so a strict package can still receive an imprecise value from typed code. ry

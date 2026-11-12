@@ -6087,7 +6087,8 @@ unsafe fn is_base_function(speculation: &Speculation) -> bool {
 }
 
 /// Walks from `start` to the binding a function lookup of `symbol` finds, as the interpreter
-/// does, but gives up instead of forcing a promise or calling an active binding.
+/// does, but gives up instead of calling an active binding or forcing a promise that may run
+/// arbitrary code.
 pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let mut env = start;
@@ -6101,13 +6102,23 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
             if value.kind() == SexpType::Promise {
                 if value.car() == rvalues::unbound() {
                     // An installed package binds its closures to lazy-load promises, which only
-                    // read the function from the package database, so forcing one is safe. A
-                    // promise of anything else may run arbitrary code. A load that fails leaves
-                    // the call to the interpreter, which raises the error itself.
+                    // read the function from the package database, so forcing one is safe. Any
+                    // other promise but a lazy definition's may run arbitrary code. A load that
+                    // fails leaves the call to the interpreter, which raises the error itself.
                     let reads_database = env == heap.known().base_env
                         || env == heap.known().base_namespace
                         || matches!(interp::serialize::lazy_record_header(value), Ok(Some(_)));
-                    if !reads_database {
+                    // `ry load` binds a definition to a promise that lowers its code and
+                    // evaluates it. Only a function definition and a pure constant of a
+                    // strict file are bound that way, so forcing one early changes nothing a
+                    // program can observe.
+                    let code = value.cdr();
+                    let lazy_definition = code.kind() == SexpType::Language
+                        && rvalues::install("ryLoaderForce")
+                            .ok()
+                            .and_then(|symbol| interp::builtins::internal_function(symbol))
+                            == Some(code.car());
+                    if !reads_database && !lazy_definition {
                         return None;
                     }
                     value = interp::eval::force_promise(value).ok()?;
