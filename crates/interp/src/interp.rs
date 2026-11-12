@@ -384,15 +384,19 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if depth == 0 {
-        state.references_used = 0;
-    }
     if !state.pending_closures.is_empty() {
         state
             .pending_closures
             .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
+    // An unwind to top level skips the releases of the calls it leaves, so their argument
+    // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 && state.references_used != 0 {
+        // SAFETY: `state` is the interpreter's own state, which `release_references` reads
+        // through `interp()`, and it is not used after this call.
+        unsafe { eval::release_references(0) };
+    }
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,
@@ -425,6 +429,9 @@ pub struct Hooks {
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
     pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
+    /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
+    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -459,6 +466,14 @@ pub struct Hooks {
 
 /// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
 pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
+
+/// The summaries an ALTREP class may answer for its vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AltrepSummary {
+    Sum,
+    Min,
+    Max,
+}
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -798,6 +813,7 @@ pub fn default_hooks() -> Hooks {
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_summary: |_, _, _| Ok(None),
         defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
