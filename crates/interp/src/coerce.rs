@@ -203,20 +203,6 @@ pub unsafe fn coerce_vector_quiet(
     if object.kind() == kind {
         return Ok(object);
     }
-    // As in GNU R, a compact integer sequence becomes a compact double one without expanding.
-    if kind == SexpType::Real
-        && object.kind() == SexpType::Integer
-        && !values::has_attributes(object)
-        && let Some((_, first, increment)) = values::compact_sequence(object)
-        && let Some(sequence) = (crate::interp().hooks.compact_sequence)(
-            SexpType::Real,
-            values::length(object),
-            first,
-            increment,
-        )?
-    {
-        return Ok(sequence);
-    }
     let object = values::materialize(object)?;
     let source = object.kind();
     let result = match source {
@@ -993,6 +979,23 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         return factor_as_character(object).inspect(|&result| {
             values::clear_attributes(result);
         });
+    }
+    // As in GNU R, a compact integer sequence becomes a compact double one without expanding.
+    // Only the conversion a user sees does this: a builtin's own coercion reads the elements
+    // right away, and an expansion on that read would allocate while the builtin holds
+    // unrooted results.
+    if kind == SexpType::Real
+        && object.kind() == SexpType::Integer
+        && !values::has_attributes(object)
+        && let Some((_, first, increment)) = values::compact_sequence(object)
+        && let Some(sequence) = (crate::interp().hooks.compact_sequence)(
+            SexpType::Real,
+            values::length(object),
+            first,
+            increment,
+        )?
+    {
+        return Ok(sequence);
     }
     // As in GNU R, a number vector without attributes converts to character lazily, so the
     // strings are made only when something reads them.
