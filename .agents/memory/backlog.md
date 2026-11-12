@@ -1023,6 +1023,14 @@ overhead, not allocation.
   counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
   which only an `f` that reads `parent.frame()` can observe.
 
+- Two public programs run slower than GNU R (`tools/bench/public/results.json`); neither regressed
+  since the public record before it (same-machine A/B). Profiles from `ry run --profile-summary`:
+  - fannkuchredux (0.88x): 51% JIT code, 21% builtins, 15% closure call setup. Each flip calls
+    the `rev.default` closure, and `[` (3.6M calls) and `:` (3.3M) run as builtins that allocate
+    a vector, where the JIT could reverse a prefix in place and index a range without making it.
+  - binarytrees_naive (0.92x): 66% tier-0 instructions, 16% call setup, `c` 8% and `[[` 5%. The
+    recursive `tree` and `check` closures, defined inside `execute`, never leave tier 0.
+
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench applications` (`tools/bench/applications/`, results in
 `benchmarks.mdx`) reproduces the gap on production-shaped workloads. `ry run --profile-summary
