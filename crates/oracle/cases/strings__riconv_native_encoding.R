@@ -6,6 +6,7 @@
 source_file <- file.path(tempdir(), "riconv_probe.c")
 writeLines(c(
   "#include <errno.h>",
+  "#include <string.h>",
   "#include <Rinternals.h>",
   "#include <R_ext/Riconv.h>",
   "SEXP convert(SEXP to, SEXP from, SEXP input) {",
