@@ -1001,9 +1001,9 @@ unsafe fn c_values_finite(value: Sexp) -> ApiResult<bool> {
     })
 }
 
-/// A `DLLInfo` object: name, path, dynamic lookup flag, and the handle and record pointers.
+/// A `DLLInfo` object: name, path, lookup flags, and the handle and record pointers.
 unsafe fn dll_info(dll: *mut Dll) -> ApiResult<Sexp> {
-    let info = interp::native::dll_info(&(*dll).name, &(*dll).path)?;
+    let info = interp::native::dll_info(&(*dll).name, &(*dll).path, (*dll).forces_symbols())?;
     let record = interp::values::list_get(info, "info");
     record.set_external_address(dll.cast());
     let handle = interp::values::list_get(info, "handle");
@@ -1044,7 +1044,7 @@ unsafe fn do_dyn_unload(call: &Call<'_>) -> ApiResult<Sexp> {
 }
 
 unsafe fn loaded_dlls() -> ApiResult<Sexp> {
-    let mut items = vec![interp::native::dll_info("base", "base")?];
+    let mut items = vec![interp::native::base_dll_info()?];
     let mut names = vec!["base".to_owned()];
     for (name, info) in builtin_libraries::loaded()? {
         items.push(info);
@@ -1211,9 +1211,7 @@ unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
         RoutineKind::Fortran,
     ]
     .into_iter()
-    .any(|kind| find_routine(&name, package.as_deref(), kind).is_ok())
-        || (package.as_deref().is_none_or(|package| package == "base")
-            && interp::native::is_base_routine(&name));
+    .any(|kind| find_routine(&name, package.as_deref(), kind).is_ok());
     interp::values::scalar_bool(found)
 }
 

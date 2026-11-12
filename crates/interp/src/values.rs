@@ -218,6 +218,7 @@ symbol_table! {
     na_encode = "na.encode",
     scientific = "scientific",
     decimal_mark = "decimal.mark",
+    out_dec = "OutDec",
     expr = "expr",
     width_cutoff = "width.cutoff",
     backtick = "backtick",

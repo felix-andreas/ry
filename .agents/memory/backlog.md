@@ -117,7 +117,8 @@ left, in order of expected gain:
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
 - **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
 - **Compiled closures stay rooted for the session.** Up to `MAX_COMPILED` closures are kept alive by their code; dropping the code with the closure needs a finalizer hook in the heap.
-- **A record cannot hold a `List` field.** `shapes::intern` lays out scalars, strings and boxes only (`ir::Item` has no vector), so `(time = time, event = event)` over `List` parameters refuses with "a field a box cannot hold", and the whole function runs in the interpreter. R records cannot enter typed code (`decisions.md`, "R lists do not convert to records at a typed boundary"), so this is the only way to bundle columns, and the typed `log_rank` takes them as separate parameters until it works. A vector field is one counted pointer word, like a box field.
+- **Updating a record's `List` field copies the list.** `(..r, values = List.append(r$values, x))` reads the field with a dup while the old box still holds it, so `Op::Push` sees a shared list and copies it: a loop of such updates is quadratic (20,000, 40,000 and 80,000 appends take 0.045, 0.15 and 0.59 s). Growing in place needs a field read that moves the list out of a uniquely held box, which the update then consumes.
+- **A tag holding a `List` cannot come from R.** `typed::field_word` converts scalar, string and box payloads only, so `size(t)` with `t <- :Many([1i64, 2i64])` from R code runs in the interpreter, while the same call from typed code compiles. An R value cannot say whether an empty vector is a `List<I64>` or a `List<F64>`, so a list payload needs its declared type to convert, which `to_box` does not carry. The fallback reason is wrong as well: "does not convert to Tag(4294967295): an `I64` parameter takes only a whole number".
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
@@ -127,9 +128,8 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 
 - **Not compiled natively; the whole function runs in the interpreter:**
   - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - `List.with_capacity` (fasta), and in knucleotide `List.sort_with`, `Dict.update` and `Dict.get` (both take or return a `Result`), a tuple index `entry[[2]]` and `<` on `Str`;
-  - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries);
-  - a record with a `List` field (pidigits' `Int`; see "A record cannot hold a `List` field" above).
+  - `List.with_capacity` (fasta);
+  - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
   - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
@@ -137,7 +137,7 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
   - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
   - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
 - **Nominal items do not fit an empty list.** `children <- []` then `List.append(children, @Tree(...))` is "expected `T`, found `Tree`", and `children: List<Tree> <- []` is "expected `List<Tree>`, found `List<T>`". A recursive `alias` is refused instead, with a message that prints an enormous expanded type. This blocks a typed awfy `storage`.
-- **`List.append` on an Array is quadratic.** `owned_list` in `crates/interp/src/standard_library.rs` excludes Arrays, so each append to a list built by `[]` or `List.from_r` copies and re-checks every item: 40,000 appends take about 25 s, against 0.007 s from `List.with_capacity`, although the standard-library page promises amortized constant time. This blocks typed rcp `list-for` and `list-while`, which would pass the 300 s bench timeout.
+- **Helper moves never engage inside a function.** `op_call_rebinding` in `crates/interp/src/bytecode.rs` calls a closure generically in a slot frame, because moving the value needs the binding's cell, so `x <- helper(x, i)` in a loop inside a function copies the collection on every call for lists, dictionaries and sets alike (5,000, 10,000 and 20,000 calls take 0.1, 0.36 and 1.44 s). The standard-library page's "Updates in place" promises the move without that restriction; it holds at top level only.
 - **Interpreted `List.with_capacity` plus record appends returns an R `list`,** which then fails the declared `List<Record{...}>` return check.
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
 - **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
@@ -257,6 +257,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 - **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
+- **Heap page placement makes peak RSS follow collection timing, not live data** (owner: the GC and heap track). With `formatC()` calling its kernel directly, report allocates less, runs fewer minor collections (105 against 138 on a formatC-only loop), and peaks about 1 MB higher. The GC log's old-generation and nursery bytes and massif's malloc peak match main, and all the extra residency is in one 32 MB arena. Fix the placement so the peak tracks live data; `testing.md`, "Judge a change's peak RSS", exempts such rises until then.
 
 ## Open: a dense id for interned strings (strings track)
 
