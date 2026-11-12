@@ -1035,8 +1035,9 @@ fn formal_shadows_enclosing_function() {
 
 #[test]
 fn a_body_that_could_run_nothing_natively_never_records() {
-    // `is.null` has no native form, so whatever its profile, compiled code for `wrap` would hand
-    // its only call back to tier 0. It is refused when its recording window would open, and
+    // The closures take `...` so that they are not wrappers, which compiled code, a top-level
+    // loop's included, runs without entering. `is.null` has no native form, so whatever its
+    // profile, compiled code for `wrap` would hand its only call back to tier 0. It is refused when its recording window would open, and
     // never records; `twice` does arithmetic, so it records and then compiles.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
@@ -1055,7 +1056,7 @@ fn a_body_that_could_run_nothing_natively_never_records() {
             );
             values::ints(code.cdr().element(PROFILE)).to_vec()
         };
-        run("wrap <- function(x) is.null(x)\ntwice <- function(x) x * 2");
+        run("wrap <- function(x, ...) is.null(x)\ntwice <- function(x, ...) x * 2");
         let ran = run(&format!(
             "for (i in 1:{}) {{ wrap(i); twice(i) }}",
             window + 1
@@ -1081,7 +1082,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
     // `rare` reaches the entry threshold, but it makes one of every 201 closure calls, so its
     // expected calls cannot repay a compile: it is refused, not for good, and its count starts
     // over. A second refusal doubles the wait. Called back to back, the same body then
-    // compiles.
+    // compiles. `rare` takes `...` for the reason `wrap` does above.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
         jit::install_mode(Mode::On);
@@ -1092,7 +1093,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
                 .unwrap_or_else(|_| panic!("rare is not defined"));
             values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
         };
-        run("rare <- function(x) x * 3");
+        run("rare <- function(x, ...) x * 3");
         run("other <- function(x) { y <- x + 1; y }");
         run(&format!(
             "for (i in 1:{}) {{ for (j in 1:200) other(j); rare(i) }}",
