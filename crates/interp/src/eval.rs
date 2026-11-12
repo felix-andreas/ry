@@ -2700,7 +2700,9 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
             Reify::Builtin(op) => builtin_def(op)?.name,
             Reify::Site(name) => name,
         };
-        interp().frames[index].reified_by = activity::label(name);
+        let reason = activity::label(name);
+        activity::count_reification(reason);
+        interp().frames[index].reified_by = reason;
     }
     materialize_references(index)?;
     let frame = &interp().frames[index];

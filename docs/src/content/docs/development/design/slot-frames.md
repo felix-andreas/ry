@@ -393,8 +393,9 @@ builtin that asked, or a named site such as `"function definition"` or `"method 
 | `frame with an environment` | the callee has no slot table and always gets a heap frame |
 
 The section prints the direct share, the direct share of calls that did not observe their
-environment, and the table of classes. The counting runs only while a profile summary is
-collected.
+environment, and the table of classes. A second section, "Slot frames turned into environments",
+counts every reification by its cause, whatever the frame's function, so it also covers base R
+and script closures. The counting runs only while a profile summary is collected.
 
 ## Prior decision
 
