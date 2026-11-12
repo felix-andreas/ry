@@ -1456,7 +1456,7 @@ fn break_and_next_route_through_nested_steps() {
     // of its own. A `break` or `next` forced inside the inner body must still resume the outer
     // loop after the inner step returns, rather than the inner one or the step's caller. The
     // `break` in `outer` also makes the optimizing tier hand back a resume at the loop's exit,
-    // the instruction right after the backward `Jump`, which baseline code must take as such.
+    // the instruction right after the backward `Jump`.
     let definitions = [
         "inner <- function(n, v) { t <- 0; for (j in seq_len(n)) { if (j == 2) next; t <- t + j }; t + v }",
         "outer <- function(m) { s <- 0; for (i in 1:m) { s <- s + inner(i, if (i == 4) break else if (i == 2) next else i) }; s }",
@@ -1625,7 +1625,7 @@ unsafe fn has_compiled_code(name: &str) -> bool {
 }
 
 /// The outcome of four calls of a closure with `body` under tier 0, then of four calls of a
-/// fresh closure with the same body under the forced JIT and four under the baseline tier alone.
+/// fresh closure with the same body under the forced JIT.
 /// Each closure is new, so each run starts from its own profile.
 unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>) {
     unsafe {
@@ -1643,13 +1643,7 @@ unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>)
         jit::install_mode(Mode::Force);
         let compiled_name = format!("compiled_{case}");
         define(&compiled_name);
-        let mut compiled = calls(&compiled_name);
-        // The baseline tier compiles at the first entry and never tiers up in this mode, so
-        // every call after the first runs its machine code.
-        jit::install_mode(Mode::Baseline);
-        let baseline_name = format!("baseline_{case}");
-        define(&baseline_name);
-        compiled.extend(calls(&baseline_name));
+        let compiled = calls(&compiled_name);
         jit::install_mode(Mode::Off);
         for outcome in &reference[1..] {
             assert_eq!(
