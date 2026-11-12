@@ -19,7 +19,7 @@ use {
         annotations::{self, Entry},
         arith,
         builtins::Arg,
-        bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
+        bytecode::{self, LoopState, Machine, PROFILE, TIER1, TypedCall, profile},
         eval, heap,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
@@ -421,6 +421,8 @@ unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     value
 }
 
+/// Holds `unwind` until compiled code hands the activation back. The collector traces it there
+/// through [`interp::Interp::held_unwinds`].
 fn park(activation: &mut Activation, unwind: Unwind) {
     activation.pending = Some(unwind);
 }
@@ -709,7 +711,13 @@ pub unsafe extern "C" fn jit_call(
                     });
                 }
                 if annotations::is_typed(function) {
-                    if let Some(value) = crate::native::call(function, &args) {
+                    let typed = TypedCall {
+                        call,
+                        function,
+                        args: &args,
+                        sys_parent: machine.env(),
+                    };
+                    if let Some(value) = crate::native::call(&typed) {
                         return value;
                     }
                     annotations::log_interpreted(call);

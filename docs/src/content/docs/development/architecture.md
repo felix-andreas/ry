@@ -79,9 +79,14 @@ illegal dependency unrepresentable.
   view an R vector's data or own their items, dictionaries, and records, tuples and tags in
   counted boxes whose *shape* (layout plus field types) the code knows. A tag type is a union of
   shapes, and a `match` over one branches on the box's shape. `jit`'s `native::call` is the only
-  caller, and a call that does not compile, or fails while it runs, goes back to the interpreter
-  unchanged. It
-  depends on `heap` and `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and
+  caller, and a call that does not compile, or gives up while it runs, goes back to the
+  interpreter unchanged. Typed code calls an R function from native code when the call is a
+  statement or the argument of a `*.from_r` conversion; the arguments arrive as forced promises
+  of the code written in the call, and the conversion's result type comes from the type the
+  interpreter saw it give, so the first call of such a function runs interpreted. Code that has
+  called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
+  `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and each typed call that runs in the
+  interpreter with the reason the native path declined it, and
   `RY_TYPED_DUMP=1` prints the Cranelift IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and

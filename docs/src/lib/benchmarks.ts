@@ -24,6 +24,8 @@ export type Group = { id: string; name: string; description?: string; url?: stri
 export type Meta = {
   date: string;
   ryCommit?: string;
+  // The release archive measured, when the numbers come from one (`bench.py --release`).
+  release?: { tag: string; archive: string; sha256: string };
   gnuR: { version: string; blas?: string };
   machine: { cpu: string; cores?: number; kernel?: string };
   rounds: number;
@@ -172,8 +174,13 @@ export function suiteMetadata(suite: Suite): string {
   const results = suite.results;
   if (results === undefined) return '';
   const { meta } = results;
-  const commit = meta.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta.ryCommit)}`;
-  return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${meta.rounds} paired rounds.`;
+  const build =
+    meta.release !== undefined
+      ? ` on the ry ${meta.release.tag} release archive (sha256 ${meta.release.sha256.slice(0, 12)})`
+      : meta.ryCommit === undefined
+        ? ''
+        : ` at ry ${shortCommit(meta.ryCommit)}`;
+  return `Measured on ${meta.date.slice(0, 10)}${build} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${meta.rounds} paired rounds.`;
 }
 
 // A commit as its first nine hex digits, keeping a marker such as `-dirty` that follows the hash.
@@ -483,7 +490,7 @@ export function methodRows(): { columns: string[]; rows: string[][] } {
       const blas = meta?.gnuR.blas?.split('/').pop();
       return [
         suite.name,
-        `\`just bench ${suite.id} --write\``,
+        `\`just bench ${suite.id} --release ARCHIVE --write\``,
         `${meta?.gnuR.version ?? ''}${blas === undefined ? '' : `, BLAS \`${blas}\``}`,
         (suite.results?.engines ?? []).map(engineLabel).join(', '),
         `${meta?.rounds} paired rounds${meta?.extraRounds ? `, ${meta.extraRounds} more for each wide interval` : ''}${meta?.seed === undefined ? '' : `, seed ${meta.seed}`}`,
@@ -520,6 +527,7 @@ type RawResults = {
   meta: {
     date: string;
     ry_commit?: string | null;
+    release?: { tag: string; archive: string; sha256: string } | null;
     gnu_r: { version: string; blas?: string | null };
     machine: { cpu: string; cores?: number | null; kernel?: string | null };
     rounds: number;
@@ -595,6 +603,7 @@ function meta(raw: RawResults['meta']): Meta {
     // A runner written in Python stores an absent value as null, which reads here as absent.
     date: raw.date,
     ryCommit: raw.ry_commit ?? undefined,
+    release: raw.release ?? undefined,
     gnuR: { version: raw.gnu_r.version, blas: raw.gnu_r.blas ?? undefined },
     machine: { cpu: raw.machine.cpu, cores: raw.machine.cores ?? undefined, kernel: raw.machine.kernel ?? undefined },
     rounds: raw.rounds,

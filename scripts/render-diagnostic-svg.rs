@@ -4,7 +4,7 @@
 edition = "2024"
 ---
 
-//! Renders a real `ry check` run on the README's Payment example to `docs/public/diagnostic.svg`.
+//! Renders real `ry check` runs on README examples to the diagnostic panels under `docs/public/`.
 //! Run it from the repository root with `just readme`; `--check` only reports a stale image.
 //!
 //! GitHub strips ANSI escapes from fenced code blocks, so an image is the only way to show a
@@ -12,24 +12,47 @@ edition = "2024"
 //! SVG, including `prefers-color-scheme`, so one file serves the light and the dark theme. The
 //! diagnostic's text also goes in `<desc>`, so screen readers and search see it.
 //!
-//! The example is the fenced ```r block right above the image in README.md, so the README is the
-//! only copy of it, and the image is generated rather than drawn, so it cannot drift from what the
-//! tool prints.
+//! Each panel's example is the fenced ```r block right above its image in README.md, so the README
+//! is the only copy of it, and the image is generated rather than drawn, so it cannot drift from
+//! what the tool prints. A README panel has to make its point at a glance, so it keeps only the
+//! finding's headline and each source line with its underline, and drops the rule name, the
+//! location, the context lines, the help and the summary.
 //!
 //! Usage: `cargo -Zscript scripts/render-diagnostic-svg.rs <ry binary> [--check]`
 
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
+use std::path::Path;
 use std::process::{Command, ExitCode};
 
 const README: &str = "README.md";
-const IMAGE: &str = "docs/public/diagnostic.svg";
-const FILE_NAME: &str = "payment.R";
 /// Pixels per column of a 14px monospace font, whose advance is about 0.6em.
 const ADVANCE: f32 = 8.4;
 const LINE_HEIGHT: f32 = 20.0;
 const PADDING: f32 = 16.0;
+
+struct Panel {
+    image: &'static str,
+    file_name: &'static str,
+    ry_toml: &'static str,
+    title: &'static str,
+}
+
+const PANELS: [Panel; 2] = [
+    Panel {
+        image: "docs/public/diagnostic-typing.svg",
+        file_name: "discount.R",
+        ry_toml: "[check]\ntyping = true\n",
+        title: "ry check reports a type error that it inferred from plain R",
+    },
+    Panel {
+        image: "docs/public/diagnostic.svg",
+        file_name: "payment.R",
+        ry_toml: "[check]\ntyping = true\n",
+        title: "ry check reports a match that misses a case",
+    },
+];
 
 fn main() -> ExitCode {
     match run() {
@@ -49,68 +72,98 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         _ => return Err("usage: render-diagnostic-svg.rs <ry binary> [--check]".into()),
     };
     let ry = fs::canonicalize(ry).map_err(|error| format!("cannot find the ry binary `{ry}`: {error}"))?;
-    let example = readme_example(&fs::read_to_string(README)?)?;
+    let readme = fs::read_to_string(README)?;
+    let mut code = ExitCode::SUCCESS;
+    for panel in &PANELS {
+        let example = readme_example(&readme, panel.image)?;
+        let svg = render(&finding(&ry, panel, &example)?, panel.title)?;
+        if fs::read_to_string(panel.image).is_ok_and(|current| current == svg) {
+            continue;
+        }
+        if check {
+            eprintln!("error: {} differs from what `ry check` prints; run `just readme`", panel.image);
+            code = ExitCode::from(1);
+            continue;
+        }
+        fs::write(panel.image, svg)?;
+        println!("wrote {}", panel.image);
+    }
+    Ok(code)
+}
 
+/// The body of the last ```r block before the line that shows `image`.
+fn readme_example(readme: &str, image: &str) -> Result<String, Box<dyn Error>> {
+    let lines: Vec<&str> = readme.lines().collect();
+    let shown = lines
+        .iter()
+        .position(|line| line.contains(image))
+        .ok_or(format!("{README} does not show {image}"))?;
+    let open = lines[..shown]
+        .iter()
+        .rposition(|line| line.trim_end() == "```r")
+        .ok_or(format!("{README} has no ```r block above {image}"))?;
+    let close = lines[open + 1..shown]
+        .iter()
+        .position(|line| line.trim_end() == "```")
+        .ok_or(format!("the ```r block above {image} in {README} is not closed"))?;
+    let body = &lines[open + 1..open + 1 + close];
+    Ok(body.iter().map(|line| format!("{line}\n")).collect())
+}
+
+/// The styled lines of the one finding `ry check` reports on `example`, cut down to its headline
+/// and each source line that carries an underline.
+fn finding(ry: &Path, panel: &Panel, example: &str) -> Result<Vec<Vec<Span>>, Box<dyn Error>> {
     // A fresh directory, so no `ry.toml` or check cache of the repository applies.
     let directory = std::env::temp_dir().join(format!("ry-readme-diagnostic-{}", std::process::id()));
     fs::create_dir_all(&directory)?;
-    fs::write(directory.join("ry.toml"), "")?;
-    fs::write(directory.join(FILE_NAME), example)?;
+    fs::write(directory.join("ry.toml"), panel.ry_toml)?;
+    fs::write(directory.join(panel.file_name), example)?;
     // `CLICOLOR_FORCE` gives a pipe the colors and box drawing of a terminal, without wrapping
     // lines to a terminal's width.
-    let output = Command::new(&ry)
-        .args(["check", FILE_NAME])
+    let output = Command::new(ry)
+        .args(["check", panel.file_name])
         .current_dir(&directory)
         .env("CLICOLOR_FORCE", "1")
         .env_remove("NO_COLOR")
         .output();
     fs::remove_dir_all(&directory)?;
     let output = output?;
-    // Findings go to stderr and the summary to stdout, which a terminal shows in that order.
-    let transcript = format!(
-        "\u{1b}[2m$\u{1b}[0m ry check {FILE_NAME}\n{}{}",
-        String::from_utf8(output.stderr)?,
-        String::from_utf8(output.stdout)?
-    );
-    if output.status.code() != Some(1) {
-        return Err(format!("`ry check {FILE_NAME}` should report a finding, but printed:\n{transcript}").into());
+    // Findings go to stderr and the summary to stdout.
+    let report = String::from_utf8(output.stderr)?;
+    let summary = String::from_utf8(output.stdout)?;
+    let headlines = report.lines().filter(|line| plain_text(line).trim_start().starts_with('×')).count();
+    if output.status.code() != Some(1) || headlines != 1 {
+        let file_name = panel.file_name;
+        return Err(format!("`ry check {file_name}` should report one finding, but printed:\n{report}{summary}").into());
     }
 
-    let svg = render(&transcript)?;
-    if fs::read_to_string(IMAGE).is_ok_and(|current| current == svg) {
-        return Ok(ExitCode::SUCCESS);
+    let plain: Vec<String> = report.lines().map(plain_text).collect();
+    let underline = |index: usize| {
+        plain.get(index).and_then(|text| text.split_once('│')).is_some_and(|(gutter, marks)| {
+            gutter.trim().is_empty() && marks.contains('^')
+        })
+    };
+    let source = |index: usize| {
+        plain.get(index).and_then(|text| text.split_once('│')).is_some_and(|(gutter, _)| {
+            gutter.trim().parse::<usize>().is_ok()
+        })
+    };
+    let kept: Vec<Vec<Span>> = report
+        .lines()
+        .enumerate()
+        .filter(|&(index, _)| {
+            plain[index].trim_start().starts_with('×') || underline(index) || (source(index) && underline(index + 1))
+        })
+        .map(|(_, line)| parse_sgr(line))
+        .collect();
+    if !(0..plain.len()).any(underline) {
+        return Err(format!("`ry check {}` underlined no source line:\n{report}", panel.file_name).into());
     }
-    if check {
-        eprintln!("error: {IMAGE} differs from what `ry check` prints; run `just readme`");
-        return Ok(ExitCode::from(1));
-    }
-    fs::write(IMAGE, svg)?;
-    println!("wrote {IMAGE}");
-    Ok(ExitCode::SUCCESS)
-}
-
-/// The body of the last ```r block before the line that shows the image.
-fn readme_example(readme: &str) -> Result<String, Box<dyn Error>> {
-    let lines: Vec<&str> = readme.lines().collect();
-    let image = lines
-        .iter()
-        .position(|line| line.contains(IMAGE))
-        .ok_or(format!("{README} does not show {IMAGE}"))?;
-    let open = lines[..image]
-        .iter()
-        .rposition(|line| line.trim_end() == "```r")
-        .ok_or(format!("{README} has no ```r block above {IMAGE}"))?;
-    let close = lines[open + 1..image]
-        .iter()
-        .position(|line| line.trim_end() == "```")
-        .ok_or(format!("the ```r block above {IMAGE} in {README} is not closed"))?;
-    let body = &lines[open + 1..open + 1 + close];
-    Ok(body.iter().map(|line| format!("{line}\n")).collect())
+    Ok(kept)
 }
 
 /// One SVG holding the colored lines, styled for both GitHub themes.
-fn render(transcript: &str) -> Result<String, std::fmt::Error> {
-    let lines: Vec<Vec<Span>> = transcript.trim_end().lines().map(parse_sgr).collect();
+fn render(lines: &[Vec<Span>], title: &str) -> Result<String, std::fmt::Error> {
     let columns = lines
         .iter()
         .map(|spans| spans.iter().map(|span| span.text.chars().count()).sum::<usize>())
@@ -127,7 +180,7 @@ fn render(transcript: &str) -> Result<String, std::fmt::Error> {
     write!(
         out,
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-labelledby="title desc">
-<title id="title">ry check reports a match that misses a case</title>
+<title id="title">{}</title>
 <desc id="desc">{}</desc>
 <style>
 .bg {{ fill: #f6f8fa; stroke: #d0d7de; }}
@@ -143,6 +196,7 @@ text {{ fill: #e6edf3; }}
 </style>
 <rect class="bg" x="0.5" y="0.5" width="{}" height="{}" rx="6"/>
 "##,
+        escape(title),
         escape(&plain.join("\n")),
         width - 1.0,
         height - 1.0,
@@ -237,6 +291,11 @@ fn parse_sgr(line: &str) -> Vec<Span> {
         rest = &escape[end + 1..];
     }
     spans
+}
+
+/// A line's text without its SGR escapes.
+fn plain_text(line: &str) -> String {
+    parse_sgr(line).into_iter().map(|span| span.text).collect()
 }
 
 fn escape(text: &str) -> String {

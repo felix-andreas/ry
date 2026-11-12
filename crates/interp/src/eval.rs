@@ -1922,13 +1922,9 @@ pub unsafe fn apply_closure(
     {
         return Ok(value);
     }
-    if supplied.is_none() && crate::annotations::is_typed(function) {
-        force_typed_arguments(args)?;
-        if let Some(tier) = bytecode::tier() {
-            if let Some(value) = (tier.call)(function, args) {
-                return value;
-            }
-            crate::annotations::log_interpreted(call);
+    if crate::annotations::is_typed(function) {
+        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
+            return value;
         }
     }
     if let Some(frame) = bind_slots(call, function, args)? {
@@ -1945,6 +1941,39 @@ pub unsafe fn apply_closure(
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+}
+
+/// Runs a call of the typed closure `function` natively when the native tier takes it, and
+/// otherwise reports why it runs in the interpreter.
+unsafe fn try_native_typed(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Option<R<Sexp>>> {
+    if supplied.is_some() {
+        crate::annotations::log_interpreted_because(
+            call,
+            "it is a method that dispatch called, which the native tier does not take",
+        );
+        return Ok(None);
+    }
+    force_typed_arguments(args)?;
+    let Some(tier) = bytecode::tier() else {
+        crate::annotations::log_interpreted_because(call, "no native tier is loaded");
+        return Ok(None);
+    };
+    let value = (tier.call)(&bytecode::TypedCall {
+        call,
+        function,
+        args,
+        sys_parent,
+    });
+    if value.is_none() {
+        crate::annotations::log_interpreted(call);
+    }
+    Ok(value)
 }
 
 /// Forces, left to right, each argument promise that typed code wrote: a call from one typed
@@ -2004,13 +2033,9 @@ pub unsafe fn apply_closure_owning(
     {
         return Ok(value);
     }
-    if supplied.is_none() && crate::annotations::is_typed(function) {
-        force_typed_arguments(args)?;
-        if let Some(tier) = bytecode::tier() {
-            if let Some(value) = (tier.call)(function, args) {
-                return value;
-            }
-            crate::annotations::log_interpreted(call);
+    if crate::annotations::is_typed(function) {
+        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
+            return value;
         }
     }
     if let Some(frame) = bind_slots(call, function, args)? {
@@ -2990,6 +3015,34 @@ pub unsafe fn enter(
             depth: 0,
         }),
     }
+}
+
+/// Runs `body` in a frame for the call `typed` describes, with a new environment enclosed by the
+/// closure's. Compiled typed code has no frame of its own and runs each R call it makes this
+/// way, so `stop()`, `sys.call()` and `parent.frame()` there see the call the interpreter makes.
+pub unsafe fn run_in_frame(
+    typed: &bytecode::TypedCall<'_>,
+    body: impl FnOnce(Sexp) -> R<()>,
+) -> R<()> {
+    let env = values::new_env(typed.function.tag())?;
+    let caller = if typed.sys_parent == nil() {
+        interp().slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    let (depth, sampled) = push_frame(
+        typed.call,
+        typed.function,
+        env,
+        typed.sys_parent,
+        typed.args,
+        &[],
+        crate::NO_SLOTS,
+        0,
+        caller,
+    );
+    let result = sampled.and_then(|()| body(env)).map(|()| nil());
+    leave(depth, result).map(|_| ())
 }
 
 /// Finishes the call [`enter`] pushed at `depth` once its body has ended with `result`: it

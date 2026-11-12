@@ -259,6 +259,9 @@ cases depend on that build:
 - Collation and a few string cases follow ICU, which R uses when its headers are installed.
 - The `datatable__*`, `grid__*` and knitr cases print what those packages' current CRAN releases
   print, and each declares the packages it needs in an `# oracle: requires` line.
+- `strings__riconv_native_encoding` switches to `en_US.ISO-8859-1`, which a stock Ubuntu container
+  lacks. It declares the locale in a `# oracle: requires locale` line, and
+  `tools/oracle-locales.sh`, which dev-setup and CI run, generates it.
 
 `sudo tools/dev-setup.sh` builds exactly this into `/opt/R/4.6.2` and installs the packages, and
 `just doctor` checks it. `--enable-R-shlib` changes no output: it builds the `libR.so` that ry's
