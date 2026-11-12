@@ -471,6 +471,39 @@ fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
     });
 }
 
+/// `Dict.len` and `Set.len` return a ry `I64`, so compiled code must not return the count as an
+/// R integer. A short loop runs the body in tier 0 and a long one enters it in compiled code, so
+/// both paths are pinned.
+#[test]
+fn collection_lengths_keep_their_type_in_compiled_code() {
+    with_interpreter(|| unsafe {
+        let definitions = [
+            "dict_len <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.len(d) }",
+            "set_len <- function(n) { s <- Set.insert(Set.empty(), 2L); for (i in 1:n) NULL; Set.len(s) }",
+            "dict_empty <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.is_empty(d) }",
+        ];
+        for definition in definitions {
+            run(definition);
+        }
+        let calls = |mode| {
+            jit::install_mode(mode);
+            let outcomes: Vec<String> = ["dict_len", "set_len", "dict_empty"]
+                .iter()
+                .flat_map(|name| {
+                    ["3L", "100000L"].map(|n| run(&format!(".Internal(typeof({name}({n})))")))
+                })
+                .collect();
+            jit::install_mode(Mode::Off);
+            outcomes
+        };
+        let interpreted = calls(Mode::Off);
+        assert_eq!(interpreted[..4], ["\"I64\""; 4], "{interpreted:?}");
+        assert_eq!(interpreted[4], "\"logical\"", "{interpreted:?}");
+        assert_eq!(calls(Mode::On), interpreted);
+        assert_eq!(calls(Mode::Force), interpreted);
+    });
+}
+
 #[test]
 fn native_functions_agree_across_tiers() {
     // Scalar functions called with unboxed arguments run as native functions, recursion

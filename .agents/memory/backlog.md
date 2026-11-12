@@ -607,9 +607,6 @@ protects construction but nothing after it.
   environment on its first run (`op_call_rebinding` falls back to `eval::rebind_call`), so the
   rest of the call runs on the environment path. It stays linear; updating through the slot
   would keep the frame's slots. Helper moves already work from slots (`moves::Binding::Slot`).
-- With the JIT on, `Dict.len(d)` after a loop inside a function returns an R number, not an
-  `I64`: `f <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.len(d) }` prints
-  `[1] 0` for `f(100000L)` and `0i64` for `f(3L)` or with `RY_JIT=off`.
 - Under GNU R (`ry load`, `crates/ry/src/load.rs`), `std::List.map` fails with R's "there is no
   package called 'std'" instead of the explanation bare names get, bare names are stubbed whatever
   `[check] prelude` says, and the stub message calls every `ry.exports` name (DataFrame, Arrays) part
