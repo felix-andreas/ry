@@ -133,8 +133,12 @@ the interpreter, and the flag under the bar names what was refused.
 
 ## How it was measured
 
-Every number on this page comes from a release build of ry (`cargo build --release`), and the runner
-refuses any other build.
+The published numbers measure the build you download: the official Linux x86_64 archive of a
+tagged release, which is profile-guided and laid out by BOLT (`tools/layout/optimize.sh`). The
+runner unpacks the archive into a private directory where its `ry` extracts the runtime and base R
+it embeds, and the line under each chart names the release and the first digits of the archive's
+sha256. A suite whose line names a commit instead was measured on a plain release build of that
+commit (`cargo build --release`), without the release layout.
 
 A run measures several rounds. Each round runs every program on every engine once, with the
 programs in an order shuffled per round and the engines in an order shuffled per program, from a
@@ -174,10 +178,12 @@ The runner, not this page, judges the data:
 <BenchmarkMethod />
 
 To reproduce a suite, run its command from the table on a machine with GNU R; the packages suite
-first needs `just bench-packages install`. With `--write`, the runner stores
-`tools/bench/<suite>/results.json` with the commit that built ry, and `just readme` rewrites
-the README summary from it. `--write` refuses a working tree with a change to a tracked file or an
-untracked file under `crates/` or `tools/bench/`, so every stored commit reproduces its
-measurement. The README summary warns when the suites were measured on different machines (CPU
+first needs `just bench-packages install`. Without `--release`, a run measures the local release
+build in `target/release`, which is how to compare two builds of your own (`--baseline`). With
+`--write`, the runner stores `tools/bench/<suite>/results.json` with the release tag, the archive's
+file name and sha256, and the commit the tag names, and `just readme` rewrites the README summary
+from it. `--write` refuses a nightly archive, a local build, and a working tree with a change to a
+tracked file or an untracked file under `crates/` or `tools/bench/`, so the stored programs
+reproduce the measurement. The README summary warns when the suites were measured on different machines (CPU
 model or kernel) or against a GNU R on a different BLAS, because their ratios are then not
 comparable.

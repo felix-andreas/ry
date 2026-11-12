@@ -1,0 +1,31 @@
+# A process started with SIGINT ignored, such as a background job of a non-interactive shell (the
+# way CI and agents often run tests), keeps ignoring it, as GNU R does. An R script that interrupts
+# itself is then not interrupted, on ry's runtime and on GNU R alike.
+
+requires ry-runtime
+requires gnu-r
+
+file interrupt.R
+| outcome <- tryCatch({
+|   tools::pskill(Sys.getpid(), tools::SIGINT)
+|   for (i in seq_len(100)) Sys.sleep(0.01)
+|   "not interrupted"
+| }, interrupt = function(condition) "interrupted")
+| cat(outcome, "\n")
+
+run ry run --runtime ry interrupt.R
+expect exit 0
+expect stdout "interrupted"
+expect stdout lacks "not interrupted"
+run ry run --runtime gnu-r interrupt.R
+expect exit 0
+expect stdout "interrupted"
+expect stdout lacks "not interrupted"
+
+ignore SIGINT
+run ry run --runtime ry interrupt.R
+expect exit 0
+expect stdout "not interrupted"
+run ry run --runtime gnu-r interrupt.R
+expect exit 0
+expect stdout "not interrupted"
