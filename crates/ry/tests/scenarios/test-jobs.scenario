@@ -44,7 +44,7 @@ file tests/testthat/test-wrong.R
 
 run ry test --jobs 2 --reporter summary --runtime ry
 expect exit 1
-expect stdout "Starting 2 test processes."
+expect stderr "Starting 2 test processes."
 expect stdout "area: .."
 expect stdout "square: .."
 expect stdout "wrong: 1"
@@ -53,7 +53,7 @@ expect stdout "Expected `area(2, 2)` to equal 5."
 # One job runs the files in the `ry test` process, as a run without the flag does here.
 run ry test --jobs 1 --reporter summary --runtime ry --filter wrong
 expect exit 1
-expect stdout lacks "test processes"
+expect stderr lacks "test processes"
 expect stdout "wrong: 1"
 
 # A profile summary describes one process, so it cannot cover workers.
