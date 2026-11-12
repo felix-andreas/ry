@@ -170,7 +170,6 @@ fn exit_kind(ty: Ty) -> i32 {
     }
 }
 
-
 fn flags() -> MemFlagsData {
     MemFlagsData::trusted()
 }
@@ -1277,7 +1276,9 @@ impl<'p> Translator<'p> {
                 let forgetting = self.builder.create_block();
                 let joined = self.builder.create_block();
                 self.builder.set_cold_block(forgetting);
-                self.builder.ins().brif(validate, forgetting, &[], joined, &[]);
+                self.builder
+                    .ins()
+                    .brif(validate, forgetting, &[], joined, &[]);
                 self.builder.switch_to_block(forgetting);
                 self.forget_slots(before);
                 self.builder.ins().jump(joined, &[]);
@@ -1549,7 +1550,11 @@ impl<'p> Translator<'p> {
 
     /// Boxes the unboxed registers the instruction at `position` reads, so tier 0 finds them.
     unsafe fn box_reads(&mut self, position: usize, before: &StateRef<'p>) {
-        self.box_registers(position, analysis::reads(&self.plan.insts[position]), before);
+        self.box_registers(
+            position,
+            analysis::reads(&self.plan.insts[position]),
+            before,
+        );
     }
 
     /// Where tier 0 would find the object for the unboxed `register` at `position`: the
@@ -1590,7 +1595,13 @@ impl<'p> Translator<'p> {
     /// The boxed form of the unboxed `register` for tier 0. A constant is the pool's own object,
     /// and a variable whose frame cell holds the object it was unboxed from reuses that object,
     /// so neither allocates.
-    unsafe fn box_for_tier0(&mut self, position: usize, register: usize, ty: Ty, before: &StateRef<'p>) -> Value {
+    unsafe fn box_for_tier0(
+        &mut self,
+        position: usize,
+        register: usize,
+        ty: Ty,
+        before: &StateRef<'p>,
+    ) -> Value {
         let slot = match self.known_object(position, register) {
             Some(Known::Constant(constant)) => {
                 return self.builder.ins().iconst(I64, constant.as_ptr() as i64);
@@ -1648,7 +1659,9 @@ impl<'p> Translator<'p> {
         let join = self.builder.create_block();
         self.builder.append_block_param(join, I64);
         self.builder.set_cold_block(boxing);
-        self.builder.ins().brif(reusable, join, &[cell], boxing, &[]);
+        self.builder
+            .ins()
+            .brif(reusable, join, &[cell], boxing, &[]);
         self.builder.switch_to_block(boxing);
         let value = self.use_register(register, ty);
         let boxed = self.box_value(ty, value);
@@ -3095,10 +3108,10 @@ impl<'p> Translator<'p> {
             self.subscript_position(before.registers[index], index, bound, false);
         // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
         let status = self.status(slot);
-        let local = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
+        let local =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
         let attempt = self.builder.ins().band(in_range, local);
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
@@ -3428,7 +3441,9 @@ impl<'p> Translator<'p> {
             let nil = values::nil().as_ptr() as i64;
             let in_slots = self.builder.ins().icmp_imm_u(IntCC::Equal, env, nil);
             let slotted = self.builder.create_block();
-            self.builder.ins().brif(in_slots, slotted, &[], outline, &[]);
+            self.builder
+                .ins()
+                .brif(in_slots, slotted, &[], outline, &[]);
             self.builder.switch_to_block(slotted);
             let value =
                 self.builder
@@ -3449,20 +3464,20 @@ impl<'p> Translator<'p> {
                 .builder
                 .ins()
                 .uload8(I32, flags(), value, header_layout::KIND as i32);
-            let promise = self
-                .builder
-                .ins()
-                .icmp_imm_u(IntCC::Equal, kind, SexpType::Promise as i64);
+            let promise =
+                self.builder
+                    .ins()
+                    .icmp_imm_u(IntCC::Equal, kind, SexpType::Promise as i64);
             let forced = self.builder.create_block();
             let plain = self.builder.create_block();
             self.builder.ins().brif(promise, forced, &[], plain, &[]);
             self.builder.switch_to_block(plain);
             self.builder.ins().jump(merged, &[value, local_status]);
             self.builder.switch_to_block(forced);
-            let promised = self
-                .builder
-                .ins()
-                .load(I64, flags(), value, header_layout::FIRST as i32);
+            let promised =
+                self.builder
+                    .ins()
+                    .load(I64, flags(), value, header_layout::FIRST as i32);
             let evaluated = self
                 .builder
                 .ins()
@@ -3495,14 +3510,11 @@ impl<'p> Translator<'p> {
         let enclosing = self.builder.ins().band_imm_u(found, 1);
         let enclosing = self.builder.ins().ireduce(I32, enclosing);
         // The low bit picks the enclosing status over the local one.
-        let step = self.builder.ins().imul_imm_s(
-            enclosing,
-            i64::from(status::RUNTIME_ENCLOSING - status::RUNTIME_LOCAL),
-        );
-        let status = self
+        let step = self
             .builder
             .ins()
-            .iadd_imm_s(step, i64::from(status::RUNTIME_LOCAL));
+            .imul_imm_s(enclosing, status::RUNTIME_ENCLOSING - status::RUNTIME_LOCAL);
+        let status = self.builder.ins().iadd_imm_s(step, status::RUNTIME_LOCAL);
         self.builder.ins().jump(merged, &[value, status]);
     }
 

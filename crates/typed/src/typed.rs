@@ -11,6 +11,17 @@
 //! done something visible, so once it has, giving up is an error instead of a second run.
 
 #![allow(unsafe_op_in_unsafe_fn)]
+// Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
+#![allow(clippy::missing_safety_doc)]
+// The lowering's `to_*` helpers take `&mut self` because they emit code, and its builder callbacks
+// have long closure types.
+#![allow(
+    clippy::wrong_self_convention,
+    clippy::type_complexity,
+    clippy::explicit_counter_loop,
+    clippy::needless_borrow,
+    clippy::unnecessary_cast
+)]
 
 pub mod backend;
 pub mod fusion;
@@ -547,8 +558,8 @@ fn item_storage(item: Item) -> SexpType {
         Item::Lgl => SexpType::Logical,
         Item::Str => SexpType::String,
         Item::I64 => SexpType::I64,
-        // A ry list of records or tags is an R list of them.
-        Item::Record(_) | Item::Tag(_) => SexpType::List,
+        // A ry list of records, tags or lists is an R list of them.
+        Item::Record(_) | Item::Tag(_) | Item::Array(_) => SexpType::List,
     }
 }
 
@@ -559,7 +570,7 @@ fn item_kind(item: Item) -> u32 {
         Item::Lgl => values::LGL,
         Item::Str => values::STR,
         Item::I64 => values::I64,
-        Item::Record(_) | Item::Tag(_) => values::OBJECT,
+        Item::Record(_) | Item::Tag(_) | Item::Array(_) => values::OBJECT,
     })
 }
 
@@ -720,6 +731,8 @@ impl Arguments {
                             };
                             *(slot as *mut u64).add(index) = boxed;
                         }
+                        // `list_type` gives no R list of lists a type.
+                        Item::Array(_) => return false,
                     }
                 }
                 self.words.push(list as u64);
@@ -802,7 +815,9 @@ unsafe fn to_box_inner(value: Sexp) -> Option<(u64, Item)> {
         for (&item, word) in items.iter().zip(words) {
             match item {
                 Item::Str => values::ry_str_drop(word[0], word[1]),
-                Item::Record(_) | Item::Tag(_) => values::ry_list_drop(word[0] as *mut List),
+                Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
+                    values::ry_list_drop(word[0] as *mut List)
+                }
                 _ => {}
             }
         }
@@ -910,6 +925,7 @@ unsafe fn from_box_inner(boxed: u64) -> Result<Sexp, Unwind> {
                 hi: *at.add(1),
             })?),
             Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box_inner(word)?),
+            Item::Array(_) => Slot::Handle(to_r(Type::of_item(item), [word, 0])?),
         });
     }
     let heap = interp::heap();
@@ -969,6 +985,13 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                         interp::heap().set_element(vector, index, from_box(boxed)?);
                     }
                 }
+                Item::Array(_) => {
+                    let items = std::slice::from_raw_parts(data as *const u64, length);
+                    for (index, &list) in items.iter().enumerate() {
+                        let element = to_r(Type::of_item(item), [list, 0])?;
+                        interp::heap().set_element(vector, index, element);
+                    }
+                }
             }
             vector.set_array(array);
             Ok(vector)
@@ -986,6 +1009,9 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                     Item::I64 => interp::numbers::alloc(*(data as *const i64).add(index))?,
                     Item::Str => string_vector(*(data as *const Str).add(index))?,
                     Item::Record(_) | Item::Tag(_) => from_box(*(data as *const u64).add(index))?,
+                    Item::Array(_) => {
+                        to_r(Type::of_item(item), [*(data as *const u64).add(index), 0])?
+                    }
                 };
                 interp::heap().set_element(vector, index, element);
             }

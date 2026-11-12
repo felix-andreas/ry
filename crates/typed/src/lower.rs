@@ -677,12 +677,12 @@ impl Lowering<'_> {
         let item = match values.first() {
             Some(&first) => {
                 let ty = self.builder.ty(first);
-                let item = ty.item().ok_or(Refusal::new(
+                let item = ty.held_item().ok_or(Refusal::new(
                     "a list literal of something a list cannot hold",
                 ))?;
                 if values
                     .iter()
-                    .any(|&value| self.builder.ty(value).item() != Some(item))
+                    .any(|&value| self.builder.ty(value).held_item() != Some(item))
                 {
                     return Err(Refusal::new("a list literal whose items differ in type"));
                 }
@@ -724,7 +724,7 @@ impl Lowering<'_> {
         let item = self
             .builder
             .ty(value)
-            .item()
+            .held_item()
             .ok_or(Refusal::new("an append of something a list cannot hold"))?;
         self.settle(list, item)?;
         let ty = self.builder.ty(list);
@@ -1147,7 +1147,8 @@ impl Lowering<'_> {
                 let exit = inlined.exit;
                 match inlined.result {
                     Some(result) => {
-                        if self.builder.ty(result) != self.builder.ty(value) {
+                        let (expected, found) = (self.builder.ty(result), self.builder.ty(value));
+                        if expected != found && (expected, found) != (Type::Lgl, Type::Bool) {
                             return Err(Refusal::new("a `return` of another type"));
                         }
                         self.builder.push(Some(result), Op::Copy(value));
@@ -1282,6 +1283,11 @@ impl Lowering<'_> {
             | (Type::Str, Item::Str) => Ok(value),
             (Type::Record(a), Item::Record(b)) if a == b => Ok(value),
             (Type::Tag(a), Item::Tag(b)) if shapes::within(a, b) => Ok(value),
+            (Type::Vector { item, array: true }, Item::Array(id))
+                if shapes::array_of(item) == id =>
+            {
+                Ok(value)
+            }
             (Type::Int | Type::Lgl, Item::Dbl) => {
                 Ok(self.builder.emit(Type::Dbl, Op::ToDbl(value)))
             }
@@ -2183,7 +2189,7 @@ impl Lowering<'_> {
                 }
                 let a = self.to_i64(a)?;
                 let b = self.to_i64(b)?;
-                let op = match &*name {
+                let op = match name {
                     "Num.bitwise_and" => Bits::And,
                     "Num.bitwise_or" => Bits::Or,
                     "Num.bitwise_xor" => Bits::Xor,
@@ -2280,7 +2286,7 @@ impl Lowering<'_> {
                     _ => Err(Refusal::new("a `Num.round` of something other than an F64")),
                 }
             }
-            "List.count_if" | "List.walk" => self.walk(&name, &arguments),
+            "List.count_if" | "List.walk" => self.walk(name, &arguments),
             "length" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `length`"));
@@ -2403,8 +2409,6 @@ impl Lowering<'_> {
                     return Ok(a);
                 }
                 match self.builder.ty(a) {
-                    // The native sum gives up on an empty list, which the standard library
-                    // sums to the R integer 0.
                     Type::Vector {
                         item: Item::I64,
                         array: true,
@@ -2748,7 +2752,7 @@ impl Lowering<'_> {
                 Ok(self.builder.emit(Type::Bool, Op::Truth(empty)))
             }
             "List.sublist" | "List.take_first" | "List.take_last" | "List.drop_first"
-            | "List.drop_last" => self.slice(&name, &arguments),
+            | "List.drop_last" => self.slice(name, &arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
             ".ry_update" => self.update(&arguments),
@@ -3386,7 +3390,7 @@ impl Lowering<'_> {
             let item = self
                 .builder
                 .ty(field)
-                .item()
+                .held_item()
                 .ok_or(Refusal::new("a field a box cannot hold"))?;
             items.push(item);
         }
@@ -4097,16 +4101,7 @@ impl Lowering<'_> {
             return Err(Refusal::new("a `paste` of nothing"));
         }
         let separator = self.string(&separator);
-        let pasted = if vectors {
-            let mut vector_parts = SmallVec::new();
-            for part in parts {
-                vector_parts.push(self.as_vector(part)?);
-            }
-            self.builder.emit(
-                Type::vector(Item::Str),
-                Op::PasteVectors(vector_parts, separator),
-            )
-        } else if collapse.is_some() {
+        let pasted = if vectors || collapse.is_some() {
             let mut vector_parts = SmallVec::new();
             for part in parts {
                 vector_parts.push(self.as_vector(part)?);
@@ -4977,6 +4972,8 @@ unsafe fn field_pattern(
 fn joined(a: Type, b: Type) -> Option<Type> {
     match (a, b) {
         (Type::Tag(a), Type::Tag(b)) => Some(Type::Tag(shapes::join(a, b))),
+        // A `Bool` is a logical that is never `NA`, held in the same word.
+        (Type::Bool, Type::Lgl) | (Type::Lgl, Type::Bool) => Some(Type::Lgl),
         (a, b) => (a == b).then_some(a),
     }
 }

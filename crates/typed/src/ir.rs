@@ -32,6 +32,9 @@ pub enum Item {
     Record(u32),
     /// A boxed tag of this union of shapes.
     Tag(u32),
+    /// A ry list of the items [`crate::shapes::array_item`] gives for this id, which lets a
+    /// record field or a list item be a list while an item stays one word.
+    Array(u32),
 }
 
 /// The type of a local.
@@ -109,6 +112,10 @@ impl Type {
             Item::I64 => Type::I64,
             Item::Record(shape) => Type::Record(shape),
             Item::Tag(union) => Type::Tag(union),
+            Item::Array(id) => Type::Vector {
+                item: crate::shapes::array_item(id),
+                array: true,
+            },
         }
     }
 
@@ -123,6 +130,15 @@ impl Type {
             Type::Record(shape) => Some(Item::Record(shape)),
             Type::Tag(union) => Some(Item::Tag(union)),
             _ => None,
+        }
+    }
+
+    /// The item a value of this type is when a ry list or a record holds it: a scalar's item, or
+    /// a ry list as an [`Item::Array`].
+    pub fn held_item(self) -> Option<Item> {
+        match self {
+            Type::Vector { item, array: true } => Some(Item::Array(crate::shapes::array_of(item))),
+            _ => self.item(),
         }
     }
 

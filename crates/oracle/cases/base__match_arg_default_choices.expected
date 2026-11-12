@@ -1,0 +1,53 @@
+[stdout]
+| [1] "linear"
+| [1] "quadratic"
+| [1] "LINEAR"
+| [1] "'arg' should be one of “LINEAR”, “QUADRATIC”"
+| [1] "QUADRATIC"
+| [1] "two"
+| [1] "one"
+| [1] "linear_g"
+| [1] "quadratic_g"
+| [1] "linear"
+| [1] "extra"
+| [1] "linear"
+| [1] "made"
+| [1] "made"
+| [1] "only"
+| [1] "only"
+|       a 
+| "alpha" 
+|      b 
+| "beta" 
+| [1] "alpha"
+| [1] "alpha"
+| [1] "1"
+| [1] "alpha"
+| [1] "gamma"
+| NULL
+| [1] "right"
+| [1] "'arg' must be of length 1"
+| [1] "mean"
+| [1] "med"
+| [1] "'arg' should be one of “mean”, “median”, “med”"
+| [1] "'arg' should be one of “mean”, “median”, “med”"
+| [1] "north"
+| [1] "south"
+| [1] "north"
+| [1] "linear"
+|         lin        quad 
+|    "linear" "quadratic" 
+| [1] " quadratic linear"
+| [1] "up"
+| [1] "down"
+| [1] "'arg' must be of length 1"
+| [1] "'arg' must be of length 1"
+| [1] "fourth"
+| [1] "deep"
+| [1] "shallow"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "shallow"

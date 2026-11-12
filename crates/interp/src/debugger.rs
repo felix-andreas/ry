@@ -1292,9 +1292,7 @@ pub(crate) unsafe fn evaluate_text(expression: &str, env: Sexp) -> Result<Sexp, 
         Err(Unwind::Interrupt) => Err("interrupted".to_owned()),
         // An error no handler caught ran the default handler, which records the message and
         // jumps to the top level; the program itself does not unwind.
-        Err(Unwind::Jump(jump)) if matches!(jump, Jump::TopLevel) => {
-            Err(interp().error_message.trim_end().to_owned())
-        }
+        Err(Unwind::Jump(Jump::TopLevel)) => Err(interp().error_message.trim_end().to_owned()),
         Err(Unwind::Jump(_)) => Err("the expression jumped out of the debugger".to_owned()),
     }
 }

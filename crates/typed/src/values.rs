@@ -359,13 +359,10 @@ pub unsafe extern "C" fn ry_list_range_i64(from: i64, to: i64) -> *mut List {
 /// The longest list `List.range` builds, as the standard library limits it.
 const MAX_RANGE: u128 = i32::MAX as u128;
 
-/// `List.sum` of an `I64` list. Status 0 with the total, and 2 for an empty list (whose sum
-/// the standard library gives as an R integer) or an overflow, where it raises an error.
+/// `List.sum` of an `I64` list. Status 0 with the total, which is 0 for an empty list, and 2 for
+/// an overflow, where the standard library raises an error.
 pub unsafe extern "C" fn ry_sum_i64(a: *mut List, out: *mut i64) -> u32 {
     let data = items::<i64>(a);
-    if data.is_empty() {
-        return 2;
-    }
     let mut total: i64 = 0;
     for &item in data {
         match total.checked_add(item) {
@@ -470,7 +467,9 @@ pub unsafe extern "C" fn ry_list_push(
     let target = if owned != 0 && is_unique(list) {
         list_reserve(list, length + 1)
     } else {
-        let copy = list_copy(list, grown_capacity(length + 1, (*list).capacity as usize));
+        // The copy's room grows from the length, not the shared list's capacity, so a loop of
+        // pushes that each copy does not double the capacity on every step.
+        let copy = list_copy(list, grown_capacity(length + 1, length));
         consume(list, owned);
         copy
     };
@@ -691,9 +690,10 @@ pub unsafe extern "C" fn ry_elementwise(
             return 1;
         }
     }
-    // An empty result's type is one only the interpreter knows, except for a sum of doubles.
+    // An empty list's type is one only the interpreter knows, except that a sum of it is 0 of
+    // the program's kind, as the standard library sums an empty list of either kind.
     let length = match length {
-        Some(length) if length > 0 || (sum != 0 && kind == DBL) => length as usize,
+        Some(length) if length > 0 || sum != 0 => length as usize,
         _ => return 1,
     };
     let sum = sum != 0;
