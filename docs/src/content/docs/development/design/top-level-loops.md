@@ -29,6 +29,8 @@ Otherwise the tree walker runs it.
 - `for` compiles after evaluating its sequence, with the evaluated value in place of the sequence
   expression, so the sequence is evaluated once. `ForInit` coerces a factor and steps a compact
   sequence without expanding it, as in a closure.
+- A `for` loop that stays in the tree walker steps through a compact sequence the same way, in
+  `do_for` after `run_loop` declines it, so no loop expands `1:n`.
 - `while` and `repeat` keep all their state in the environment, so after
   `LOOP_COMPILE_ITERATIONS` iterations the compiled loop starts again from the condition (`while`)
   or the body (`repeat`), which is exactly where the tree walker stands between two iterations.
