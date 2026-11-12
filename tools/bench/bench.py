@@ -181,6 +181,19 @@ def engines(args, suite):
     return table
 
 
+def file_contains(path, needle):
+    """Whether the file holds `needle`, read in 1 MiB pieces. Reading a 120 MiB libR whole would
+    raise this process's peak RSS, which every later child inherits as the floor of its own
+    `ru_maxrss` (the kernel carries the parent's peak across fork and exec)."""
+    tail = b""
+    with open(path, "rb") as file:
+        while piece := file.read(1 << 20):
+            if needle in tail + piece:
+                return True
+            tail = piece[-(len(needle) - 1):]
+    return False
+
+
 def refuse_foreign_images(binaries):
     """Exits unless every ry build in `binaries` would load only images it wrote itself.
 
@@ -194,7 +207,7 @@ def refuse_foreign_images(binaries):
     """
     for binary in dict.fromkeys(binaries):
         runtime = runtime_of(binary)
-        if runtime is not None and b"RY_IMAGE_LOG" not in runtime.read_bytes():
+        if runtime is not None and not file_contains(runtime, b"RY_IMAGE_LOG"):
             sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot "
                      "report a start-up or code image it does not use, and its timings may measure a "
                      "slow start; compare a build that has it")
