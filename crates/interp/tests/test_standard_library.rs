@@ -589,6 +589,16 @@ const PRINTS: &[(&str, &str)] = &[
         "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); [List.len(p), List.len(holder[[1]])] }",
         "[2i64, 1i64]\n",
     ),
+    // A ry list grows in place too, in its items' own storage, with the literal conversion and
+    // the item checks of a fresh one.
+    (
+        "{ p <- [1i64]; q <- p; for (i in 1:9) p <- List.append(p, i); holder <- list(p); p <- List.append(p, 0); [List.len(p), List.len(q), List.len(holder[[1]]), List.sum(p)] }",
+        "[11i64, 1i64, 10i64, 46i64]\n",
+    ),
+    (
+        "{ p <- [0.5]; for (i in 1:5) p <- List.append(p, 2); grown_words <- [\"a\"]; for (w in c(\"b\", \"c\")) grown_words <- List.append(grown_words, w); r <- [(a = 1i64,)]; r <- List.append(r, (a = 2i64,)); list(List.to_r(p), List.to_r(grown_words), r) }",
+        "[[1]]\n[1] 0.5 2.0 2.0 2.0 2.0 2.0\n\n[[2]]\n[1] \"a\" \"b\" \"c\"\n\n[[3]]\n[(a = 1i64,), (a = 2i64,)]\n\n",
+    ),
     (
         "{ p <- list(1L, 2L); q <- p; p <- List.set(p, 1L, 9L); c(p[[1]], q[[1]]) }",
         "[1] 9 1\n",
@@ -958,6 +968,10 @@ const ERRORS: &[(&str, &str)] = &[
     (
         "Dict.get(d, 1L)",
         "the dict's keys are character, and this one is integer; a collection holds one type",
+    ),
+    (
+        "{ p <- [1i64]; p <- List.append(p, 2i64); List.append(p, 2.5) }",
+        "`List.append()` received a list, so its result must be one too: 2.5 does not fit I64, the type of the list's other items",
     ),
     (
         "Set.contains(s, \"a\")",
@@ -1510,6 +1524,17 @@ unsafe fn move_undo_failures() -> Vec<String> {
             "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
             "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
             "[1] 1 2 2\n",
+        ),
+        // An Array's replaced items are read out for the journal and stored back.
+        (
+            "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; moved_xs <- [1.5, 2.5]; frame <<- environment(); moved_xs <- bad(moved_xs, 5) }; f() }",
+            "List.to_r(frame$moved_xs)",
+            "[1] 1.5 2.5\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs <- List.append(xs, v); xs <- List.set(xs, 3L, v); xs <- List.swap(xs, 1L, 3L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; moved_ys <- [1i64, 2i64, 3i64]; moved_ys <- List.append(moved_ys, 4i64); frame <- environment(); moved_ys <- bad(moved_ys, 9) }",
+            "frame$moved_ys",
+            "[1i64, 2i64, 3i64, 4i64]\n",
         ),
         // Base replacements change a moved list in place without the journal, so the move ends
         // before them and the caller keeps its value.
