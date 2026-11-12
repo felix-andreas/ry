@@ -227,7 +227,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   stats package's native routines. **`parallel.rs`** holds the parallel package's, **`rd.rs`** the
   Rd parser behind `tools::parse_Rd`, and **`graphics_render.rs`** what a graphics device draws
   and the image files it writes.
-- **`annotations.rs`**: the run-time checks that [inline annotations](/reference/type-system#inline-annotations-at-run-time)
+- **`annotations.rs`**: the run-time checks that [annotations](/reference/type-system#annotations-at-run-time)
   become at a function's boundary.
 - **`records.rs`**: records, tuples, tags and `match` at run time. **`arrays.rs`**: `List<T>`, an R
   vector with the heap's list bit set, and the strict rules that go with it; **`numbers.rs`**: the native number types.
