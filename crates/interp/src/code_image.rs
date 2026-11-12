@@ -40,7 +40,7 @@
 //!
 //! | Field | Content |
 //! |---|---|
-//! | magic | `RYCODE\0\x01` |
+//! | magic | `RYCODE\0\x03` |
 //! | build | the runtime's identity, as a length-prefixed blob |
 //! | flags | `u32`, bit 0 set when the image was trained |
 //! | database length | `u64`, the size of the `.rdb` file the image was written for |
