@@ -8655,7 +8655,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 | --- | --- | --- |
 | R code | JIT track (inlining tier, roadmap row (c)) | Almost all R-level time runs as machine code. Callees are inlined across closures and S3/S4 dispatch, and frames, promises and environments materialize only on deoptimization |
 | R code: tier-0 interpreter (44% of testthat) | T0 | 10 to 20 instructions per simple bytecode op (about 120 today): pinned interpreter state, quickened slot-local typed ops, superinstructions, feedback recorded only until a site is quickened |
-| R code | AOT track | 80% or more of package closures compiled at install, so package code is machine code from its first call |
+| R code | AOT track | 80% or more of R-level time in native code, from closures compiled at install, so package code is machine code from its first call ("Native share: the 80% target needs install-time compilation") |
 | Builtins: call machinery, subassignment, `[`/`[[`, apply family | B5 | No allocation on any fast path, arguments passed without pairlists, results written in place when unshared; faster than GNU R's C |
 | Builtins: element-wise kernels | B1 | Fused element-wise temporaries and SIMD kernels that beat GNU R's C |
 | Builtins: strings and testthat hotspots | C | Interned strings with no temporaries; the testthat profile's top entries |
@@ -8671,6 +8671,40 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - Thresholds drop to the hundreds.
   - Target: the tier-1 share of R-level time goes over 60%. This follows the adopted method-JIT direction in `prior-art.md`; trace compilation stays rejected.
 - **Progress tracking.** Each merge reports the bench-real suites with their intervals, and the bucket shares from `ry run --profile-summary`, against the 3x row.
+
+## Native share: the 80% target needs install-time compilation
+
+- **Target.** At least 80% of R-level time runs in native code, reached with install-time compilation (the AOT track). A JIT that compiles per session tops out at about 45 to 55%, so it cannot reach the target alone.
+- **Why a per-session JIT stops near half.** Bodies that never reach the tier-up threshold take 25 to 35% of the time, and lowering the threshold does not recover them: 3000 entries is the measured optimum of the `repays()` cost model (`crates/jit/src/jit.rs`), and bypassing its RARE refusal adds under 1 point of native share while running slower. What a per-session JIT can still win is plan coverage, the steps it hands back to tier 0.
+- **Method.** A `census` build (`cargo build --release -p ry-lang -p libr -p rcmd --features jit/census`) samples the innermost running closure body every millisecond of wall time when `RY_CENSUS=FILE` is set, with whether it is in native code (`crates/interp/src/census.rs`), and `tools/native-share.py` folds the samples by body and JIT status. The share is of time, not instructions, because tier 0 runs every body in the same handlers, so callgrind cannot attribute instructions to a closure. A body's time includes the builtins it calls but not the closure bodies it calls. For rlang, the 65% of wall time the parent spends waiting on its 41 callr children (confirmed with `strace`) is excluded with `--exclude`. The sampler costs 7 to 16% of wall time; the default build compiles it out.
+- **Where time goes today** (default tiering; bodies, then share of time):
+
+| status | testthat_full | rlang (callr wait excluded) | cli |
+| --- | --- | --- | --- |
+| native | 1 / 0.2% | 1 / 0.0% | 5 / 3.0% |
+| RARE (cost model refuses) | 122 / 58.2% | 77 / 46.1% | 155 / 42.3% |
+| never hot | 1733 / 27.6% | 8083 / 24.7% | 15391 / 35.0% |
+| MOSTLY_TIER0 | 4 / 4.6% | 3 / 9.7% | 9 / 5.8% |
+| NEVER_NATIVE | 14 / 4.2% | 17 / 6.9% | 39 / 5.4% |
+| NOTHING_NATIVE | 0 / 0% | 6 / 5.2% | 10 / 2.8% |
+| native entry | 3 / 2.3% | 3 / 0.9% | 4 / 2.7% |
+| `for` over a non-vector, frame reflection, no feedback | 1 / 1.6% | 2 / 4.6% | 1 / 0.4% |
+| AST | 104 / 0.9% | 274 / about 0% | 72923 / 2.2% |
+| total bodies | 1982 | 8467 | 88537 |
+
+- **What plan-coverage fixes would win.** A flip simulation counts a refused body as native once every step that kept it in tier 0 is lowered, using the steps a forced compile records for each refused body. Points of native share gained:
+
+| fix | testthat_full | cli | rlang |
+| --- | --- | --- | --- |
+| T1's plan items | +9.7 | +6.6 | +5.9 |
+| `CallRebinding` guard | +2.7 | +1.8 | +4.1 |
+| `Op::Internal` lowered | +3.5 | +3.8 | +4.3 |
+| callee is a special | +2.0 | +2.6 | +1.2 |
+| T1 and `CallRebinding` | +17.5 | +12.8 | +10.0 |
+| all of the above | +28.7 | +25.3 | +21.5 |
+| every step native | +46.7 | +32.6 | +41.8 |
+
+- **Consequence.** The JIT track owns plan coverage (T1's items, the `CallRebinding` guard, `Op::Internal`, whose operand names the builtin-table entry directly). The AOT track's install-time compilation rises in priority and is measured by native share, because it is the only route past the never-hot quarter to a third of the time.
 
 ## Tier 0 runs frameless fast handlers, quickened arithmetic and out-of-line loop fallbacks
 

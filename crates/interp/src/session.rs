@@ -889,6 +889,8 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::profile_summary::finish() {
         report_toplevel(unwind);
     }
+    #[cfg(feature = "census")]
+    crate::census::finish();
     (interp().hooks.run_exit_finalizers)();
     crate::system::remove_session_temp_dir();
 }

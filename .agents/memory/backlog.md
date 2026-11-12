@@ -810,6 +810,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
+- **Native share: 80% of R-level time in native code, with install-time compilation.** A
+  per-session JIT tops out at about 45 to 55%, because never-hot bodies take 25 to 35% of the time
+  and 3000 entries is the threshold optimum (`decisions.md`, "Native share: the 80% target needs
+  install-time compilation", which has both tables and the method). The JIT track closes plan
+  coverage (T1's items, the `CallRebinding` guard, lowering `Op::Internal`: up to about +29 points
+  together); the AOT track's install-time compilation covers the never-hot bodies. Measure with a
+  `--features jit/census` build, `RY_CENSUS=FILE` and `tools/native-share.py`.
 - **An optimizing layer for LuaJIT-class loops (not queued; starts only on the orchestrator's go,
   after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
   addressing and unboxed scalars, slot frames) close the interpreter and value-representation gaps
