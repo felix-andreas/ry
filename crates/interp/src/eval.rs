@@ -2281,9 +2281,18 @@ pub const DOTS_SOURCE: i32 = -2;
 /// arguments once they are collected.
 pub const MATCH_PER_CALL: i32 = -3;
 
+/// The source of a formal the site leaves out whose default is a literal, which goes in the
+/// slot as it is.
+pub const LITERAL_DEFAULT: i32 = -4;
+
+/// The source of a formal the site leaves out whose default is code, which runs as a promise
+/// over the slots.
+pub const PROMISED_DEFAULT: i32 = -5;
+
 /// The direct-call plan of the call `call` for closures with `function`'s formals and body:
-/// for each formal, the position of the argument that fills its slot, -1 when the site
-/// supplies none, or [`DOTS_SOURCE`] for `...`, followed by the positions of the arguments
+/// for each formal, the position of the argument that fills its slot, [`DOTS_SOURCE`] for
+/// `...`, or when the site supplies none, [`LITERAL_DEFAULT`] or [`PROMISED_DEFAULT`] for a
+/// formal with a default and -1 for one without, followed by the positions of the arguments
 /// `...` collects, in order. A call that passes `...` gets the one entry [`MATCH_PER_CALL`].
 /// `None` when such calls need [`bind_slots`] or a heap frame: the body has no slot table that
 /// names the formals, the call passes `..N`, its arguments do not match, or a formal the site
@@ -2347,13 +2356,11 @@ unsafe fn plannable(function: Sexp) -> Option<(CallShape, Option<usize>)> {
     }
     let names = table.element(1);
     let slots = values::length(names);
-    let missing_value = missing_arg();
+    let registers = values::ints(body.cdr().element(bytecode::REGISTERS))[0];
     let mut shape = CallShape {
         formals: 0,
-        slots: slots as u32,
-        registers: values::ints(body.cdr().element(bytecode::REGISTERS))[0] as u32,
-        defaulted: 0,
-        promised: 0,
+        slots: u16::try_from(slots).ok()?,
+        registers: u16::try_from(registers).ok()?,
     };
     let mut dots_index = None;
     let mut formal = function.car();
@@ -2367,13 +2374,6 @@ unsafe fn plannable(function: Sexp) -> Option<(CallShape, Option<usize>)> {
         }
         if formal.tag() == symbols().dots {
             dots_index = Some(index);
-        }
-        let default = formal.car();
-        if default != missing_value {
-            shape.defaulted |= 1 << index;
-            if !(default.kind().is_atomic() || default == nil()) {
-                shape.promised |= 1 << index;
-            }
         }
         shape.formals += 1;
         formal = formal.cdr();
@@ -2408,13 +2408,17 @@ unsafe fn plan_sources(
     }
     let mut defaults = None;
     let mut formal = formals;
-    for (index, &source) in sources[..formal_count].iter().enumerate() {
+    for (index, source) in sources[..formal_count].iter_mut().enumerate() {
         let default = formal.car();
-        if source < 0
-            && default != missing_value
-            && !slot_default_fits(function, default, index, &mut defaults)?
-        {
-            return Ok(None);
+        if *source == -1 && default != missing_value {
+            if !slot_default_fits(function, default, index, &mut defaults)? {
+                return Ok(None);
+            }
+            *source = if default.kind().is_atomic() || default == nil() {
+                LITERAL_DEFAULT
+            } else {
+                PROMISED_DEFAULT
+            };
         }
         formal = formal.cdr();
     }
@@ -2455,17 +2459,15 @@ pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent
 }
 
 /// What binding a planned call needs to know about the closures a plan is for, all fixed by
-/// their formals and body ([`plannable`]): so many formals, a slot table of `slots` names (the formals, then
-/// the body's locals), `registers` registers after the slots, the formals that have a default
-/// (`defaulted`), and those whose default is code that runs as a promise over the slots
-/// (`promised`), not a literal that goes in the slot as it is.
+/// their formals and body ([`plannable`]): so many formals, a slot table of `slots` names (the
+/// formals, then the body's locals), and `registers` registers after the slots. Which formals
+/// take their default is in the plan's sources ([`LITERAL_DEFAULT`], [`PROMISED_DEFAULT`]), so
+/// a plan row stays small.
 #[derive(Clone, Copy, Default)]
 pub struct CallShape {
-    pub formals: u32,
-    pub slots: u32,
-    pub registers: u32,
-    pub defaulted: u64,
-    pub promised: u64,
+    pub formals: u8,
+    pub slots: u16,
+    pub registers: u16,
 }
 
 /// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
@@ -2508,7 +2510,7 @@ pub unsafe fn call_with_plan(
             )?;
         }
     }
-    let mut missing = 0u64;
+    let (mut missing, mut promised) = (0u64, 0u64);
     // Only a formal the call leaves out reads its default, so the walk over the formals goes
     // no further than the last of them.
     let (mut formal, mut formal_index) = (function.car(), 0);
@@ -2516,12 +2518,15 @@ pub unsafe fn call_with_plan(
         let value = match args.get(source as usize) {
             Some(arg) if source >= 0 => arg.value,
             _ if source == DOTS_SOURCE => dots,
-            _ if shape.defaulted & (1 << index) != 0 => {
+            _ if source <= LITERAL_DEFAULT => {
                 while formal_index < index {
                     formal = formal.cdr();
                     formal_index += 1;
                 }
                 missing |= 1 << index;
+                if source == PROMISED_DEFAULT {
+                    promised |= 1 << index;
+                }
                 formal.car()
             }
             _ => missing_value,
@@ -2541,7 +2546,7 @@ pub unsafe fn call_with_plan(
         &[],
         header as u32,
         missing,
-        missing & shape.promised,
+        promised,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
