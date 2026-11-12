@@ -158,5 +158,6 @@
 [warnings]
 [errors]
 [value]
-NULL
-| NULL
+integer
+| structure(c(a = 25L, z = NA), dim = 2L, dimnames = list(c("a", 
+| "z")))

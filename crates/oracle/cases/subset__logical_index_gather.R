@@ -36,4 +36,3 @@ big <- data.frame(g = c("north", "south", "east", "west")[1:100000 %% 4L + 1L], 
                   p = 1 + 1:100000 %% 100L)
 sub <- big[big$u > 3L, ]
 print(dim(sub)); print(head(sub)); print(tail(sub)); print(sum(sub$p)); print(table(sub$g))
-invisible(NULL)

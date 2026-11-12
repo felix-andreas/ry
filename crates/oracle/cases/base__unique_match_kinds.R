@@ -36,4 +36,3 @@ for (v in list(words, reals)) {
   print(anyDuplicated(v)); print(anyDuplicated(v, fromLast = TRUE)); print(which(duplicated(v)))
   print(which(duplicated(v, fromLast = TRUE))); print(length(unique(v)))
 }
-invisible(NULL)

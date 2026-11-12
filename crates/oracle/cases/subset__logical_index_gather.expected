@@ -287,5 +287,7 @@
 [warnings]
 [errors]
 [value]
-NULL
-| NULL
+integer
+| structure(c(east = 19117L, north = 19118L, south = 19117L, west = 19117L
+| ), dim = 4L, dimnames = structure(list(c("east", "north", "south", 
+| "west")), names = ""), class = "table")

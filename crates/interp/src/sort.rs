@@ -788,8 +788,11 @@ unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
     }
     let duplicated = duplicated_elements(x, call.arg(1), from_last, false, "duplicated")?;
     let result = values::alloc_uninit(SexpType::Logical, duplicated.len)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = i32::from(duplicated.contains(index));
+    let flags = values::ints_mut(result).chunks_mut(64);
+    for (chunk, &word) in flags.zip(&duplicated.words) {
+        for (bit, slot) in chunk.iter_mut().enumerate() {
+            *slot = (word >> bit & 1) as i32;
+        }
     }
     Ok(result)
 }
@@ -2604,12 +2607,6 @@ impl Bits {
         let absent = *word & bit == 0;
         *word |= bit;
         absent
-    }
-
-    fn contains(&self, index: usize) -> bool {
-        self.words
-            .get(index / 64)
-            .is_some_and(|word| word & (1 << (index % 64)) != 0)
     }
 
     fn count(&self) -> usize {
