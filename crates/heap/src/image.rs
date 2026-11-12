@@ -161,9 +161,9 @@ fn words_as_bytes(words: &[u64]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 8) }
 }
 
-/// Fills a run of memory with the bytes an image stored for it: by reading them, or by mapping
-/// the file over it.
-pub type Fill<'a> = &'a mut dyn FnMut(&mut [u8]) -> Result<(), ImageError>;
+/// Fills a run of memory with the bytes an image stored for it, which start at the given offset
+/// in their section: by reading them, or by mapping the file over the memory.
+pub type Fill<'a> = &'a mut dyn FnMut(&mut [u8], usize) -> Result<(), ImageError>;
 
 /// A 64-bit digest of a sequence of words.
 pub struct Digest(u64);
@@ -454,6 +454,16 @@ impl Heap {
                 .cast::<*mut c_void>()
                 .write_unaligned(std::ptr::null_mut());
         }
+        // An empty page is zeroes a loading process has already, so the file leaves it out.
+        let page_words = PAGE_SIZE / 8;
+        let mut stored = 0;
+        for page in 0..pages.len() / page_words {
+            if !self.space.is_empty_page(page) {
+                pages.copy_within(page * page_words..(page + 1) * page_words, stored);
+                stored += page_words;
+            }
+        }
+        pages.truncate(stored);
 
         for value in [
             self.old_small_bytes as u64,
@@ -904,35 +914,29 @@ impl Heap {
             .map(|object| (object, self.size_of(object)))
             .collect();
         let header = size_of::<Header>();
-        let mut fill_pages = |memory: &mut [u8]| -> Result<(), ImageError> {
-            let saved: Vec<Vec<u8>> = kept
-                .iter()
-                .map(|&(object, size)| {
-                    std::slice::from_raw_parts(
-                        object.as_ptr().cast::<u8>().add(header),
-                        size - header,
-                    )
+        let saved: Vec<Vec<u8>> = kept
+            .iter()
+            .map(|&(object, size)| {
+                std::slice::from_raw_parts(object.as_ptr().cast::<u8>().add(header), size - header)
                     .to_vec()
-                })
-                .collect();
-            pages(memory)?;
-            for (&(object, _), contents) in kept.iter().zip(&saved) {
-                std::ptr::copy_nonoverlapping(
-                    contents.as_ptr(),
-                    object.as_ptr().cast::<u8>().add(header),
-                    contents.len(),
-                );
-            }
-            Ok(())
-        };
-        self.space.load_image(&mut input, &held, &mut fill_pages)?;
+            })
+            .collect();
+        let loaded = self.space.load_image(&mut input, &held, pages);
+        for (&(object, _), contents) in kept.iter().zip(&saved) {
+            std::ptr::copy_nonoverlapping(
+                contents.as_ptr(),
+                object.as_ptr().cast::<u8>().add(header),
+                contents.len(),
+            );
+        }
+        loaded?;
         if large_length > 0 {
             if !virtual_memory::commit(section, large_length) {
                 return Err(ImageError::Heap(HeapError::CannotAllocate {
                     bytes: large_length,
                 }));
             }
-            large(std::slice::from_raw_parts_mut(section, large_length))?;
+            large(std::slice::from_raw_parts_mut(section, large_length), 0)?;
         }
 
         self.remembered.clear();

@@ -108,3 +108,9 @@ How typed ry runs close to Rust's speed: a typed core IR compiled ahead of time 
 types, Rust-like layouts for numbers, strings, lists, records and tags, direct calls with no
 environment, native values freed by compiler-inserted reference counts with in-place reuse, and
 conversion only at the R boundary. It builds to the runtime contract of the native-types design.
+
+### [Compiled top-level loops](/development/design/top-level-loops/)
+
+Which loops the tree walker evaluates in the global environment compile, how they run on the
+environment's bindings without a call frame, and what compiling loops in `eval()`, `local()` and
+`test_that` environments would take.

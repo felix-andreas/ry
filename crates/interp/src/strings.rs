@@ -106,9 +106,6 @@ unsafe fn do_paste0(call: &Call<'_>) -> R<Sexp> {
     paste(call, None, call.arg(1), call.arg(2))
 }
 
-/// One row's pieces and separators, for `paste`.
-type Parts = SmallVec<[Sexp; 16]>;
-
 /// `paste` joins bytes, not text, because a native string may hold bytes that are not UTF-8.
 /// As in GNU R, the result is marked "bytes" when any piece is, UTF-8 when any piece is UTF-8
 /// or latin1 (which is translated), and native otherwise.
@@ -132,70 +129,29 @@ unsafe fn paste(
     } else {
         return Err(error("invalid 'collapse' argument"));
     };
-    let recycle_zero = flag(recycle_zero);
-    let mut columns: SmallVec<[Sexp; 8]> = SmallVec::with_capacity(length(list));
+    // The converted columns go into a separate list rather than back into `list`, as GNU R's
+    // `do_paste` does, because `list` can be the caller's own: `.Internal(paste(args, ...))`
+    // would see its non-character elements replaced.
+    let mut columns: SmallVec<[(Sexp, usize); 8]> = SmallVec::with_capacity(length(list));
+    let mut count = 0;
+    let mut any_empty = false;
     for index in 0..length(list) {
         // Every element of a column is read, so a deferred column converts in one batch.
-        columns.push(values::materialize(as_character(
-            list.element(index),
-            || call.env(),
-        )?)?);
+        let column = values::materialize(as_character(list.element(index), || call.env())?)?;
+        let column_length = length(column);
+        count = count.max(column_length);
+        any_empty |= column_length == 0;
+        columns.push((column, column_length));
     }
-    let lengths: SmallVec<[usize; 8]> = columns.iter().map(|&column| length(column)).collect();
-    let mut count = lengths.iter().copied().max().unwrap_or(0);
-    if recycle_zero && lengths.contains(&0) {
+    if any_empty && flag(recycle_zero) {
         count = 0;
     }
-    // As in GNU R, each result decides its encoding from all of its pieces before joining any,
-    // so a bytes piece keeps every other piece untranslated.
-    let encoding_of = |charsxps: &[Sexp]| {
-        let mut encoding = Encoding::Native;
-        for &charsxp in charsxps {
-            if charsxp == na_string() {
-                continue;
-            }
-            if charsxp.has_gp(gp::BYTES) {
-                return Encoding::Bytes;
-            }
-            if charsxp.has_gp(gp::LATIN1) || charsxp.has_gp(gp::UTF8) {
-                encoding = Encoding::Utf8;
-            }
-        }
-        encoding
-    };
-    let join_into = |bytes: &mut Vec<u8>, charsxps: &[Sexp], encoding: Encoding| {
-        for &charsxp in charsxps {
-            if charsxp == na_string() {
-                bytes.extend_from_slice(b"NA");
-            } else if charsxp.has_gp(gp::LATIN1) && encoding != Encoding::Bytes {
-                bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
-            } else {
-                bytes.extend_from_slice(charsxp.bytes());
-            }
-        }
-    };
-    let row_pieces = |parts: &mut Parts, row: usize| {
-        parts.clear();
-        for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
-            if position > 0
-                && let Some(separator) = separator
-            {
-                parts.push(separator);
-            }
-            if column_length > 0 {
-                parts.push(column.element(row % column_length));
-            }
-        }
-    };
-    let mut parts = Parts::new();
     let Some(collapse) = collapse else {
         let result = alloc(SexpType::String, count)?;
         with_byte_buffer(|bytes| {
             for row in 0..count {
-                row_pieces(&mut parts, row);
-                let encoding = encoding_of(&parts);
                 bytes.clear();
-                join_into(bytes, &parts, encoding);
+                let encoding = join_row(bytes, &columns, separator, row);
                 values::set_mkchar_bytes(result, row, bytes, encoding)?;
             }
             Ok(())
@@ -209,17 +165,9 @@ unsafe fn paste(
     // marked ASCII whatever its pieces were.
     let mut estimate = 0;
     for row in 0..count {
-        row_pieces(&mut parts, row);
-        estimate += parts
-            .iter()
-            .map(|&charsxp| {
-                if charsxp == na_string() {
-                    2
-                } else {
-                    charsxp.bytes().len()
-                }
-            })
-            .sum::<usize>();
+        row_pieces(&columns, separator, row, |charsxp| {
+            estimate += charsxp.bytes().len();
+        });
     }
     let collapse_bytes = collapse.bytes();
     estimate += count.saturating_sub(1) * collapse_bytes.len();
@@ -227,7 +175,7 @@ unsafe fn paste(
     with_byte_buffer(|bytes| {
         bytes.reserve(estimate);
         let mut encoding = if count > 1 {
-            encoding_of(&[collapse])
+            piece_encoding(Encoding::Native, collapse)
         } else {
             Encoding::Native
         };
@@ -242,11 +190,8 @@ unsafe fn paste(
                 }
                 bytes.extend_from_slice(collapse_bytes);
             }
-            row_pieces(&mut parts, row);
-            let row_encoding = encoding_of(&parts);
             let start = bytes.len();
-            join_into(bytes, &parts, row_encoding);
-            match row_encoding {
+            match join_row(bytes, &columns, separator, row) {
                 Encoding::Bytes => encoding = Encoding::Bytes,
                 Encoding::Utf8 if encoding == Encoding::Native && !bytes[start..].is_ascii() => {
                     encoding = Encoding::Utf8;
@@ -269,6 +214,61 @@ unsafe fn paste(
         values::set_mkchar_bytes(collapsed, 0, bytes, encoding)
     })?;
     Ok(collapsed)
+}
+
+/// Appends one row of `paste` and returns its encoding, decided from all pieces before any is
+/// joined, as in GNU R: a bytes piece keeps latin1 pieces untranslated. `NA` needs no case of its
+/// own, because `NA_STRING` holds the bytes "NA" and no encoding mark.
+unsafe fn join_row(
+    bytes: &mut Vec<u8>,
+    columns: &[(Sexp, usize)],
+    separator: Option<Sexp>,
+    row: usize,
+) -> Encoding {
+    let mut encoding = Encoding::Native;
+    row_pieces(columns, separator, row, |charsxp| {
+        encoding = piece_encoding(encoding, charsxp)
+    });
+    row_pieces(columns, separator, row, |charsxp| {
+        if charsxp.has_gp(gp::LATIN1) && encoding != Encoding::Bytes {
+            bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
+        } else {
+            bytes.extend_from_slice(charsxp.bytes());
+        }
+    });
+    encoding
+}
+
+/// Visits one row's pieces in order, with the separator between columns, without collecting them.
+unsafe fn row_pieces(
+    columns: &[(Sexp, usize)],
+    separator: Option<Sexp>,
+    row: usize,
+    mut visit: impl FnMut(Sexp),
+) {
+    for (position, &(column, column_length)) in columns.iter().enumerate() {
+        if position > 0
+            && let Some(separator) = separator
+        {
+            visit(separator);
+        }
+        if row < column_length {
+            visit(column.element(row));
+        } else if column_length > 0 {
+            visit(column.element(row % column_length));
+        }
+    }
+}
+
+/// The encoding a `paste` result has so far, after one more piece: bytes wins over everything,
+/// and UTF-8 or latin1 makes the result UTF-8.
+unsafe fn piece_encoding(encoding: Encoding, charsxp: Sexp) -> Encoding {
+    match encoding {
+        Encoding::Bytes => encoding,
+        _ if charsxp.has_gp(gp::BYTES) => Encoding::Bytes,
+        _ if charsxp.has_gp(gp::LATIN1 | gp::UTF8) => Encoding::Utf8,
+        _ => encoding,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

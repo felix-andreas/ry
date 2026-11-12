@@ -65,7 +65,13 @@ illegal dependency unrepresentable.
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library.
+  `DataFrame` and the standard library. A `for`, `while` or `repeat` loop in the global
+  environment compiles to tier 0 only once it is known to run at least
+  `bytecode::LOOP_COMPILE_ITERATIONS` (16) iterations: a `for` over at least 16 elements compiles
+  before its first iteration, and a `while` or `repeat` compiles after its 16th. Compiling a small
+  loop costs about what 9 interpreted iterations would, so 16 pays it back with margin, and a
+  shorter top-level loop runs in the AST evaluator
+  ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -627,7 +633,7 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   (start-up has already forced some bindings, so forcing bindings would miss their records), and
   writes the images (`R/<package>.ryc`, `R/sysdata.ryc`) with the uncompressed records alone, so those fetches read them in place
   instead of inflating them. They hold no compiled or machine code: for untrained base code,
-  decoding it and mapping a native section cost more than compiling the closures a session
+  decoding it costs more than compiling the closures a session
   calls. They are written for the same build as the start image.
 - **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
   runtime's sources), and an image of another build is skipped silently, so a development
@@ -652,7 +658,10 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   large section (`fill_from` in `crates/interp/src/image.rs`; Windows reads them instead): nothing
   is decoded or patched per object, a page start-up never writes stays shared through the page
   cache by every process that loads the image, and a page is copied when it is first written.
-  The objects carry their tenured bits, so no minor or intermediate collection traces them and a
+  The file stores only the pages that hold an object, back to back. An empty page between them
+  (left where compaction emptied a page below an environment or symbol that cannot move) is
+  untouched zeroed memory in the loader, so it costs neither file bytes nor memory until an
+  allocation claims it. The objects carry their tenured bits, so no minor or intermediate collection traces them and a
   major collection's marking leaves their headers alone.
 - **Base R's closures arrive compiled.** Just before writing, the writer compiles afresh every
   closure bound in base's namespace and the six default namespaces
