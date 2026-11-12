@@ -1091,6 +1091,9 @@ pub struct Plan<'a> {
     pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
     pub loop_headers: List<'a, usize>,
+    /// The blocks entered only by falling through from the block before them, by bit, so
+    /// compiled code reaches their first instruction only from that block's last.
+    continuations: List<'a, u64>,
 }
 
 /// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
@@ -1107,6 +1110,11 @@ pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to ti
 pub const BRIEF: &str = "the first call would end before compiling paid for itself";
 
 impl Plan<'_> {
+    /// Whether block `block` is entered only by falling through from the block before it.
+    pub fn continues(&self, block: usize) -> bool {
+        bit(&self.continuations, block)
+    }
+
     pub fn block_at(&self, pc: usize) -> Option<usize> {
         self.block_at
             .get(pc)
@@ -1440,6 +1448,21 @@ pub unsafe fn plan<'a>(
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
     let live = builder.liveness(&blocks, &successors);
+    let mut predecessors: List<'_, u32> = List::with_capacity_in(blocks.len(), arena);
+    predecessors.resize(blocks.len(), 0);
+    for &successor in successors.iter().flatten().flatten() {
+        if let Some(count) = predecessors.get_mut(successor) {
+            *count += 1;
+        }
+    }
+    let mut continuations = List::new_in(arena);
+    continuations.resize(blocks.len().div_ceil(64).max(1), 0u64);
+    for block in 1..blocks.len() {
+        let continues = predecessors[block] == 1
+            && successors[block - 1][0] == Some(block)
+            && loop_headers.binary_search(&block).is_err();
+        set_bit(&mut continuations, block, continues);
+    }
     builder.fixpoint(&mut blocks, &block_at, &live, &loop_headers)?;
     let count = builder.insts.len();
     let mut actions = List::with_capacity_in(count, arena);
@@ -1493,6 +1516,7 @@ pub unsafe fn plan<'a>(
         edges,
         states: builder.states,
         loop_headers,
+        continuations,
     })
 }
 

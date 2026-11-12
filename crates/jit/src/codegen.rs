@@ -1619,7 +1619,22 @@ impl<'p> Translator<'p> {
     /// registers. A step between them may rebind the variable, but then it also forgets the
     /// variable, which the run-time status check in [`Self::box_for_tier0`] sees.
     fn known_object(&self, position: usize, register: usize) -> Option<Known> {
-        for earlier in (self.block_start..position).rev() {
+        // A syntax-function or dispatch check that always passes ends a block, as `x[i]` ends
+        // one between reading `x` and reading `i`; the block after it is still reached only
+        // from that check, so the search continues into the block before.
+        let mut start = self.block_start;
+        while let Some(block) = self
+            .plan
+            .insts
+            .get(start)
+            .and_then(|inst| self.plan.block_at(inst.pc))
+            && self.plan.continues(block)
+            && matches!(self.plan.actions.get(start.wrapping_sub(1)), Some(Action::FallThrough))
+            && let Some(previous) = block.checked_sub(1).and_then(|previous| self.plan.blocks.get(previous))
+        {
+            start = previous.start;
+        }
+        for earlier in (start..position).rev() {
             match *self.plan.actions.get(earlier)? {
                 Action::Constant { dst, value, .. } if dst == register => {
                     return Some(Known::Constant(value));
