@@ -215,6 +215,11 @@ pub struct Heap {
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
+    /// Set once an environment that others descend from was given a detached enclosure. Its
+    /// descendants inherited [`gp::DETACHED`] from it while it was attached, so they cannot be
+    /// told apart from attached ones any more, and every symbol takes
+    /// [`gp::BOUND_ELSEWHERE`] instead, including each one installed from then on.
+    everything_bound_elsewhere: bool,
     /// `Rprofmem()`'s reporter and its threshold in bytes. A vector whose reported size exceeds
     /// the threshold is passed to the reporter; `usize::MAX` turns reporting off, so the check
     /// on every allocation is one compare.
@@ -790,6 +795,7 @@ impl Heap {
             mark_stack: Vec::new(),
             binding_epoch: 0,
             enclosure_epoch: 0,
+            everything_bound_elsewhere: false,
             allocation_reporter: None,
             report_threshold: usize::MAX,
             strings: StringTable::default(),
@@ -1637,6 +1643,9 @@ impl Heap {
         }
         object.set_enclosure_unbarriered(enclosure);
         mark_enclosing(enclosure);
+        if enclosure.has_gp(gp::DETACHED) {
+            object.set_gp_bits(gp::DETACHED, true);
+        }
         enclosure.increment_refcount();
         Ok(object)
     }
@@ -1862,6 +1871,9 @@ impl Heap {
         let nil = self.known.nil;
         let symbol = self.alloc_triple(SexpType::Symbol, name, nil, nil)?;
         symbol.mark_not_mutable();
+        if self.everything_bound_elsewhere {
+            symbol.set_gp_bits(gp::BOUND_ELSEWHERE, true);
+        }
         self.symbols.insert(name, symbol);
         self.new_roots.push(symbol);
         Ok(symbol)
@@ -2125,6 +2137,23 @@ impl Heap {
                 self.enclosure_epoch += 1;
             }
         }
+        // A base frame's own bindings end every walk through it, so it is never detached.
+        if !value.has_gp(gp::DETACHED) || self.is_symbol_frame(env) {
+            if env.has_gp(gp::DETACHED) {
+                env.set_gp_bits(gp::DETACHED, false);
+                if !self.is_symbol_frame(env) {
+                    (*bindings(env)).mark_bound_elsewhere();
+                }
+            }
+        } else if !env.has_gp(gp::DETACHED) {
+            env.set_gp_bits(gp::DETACHED, true);
+            if env.has_gp(gp::ENCLOSING) && !self.everything_bound_elsewhere {
+                self.everything_bound_elsewhere = true;
+                for symbol in self.symbols.values() {
+                    symbol.set_gp_bits(gp::BOUND_ELSEWHERE, true);
+                }
+            }
+        }
         mark_enclosing(value);
         self.store(env, env.enclosure(), value);
         env.set_enclosure_unbarriered(value);
@@ -2273,7 +2302,7 @@ impl Heap {
             self.write_barrier(env, cell);
             let frame = &mut *bindings(env);
             let owned = frame.owns_memory();
-            frame.insert(symbol, cell);
+            frame.insert(symbol, cell, !env.has_gp(gp::DETACHED));
             if !owned && frame.owns_memory() {
                 self.space.set_finalizable(env);
             }
@@ -2326,7 +2355,11 @@ impl Heap {
         if let Some(&first) = cells.first() {
             let frame = &mut *env.frame_ptr();
             let owned = frame.owns_memory();
-            frame.insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            frame.insert_formals(
+                &cells,
+                bindings.iter().map(|binding| binding.symbol),
+                !env.has_gp(gp::DETACHED),
+            );
             if !owned && frame.owns_memory() {
                 self.space.set_finalizable(env);
             }
@@ -2566,6 +2599,7 @@ impl Heap {
         let empty = self.known.empty_env;
         self.release_field(env, env.enclosure());
         env.set_enclosure_unbarriered(empty);
+        env.set_gp_bits(gp::DETACHED, true);
     }
 
     /// Clears a promise that only a released frame held.
@@ -4433,8 +4467,10 @@ impl Heap {
             blank_scalar.set_element_unbarriered(0, blank_string);
             self.known.blank_scalar_string = blank_scalar;
             let empty_env = self.alloc_environment(nil)?;
+            empty_env.set_gp_bits(gp::DETACHED, true);
             self.known.empty_env = empty_env;
             let base_env = self.alloc_environment(empty_env)?;
+            base_env.set_gp_bits(gp::DETACHED, false);
             self.known.base_env = base_env;
             let global_env = self.alloc_environment(base_env)?;
             self.known.global_env = global_env;
