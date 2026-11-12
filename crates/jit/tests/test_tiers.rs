@@ -3019,6 +3019,8 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
         "tier_parse <- function(row: Str) -> Result<I64, :Bad> \
          match (Str.to_i64(row)) { :Ok(v) => :Ok(v * 2i64)\n :Err(_) => :Err(:Bad) }",
         "tier_area <- function(r: Record{w: F64, h: F64}) -> F64 r$w * r$h",
+        "tier_bump <- function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+         match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }",
     ];
     let cases: &[(&str, &[&str])] = &[
         // A record's fields sit in name order, whatever order the literal gives them in, and a
@@ -3115,6 +3117,24 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             &[
                 "{ x <- List.from_r(c(\"1\", \"x\", \"1\", \"drop\", \"5\")); FUNCTION(x) }",
                 "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
+        // A dictionary update that reads the payload where the key is found and where it is
+        // missing, and removes a key it set before, by a function written at the call and by a
+        // typed closure.
+        (
+            "function(rows: List<Str>) -> F64 { \
+             inline <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+             match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }))\n \
+             called <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, tier_bump))\n \
+             Num.to_f64(Dict.len(inline)) * 1000 + Result.with_default(Dict.get(inline, \"b\"), -1) * 100 + \
+             Num.to_f64(Dict.len(called)) * 10 + Result.with_default(Dict.get(called, \"a\"), -1) }",
+            &[
+                "{ x <- List.from_r(c(\"a\", \"b\", \"a\", \"c\", \"a\", \"b\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"a\", \"a\", \"a\", \"a\")); FUNCTION(x) }",
+                "{ x <- List.from_r(character(0)); FUNCTION(x) }",
             ],
         ),
         // Text: number formatting, repetition, case, splitting, joining and byte counts of
@@ -3458,6 +3478,60 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         (
             "function(x: List<F64>) -> I64 List.count_if(x, function(v: F64) -> Bool v > 1)",
             &["{ a <- [0.5, 2, 3]; FUNCTION(a) }"],
+        ),
+        // A predicate that only compares its item with numbers counts over the whole list: the
+        // number may sit on either side or be a local, and `&`, `|`, `!` and parentheses join
+        // comparisons. A predicate that computes with the item runs per item with the same count.
+        (
+            "function(x: List<F64>, low: F64) -> I64 { high <- low + 2; \
+             List.count_if(x, function(v: F64) -> Bool (v > low & !(v >= high)) | 0.25 == v) }",
+            &[
+                "{ a <- [0.25, 0.5, 2, 3, 2.5, -1]; b <- 0.5; FUNCTION(a, b) }",
+                "{ a <- List.from_r(0[0L]); b <- 0.5; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(x: List<F64>) -> I64 { counts <- function(v: F64) -> Bool v != 2; \
+             List.count_if(x, counts) + List.count_if(x, function(v: F64) -> Bool v * 2 > 1) }",
+            &["{ a <- [0.25, 0.5, 2, 3]; FUNCTION(a) }"],
+        ),
+        // A count whose whole mask is one logical step has no comparison in it.
+        (
+            "function(a: List<Bool>, b: List<Bool>) -> I64 \
+             List.count_if(!a, function(v) v) * 100i64 + List.count_if(a & b, function(v) v) * 10i64 \
+             + List.count_if(a | b, function(v) v)",
+            &[
+                "{ a <- [TRUE, TRUE, FALSE, TRUE]; b <- [TRUE, FALSE, FALSE, TRUE]; FUNCTION(a, b) }",
+                "{ a <- [TRUE, TRUE]; b <- [FALSE, FALSE]; FUNCTION(a, b) }",
+            ],
+        ),
+        // The item's name in the predicate hides an outer local of the same name.
+        (
+            "function(x: List<F64>, v: F64) -> I64 List.count_if(x, function(v: F64) -> Bool v <= 2)",
+            &["{ a <- [0.25, 0.5, 2, 3]; b <- 9; FUNCTION(a, b) }"],
+        ),
+        // A branch on a comparison of two doubles takes either side for every operator, and an
+        // undefined comparison stops the native code so the interpreter answers.
+        (
+            "function(x: List<F64>, t: F64) -> I64 { n <- 0i64; for (v in x) { \
+             if (v > t) n <- n + 1i64; if (v != t) n <- n + 10i64; if (v <= t) n <- n + 100i64; \
+             if (v == t) n <- n + 1000i64 else n <- n + 10000i64; \
+             if (v < t) n <- n + 100000i64; if (v >= t) n <- n + 1000000i64 }; n }",
+            &["{ a <- [0.25, 0.5, 2, 3, 2]; b <- 2; FUNCTION(a, b) }"],
+        ),
+        (
+            "function(a: F64, b: F64) -> I64 { ratio <- a / b; if (ratio != ratio) 1i64 else 2i64 }",
+            &[
+                "{ x <- 1; y <- 2; FUNCTION(x, y) }",
+                "{ x <- 0; y <- 0; tryCatch(FUNCTION(x, y), error = function(e) conditionMessage(e)) }",
+            ],
+        ),
+        (
+            "function(a: F64, b: F64) -> I64 { ratio <- a / b; if (ratio < 1) 1i64 else 2i64 }",
+            &[
+                "{ x <- 1; y <- 2; FUNCTION(x, y) }",
+                "{ x <- 0; y <- 0; tryCatch(FUNCTION(x, y), error = function(e) conditionMessage(e)) }",
+            ],
         ),
         (
             "function(x: List<F64>) -> F64 List.walk(x, 0, function(s: F64, v: F64) -> F64 s + v * v)",

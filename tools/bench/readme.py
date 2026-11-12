@@ -4,13 +4,15 @@ suites, each a directory `tools/bench/<suite>/` with a `suite.toml` and a `resul
 the VS Code Marketplace show a README as it is, so the block is generated text, and `--check` fails
 when a README differs from what this script would write.
 
-The block is one bullet per measured suite in a fixed order, giving the geometric means the runner
-stored and what the suite measures, then one sentence on how they were measured. Ratios have two
-decimals below 10x and none from 10x up, as on the benchmarks page, which
-`docs/src/lib/benchmarks.ts` renders from the same files. A suite without a results file has no
-bullet.
+The block is one bullet per measured suite that compares ry with GNU R, in a fixed order, giving
+the geometric means the runner stored and what the suite measures, then one sentence on how they
+were measured. The suite that compares typed ry with Rust follows as a paragraph of its own,
+because its ratio is a time relative to Rust's, where lower is faster, and must not be read as one
+of the speed-ups. Ratios have two decimals below 10x and none from 10x up, as on the benchmarks
+page, which `docs/src/lib/benchmarks.ts` renders from the same files. A suite without a results
+file is left out.
 
-A vertical grouped bar chart of the same geometric means, in a light and a dark SVG under
+A vertical grouped bar chart of the geometric means over GNU R, in a light and a dark SVG under
 `docs/public/`, is shown by the root README through `<picture>`. It has one group per suite with
 bars for GNU R (always 1x), ry and, where the suite has a typed column, ry typed. `--check` also
 fails when either SVG differs from what this script would write.
@@ -23,7 +25,7 @@ from decimal import ROUND_HALF_UP, Decimal
 root = pathlib.Path(__file__).resolve().parent.parent.parent
 bench = root / "tools/bench"
 readmes = [root / "README.md", root / "editors/code/README.md"]
-suite_order = ["public", "packages", "kernels", "applications"]
+suite_order = ["public", "packages", "kernels", "applications", "typed"]
 marker = "bench-summary"
 chart_dir = root / "docs/public"
 # Series colors of docs/src/components/SpeedChart.astro, with a neutral gray for the GNU R baseline.
@@ -41,7 +43,7 @@ def main():
     stale = []
     for theme in themes:
         path = chart_dir / f"bench-summary-{theme}.svg"
-        svg = chart_svg(suites, theme)
+        svg = chart_svg(against_gnu_r(suites), theme)
         if path.exists() and path.read_text() == svg:
             continue
         if check:
@@ -86,18 +88,42 @@ def load_suites():
     rank = lambda suite: (suite_order.index(suite["id"]) if suite["id"] in suite_order else len(suite_order), suite["id"])
     return sorted(suites, key=rank)
 
+def against_gnu_r(suites):
+    """The suites whose ratios are speed-ups over GNU R. A results file that names no baseline is
+    one of them: every suite compared ry with GNU R before a results file said so."""
+    return [suite for suite in suites if suite["results"].get("baseline", "gnu_r") == "gnu_r"]
+
 def summary_block(suites):
-    """A bullet per suite, such as `**Numeric kernels: 4.89x, 11x in typed ry.** 16 small programs ...`."""
+    """A bullet per suite measured against GNU R, such as `**Numeric kernels: 4.89x, 11x in typed
+    ry.** 16 small programs ...`, a paragraph on how they were measured, and a paragraph per suite
+    measured against another baseline."""
+    compared = against_gnu_r(suites)
     lines = []
-    for suite in suites:
+    for suite in compared:
         geomean = suite["results"]["geomean"]
         speeds = [ratio(geomean["ry"]["median"]) if "ry" in geomean else "not measured"]
         if "ry_typed" in geomean:
             speeds.append(f"{ratio(geomean['ry_typed']['median'])} in typed ry")
         lines.append(f"- **{short_name(suite['name'])}: {', '.join(speeds)}.** {len(suite['results']['programs'])} {suite['summary']}.")
-    note = [measured_sentence(suites)] + mixed_machines(suites)
-    note.append("[Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.")
-    return "\n".join(lines + ["", " ".join(note)])
+    paragraphs = [" ".join([measured_sentence(compared)] + mixed_machines(compared))]
+    paragraphs += [slowdown_paragraph(suite) for suite in suites if suite not in compared]
+    paragraphs[-1] += " [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured."
+    return "\n".join(lines + [line for paragraph in paragraphs for line in ("", paragraph)])
+
+def slowdown_paragraph(suite):
+    """The suite whose ratio is the engine's time over its baseline's, such as `**Typed ry against
+    Rust: ry typed takes 1.80x Rust's time.** ...`, with what the number is and how to read it."""
+    results = suite["results"]
+    meta = results["meta"]
+    baseline = results["engines"][results["baseline"]]
+    engine = next(key for key in results["engines"] if key != results["baseline"])
+    mean = results["geomean"].get(engine)
+    headline = "not measured" if mean is None else f"{results['engines'][engine]} takes {ratio(mean['median'])} {baseline}'s time"
+    count = len(results["programs"]) if mean is None else mean["programs"]
+    build = f" of the ry {meta['release']['tag']} release archive" if meta.get("release") else ""
+    return (f"**{suite['name']}: {headline}.** This is the geometric mean over {count} {suite['summary']} "
+            f"(1x is {baseline}'s speed, lower is faster), from {meta['rounds']} paired rounds{build} "
+            f"against {baseline} {meta[results['baseline']]['version']}.")
 
 def measured_sentence(suites):
     """One sentence for all suites; a field that differs between suites is given as a list or range."""

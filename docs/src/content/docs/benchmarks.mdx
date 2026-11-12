@@ -5,6 +5,7 @@ description: How fast R runs on ry against GNU R, on public compiler benchmarks,
 
 import BenchmarkMethod from '../../components/BenchmarkMethod.astro';
 import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
+import BenchmarkSection from '../../components/BenchmarkSection.astro';
 import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 import SpeedChart from '../../components/SpeedChart.astro';
@@ -17,7 +18,8 @@ package and business code. Each suite's geometric mean of ry's speed-ups over GN
 <BenchmarkSummary />
 
 Every number on this page is rendered from the results files in `tools/bench/`, and each chart names
-the date, the GNU R version, the machine and the ry commit of its measurement.
+the date, the version of the engine ry is compared with, the machine and the ry commit of its
+measurement.
 
 ## Public R JIT benchmarks
 
@@ -131,6 +133,50 @@ the interpreter, and the flag under the bar names what was refused.
 
 <BenchmarkPrograms suite="applications" />
 
+<BenchmarkSection suite="typed">
+
+This suite asks how close typed ry comes to Rust. It takes the typed version of every numeric
+kernel and application workload above and times it against the same program written in Rust: the
+same algorithm on the same sizes, in the data model a Rust programmer would pick, such as a
+`Vec<f64>` for a `List<F64>`, a struct for a record and an enum for a tagged union. Rust is the
+baseline here, so a ratio is typed ry's time over Rust's: 1x is Rust's speed, and lower is faster.
+
+<SpeedChart suite="typed" />
+
+Each Rust program is one file compiled with `rustc -O`. That is optimization level 3, the level of
+cargo's release profile, and no flag names a target CPU, so the program is built the way a released
+Rust program is. The two engines are timed alike: a process runs the program once cold and five
+times warm and reports the median warm run, through a harness in each language that takes the same
+samples (`tools/bench/harness.typed.R` and `tools/bench/typed/harness.rs`). A Rust program passes
+its inputs through `black_box`, which keeps the compiler from computing the result ahead of the
+run. Both must print the same checksum.
+
+Start-up is outside these times, so the suite can time much shorter runs than the suites above. A
+program counts as too short only when Rust finishes it in under 0.1 ms. The suite has no memory
+table, because the runner cannot read a peak below its own memory use, and a Rust program needs
+less than that; the two suites above give the memory of the typed programs. Reproducing the suite
+needs `rustc` and no GNU R.
+
+Compile time is outside every timed run too, and the suite reports it in a table of its own,
+because typed ry compiles a function the first time it is called and has to stay fast at it. The
+Rust column is one `rustc` process per program. The typed column is the time the typed core spent
+compiling the program's functions, summed from the `compiled for ... in N us` and
+`refused ... after N us` lines that `RY_TYPED_LOG=1` prints.
+
+<details>
+<summary>The numbers: milliseconds</summary>
+
+<BenchmarkTable suite="typed" />
+
+</details>
+
+**The programs.** Each program as typed ry and as Rust. The number beside the name is typed ry's
+time over Rust's.
+
+<BenchmarkPrograms suite="typed" />
+
+</BenchmarkSection>
+
 ## How it was measured
 
 The published numbers measure the build you download: the official Linux x86_64 archive of a
@@ -179,7 +225,8 @@ The runner, not this page, judges the data:
 
 To reproduce a suite, run its command from the table on a machine with GNU R; the packages suite
 first needs `just bench-packages install`. Without `--release`, a run measures the local release
-build in `target/release`, which is how to compare two builds of your own (`--baseline`). With
+build in `target/release`, which is how to compare two builds of your own (`--baseline`), and
+`--ry PATH` measures the release build at another path. With
 `--write`, the runner stores `tools/bench/<suite>/results.json` with the release tag, the archive's
 file name and sha256, and the commit the tag names, and `just readme` rewrites the README summary
 from it. `--write` refuses a nightly archive, a local build, and a working tree with a change to a
