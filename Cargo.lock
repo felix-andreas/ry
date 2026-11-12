@@ -4506,6 +4506,7 @@ version = "0.4.3-beta"
 dependencies = [
  "foldhash 0.2.0",
  "hashbrown 0.17.1",
+ "heap",
  "itoa",
  "libmimalloc-sys",
  "memmap2",

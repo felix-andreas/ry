@@ -342,10 +342,7 @@ fn factor_codes(x: &Column, i: &Column) -> Option<Keys> {
     let translation: Vec<u32> = if Arc::ptr_eq(x_levels, i_levels) {
         (0..levels).collect()
     } else {
-        i_levels
-            .iter()
-            .map(|level| x_levels.position(level).unwrap_or(absent))
-            .collect()
+        i_levels.translation(x_levels, absent)
     };
     let identity: Vec<u32> = (0..levels).collect();
     let codes = |codes: Codes, translation: &[u32]| {

@@ -266,12 +266,20 @@ fn answer(output: Output) -> Result<Answer> {
             let frame = table.frame();
             let mut checksum = 0.0;
             for (name, kind) in &schema.columns {
-                if matches!(kind, ColumnType::Integer | ColumnType::Double) {
-                    let values = frame
-                        .column(name)?
-                        .as_materialized_series()
-                        .cast(&DataType::Float64)?;
-                    checksum += sum_without_na(values.f64()?);
+                // Each value widens as it is added. Casting a whole integer column of 1e8 rows
+                // first would hold 0.8 GB beside the answer.
+                let series = frame.column(name)?.as_materialized_series();
+                match kind {
+                    ColumnType::Integer => {
+                        checksum += series
+                            .i32()?
+                            .downcast_iter()
+                            .flat_map(|array| array.iter().flatten())
+                            .map(|&value| f64::from(value))
+                            .sum::<f64>();
+                    }
+                    ColumnType::Double => checksum += sum_without_na(series.f64()?),
+                    _ => {}
                 }
             }
             Ok(Answer {

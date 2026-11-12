@@ -3594,6 +3594,188 @@ fn an_all_missing_string_column_becomes_a_factor_without_levels() {
     );
 }
 
+/// A label drawn so that labels share prefixes of every length the level table encodes
+/// differently: none, a few bytes, more than a header holds, and a prefix that ends inside a
+/// multi-byte character.
+fn random_label(rng: &mut SplitMix64) -> String {
+    let prefix = match rng.below(6) {
+        0 => "",
+        1 => "id",
+        2 => "a shared prefix that is longer than fifteen bytes/",
+        3 => "é",
+        4 => "è",
+        _ => "zone-",
+    };
+    let tail = match rng.below(4) {
+        0 => String::new(),
+        1 => rng.below(40).to_string(),
+        2 => format!("{}-a tail of more than fifteen bytes", rng.below(6)),
+        _ => (0..rng.below(4))
+            .map(|_| ['a', 'b', 'é', '0'][rng.below(4)])
+            .collect(),
+    };
+    format!("{prefix}{tail}")
+}
+
+/// Level tables over random labels, in a chosen order and in byte order, checked label by label
+/// against plain vectors of strings: lookups in both directions, the translation between two
+/// tables, and a factor column's text and recoding over each.
+#[test]
+fn fuzz_level_tables_against_a_reference() {
+    for_each_seed(150, |seed| {
+        let mut rng = SplitMix64(seed);
+        let distinct = |rng: &mut SplitMix64| {
+            let mut labels: Vec<String> = Vec::new();
+            for _ in 0..rng.below(120) {
+                let label = random_label(rng);
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            if rng.chance(1, 2) {
+                labels.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            }
+            labels
+        };
+        let labels = distinct(&mut rng);
+        let others = distinct(&mut rng);
+        let levels = factor::Levels::from_labels(labels.iter().map(String::as_str));
+        let other_levels = std::sync::Arc::new(factor::Levels::from_labels(
+            others.iter().map(String::as_str),
+        ));
+
+        assert_eq!(levels.len(), labels.len());
+        assert_eq!(levels.to_strings(), labels);
+        for (code, label) in labels.iter().enumerate() {
+            assert_eq!(levels.get(code as u32).as_ref(), Some(label));
+            assert_eq!(levels.position(label), Some(code as u32));
+        }
+        assert_eq!(levels.get(labels.len() as u32), None);
+        for _ in 0..40 {
+            let label = random_label(&mut rng);
+            let expected = labels.iter().position(|known| *known == label);
+            assert_eq!(levels.position(&label), expected.map(|code| code as u32));
+        }
+        let repeated =
+            factor::Levels::from_labels(labels.iter().chain(labels.iter()).map(String::as_str));
+        assert_eq!(repeated.to_strings(), labels);
+
+        let absent = u32::MAX;
+        let expected: Vec<u32> = labels
+            .iter()
+            .map(|label| {
+                others
+                    .iter()
+                    .position(|other| other == label)
+                    .map_or(absent, |code| code as u32)
+            })
+            .collect();
+        assert_eq!(levels.translation(&other_levels, absent), expected);
+
+        // A column far shorter than its level table reads its labels one by one, and a longer
+        // one decodes the table once, so both lengths are drawn.
+        let rows = match (labels.is_empty(), rng.chance(1, 2)) {
+            (true, _) => 0,
+            (false, true) => rng.below(4),
+            (false, false) => rng.below(200),
+        };
+        let codes: Vec<i32> = (0..rows)
+            .map(|_| match rng.chance(1, 8) {
+                true => NA_INTEGER,
+                false => 1 + rng.below(labels.len()) as i32,
+            })
+            .collect();
+        let label_of =
+            |code: &i32| (*code != NA_INTEGER).then(|| labels[*code as usize - 1].clone());
+        let column = column_of(
+            "f",
+            RVector::Factor {
+                codes: codes.clone(),
+                levels: labels.clone(),
+            },
+        );
+        let text = factor::text(&column).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            to_r(text.as_materialized_series()).unwrap_or_else(|error| panic!("{error}")),
+            RVector::Character(codes.iter().map(label_of).collect())
+        );
+
+        let recoded = |column: &table::polars::prelude::Column| {
+            let series =
+                factor::recode(column, &other_levels).unwrap_or_else(|error| panic!("{error}"));
+            to_r(&series).unwrap_or_else(|error| panic!("{error}"))
+        };
+        let expected = RVector::Factor {
+            codes: codes
+                .iter()
+                .map(|code| {
+                    label_of(code)
+                        .and_then(|label| others.iter().position(|other| *other == label))
+                        .map_or(NA_INTEGER, |code| code as i32 + 1)
+                })
+                .collect(),
+            levels: others.clone(),
+        };
+        assert_eq!(recoded(&column), expected);
+        assert_eq!(recoded(&text), expected);
+
+        let interned = factor::from_strings(text.as_materialized_series())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut used: Vec<String> = codes.iter().filter_map(label_of).collect();
+        used.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        used.dedup();
+        let RVector::Factor {
+            codes: interned_codes,
+            levels: interned_levels,
+        } = to_r(&interned).unwrap_or_else(|error| panic!("{error}"))
+        else {
+            panic!("interning a string column did not give a factor");
+        };
+        assert_eq!(interned_levels, used);
+        let interned_labels: Vec<Option<String>> = interned_codes
+            .iter()
+            .map(|code| (*code != NA_INTEGER).then(|| used[*code as usize - 1].clone()))
+            .collect();
+        assert_eq!(
+            interned_labels,
+            codes.iter().map(label_of).collect::<Vec<_>>()
+        );
+    });
+}
+
+/// A string column of many distinct labels, some sharing their first 12 bytes, becomes a factor
+/// whose levels are in byte order and whose rows read back unchanged. The labels fill many
+/// blocks of the level table, and the long ones sort by more than their sort key holds.
+#[test]
+fn a_large_string_column_becomes_a_factor_with_sorted_levels() {
+    let mut rng = SplitMix64(7);
+    let values: Vec<Option<String>> = (0..40_000)
+        .map(|_| match rng.below(3) {
+            0 => Some(format!("id{}", rng.below(30_000))),
+            1 => Some(format!("a shared prefix/{}", rng.below(5_000))),
+            _ => Some(format!("{}", rng.below(1_000))),
+        })
+        .collect();
+    let column = column_of("k", RVector::Character(values.clone()));
+    let factor = factor::from_strings(column.as_materialized_series())
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut expected: Vec<String> = values.iter().flatten().cloned().collect();
+    expected.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    expected.dedup();
+    let levels =
+        factor::levels(factor.dtype()).unwrap_or_else(|| panic!("the column is not a factor"));
+    assert_eq!(levels.to_strings(), expected);
+    for (code, label) in expected.iter().enumerate().step_by(97) {
+        assert_eq!(levels.position(label), Some(code as u32));
+        assert_eq!(levels.get(code as u32).as_ref(), Some(label));
+    }
+    let text = factor::text(&factor.into_column()).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        to_r(text.as_materialized_series()).unwrap_or_else(|error| panic!("{error}")),
+        RVector::Character(values)
+    );
+}
+
 fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {
     to_series(PlSmallStr::from(name), vector)
         .unwrap_or_else(|error| panic!("cannot build {name}: {error}"))

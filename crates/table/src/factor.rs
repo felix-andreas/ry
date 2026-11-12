@@ -7,14 +7,14 @@
 //! level table travels with the dtype without being copied.
 //!
 //! Polars' own `Enum` keeps a hash map, an ordered list and an interned string array per level,
-//! about 135 bytes for a short label. A [`Levels`] table holds one 16-byte string view per level,
-//! with labels longer than 12 bytes in a shared byte buffer, and builds its label-to-code index
-//! only when something looks a label up.
+//! about 135 bytes for a short label. A [`Levels`] table keeps its labels in byte order and
+//! writes each as the bytes it does not share with the label before it, and it finds a label by
+//! binary search, so it holds no index beside the labels.
 
 use {
     crate::{
         Error, Result,
-        kernel::{CodeValues, Codes, gather_values},
+        kernel::{CodeValues, Codes, Shared, gather_values},
     },
     foldhash::fast::FixedState,
     hashbrown::HashTable,
@@ -30,29 +30,44 @@ use {
     polars_buffer::Buffer,
     polars_core::datatypes::extension::{ExtensionTypeImpl, ExtensionTypeInstance},
     rayon::prelude::*,
-    std::{
-        any::Any,
-        borrow::Cow,
-        hash::BuildHasher,
-        sync::{Arc, OnceLock},
-    },
+    std::{any::Any, borrow::Cow, cmp::Ordering, hash::BuildHasher, sync::Arc},
 };
 
-/// A factor's levels in order. Code `c` names `labels[c]`, and the labels are distinct.
+/// A factor's levels: distinct labels, each named by one code.
+///
+/// The labels are stored in byte order and front-coded. A label's entry gives the number of
+/// leading bytes it shares with the label before it and then the bytes that follow them, so a
+/// column of identifiers costs a few bytes a level where a string view costs 16. Every
+/// [`BLOCK`]-th label shares nothing and its entry's position is recorded, so a lookup searches
+/// those whole labels and then reads at most one block.
+#[derive(Default)]
 pub struct Levels {
-    labels: Utf8ViewArray,
-    index: OnceLock<HashTable<u32>>,
+    /// The entries in byte order of their labels. An entry is a header byte, the lengths the
+    /// header could not hold, and the label's bytes after the shared ones. The header's high four
+    /// bits are the shared length and its low four bits the length of the rest; a length of 15 or
+    /// more is written as 15, with the excess following the header as a varint.
+    bytes: Vec<u8>,
+    /// Where each block's first entry starts in `bytes`.
+    blocks: Vec<u64>,
+    len: usize,
+    /// The levels' order when it is not byte order, which a factor built from labels in a chosen
+    /// order has. Without it, a label's code is its rank in byte order.
+    order: Option<Order>,
+}
+
+/// The labels in a block: the most a lookup reads after its binary search, and the interval at
+/// which a label is written whole.
+const BLOCK: usize = 16;
+
+/// A level order that differs from byte order, as both directions of one permutation, because a
+/// row's label is found from its code and a label's code from its rank.
+#[derive(PartialEq)]
+struct Order {
+    rank_of: Vec<u32>,
+    code_of: Vec<u32>,
 }
 
 impl Levels {
-    /// The levels whose labels are `labels`, which must be distinct and hold no nulls.
-    pub fn new(labels: Utf8ViewArray) -> Levels {
-        Levels {
-            labels,
-            index: OnceLock::new(),
-        }
-    }
-
     /// The levels named by `labels` in order, keeping the first of any repeated label.
     pub fn from_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Levels {
         let mut seen: HashTable<u32> = HashTable::new();
@@ -70,56 +85,335 @@ impl Levels {
                 kept.push(label);
             }
         }
-        let mut array = MutableBinaryViewArray::<str>::with_capacity(kept.len());
-        for label in kept {
-            array.push_value(label);
+        let mut code_of: Vec<u32> = (0..kept.len() as u32).collect();
+        code_of.sort_unstable_by_key(|code| kept[*code as usize].as_bytes());
+        let mut levels = Levels::default();
+        let mut previous: &[u8] = &[];
+        for code in &code_of {
+            let label = kept[*code as usize].as_bytes();
+            levels.push(previous, label);
+            previous = label;
         }
-        Levels::new(array.freeze())
+        let sorted = code_of
+            .iter()
+            .enumerate()
+            .all(|(rank, code)| rank == *code as usize);
+        if !sorted {
+            let mut rank_of = vec![0u32; code_of.len()];
+            for (rank, code) in code_of.iter().enumerate() {
+                rank_of[*code as usize] = rank as u32;
+            }
+            levels.order = Some(Order { rank_of, code_of });
+        }
+        levels
+    }
+
+    /// The table of several tables' labels, where every label of a piece sorts after the labels
+    /// of the pieces before it and every piece but the last holds whole blocks. A column's
+    /// labels are encoded in such pieces in parallel.
+    fn joined(pieces: Vec<Levels>) -> Levels {
+        let mut levels = Levels::default();
+        levels
+            .bytes
+            .reserve_exact(pieces.iter().map(|piece| piece.bytes.len()).sum());
+        levels
+            .blocks
+            .reserve_exact(pieces.iter().map(|piece| piece.blocks.len()).sum());
+        // Each piece is freed as soon as it is copied, so the pieces and the table together
+        // never hold much more than the table's own size.
+        for piece in pieces {
+            let base = levels.bytes.len() as u64;
+            levels
+                .blocks
+                .extend(piece.blocks.iter().map(|start| start + base));
+            levels.bytes.extend_from_slice(&piece.bytes);
+            levels.len += piece.len;
+        }
+        levels
+    }
+
+    /// Appends `label`, which must sort after `previous`, the label appended before it.
+    fn push(&mut self, previous: &[u8], label: &[u8]) {
+        let shared = if self.len.is_multiple_of(BLOCK) {
+            self.blocks.push(self.bytes.len() as u64);
+            0
+        } else {
+            previous
+                .iter()
+                .zip(label)
+                .take_while(|(before, byte)| before == byte)
+                .count()
+        };
+        let rest = label.len() - shared;
+        self.bytes
+            .push(((shared.min(15) as u8) << 4) | rest.min(15) as u8);
+        for length in [shared, rest] {
+            if let Some(mut excess) = length.checked_sub(15) {
+                while excess >= 0x80 {
+                    self.bytes.push(excess as u8 | 0x80);
+                    excess >>= 7;
+                }
+                self.bytes.push(excess as u8);
+            }
+        }
+        self.bytes.extend_from_slice(&label[shared..]);
+        self.len += 1;
     }
 
     pub fn len(&self) -> usize {
-        self.labels.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.labels.len() == 0
+        self.len == 0
     }
 
-    pub fn get(&self, code: u32) -> Option<&str> {
-        ((code as usize) < self.labels.len()).then(|| self.labels.value(code as usize))
+    /// The label of `code`, read from the start of its block.
+    pub fn get(&self, code: u32) -> Option<String> {
+        let mut cursor = Cursor::new(self);
+        cursor.seek(self.rank(code)?);
+        cursor.current().map(string)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.labels.values_iter()
-    }
-
-    /// The code of `label`. The first lookup builds the label index, which every later lookup
-    /// shares.
+    /// The code of `label`: a binary search among the blocks' first labels, then a read of the
+    /// one block that can hold it.
     pub fn position(&self, label: &str) -> Option<u32> {
-        let state = FixedState::default();
-        let index = self.index.get_or_init(|| {
-            let mut index = HashTable::with_capacity(self.labels.len());
-            for (code, label) in self.labels.values_iter().enumerate() {
-                index.insert_unique(state.hash_one(label), code as u32, |code| {
-                    state.hash_one(self.labels.value(*code as usize))
-                });
+        self.find(label.as_bytes())
+    }
+
+    /// Every label, in the order of the codes.
+    pub fn to_strings(&self) -> Vec<String> {
+        let mut strings = vec![String::new(); self.len];
+        let mut cursor = Cursor::new(self);
+        cursor.seek(0);
+        while let Some(label) = cursor.current() {
+            strings[self.code(cursor.rank) as usize] = string(label);
+            cursor.advance();
+        }
+        strings
+    }
+
+    /// For each code of this table, the code `to` gives the same label, or `absent` when `to`
+    /// lacks the label. Both tables are sorted, so one pass over the two matches every label; a
+    /// table much smaller than `to` looks its labels up one by one, which reads less of `to`.
+    pub fn translation(&self, to: &Levels, absent: u32) -> Vec<u32> {
+        let mut translation = vec![absent; self.len];
+        let mut own = Cursor::new(self);
+        own.seek(0);
+        if self.len.saturating_mul(2 * BLOCK) < to.len {
+            while let Some(label) = own.current() {
+                if let Some(code) = to.find(label) {
+                    translation[self.code(own.rank) as usize] = code;
+                }
+                own.advance();
             }
-            index
-        });
-        index
-            .find(state.hash_one(label), |code| {
-                self.labels.value(*code as usize) == label
+            return translation;
+        }
+        let mut other = Cursor::new(to);
+        other.seek(0);
+        while let (Some(label), Some(candidate)) = (own.current(), other.current()) {
+            match label.cmp(candidate) {
+                Ordering::Less => own.advance(),
+                Ordering::Greater => other.advance(),
+                Ordering::Equal => {
+                    translation[self.code(own.rank) as usize] = to.code(other.rank);
+                    own.advance();
+                    other.advance();
+                }
+            }
+        }
+        translation
+    }
+
+    fn find(&self, label: &[u8]) -> Option<u32> {
+        let block = self
+            .blocks
+            .partition_point(|start| self.first(*start) <= label)
+            .checked_sub(1)?;
+        let mut cursor = Cursor::new(self);
+        cursor.seek(block * BLOCK);
+        for _ in 0..BLOCK {
+            match cursor.current()?.cmp(label) {
+                Ordering::Less => cursor.advance(),
+                Ordering::Equal => return Some(self.code(cursor.rank)),
+                Ordering::Greater => return None,
+            }
+        }
+        None
+    }
+
+    /// The first label of the block whose entry starts at `start`. It shares nothing with the
+    /// label before it, so its entry holds it whole.
+    fn first(&self, start: u64) -> &[u8] {
+        let start = start as usize;
+        let (length, at) = read_length(&self.bytes, start + 1, self.bytes[start] & 15);
+        &self.bytes[at..at + length]
+    }
+
+    fn rank(&self, code: u32) -> Option<usize> {
+        match &self.order {
+            Some(order) => order.rank_of.get(code as usize).map(|rank| *rank as usize),
+            None => ((code as usize) < self.len).then_some(code as usize),
+        }
+    }
+
+    fn code(&self, rank: usize) -> u32 {
+        match &self.order {
+            Some(order) => order.code_of[rank],
+            None => rank as u32,
+        }
+    }
+
+    /// Every label as a string array, in the order of the codes. The labels are decoded in
+    /// parallel, a run of whole blocks to a task, and each task's labels too long for a view to
+    /// hold inline share one buffer.
+    fn labels(&self) -> Result<Utf8ViewArray> {
+        const TASK: usize = BLOCK << 12;
+        let mut views = vec![View::default(); self.len];
+        let buffers = views
+            .par_chunks_mut(TASK)
+            .enumerate()
+            .map(|(task, views)| {
+                let mut long: Vec<u8> = Vec::new();
+                let mut cursor = Cursor::new(self);
+                cursor.seek(task * TASK);
+                for view in views {
+                    let Some(label) = cursor.current() else {
+                        break;
+                    };
+                    *view = if label.len() <= View::MAX_INLINE_SIZE as usize {
+                        View::new_inline(label)
+                    } else {
+                        let offset = u32::try_from(long.len())
+                            .ok()
+                            .filter(|offset| {
+                                u32::try_from(label.len())
+                                    .is_ok_and(|len| offset.checked_add(len).is_some())
+                            })
+                            .ok_or_else(|| Error::Query("a factor's labels are too long".into()))?;
+                        long.extend_from_slice(label);
+                        View::new_from_bytes(label, task as u32, offset)
+                    };
+                    cursor.advance();
+                }
+                Ok(Buffer::from(long))
             })
-            .copied()
+            .collect::<Result<Vec<Buffer<u8>>>>()?;
+        let views: Buffer<View> = match &self.order {
+            Some(order) => gather_values(&views, &order.rank_of),
+            None => views.into(),
+        };
+        // SAFETY: every view is inline or points into the buffer of the task that wrote it, and
+        // every label is valid UTF-8 because the table was built from strings.
+        Ok(unsafe {
+            Utf8ViewArray::new_unchecked_unknown_md(
+                ArrowDataType::Utf8View,
+                views,
+                buffers.into(),
+                None,
+                None,
+            )
+        })
     }
 
-    pub fn labels(&self) -> &Utf8ViewArray {
-        &self.labels
-    }
-
+    /// Whether both tables give every code the same label. Equal label sets encode to equal
+    /// bytes, so the labels are compared without being decoded.
     fn same(&self, other: &Levels) -> bool {
-        std::ptr::eq(self, other) || (self.len() == other.len() && self.iter().eq(other.iter()))
+        std::ptr::eq(self, other)
+            || (self.len == other.len && self.order == other.order && self.bytes == other.bytes)
     }
+}
+
+/// A position among a level table's labels in byte order, holding the label it is on. Reading
+/// the next label rewrites the end of the held one, which is how front-coded labels decode.
+struct Cursor<'a> {
+    levels: &'a Levels,
+    /// The rank of the held label, or the level count when the cursor is on none.
+    rank: usize,
+    /// Where the entry after the held label starts.
+    next: usize,
+    label: Vec<u8>,
+}
+
+impl<'a> Cursor<'a> {
+    /// A cursor on no label, until [`Cursor::seek`] moves it to one.
+    fn new(levels: &'a Levels) -> Cursor<'a> {
+        Cursor {
+            levels,
+            rank: levels.len,
+            next: 0,
+            label: Vec::new(),
+        }
+    }
+
+    fn current(&self) -> Option<&[u8]> {
+        (self.rank < self.levels.len).then_some(self.label.as_slice())
+    }
+
+    fn advance(&mut self) {
+        self.rank += 1;
+        if self.rank < self.levels.len {
+            self.next = read_entry(&self.levels.bytes, self.next, &mut self.label);
+        }
+    }
+
+    /// Moves to the label of `rank`. A label further on in the cursor's own block is reached by
+    /// reading on, and any other from the first label of its block.
+    fn seek(&mut self, rank: usize) {
+        let levels = self.levels;
+        if rank >= levels.len {
+            self.rank = levels.len;
+            return;
+        }
+        let ahead = self.rank <= rank && self.rank / BLOCK == rank / BLOCK;
+        if !ahead {
+            let block = rank / BLOCK;
+            self.rank = block * BLOCK;
+            self.next = read_entry(
+                &levels.bytes,
+                levels.blocks[block] as usize,
+                &mut self.label,
+            );
+        }
+        while self.rank < rank {
+            self.advance();
+        }
+    }
+}
+
+/// Reads the entry at `at` into `label`, which holds the label of the entry before it, and
+/// returns where the next entry starts.
+fn read_entry(bytes: &[u8], at: usize, label: &mut Vec<u8>) -> usize {
+    let header = bytes[at];
+    let (shared, at) = read_length(bytes, at + 1, header >> 4);
+    let (rest, at) = read_length(bytes, at, header & 15);
+    label.truncate(shared);
+    label.extend_from_slice(&bytes[at..at + rest]);
+    at + rest
+}
+
+/// A length whose half of an entry's header is `nibble`, with its excess at `at` when the header
+/// could not hold it. Returns the length and where the bytes after it start.
+fn read_length(bytes: &[u8], mut at: usize, nibble: u8) -> (usize, usize) {
+    let mut length = nibble as usize;
+    if nibble == 15 {
+        let mut shift = 0;
+        loop {
+            let byte = bytes[at];
+            at += 1;
+            length += ((byte & 0x7f) as usize) << shift;
+            shift += 7;
+            if byte < 0x80 {
+                break;
+            }
+        }
+    }
+    (length, at)
+}
+
+/// A label as a string. Every label was built from a string, so the conversion loses nothing.
+fn string(label: &[u8]) -> String {
+    String::from_utf8_lossy(label).into_owned()
 }
 
 /// The extension type of a factor column.
@@ -144,17 +438,12 @@ impl ExtensionTypeImpl for FactorType {
             .is_some_and(|other| self.0.same(&other.0))
     }
 
-    /// Hashes the level count and the outer labels, which equal level tables share, without
+    /// Hashes the level count and the first entries, which equal level tables share, without
     /// reading every label of a large table.
     fn dyn_hash(&self) -> u64 {
-        let state = FixedState::default();
         let levels = &self.0;
-        let first = levels.get(0).unwrap_or("");
-        let last = levels
-            .len()
-            .checked_sub(1)
-            .and_then(|code| levels.get(code as u32));
-        state.hash_one((levels.len(), first, last.unwrap_or("")))
+        let head = &levels.bytes[..levels.bytes.len().min(64)];
+        FixedState::default().hash_one((levels.len, levels.bytes.len(), head))
     }
 
     fn dyn_display(&self) -> Cow<'_, str> {
@@ -272,8 +561,12 @@ pub(crate) fn from_gathered(name: PlSmallStr, dtype: &DataType, codes: Codes) ->
     storage.into_extension(typ.clone())
 }
 
-/// A column as text: a factor gives each row's label, sharing the level table's string bytes,
-/// and any other column is cast to strings.
+/// A column as text: a factor gives each row's label, and any other column is cast to strings.
+///
+/// A factor's level table is decoded into strings once and the rows share them. A column much
+/// shorter than its level table, such as a few rows filtered out of a large one, reads each
+/// row's label from the label's block, because decoding the whole table would cost more than
+/// the rows do.
 pub fn text(column: &Column) -> Result<Column> {
     let Some(levels) = levels(column.dtype()) else {
         return Ok(column.cast(&DataType::String)?);
@@ -284,7 +577,41 @@ pub fn text(column: &Column) -> Result<Column> {
             column.name()
         )));
     };
-    let labels = levels.labels();
+    let rows = column.len();
+    if rows.saturating_mul(BLOCK) < levels.len() {
+        const TASK: usize = 1 << 14;
+        let valid = |row: usize| {
+            codes
+                .validity
+                .as_ref()
+                .is_none_or(|validity| validity.get_bit(row))
+        };
+        let code = |row: usize| match &codes.values {
+            CodeValues::U8(values) => u32::from(values[row]),
+            CodeValues::U16(values) => u32::from(values[row]),
+            CodeValues::U32(values) => values[row],
+        };
+        let pieces: Vec<Utf8ViewArray> = (0..rows.div_ceil(TASK))
+            .into_par_iter()
+            .map(|task| {
+                let start = task * TASK;
+                let end = (start + TASK).min(rows);
+                let mut strings = MutableBinaryViewArray::<str>::with_capacity(end - start);
+                let mut cursor = Cursor::new(levels);
+                for row in start..end {
+                    let rank = valid(row).then(|| levels.rank(code(row))).flatten();
+                    cursor.seek(rank.unwrap_or(levels.len()));
+                    match cursor.current() {
+                        Some(label) => strings.push_value(String::from_utf8_lossy(label)),
+                        None => strings.push_null(),
+                    }
+                }
+                strings.freeze()
+            })
+            .collect();
+        return Ok(StringChunked::from_chunk_iter(column.name().clone(), pieces).into_column());
+    }
+    let labels = levels.labels()?;
     let views = labels.views();
     let views: Buffer<View> = match &codes.values {
         CodeValues::U8(values) => gather_views(views, values),
@@ -359,48 +686,39 @@ fn polars_error(error: Error) -> PolarsError {
 
 /// A column as a factor over `levels`: each row's label is looked up among them, and a label
 /// they lack becomes `NA`. A factor already over `levels` is returned as it is.
+///
+/// The lookup runs once per distinct label, not once per row: a factor's level table is matched
+/// against `levels`, and any other column becomes a factor of its own distinct strings first.
 pub fn recode(column: &Column, levels: &Arc<Levels>) -> Result<Series> {
-    if let Some(own) = self::levels(column.dtype())
-        && own.same(levels)
-    {
-        return Ok(column.as_materialized_series().clone());
-    }
-    let name = column.name().clone();
-    let (codes, validity): (Vec<u32>, Vec<bool>) = match self::levels(column.dtype()) {
-        Some(own) => {
-            let translation: Vec<Option<u32>> =
-                own.iter().map(|label| levels.position(label)).collect();
-            let codes = column.as_materialized_series().to_physical_repr();
-            let codes = codes.cast(&DataType::UInt32)?;
-            codes
-                .u32()?
-                .iter()
-                .map(|code| {
-                    match code.and_then(|code| translation.get(code as usize).copied().flatten()) {
-                        Some(code) => (code, true),
-                        None => (0, false),
-                    }
-                })
-                .unzip()
-        }
-        None => {
-            let text = column.cast(&DataType::String)?;
-            text.str()?
-                .iter()
-                .map(
-                    |label| match label.and_then(|label| levels.position(label)) {
-                        Some(code) => (code, true),
-                        None => (0, false),
-                    },
-                )
-                .unzip()
-        }
+    let series = match self::levels(column.dtype()) {
+        Some(own) if own.same(levels) => return Ok(column.as_materialized_series().clone()),
+        Some(_) => column.as_materialized_series().clone(),
+        None => from_strings(column.as_materialized_series())?,
     };
-    let validity = validity
+    let Some(own) = self::levels(series.dtype()) else {
+        unreachable!("the series is a factor");
+    };
+    const ABSENT: u32 = u32::MAX;
+    let translation = own.translation(levels, ABSENT);
+    let own_codes = series.to_physical_repr().cast(&DataType::UInt32)?;
+    let mut validity = MutableBitmap::with_capacity(series.len());
+    let codes: Vec<u32> = own_codes
+        .u32()?
         .iter()
-        .any(|valid| !valid)
-        .then(|| Bitmap::from_iter(validity));
-    Ok(from_codes(name, levels.clone(), codes, validity))
+        .map(|code| {
+            let code = code
+                .and_then(|code| translation.get(code as usize).copied())
+                .filter(|code| *code != ABSENT);
+            validity.push(code.is_some());
+            code.unwrap_or(0)
+        })
+        .collect();
+    Ok(from_codes(
+        series.name().clone(),
+        levels.clone(),
+        codes,
+        validity.into(),
+    ))
 }
 
 /// A string column as a factor with its distinct values as levels, sorted in byte order, which
@@ -423,8 +741,8 @@ const PARTITIONS: usize = 1 << PARTITION_BITS;
 /// A column can hold tens of millions of distinct strings, and then every random access into one
 /// big hash table misses the cache. So each piece's rows are hashed in parallel and split by hash
 /// into partitions, and each partition numbers its own strings in a table small enough to stay
-/// warm. A partition copies only labels longer than a view holds inline into its own byte arena,
-/// which later becomes one of the level table's buffers, so a label's bytes are copied once.
+/// warm. A partition holds a 16-byte view per string and copies only the strings a view cannot
+/// hold inline into its own byte arena.
 pub(crate) struct Interner {
     partitions: Vec<Partition>,
     /// Per row, the partition in the low bits and the string's index within the partition above
@@ -520,23 +838,6 @@ fn label<'a>(views: &'a [View], arena: &'a [u8], index: u32) -> &'a [u8] {
     }
 }
 
-/// A raw pointer to the codes a piece writes, shared by the partitions because each writes only
-/// the rows whose strings hash into it.
-#[derive(Clone, Copy)]
-struct Codes32(*mut u32);
-
-// SAFETY: the partitions write disjoint rows, and the pointer outlives every write.
-unsafe impl Send for Codes32 {}
-unsafe impl Sync for Codes32 {}
-
-impl Codes32 {
-    /// # Safety
-    /// `row` must be within the piece, and no other thread may write it.
-    unsafe fn write(self, row: usize, code: u32) {
-        unsafe { *self.0.add(row) = code };
-    }
-}
-
 impl Interner {
     pub(crate) fn new(rows: usize) -> Interner {
         Interner {
@@ -592,7 +893,7 @@ impl Interner {
                 *slot += 1;
             }
         }
-        let codes = Codes32(self.codes[base..].as_mut_ptr());
+        let codes = Shared(self.codes[base..].as_mut_ptr());
         let expected_rows = self.expected_rows;
         self.partitions
             .par_iter_mut()
@@ -619,9 +920,10 @@ impl Interner {
     /// sort by a key of their first 12 bytes and their interned code, and only runs of strings
     /// that share those 12 bytes are sorted again by their whole bytes.
     ///
-    /// A key is as wide as a view, so the sorted keys become the level table's views in place,
-    /// and the most the method holds beyond the codes is the partitions' views, the keys and one
-    /// rank per level.
+    /// The sorted keys give each interned code its rank, which renumbers the rows, and then the
+    /// labels are written into the level table in key order. The most the method holds beyond
+    /// the codes is the partitions' views, the keys and one rank per level; the level table is
+    /// written after the ranks are freed, and the views and keys are freed once it is.
     pub(crate) fn finish(self, name: PlSmallStr) -> Series {
         let Interner {
             mut partitions,
@@ -677,19 +979,12 @@ impl Interner {
             owned.label(key.offset >> PARTITION_BITS)
         };
         let prefix_of = |key: &View| (key.length, key.prefix, key.buffer_idx);
-        let mut start = 0;
-        while start < keys.len() {
-            let prefix = prefix_of(&keys[start]);
-            let end = start
-                + keys[start..]
-                    .iter()
-                    .position(|key| prefix_of(key) != prefix)
-                    .unwrap_or(keys.len() - start);
-            if end - start > 1 {
-                keys[start..end].sort_unstable_by(|a, b| label_of(a).cmp(label_of(b)));
-            }
-            start = end;
-        }
+        keys.par_chunk_by_mut(|before, key| prefix_of(before) == prefix_of(key))
+            .for_each(|run| {
+                if run.len() > 1 {
+                    run.par_sort_unstable_by(|a, b| label_of(a).cmp(label_of(b)));
+                }
+            });
         let span = partitions
             .iter()
             .map(|owned| owned.views.len())
@@ -697,19 +992,11 @@ impl Interner {
             .unwrap_or(0)
             << PARTITION_BITS;
         let mut rank = vec![0u32; span];
-        for (position, key) in keys.iter().enumerate() {
-            rank[key.offset as usize] = position as u32;
-        }
-        keys.par_iter_mut().for_each(|key| {
-            let code = key.offset;
-            *key = partitions[(code as usize) & (PARTITIONS - 1)].views
-                [(code >> PARTITION_BITS) as usize];
+        let ranks = Shared(rank.as_mut_ptr());
+        keys.par_iter().enumerate().for_each(|(position, key)| {
+            // SAFETY: an interned code is below `span`, and no two keys hold the same one.
+            unsafe { ranks.write(key.offset as usize, position as u32) };
         });
-        let buffers: Buffer<Buffer<u8>> = partitions
-            .into_iter()
-            .map(|owned| Buffer::from(owned.arena))
-            .collect::<Vec<_>>()
-            .into();
         let valid = validity.as_ref();
         codes.par_iter_mut().enumerate().for_each(|(row, code)| {
             *code = match valid.is_none_or(|bits| bits.get(row)) {
@@ -718,21 +1005,25 @@ impl Interner {
             }
         });
         drop(rank);
-        // SAFETY: every view is inline or points into its partition's arena, which became the
-        // buffer at the partition's index, and every label is valid UTF-8 because it was read
-        // from a string array.
-        let labels = unsafe {
-            Utf8ViewArray::new_unchecked_unknown_md(
-                ArrowDataType::Utf8View,
-                keys.into(),
-                buffers,
-                None,
-                None,
-            )
-        };
+        const TASK: usize = BLOCK << 16;
+        let pieces: Vec<Levels> = keys
+            .par_chunks(TASK)
+            .map(|keys| {
+                let mut piece = Levels::default();
+                let mut previous: &[u8] = &[];
+                for key in keys {
+                    let label = label_of(key);
+                    piece.push(previous, label);
+                    previous = label;
+                }
+                piece
+            })
+            .collect();
+        drop(keys);
+        drop(partitions);
         from_codes(
             name,
-            Arc::new(Levels::new(labels)),
+            Arc::new(Levels::joined(pieces)),
             codes,
             validity.and_then(|bits| bits.into()),
         )

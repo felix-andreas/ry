@@ -95,13 +95,13 @@ struct Budget {
 const BUDGETS: &[Budget] = &[
     Budget {
         step: "read join_x",
-        peak: 95.0,
-        held: 42.0,
+        peak: 92.0,
+        held: 34.0,
     },
     Budget {
         step: "read join_big",
-        peak: 97.0,
-        held: 48.0,
+        peak: 94.0,
+        held: 35.0,
     },
     Budget {
         step: "join small on id1",

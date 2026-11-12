@@ -227,7 +227,7 @@ pub fn to_r(series: &Series) -> Result<RVector> {
                 .collect();
             RVector::Factor {
                 codes,
-                levels: levels.iter().map(str::to_string).collect(),
+                levels: levels.to_strings(),
             }
         }
         other => {

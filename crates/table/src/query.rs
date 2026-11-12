@@ -21,6 +21,7 @@ use {
         LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
         SortMultipleOptions, UnionArgs, by_name, col, concat, len, lit, pearson_corr, when,
     },
+    polars_arrow::bitmap::MutableBitmap,
     std::{collections::HashSet, fmt, sync::Arc},
 };
 
@@ -2725,22 +2726,45 @@ fn assigned_type(
     }
 }
 
-/// A string column as a factor whose levels are `levels` followed by the labels they lack, in
-/// order of first appearance.
+/// A string or factor column as a factor whose levels are `levels` followed by the labels they
+/// lack, in order of first appearance.
+///
+/// The column's distinct labels are matched against `levels` as a whole, so the rows are only
+/// read to find which of the missing labels comes first.
 fn relevel(column: Column, levels: &Arc<Levels>) -> Result<Column> {
-    let text = factor::text(&column)?;
-    let strings = text.str()?;
-    let added = || {
-        strings
-            .iter()
-            .flatten()
-            .filter(|label| levels.position(label).is_none())
+    let values = match factor::is_factor(column.dtype()) {
+        true => column,
+        false => factor::from_strings(column.as_materialized_series())?.into_column(),
     };
-    let levels = match added().next() {
-        None => levels.clone(),
-        Some(_) => Arc::new(Levels::from_labels(levels.iter().chain(added()))),
+    let Some(own) = factor::levels(values.dtype()) else {
+        unreachable!("the values are a factor");
     };
-    Ok(factor::recode(&text, &levels)?.into_column())
+    const ABSENT: u32 = u32::MAX;
+    let translation = own.translation(levels, ABSENT);
+    let mut added: Vec<String> = Vec::new();
+    if translation.contains(&ABSENT) {
+        let mut seen = MutableBitmap::from_len_zeroed(own.len());
+        let codes = values
+            .as_materialized_series()
+            .to_physical_repr()
+            .cast(&DataType::UInt32)?;
+        for code in codes.u32()?.iter().flatten() {
+            if translation.get(code as usize) == Some(&ABSENT) && !seen.get(code as usize) {
+                seen.set(code as usize, true);
+                added.extend(own.get(code));
+            }
+        }
+    }
+    let levels = match added.is_empty() {
+        true => levels.clone(),
+        false => {
+            let labels = levels.to_strings();
+            Arc::new(Levels::from_labels(
+                labels.iter().chain(&added).map(String::as_str),
+            ))
+        }
+    };
+    Ok(factor::recode(&values, &levels)?.into_column())
 }
 
 /// Whether an expression computes each row from that row alone, so that evaluating it over the
