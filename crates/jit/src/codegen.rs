@@ -1435,7 +1435,10 @@ impl<'p> Translator<'p> {
         ));
         for (index, argument) in args.iter().enumerate() {
             let (kind, bits) = match *argument {
-                Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
+                Argument::Slot(slot) => (
+                    self.builder.ins().iconst(I64, representation::BOXED as i64),
+                    self.load_slot_cell(slot),
+                ),
                 Argument::Unboxed { register, ty } => {
                     let value = self.use_register(register, ty);
                     let (kind, bits) = match ty {
@@ -1447,15 +1450,35 @@ impl<'p> Translator<'p> {
                             representation::INTEGER,
                             self.builder.ins().sextend(I64, value),
                         ),
+                        // The callee receives the integer or the double the flag says it is.
+                        Ty::Num => {
+                            let flag = self.builder.use_var(self.integers[register]);
+                            let integer = self.num_to_integer(value);
+                            let integer = self.builder.ins().sextend(I64, integer);
+                            let double =
+                                self.builder.ins().bitcast(I64, MemFlagsData::new(), value);
+                            let bits = self.builder.ins().select(flag, integer, double);
+                            let integer_kind =
+                                self.builder.ins().iconst(I64, representation::INTEGER as i64);
+                            let double_kind =
+                                self.builder.ins().iconst(I64, representation::DOUBLE as i64);
+                            let kind = self.builder.ins().select(flag, integer_kind, double_kind);
+                            self.builder
+                                .ins()
+                                .stack_store(I64, kind, buffer, (16 * index) as i32);
+                            self.builder
+                                .ins()
+                                .stack_store(I64, bits, buffer, (16 * index + 8) as i32);
+                            continue;
+                        }
                         _ => (
                             representation::LOGICAL,
                             self.builder.ins().sextend(I64, value),
                         ),
                     };
-                    (kind, bits)
+                    (self.builder.ins().iconst(I64, kind as i64), bits)
                 }
             };
-            let kind = self.builder.ins().iconst(I64, kind as i64);
             self.builder
                 .ins()
                 .stack_store(I64, kind, buffer, (16 * index) as i32);
@@ -1541,7 +1564,11 @@ impl<'p> Translator<'p> {
         let fits = self.check(value, ty);
         let failed = self.deopt(next, after.0, after.1, live, reason::SPECULATION);
         self.guard(fits, failed);
-        if ty.is_unboxed() {
+        if ty == Ty::Num {
+            let (unboxed, flag) = self.unbox_num(value);
+            self.def_register(register, ty, unboxed);
+            self.builder.def_var(self.integers[register], flag);
+        } else if ty.is_unboxed() {
             let unboxed = self.unbox(value, ty);
             self.def_register(register, ty, unboxed);
         }
@@ -2163,6 +2190,46 @@ impl<'p> Translator<'p> {
                 };
                 self.builder.def_var(self.doubles[dst], value);
             }
+            Numeric::Num => {
+                // The double result is exact for integer operands unless it leaves `i32`'s range,
+                // which is overflow: integer `NA` and doubles go through as `NaN` and a double.
+                let a = self.as_double(left, left_ty);
+                let b = self.as_double(right, right_ty);
+                let value = match arith {
+                    Arith::Add => self.builder.ins().fadd(a, b),
+                    Arith::Subtract => self.builder.ins().fsub(a, b),
+                    Arith::Multiply => self.builder.ins().fmul(a, b),
+                    _ => return Err(Refusal("mixed arithmetic the JIT does not inline")),
+                };
+                let flag = |this: &mut Self, register: usize, ty: Ty| {
+                    if ty == Ty::Num {
+                        this.builder.use_var(this.integers[register])
+                    } else {
+                        this.builder.ins().iconst(I32, 1)
+                    }
+                };
+                let a_flag = flag(self, left, left_ty);
+                let b_flag = flag(self, right, right_ty);
+                let integer = self.builder.ins().band(a_flag, b_flag);
+                self.builder.def_var(self.doubles[dst], value);
+                self.builder.def_var(self.integers[dst], integer);
+                let magnitude = self.builder.ins().fabs(value);
+                let limit = self.builder.ins().f64const(i32::MAX as f64);
+                // Unordered compares false, so `NA` stays on the fast path.
+                let outside = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::GreaterThan, magnitude, limit);
+                let integer = self.builder.ins().icmp_imm_s(IntCC::NotEqual, integer, 0);
+                let overflow = self.builder.ins().band(outside, integer);
+                let slow_block = self.builder.create_block();
+                let join = self.builder.create_block();
+                self.builder.ins().brif(overflow, slow_block, &[], join, &[]);
+                self.builder.switch_to_block(slow_block);
+                self.builder.set_cold_block(slow_block);
+                self.hand_off(position, before);
+                self.builder.switch_to_block(join);
+            }
         }
         Ok(())
     }
@@ -2194,7 +2261,7 @@ impl<'p> Translator<'p> {
                 let b_na = self.builder.ins().icmp(IntCC::Equal, b, na);
                 (flag, self.builder.ins().bor(a_na, b_na))
             }
-            Numeric::Dbl => {
+            Numeric::Dbl | Numeric::Num => {
                 let a = self.as_double(left, left_ty);
                 let b = self.as_double(right, right_ty);
                 let condition = match arith {
@@ -2378,8 +2445,9 @@ impl<'p> Translator<'p> {
                 self.builder.def_var(self.doubles[dst], result);
             }
             Intrinsic::Not | Intrinsic::IsNa => {
-                let (zero, missing) = if types[0] == Ty::Dbl {
-                    let value = self.use_register(args[0], Ty::Dbl);
+                // A `Num` holds an integer NA as NaN, so it tests as a double.
+                let (zero, missing) = if matches!(types[0], Ty::Dbl | Ty::Num) {
+                    let value = self.use_register(args[0], types[0]);
                     let zero_constant = self.builder.ins().f64const(0.0);
                     let zero = self
                         .builder
@@ -2482,6 +2550,12 @@ impl<'p> Translator<'p> {
                     )
                     .ok_or(Refusal("a helper without a result"))?;
                 self.builder.def_var(self.doubles[dst], result);
+            }
+            Intrinsic::Negate(Numeric::Num)
+            | Intrinsic::Abs(Numeric::Num)
+            | Intrinsic::Modulo(Numeric::Num)
+            | Intrinsic::IntegerDivide(Numeric::Num) => {
+                return Err(Refusal("an intrinsic on a mixed integer and double operand"));
             }
             Intrinsic::IntegerDivide(Numeric::Dbl) => {
                 let a = self.as_double(args[0], types[0]);

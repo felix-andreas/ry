@@ -9146,3 +9146,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
   Constants already pass as themselves. The rest of what promises cost is code promises and the fixed cost of each promise, not the argument's shape.
 - **Revisit** only with a caller-side proof that the frame's locals cannot be written during the call, and a workload where variable arguments to callees that are not effect-free are at least 2% of the instructions.
+
+## A list read through `Op::Item` feeds the `[[` call it falls back to
+
+- **Problem.** Tier 0's `Op::Item` handler (`records::cached_item`) serves plain lists as well as records and records the item's type at the `Item` pc. Tier 1 compiles only the record read and sends a list to the `[[` `CallBuiltin` on the fallback path, whose own feedback stays empty because tier 0 never ran it. A body like binarytrees' `check(tree)` therefore refused to compile as cold, though tier 0 had seen every value.
+- **Shape.** The planner (`crates/jit/src/analysis.rs`, `item_reads`) pairs each `Op::Item` with the first `CallBuiltin` at its fallback target that reads the same register, and `Builder::bits` joins the item's bits into that call's feedback. Feedback stays one slot per site in the constant pool; the join is derived at plan time, not stored.
+- **`Ty::Num`.** Feedback with both the integer and double bits types as `Num`: an f64 plus an integer flag, with an integer `NA` held as NaN. `+`, `-` and `*` compute in f64 and hand off to tier 0 when an integer-flagged result leaves `i32`'s range, so overflow still gives `NA` with GNU R's warning. `%%`, `%/%`, unary minus and `abs` refuse. `mixed_integer_and_double_arithmetic_agrees_with_tier_zero` pins the cases.

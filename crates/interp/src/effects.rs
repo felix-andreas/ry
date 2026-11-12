@@ -94,6 +94,7 @@ pub const EFFECT_FREE_BUILTINS: &[&str] = &[
     "[",
     "[[",
     "c",
+    "list",
     "is.na",
     "is.null",
     "sum",

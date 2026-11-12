@@ -191,12 +191,18 @@ fn declared_ty(declared: Declared) -> Ty {
 
 /// The type tier 0's feedback bits speculate on.
 pub fn from_feedback(bits: u16) -> Ty {
+    const INTEGER_OR_DOUBLE: u16 = feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR;
     let within = |mask: u16| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
         feedback::INTEGER_SCALAR => Ty::Int,
         feedback::DOUBLE_SCALAR => Ty::Dbl,
         feedback::LOGICAL_SCALAR => Ty::Lgl,
+        // A value that has been both an integer and a double scalar, such as the argument of a
+        // closure shared by `make_scaler(2)` and `make_scaler(0.5)`, or `item` in a recursion
+        // first called with `0` and then with `i`, is a `Num`, which arithmetic reads unboxed,
+        // rather than a boxed value every reader hands back to tier 0.
+        INTEGER_OR_DOUBLE => Ty::Num,
         _ if within(feedback::INTEGER_SCALAR | feedback::INTEGER_VECTOR) => Ty::IntVec,
         _ if within(feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR) => Ty::DblVec,
         _ if within(feedback::LOGICAL_SCALAR | feedback::LOGICAL_VECTOR) => Ty::LglVec,
@@ -575,6 +581,23 @@ pub enum Numeric {
     Int,
     /// On `f64`s, converting integer and logical operands.
     Dbl,
+    /// On a [`Ty::Num`] and an integer, logical or `Num` operand, giving a `Num`: integer
+    /// arithmetic when every flag says integer, double arithmetic otherwise.
+    Num,
+}
+
+/// How compiled code computes `a <arith> b` for numeric scalar operands, and the result's type.
+/// `+`, `-` and `*` stay integer arithmetic unless an operand is a double, so with a `Num`
+/// operand the result is a `Num` whose flag says which it was; every other operator gives a
+/// double.
+fn arithmetic_numeric(arith: Arith, a: Ty, b: Ty) -> (Numeric, Ty) {
+    let preserves = matches!(arith, Arith::Add | Arith::Subtract | Arith::Multiply);
+    match (a, b) {
+        (Ty::Dbl, _) | (_, Ty::Dbl) => (Numeric::Dbl, Ty::Dbl),
+        _ if !preserves => (Numeric::Dbl, Ty::Dbl),
+        (Ty::Num, _) | (_, Ty::Num) => (Numeric::Num, Ty::Num),
+        _ => (Numeric::Int, Ty::Int),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1337,7 +1360,9 @@ impl Plan<'_> {
                 .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
     }
 
-    /// How many actions compiled code does itself, and how many it hands to tier 0.
+    /// How many actions compiled code does itself, and how many it hands to tier 0. A step
+    /// tier 0's fast handler may take counts as compiled code's own: it skips the dispatch, the
+    /// write-back and the reload, and costs no more than tier 0's handler.
     pub fn native_actions(&self) -> usize {
         self.actions.iter().filter(|action| native(action)).count()
     }
@@ -1345,7 +1370,7 @@ impl Plan<'_> {
     pub fn tier0_actions(&self) -> usize {
         self.actions
             .iter()
-            .filter(|action| matches!(action, Action::Step { .. }))
+            .filter(|action| matches!(action, Action::Step { fast: Fast::No, .. }))
             .count()
     }
 }
@@ -1353,7 +1378,10 @@ impl Plan<'_> {
 fn native(action: &Action<'_>) -> bool {
     matches!(
         action,
-        Action::Inline { .. }
+        Action::Step {
+            fast: Fast::Read | Fast::Store(_),
+            ..
+        } | Action::Inline { .. }
             | Action::Traverse { .. }
             | Action::Call { .. }
             | Action::NativeCall { .. }
@@ -1395,6 +1423,7 @@ pub unsafe fn plan<'a>(
         enclosure,
         shared,
         feedback: values::ints(constants.element(FEEDBACK)),
+        item_reads: item_reads(arena, &insts, values::ints(constants.element(FEEDBACK))),
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
         slots: List::new_in(arena),
@@ -1486,6 +1515,32 @@ pub unsafe fn decode(arena: Arena<'_>, code: Sexp) -> Result<List<'_, Inst<'_>>,
         pc += 1 + count;
     }
     Ok(insts)
+}
+
+/// Tier 0's `Item` reads a plain list's item as well as a record's, and records what it read at
+/// its own pc. Tier 1 compiles only the record read and sends a list to the `[[` call on the
+/// fallback path, which tier 0 then rarely ran, so that call's own feedback misses the type its
+/// result has. Each entry pairs that call's pc with the bits the `Item` recorded: the first
+/// `CallBuiltin` from the `Item`'s target that writes the same register.
+fn item_reads<'a>(arena: Arena<'a>, insts: &[Inst<'_>], feedback: &[i32]) -> List<'a, (usize, u16)> {
+    let mut reads = List::new_in(arena);
+    for inst in insts.iter().filter(|inst| inst.op == Op::Item) {
+        let bits = feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
+        if bits == 0 {
+            continue;
+        }
+        let target = inst.operand(4);
+        let Ok(start) = insts.binary_search_by_key(&target, |inst| inst.pc) else {
+            continue;
+        };
+        if let Some(call) = insts[start..]
+            .iter()
+            .find(|call| call.op == Op::CallBuiltin && call.operand(0) == inst.operand(0))
+        {
+            reads.push((call.pc, bits));
+        }
+    }
+    reads
 }
 
 /// What each formal of a closure whose byte code is `code` has held: the type its signature
@@ -1629,6 +1684,9 @@ struct Builder<'a> {
     enclosure: Sexp,
     shared: bool,
     feedback: &'a [i32],
+    /// The bits each [`Op::Item`] site recorded, by the pc of the `[[` call on its fallback
+    /// path ([`item_reads`]).
+    item_reads: List<'a, (usize, u16)>,
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
     slots: List<'a, Sexp>,
@@ -1682,7 +1740,7 @@ impl<'a> Builder<'a> {
                     self.hints.push(Ty::Bottom);
                     self.declared.push(Ty::Boxed);
                 }
-                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
+                let bits = self.bits(inst.pc);
                 if inst.op == Op::GetVar && bits != 0 {
                     let slot = self.slot_of[&symbol];
                     self.hints[slot] = self.hints[slot].join(from_feedback(bits));
@@ -1745,13 +1803,22 @@ impl<'a> Builder<'a> {
         Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
     }
 
+    /// The kinds of value the instruction at `pc` has produced in tier 0.
+    fn bits(&self, pc: usize) -> u16 {
+        let own = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        self.item_reads
+            .iter()
+            .filter(|&&(call, _)| call == pc)
+            .fold(own, |bits, &(_, item)| bits | item)
+    }
+
     fn feedback_at(&self, pc: usize) -> Ty {
-        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u16))
+        from_feedback(self.bits(pc))
     }
 
     /// Whether the instruction at `pc` has never recorded a value.
     fn never_ran(&self, pc: usize) -> bool {
-        self.feedback.get(pc).copied().unwrap_or(0) == 0
+        self.bits(pc) == 0
     }
 
     /// The type a call of `function` at `pc` is expected to return: what the call site has
@@ -1769,15 +1836,7 @@ impl<'a> Builder<'a> {
         if self.never_ran(pc) {
             return self.declared[slot];
         }
-        // A variable that has held both an integer and a double scalar, such as the argument
-        // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
-        // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
-        // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
-        if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
-            return Ty::Num;
-        }
-        from_feedback(bits)
+        self.feedback_at(pc)
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -2718,7 +2777,7 @@ impl<'a> Builder<'a> {
 
     /// Retypes as boxed every [`Ty::Num`] register the instruction at `position` cannot read
     /// unboxed, returning them so code generation boxes them first. Only a copy, an assignment
-    /// and arithmetic whose result is a double whatever the flag says read one unboxed.
+    /// and scalar arithmetic read one unboxed.
     fn box_operands(&self, position: usize, state: &mut State<'a>) -> SmallVec<[usize; 2]> {
         let inst = &self.insts[position];
         let operands = reads(inst);
@@ -2743,23 +2802,14 @@ impl<'a> Builder<'a> {
                     ARITHS[inst.operand(0)].0,
                     Arith::Modulo | Arith::IntegerDivide
                 );
-                // An integer flag would make `+`, `-` and `*` integer arithmetic unless the other
-                // operand is a double; every other operator converts to double anyway.
-                scalar(a)
-                    && scalar(b)
-                    && !(remainder && (a == Ty::Num || b == Ty::Num))
-                    && (!matches!(
-                        ARITHS[inst.operand(0)].0,
-                        Arith::Add
-                            | Arith::Subtract
-                            | Arith::Multiply
-                            | Arith::Modulo
-                            | Arith::IntegerDivide
-                    ) || a == Ty::Dbl
-                        || b == Ty::Dbl)
+                // `+`, `-` and `*` read the flag (see `arithmetic_numeric`); every other operator
+                // converts to double anyway.
+                scalar(a) && scalar(b) && !(remainder && (a == Ty::Num || b == Ty::Num))
             }
-            // A matrix subscript reads a `Num` as the double it holds.
-            Op::CallBuiltin => unsafe { self.matrix_element(inst, state).is_some() },
+            // A matrix subscript reads a `Num` as the double it holds, and `is.na` tests it.
+            Op::CallBuiltin => unsafe {
+                self.matrix_element(inst, state).is_some() || self.is_na_of_num(inst, state)
+            },
             _ => false,
         };
         if keeps {
@@ -3350,7 +3400,7 @@ impl<'a> Builder<'a> {
                 }
                 let slot = self.peek_slot(lowering, expression, false)?;
                 let ty = lowering.state.slots[slot].ty;
-                if !ty.is_unboxed() {
+                if !ty.in_variables() {
                     return None;
                 }
                 let dst = lowering.temporary()?;
@@ -3433,7 +3483,7 @@ impl<'a> Builder<'a> {
                     {
                         let (a, b) = (types[0], types[1]);
                         let dst = lowering.temporary()?;
-                        let integers = a != Ty::Dbl && b != Ty::Dbl;
+                        let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
                         let comparison = matches!(
                             arith,
                             Arith::Equal
@@ -3456,17 +3506,7 @@ impl<'a> Builder<'a> {
                                 Ty::Lgl,
                             )
                         } else {
-                            let numeric = match arith {
-                                Arith::Add | Arith::Subtract | Arith::Multiply if integers => {
-                                    Numeric::Int
-                                }
-                                _ => Numeric::Dbl,
-                            };
-                            let ty = if numeric == Numeric::Int {
-                                Ty::Int
-                            } else {
-                                Ty::Dbl
-                            };
+                            let (numeric, ty) = arithmetic_numeric(arith, a, b);
                             (
                                 Action::Arithmetic {
                                     arith,
@@ -3752,15 +3792,8 @@ impl<'a> Builder<'a> {
                     right,
                 });
             }
-            let numeric = match arith {
-                Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
-                _ => Numeric::Dbl,
-            };
-            state.registers[dst] = if numeric == Numeric::Int {
-                Ty::Int
-            } else {
-                Ty::Dbl
-            };
+            let (numeric, ty) = arithmetic_numeric(arith, a, b);
+            state.registers[dst] = ty;
             return Ok(Action::Arithmetic {
                 arith,
                 numeric,
@@ -3813,6 +3846,17 @@ impl<'a> Builder<'a> {
                 .iter()
                 .all(|(tag, _)| *tag == values::nil());
         matches.then_some(feedback)
+    }
+
+    /// Whether `inst` calls the base `is.na` on one `Num` operand, which [`Intrinsic::IsNa`]
+    /// reads unboxed.
+    unsafe fn is_na_of_num(&self, inst: &Inst<'a>, state: &State<'a>) -> bool {
+        let Ty::Fun(function) = state.registers[inst.operand(1)] else {
+            return false;
+        };
+        inst.operand(4) == 1
+            && state.registers[inst.operand(3)] == Ty::Num
+            && interp::eval::builtin_def(function).is_ok_and(|definition| definition.name == "is.na")
     }
 
     unsafe fn call_builtin(
@@ -4087,7 +4131,7 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },
         ),
         ("!", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Not, Ty::Lgl),
-        ("is.na", [ty]) if ty.is_numeric_scalar() => (Intrinsic::IsNa, Ty::Lgl),
+        ("is.na", [ty]) if ty.is_numeric_scalar() || *ty == Ty::Num => (Intrinsic::IsNa, Ty::Lgl),
         ("sqrt", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Sqrt, Ty::Dbl),
         ("exp", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Exp, Ty::Dbl),
         ("log", [ty]) if ty.is_numeric_scalar() => (Intrinsic::Log, Ty::Dbl),

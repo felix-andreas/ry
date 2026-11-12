@@ -3504,3 +3504,70 @@ fn element_ops_cost_no_more_than_tier_zero() {
         );
     }
 }
+
+#[test]
+fn mixed_integer_and_double_arithmetic_agrees_with_tier_zero() {
+    // `x` holds integers and doubles, so compiled code keeps it as a value that is either and
+    // computes `+`, `-` and `*` on it unboxed. An integer result outside `i32`'s range is
+    // overflow, which tier 0 turns into `NA` with a warning; `NA` itself passes through.
+    let bodies = [
+        "function(xs) { s <- 0L; for (x in xs) s <- s + x * 2L; s }",
+        "function(xs) { n <- 0L; for (x in xs) if (is.na(x - 1L)) n <- n + 1L; n }",
+        "function(xs) { s <- 0L; for (x in xs) s <- s - x; s * 3L }",
+    ];
+    let inputs = [
+        "list(1L, 2.5, 3L)",
+        "list(1L, 2L)",
+        "list(1L, 2.5, 3L)",
+        "list(.Machine$integer.max, 1L)",
+        "list(-.Machine$integer.max, 3L)",
+        "list(NA_integer_, 1.5)",
+        "list(1L, NA, 2.5, NA_real_, NA_integer_)",
+        "list(1e10, 2L)",
+    ];
+    with_interpreter(|| unsafe {
+        for (case, body) in bodies.iter().enumerate() {
+            let mut outcomes = Vec::new();
+            for mode in [Mode::Off, Mode::Force] {
+                jit::install_mode(mode);
+                let name = format!("mixed_{case}_{}", outcomes.len());
+                run(&format!("{name} <- {body}"));
+                let values: Vec<String> = inputs
+                    .iter()
+                    .map(|input| run(&format!("{name}({input})")))
+                    .collect();
+                outcomes.push(values);
+            }
+            jit::install_mode(Mode::Off);
+            assert_eq!(outcomes[0], outcomes[1], "{body}");
+        }
+    });
+}
+
+#[test]
+fn a_recursion_over_integer_and_double_items_compiles() {
+    // The shootout's binary trees: `item` is a double for the first trees and an integer for
+    // the rest, and a leaf is a vector where an inner node is a list. `check` reads its items
+    // through `[[`, whose list reads tier 0 records at the record-item instruction in front of
+    // the call, and the sum is integer or double by the items. Both bodies must compile, and
+    // compiled code must give tier 0's sums.
+    let program = "tree <- function(item, depth) {
+            if (depth == 0L) return(c(item, NA, NA))
+            list(item, tree(2L * item - 1L, depth - 1L), tree(2L * item, depth - 1L))
+        }
+        check <- function(tree)
+            if (is.na(tree[[2]][[1]])) tree[[1]] else tree[[1]] + check(tree[[2]]) - check(tree[[3]])
+        sums <- c(check(tree(0, 9)))
+        for (i in 1:12) sums <- c(sums, check(tree(i, 8)) + check(tree(-i, 8)))
+        sums";
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Off);
+        let reference = run(program);
+        jit::install_mode(Mode::On);
+        let compiled = run(program);
+        let compiled_both = has_compiled_code("tree") && has_compiled_code("check");
+        jit::install_mode(Mode::Off);
+        assert_eq!(reference, compiled);
+        assert!(compiled_both, "tree or check did not compile");
+    });
+}
