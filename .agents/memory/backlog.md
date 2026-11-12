@@ -116,6 +116,27 @@ left, in order of expected gain:
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
+### Gaps the typed public ports found
+
+Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
+
+- **Not compiled natively; the whole function runs in the interpreter:**
+  - a list literal, `[]` or `[x, i]`, which calls `.ry_array` (bounce, binarytrees, nbody, fasta, pidigits, scalar-while);
+  - `List.repeat` with a computed count ("a count that is not a number": `integer_count` in `crates/typed/src/lower.rs` accepts constants only), in vector-for, vector-while, matrix-for, convolution and spectralnorm;
+  - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
+  - `List.with_capacity`, `List.swap` (fannkuchredux), `List.is_empty`, `Str.to_utf8`, `Dict.empty`, `Dict.to_list`, `Num.bitwise_and`, `Num.bitwise_xor` and `Num.shift_left_by` (mandelbrot).
+- **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
+- **Literal typing in the checker:**
+  - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
+  - An annotation does not reach the literals inside a list literal: `bodies: List<Body> <- [(x = 0, ...)]` reports `double` fields, so nbody and fasta spell `0f64`.
+  - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
+  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
+- **Nominal items do not fit an empty list.** `children <- []` then `List.append(children, @Tree(...))` is "expected `T`, found `Tree`", and `children: List<Tree> <- []` is "expected `List<Tree>`, found `List<T>`". A recursive `alias` is refused instead, with a message that prints an enormous expanded type. This blocks a typed awfy `storage`.
+- **`List.append` on an Array is quadratic.** `owned_list` in `crates/interp/src/standard_library.rs` excludes Arrays, so each append to a list built by `[]` or `List.from_r` copies and re-checks every item: 40,000 appends take about 25 s, against 0.007 s from `List.with_capacity`, although the standard-library page promises amortized constant time. This blocks typed rcp `list-for` and `list-while`, which would pass the 300 s bench timeout.
+- **Interpreted `List.with_capacity` plus record appends returns an R `list`,** which then fails the declared `List<Record{...}>` return check.
+- **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
+- **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
+
 ## Open: ahead-of-time compilation of typed ry (mid priority)
 
 Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). This extends the install-time compiler that writes machine code for a package's numeric functions into `R/<package>.ryc` (`crates/jit/src/ahead.rs`, CLI reference "build and install"); the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.

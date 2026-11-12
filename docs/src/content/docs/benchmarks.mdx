@@ -34,6 +34,14 @@ start-up.
 Scalar loops gain the most, because the JIT compiles them to machine code while GNU R interprets
 bytecode. Programs that spend their time allocating gain the least.
 
+Each distinct algorithm also exists in typed ry, as a `<name>.typed.R` beside its main program, and
+runs in [strict mode](/guide#strict-mode) as the ry typed column; the variants of one algorithm have
+no typed version of their own. A port is written as typed ry is written, so where the R program
+relies on something typed ry does not have, such as `...`, `<<-`, matrices or complex numbers, it
+uses the typed equivalent, and `suite.toml` notes which. Its printed output and result match GNU
+R's, so it has the same checksum. awfy storage, regexdna and rcp list-for and list-while have no
+typed version, because typed ry cannot yet express them as written.
+
 <details>
 <summary>The numbers: seconds and peak memory</summary>
 
