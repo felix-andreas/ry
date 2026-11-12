@@ -6165,6 +6165,15 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     computes each element, `[[` reads numbers through `Elt`, and the tree-walking `for` (top-level
     code) reads numbers element by element, which keeps `for (i in 1:1e9)` at top level at 43 MB
     instead of 3.9 GB. `altrep__reads_keep_compact` pins the `inspect` state.
+  - *Arithmetic reads a sequence unexpanded.* The vector kernels (`crates/interp/src/kernels.rs`)
+    read a compact sequence operand as a `Sequence` reader that computes each element from its
+    first element and increment, so `flows * exp(-rate * seq_len(n))` pays only the sequence's
+    creation and allocates no expansion. Only C code asking for `DATAPTR`/`INTEGER_RO` expands.
+    This deliberately differs from GNU R, whose arithmetic reads through `INTEGER_RO`/`REAL_RO`
+    and so leaves the operand `(expanded)` in `inspect`. The values are the same
+    (`altrep__sequence_arithmetic`), and keeping the operand compact saves the expansion's memory,
+    so no oracle case pins the inspect state after arithmetic. `abs` and the accuracy check of
+    `%%` still expand through `values::ints`/`arith::real_at`.
   - *Summaries ask the class.* `sum`, `min` and `max` call an ALTREP argument's own `Sum`, `Min`
     or `Max` method first (the `altrep_summary` host hook), as GNU R does, so `sum(1:n)` reads no
     elements and a class's errors surface as GNU R's.
