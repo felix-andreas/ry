@@ -74,9 +74,10 @@ written as an Open Knowledge Format v0.2 concept document, with sources in its f
 
 An independent review of the plan against published results of other language implementations and
 fresh measurements: five ranked levers (declared types that pay on whole programs, the edit-to-result
-loop, native kernels for base R's data-frame layer, an optimizing tier judged by the calls it removes,
+loop, an optimizing tier judged by the calls it removes, native kernels for base R's data-frame layer,
 and all cores for ry-owned kernels), what to stop, and the measurement that would kill each lever. It
-argues that the 10x target for untyped R has no precedent and should move to typed code and tooling.
+argues that untyped R should be planned around 3x GNU R, and that the order-of-magnitude goals belong
+to typed code and the development loop.
 
 ### [Packages and R versions in the runtime](/development/design/packaging/)
 

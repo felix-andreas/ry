@@ -10,37 +10,43 @@ citations, not a settled design, and it disagrees with `decisions.md` and `r-run
 
 ## The short version
 
-No system that keeps R's semantics and R's C API has made real R code more than about 2 times
-faster than GNU R, and ry is already there (1.9x on package test suites, 2.0x on application
-workloads). The roadmap's 10x target for untyped R has no precedent and does not survive its own
-arithmetic. The order-of-magnitude factors that ry has actually measured are somewhere else:
+On package and application code, no system that keeps R's semantics and R's C API has run more
+than about 2 times faster than GNU R, and ry is already there (1.9x on package test suites, 2.0x on
+application workloads). The roadmap's 10x target for untyped R needs R code to run 30 times faster
+and builtins 10 times faster than GNU R's, averaged over all the time in those buckets. No
+published system has shown either factor on application-shaped code, and ry's own suites of
+loops that the JIT compiles stand at 2.7x and 4.8x. The order-of-magnitude factors that ry has
+measured are somewhere else:
 
 | Where | Measured factor | Status in the plan |
 | --- | --- | --- |
-| Typed ry against GNU R | 15x on kernels, 20x on five applications | One track among several, scored against GNU R instead of Rust |
-| Edit to first test result, `ry test --watch` against `devtools::test()` | about 30x to 60x (2 s against 62 s, 1 s against 68 s, one code base) | Shipped, unpublished, not a benchmark suite |
-| A call the compiler removes entirely | 37x to 68x (probes below) | Reaches under 3% of R-level time |
+| Typed ry against GNU R | 15x on kernels, 20x on five applications (typed times under the suites' 0.1 s floor) | One track among several, with no recorded score against Rust |
+| Edit to first test result, `ry test --watch` against `devtools::test()` | about 30x to 70x (2 s against 62 s, 1 s against 68 s, one code base) | Shipped, not a benchmark suite |
+| A call the compiler removes entirely | 37x to 68x (probes below) | Tier 1 runs under 3% of R-level time on eight of nine workloads |
 | A base R closure replaced by a native entry | 3.4x to 6.9x per function (probes below) | Ported one function at a time |
-| Everything that keeps a real R call | 0.9x to 1.5x (probes below) | Where most of the runtime effort goes |
+| A call that keeps R's semantics | 0.9x to 1.5x (probes below) | What the native execution model sets out to change |
 
 The ranked levers follow from that table:
 
 1. **Make declared types pay on whole programs**, compiled ahead of time, with "this function runs
-   natively" as a property the checker reports. Expected: 3x to 10x on the typed share of a program.
-2. **Make the edit-to-result loop the headline benchmark and the product.** Expected: 10x to 60x on
-   the time a person or an agent waits per change, and 2x or more on CI.
-3. **Give base R's data-frame and object layer native kernels**, chosen by measured share. Expected:
-   10x or more on those calls; the effect on a suite depends on a share nobody has measured.
-4. **Build one optimizing tier that removes calls, and judge it by what it removes.** Expected: 1.3x
-   to 1.5x on package and application code, which would put untyped R near 3x GNU R. This is the
-   right track with the wrong expectations.
-5. **Decide whether ry-owned kernels may use all cores and plain IEEE arithmetic.** Expected: 2x to
-   4x on large vector work on four cores, nothing on test suites. Both are user directives, so this
-   is a question, not a plan.
+   natively" as a property the checker enforces. Expected: 3x to 10x on the typed share of a
+   program.
+2. **Make the edit-to-result loop the headline benchmark and the product.** Expected: 10x to 70x on
+   the time a person or an agent waits per change, and an estimated 2x or more on CI.
+3. **Build one optimizing tier that removes calls, and judge it by what it removes.** Expected: 1.3x
+   to 1.5x on package and application code, which would put untyped R near 3x GNU R. The design is
+   right and the forecast attached to it is not.
+4. **Give base R's data-frame layer native kernels**, chosen by measured share. Expected: 10x or
+   more on those calls; the effect on a suite depends on a share nobody has measured.
+5. **Let ry-owned kernels use all cores in batch runs, and offer plain IEEE sums.** Expected: 2x to
+   4x on large vector work on four cores, nothing on test suites.
+
+Two of these recommendations are the user's to decide, because they touch user directives: the 10x
+target for untyped R is the user's north star, and single-thread first is a user directive.
 
 ## What this rests on
 
-Three kinds of evidence, in decreasing order of trust:
+The evidence comes from three places, in decreasing order of trust:
 
 - **Published results of other systems**, cited inline with links.
 - **ry's own records**: the results files behind `benchmarks.mdx`, `decisions.md`, `backlog.md` and
@@ -95,8 +101,6 @@ ry is faster. Checksums agree on every probe.
 | `rowsum(x, g)` | 22.7 ns | 23.4 ns | 24.2 ns | 0.97 |
 | `order(g)` on integers | 6.8 ns | 8.8 ns | 9.2 ns | 0.77 |
 
-Three readings matter for the rest of this page.
-
 The geometric mean over all 55 probes is 1.93x, the same figure the published application and
 package suites give, so the probes are a fair miniature. Twenty-seven of the 55 are under 1.5x.
 
@@ -114,11 +118,12 @@ with GNU R whether or not the body is machine code.
 ### A code base's test suite
 
 `tools/bench/tooling/generate.py --lines 30000 --files 50` wrote a finance code base of 30,800
-lines, and its 953 `test_that()` blocks ran under both engines through `ry load --file` with the
-driver `oracle bench` uses. The package library in the measuring container held 119 of the
-benchmark closure's packages, so 391 blocks fail on GNU R for a missing package and 82 more fail on
-ry because `quadprog`'s shared object did not find `libRblas.so` there. The comparison below covers
-the 480 blocks that pass on both, and it is a partial run of a small code base, not the benchmark.
+lines, without `--typed`, so its annotations are erased. Its 953 `test_that()` blocks ran under
+both engines through `ry load --file` with the driver `oracle bench` uses. The package library in
+the measuring container held 119 of the benchmark closure's packages, so 391 blocks fail on GNU R
+for a missing package and 82 more fail on ry because `quadprog`'s shared object did not find
+`libRblas.so` there. The comparison below covers the 480 blocks that pass on both, and it is a
+partial run of a small code base, not the benchmark.
 
 | | GNU R 4.6.2 | ry | ry, `RY_JIT=off` |
 | --- | ---: | ---: | ---: |
@@ -140,15 +145,18 @@ did not investigate. `ry load --profile-summary` splits ry's whole run as follow
 | S3 method lookup | 1.9% |
 | Compiled code | not listed, so under 0.1% |
 
-`MEMORY.md` records the full-size code bases as 1.21x to 1.35x slower than GNU R per test, and
-`backlog.md` records a private 300,000-line code base as about 3% slower. This run disagrees with
-both, and nothing in the repository says which is current ("Blind spots" below).
+`MEMORY.md` records the full-size code bases differently: the time inside the tests is 1.21x to
+1.35x GNU R's, so ry is slower there, while the whole process takes 0.75x to 0.97x of GNU R's wall
+time, because GNU R spends minutes in testthat's `gc()` call per file. `backlog.md` records a
+private 300,000-line code base as about 3% slower. The block times above are the counterpart of the
+first figure and point the other way, and nothing in the repository says which describes the
+current tree ("Blind spots" below).
 
 ### Typed ry against Rust
 
-The typed runtime's bar is 1.5 to 2 times the time of equivalent Rust (`typed-runtime.md`), and
-`tools/climb/run.py` computes the score, but `tools/climb/log.tsv` has never recorded one. Two
-estimates:
+The typed runtime's bar is 1.5 to 2 times the time of equivalent Rust (`typed-runtime.md`). The
+[hill climb](/development/design/language-climb/) computes that score with `tools/climb/run.py`,
+but `tools/climb/log.tsv` holds no value for it. This review has two estimates:
 
 - Dividing the published typed times (`tools/bench/kernels/results.json` and
   `tools/bench/applications/results.json`) by the Rust twins' times measured here gives a geometric
@@ -162,57 +170,82 @@ estimates:
   0.006 s on its first run and a median of 2.06 s on the five repeats, against 0.031 s untyped.
   The binary is older than the harness, so this may be version skew and is unverified on the
   current tree. It still shows the failure mode: a typed program's speed depends on whether each
-  call site reaches the native entry, and nothing reports when one does not.
+  call site reaches the native entry, and no run reports when one does not.
 
 ## The ceiling on untyped R
 
 `r-runtime.md` sets the target: "Untyped R with the JIT on runs at 10 times GNU R's speed on one
-thread", with every track designing for a 10x row (R code 30x, builtins 10x). The published record
-of every comparable system says the ceiling on real code is about 2x.
+thread". It is the user's north star, with 1.5x and 3x as milestones. The roadmap's arithmetic
+allows it. With package native code, I/O and waiting held fixed, its Amdahl table per workload
+gives 10.96x on the workloads and 15.52x on the corpus for the row "R code 30x, builtins 10x, ry
+ports 10x, GC and start-up 10x", and a ceiling of 34.4x on the corpus. So the fixed share is not
+the limit. The question is whether those factors per bucket exist, and the evidence says they do
+not.
 
-| System | What it does | Result on real code | Source |
+**R code at 30x is an average over all the time in the bucket.** If a tenth of that time stays at
+the interpreter's speed (code that runs once, `eval`, reflection, frames that deoptimized), the
+bucket cannot pass 10x however fast the rest runs, and 30x needs all but 3% of it gone. The
+published record for application-shaped code is far from that:
+
+| System | What it does | Result | Source |
 | --- | --- | --- | --- |
-| Ř | Speculative inlining, deoptimization, environment and promise elision, contextual dispatch | 1.80x over GNU R 4.1 on real programs (0.74x to 18.3x), 3.23x on are-we-fast-yet, 1.70x on shootout; the first in-process iteration runs at 0.37x to 0.50x | [Flückiger's thesis, 2022](https://janvitek.org/pubs/fluckiger-phd-22.pdf) |
+| Ř | Speculative inlining, deoptimization, environment and promise elision, contextual dispatch, on GNU R's runtime and builtins | 1.80x over GNU R 4.1 on real programs (0.74x to 18.3x), 3.23x on are-we-fast-yet, 1.70x on shootout; the first in-process iteration runs at 0.37x to 0.50x | [Flückiger's thesis, 2022](https://janvitek.org/pubs/fluckiger-phd-22.pdf) |
 | Ř | The same, measured earlier | "ranges from a 0.7× slowdown to a 46× speedup, with the overall speedup being 1.7×" over 59 programs | [OOPSLA 2020](https://janvitek.org/pubs/oopsla20-cd.pdf) |
 | rcp | Copy-and-patch compilation of GNU R's bytecode | 1.26x geometric mean, 1.23x on its real programs | [VMIL 2025](https://ch-rigid.github.io/publications/kocourek_copyandpatch_2025.pdf) |
 | GNU R's own compiler | Bytecode over the AST interpreter | 5.7x to 7.1x on scalar loops, but "Function calls use the (slow) interpreter mechanism" | [Tierney, 2019](https://stat.uiowa.edu/~luke/talks/Riot-2019.pdf) |
 | Purdue FastR | A Java AST interpreter with specialization | 8.5x on shootout, 1.7x on Benchmark 25, "explained by the preponderance of native calls" | [VEE 2014](https://janvitek.org/pubs/vee14.pdf) |
-| pqR | Deferred evaluation and merged vector tasks | 1.5x to 2.0x on merged tasks, 0.50x to 1.39x from helper threads | [Neal, 2013](https://radfordneal.wordpress.com/2013/06/22/announcing-pqr-a-faster-version-of-r/) |
-| YJIT | A production JIT for Ruby, which also keeps a C extension API | 15% on Shopify's storefront in production, against about 65% on railsbench for the same release | [Rails at Scale, 2023](https://railsatscale.com/2023-09-18-ruby-3-3-s-yjit-runs-shopify-s-production-code-15-faster/) |
+| HHVM | A region JIT with profile-guided inlining, on a warm server whose code carries type hints | The interpreter runs facebook.com at 12.8% of the JIT's speed, so the JIT is worth 7.8x | [PLDI 2018](https://research.facebook.com/file/529018501538081/hhvm-jit-a-profile-guided-region-based-compiler-for-php-and-hack.pdf) |
+| V8 | TurboFan over the Ignition interpreter | 4.35x on JetStream, "over 1.5x" on Speedometer, the suite shaped like application code | [v8.dev, Maglev](https://v8.dev/blog/maglev) |
+| YJIT | A production JIT for Ruby, which also keeps a C extension API | 15% on Shopify's storefront in production, against about 65% on railsbench for the same release | [Rails at Scale, September 2023](https://railsatscale.com/2023-09-18-ruby-3-3-s-yjit-runs-shopify-s-production-code-15-faster/), [December 2023](https://railsatscale.com/2023-12-04-ruby-3-3-s-yjit-faster-while-using-less-memory/) |
 | CPython 3.11 | A specializing interpreter, no JIT | "an average of 25% faster" | [What's new in 3.11](https://docs.python.org/3/whatsnew/3.11.html) |
 | CPython's JIT | Copy-and-patch above that interpreter | "about as fast as the existing specializing interpreter" | [PEP 744](https://peps.python.org/pep-0744/) |
-| PyPy | A tracing JIT that emulates the C API | About 4x on pure Python, but C extensions run "2.5x to 10x slower" through the emulation | [pypy.org](https://pypy.org/), [cpyext post](https://www.pypy.org/posts/2018/09/inside-cpyext-why-emulating-cpython-c-8083064623681286567.html) |
+| PyPy | A tracing JIT that emulates the C API | About 4x on pure Python; calls into C extensions measured "2.5x to 10x slower" through the emulation before a round of fixes in 2018 | [pypy.org](https://pypy.org/), [cpyext post](https://www.pypy.org/posts/2018/09/inside-cpyext-why-emulating-cpython-c-8083064623681286567.html) |
 
-Ř is the closest precedent for ry's inlining tier: the same ideas, built by a research group over
-about six years, with no obligation to keep every package's C code working. It reached 1.8x on real
-programs. The rcp authors state the reason in one sentence: "significant performance improvements
-require high-level optimizations: inlining, type speculation, and operation elision. Removing
-explicit callee environments, skipping promise creation, and avoiding copies provide the largest
-performance gains."
+The best published factor for a JIT over its own interpreter on a real application is HHVM's 7.8x,
+on a server that stays warm for hours. ry's own suites say the same. The public JIT suite and the
+numeric kernels are made of loops that tier 1 compiles, and they stand at 2.66x and 4.8x over
+GNU R, not 30x. The rcp authors name what is missing: "significant performance improvements require
+high-level optimizations: inlining, type speculation, and operation elision. Removing explicit
+callee environments, skipping promise creation, and avoiding copies provide the largest performance
+gains." Ř built all of that and reached 1.8x on real programs.
 
-The roadmap's own shares give the same answer. Its time-weighted corpus profile is R code 53%,
-builtins 23%, package native code 5%, I/O 0.7% and waiting 9.5%, and the last three are fixed by
-its own account (package C code is single-threaded by contract, and the waiting is the suites' own
-`Sys.sleep`). Take GNU R's time as 100. At the published 1.91x, ry's time is 52, of which about 8
-is fixed. Reaching 3x means the other 44 shrink to 25, a factor of 1.75 on R code, builtins, GC and
-start-up together. Reaching 10x means they shrink to 2, a factor of 22 on all of them together.
-That is an estimate, because the corpus profile and the published package suite cover different
-package sets, but no reading of it makes 10x reachable by speeding up the buckets ry owns.
+**Builtins at 10x over GNU R's C has a mechanism for small calls only.** A builtin whose cost is
+call overhead can gain that much: `structure()` is 6.9x faster on ry. A builtin whose cost is the
+work cannot, on one thread with bit-identical results: `sort`, `exp` plus `log`, `ifelse` and
+`mean` are 1.07x to 1.2x in the probes, and the geometric mean over the twelve vector kernels is
+1.56x.
 
-So this review recommends replacing the target, not chasing it:
+**Test suites are cold code.** Most of a suite's code runs a handful of times. Compiled code is
+under 0.1% of the code-base run above and 0.7% of the testthat workload, and Ř's first iteration
+runs at half of GNU R's speed. On that run, reaching 10x over GNU R from 1.67x means everything
+except package native code gets 8 times faster than it is today (an estimate from the profile
+shares above: 95% of the time must shrink to 11.7%).
 
-- **Untyped R: 3x GNU R is the stretch goal, and 2.5x is success.** Drop the rule in "The road to
-  3x" that "a plan that can only reach 3x in its bucket is rewritten before it lands". It forces
-  every bucket to be designed for a result that the whole cannot reach.
-- **Order-of-magnitude goals move to the places that have shown one**: typed code and the
-  development loop.
+The case for 10x has strong points, and each has an answer.
+
+- *Ř and rcp ran on GNU R's runtime and builtins, and ry owns its base library and compiles at
+  install.* That is true, and it is part of why ry reaches 2x on package suites. It supports
+  3x. It does not supply a 30x.
+- *ry's own probes show 37x to 68x where a call disappears.* They show the factor exists at a call
+  site. The target needs it across the bucket, which depends on the share of time at call sites a
+  compiler can flatten. That share can be measured cheaply ("What to measure first").
+- *The rule that "a plan that can only reach 3x in its bucket is rewritten before it lands" keeps
+  designs from settling at a local optimum.* It does, and it is the right filter for designs. It
+  is the wrong forecast.
+
+So this review's recommendation to the user is to keep the design rule and change the forecast:
+
+- **Untyped R: plan and publish around 3x GNU R, with 2.5x counted as success**, until a
+  measurement shows a path past it.
+- **Put the order-of-magnitude goals where an order of magnitude has been measured**: typed code
+  and the development loop.
 
 This also answers what "a JIT on the level of Bun" should mean. Bun's JIT is JavaScriptCore, which
 Bun did not write. What Bun added is start-up ("Bun processes start 4x faster than Node.js",
 [bun.com/docs](https://bun.com/docs)), builtins in a systems language, and one integrated tool for
-install, test and build. `r-runtime.md` already says so in "The performance bar". ry's equivalents
-of Bun's actual contribution are the lazy loader, `ry test`, the start-up image and the native
-base, and they are where ry already leads by the widest margin.
+install, test and build. `r-runtime.md` says so in "The performance bar". ry's equivalents of Bun's
+contribution are the lazy loader, `ry test`, the start-up image and the native base, and they are
+where ry leads by the widest margin.
 
 ## The levers
 
@@ -220,40 +253,50 @@ base, and they are where ry already leads by the widest margin.
 
 **What it is.** Typed ry is the only place where ry has measured an order of magnitude on user
 code: 15.2x over GNU R on kernels and 20.5x on five applications, which is 3x to 10x over untyped
-ry on the same programs. Yet on the benchmark code bases, whose templates carry inline annotations,
-`backlog.md` records typed and untyped running the same number of instructions (71.5G against
-72.1G on a finbench slice), because their functions take data frames, vectors and lists, and the
-typed core compiles closures over ry's own types and scalars. The feature the mandate is built
-around buys nothing on the mandate's benchmark. Closing that gap takes four changes:
+ry on the same programs. Two caveats belong beside those figures. Almost every typed time is under
+the suites' 0.1 s floor, so it is flagged too short and counted anyway, and `sales` is refused.
 
-- **Compile typed code ahead of time, from the checker's types.** `typed-runtime.md` designs it,
-  and `backlog.md` files it as "mid priority". Today the typed core lowers R syntax at a closure's
-  first call. Ahead-of-time compilation at `ry load`, `ry install` and `ry build --exe` removes
-  warm-up and makes the next item possible.
-- **Report native compilation statically.** A typed function either compiles or `ry check` says
-  why not, at the construct that blocks it, in the editor. Today a refusal is a line in
-  `RY_TYPED_LOG` at run time, one refusal spreads to its callees, and a call from untyped code with
-  an unforced argument silently takes the interpreter ("Open: the typed core"). mypyc works this
-  way: a module compiles or the build fails. No JIT can offer this, and ry has the checker to do it.
-- **Let typed numerics leave R's.** `List.sum` over `F64` uses the long-double fold "to match the
-  interpreter". The user directive makes typed ry "independent of R's semantics", so typed sums can
-  be plain IEEE doubles, vectorized.
-- **Score against Rust, on every step.** The climb's fitness function is typed ry over Rust, and
-  its log holds no value for it. The estimate above is about 4.7x, with five of 17 programs within
-  the 2x bar.
+The benchmark code bases do not show that factor. Their templates carry inline annotations, and
+`backlog.md` records the typed and untyped finbench slices within 1% of each other (71.5G against
+72.1G instructions). The backlog gives no cause. This review's inference is that the code bases'
+functions mostly take data frames, vectors and lists, while the typed core compiles closures over
+ry's own types and scalars. If that is right, the feature the mandate is built around buys nothing
+on the mandate's benchmark, and closing the gap means building and tightening what is already
+decided:
+
+- **Build the ahead-of-time compiler.** `decisions.md` records the shape as chosen ("Typed code
+  compiles ahead of time, and `ry build --exe` writes an executable"), and `backlog.md` files the
+  work as "mid priority" while the typed core compiles a closure at its first call. This is the
+  top runtime item, not a middle one.
+- **Turn the slow-path report into a guarantee.** `typed-runtime.md` designs `ry check --explain`,
+  which lists the places typed code compiles to a slow path, and only `ry install --explain` is
+  built. Go one step further: in strict mode, a typed function that cannot run natively is a
+  diagnostic at the construct that blocks it, shown in the editor. Today a refusal is a line in
+  `RY_TYPED_LOG` at run time, one refusal spreads to the callees, and a call from untyped code
+  with an unforced argument takes the interpreter without a message ("Open: the typed core").
+  mypyc works this way: a module compiles or the build fails. No JIT can offer that, and ry has the
+  checker to do it.
+- **Give typed sums one fixed order in plain doubles.** `List.sum` over `F64` keeps the long-double
+  fold so that native and interpreted typed code agree. They can agree on a faster rule instead:
+  one fixed vectorized summation order that both paths implement. The user directive makes typed
+  ry "independent of R's semantics", and the benchmark runner already accepts a relative 1e-10
+  difference in a typed checksum.
+- **Score against Rust on every step.** The hill climb's fitness function is typed ry over Rust,
+  and its log holds no value for it. The estimate above is about 4.7x, with five of 17 programs
+  within the 2x bar.
 
 **Who shows it works.** [mypyc](https://mypyc.readthedocs.io/en/latest/introduction.html) compiles
-type-annotated Python ahead of time for 1.5x to 5x, and mypy compiled with it is 4x faster. Cinder's
-Static Python with its JIT is 18x faster on a typed Richards. The same Static Python gave
-Instagram's web tier [3.7% more requests per second](https://programming-journal.org/2023/7/2/),
-because production code is partly typed and crosses the boundary constantly, and sound gradual
-typing has measured boundary overheads of up to
-[105x](https://www2.ccs.neu.edu/racket/pubs/popl16-tfgnvf.pdf). The spread between 18x and 3.7% is
-the lesson: the factor arrives when whole call graphs are typed and compiled together, and
-disappears when typed islands sit in untyped code. Julia shows the end state for a dynamic-looking
-numeric language: 1x to 3.5x of C on its
-[microbenchmarks](https://julialang.github.io/Microbenchmarks/dev/benchmarks/), where R is 16x to
-466x.
+type-annotated Python ahead of time for 1.5x to 5x, and mypy compiled with it is 4x faster.
+[Cinder](https://github.com/facebookincubator/cinder) reports Static Python with its JIT at 18x on
+a typed Richards. The same Static Python gave Instagram's web tier
+[3.7% more requests per second](https://programming-journal.org/2023/7/2/), because production
+code is partly typed and crosses the boundary constantly, and sound gradual typing has measured
+boundary overheads of up to [105x](https://www2.ccs.neu.edu/racket/pubs/popl16-tfgnvf.pdf). The
+spread between 18x and 3.7% is the lesson: the factor arrives when whole call graphs are typed and
+compiled together, and disappears when typed islands sit in untyped code. Julia shows the end
+state for a numeric language that reads like a dynamic one: 0.8x to 3.5x of C's time on its
+[microbenchmarks](https://julialang.github.io/Microbenchmarks/dev/benchmarks/), where R takes 14x
+to 466x on everything but matrix multiplication.
 
 **Expected effect.** 3x to 10x on the typed share of a program, by ry's own measurements. On a
 whole suite the share decides: if half of a run's time is in typed code that gets 10 times faster,
@@ -261,11 +304,11 @@ the run is 1.8 times faster, and at 90% it is 5.3 times faster. The order of mag
 needs whole modules typed, which makes the migration tooling (`ry migrate`, and the checker
 reporting what blocks compilation) part of the lever.
 
-**Cost.** Large: the ahead-of-time pipeline, the static refusal report, and typed versions of the
-code bases' hot modules written in ry's own types.
+**Cost.** Large: the ahead-of-time pipeline, the diagnostic, and typed versions of the code bases'
+hot modules written in ry's own types.
 
-**Depends on.** The typed core's open items (`sales` and `vasicek` do not run natively, boxes
-convert deeply at the boundary: typed `expr_tree` spends 46 of 48 ms converting).
+**Depends on.** The typed core's open items: `sales` and `vasicek` do not run natively, and boxes
+convert deeply at the boundary (typed `expr_tree` spends 46 of 48 ms converting).
 
 **Biggest risk.** Adoption. A team must rewrite modules into ry's types to see the gain, and the
 boundary can eat it. If agents write most of the code, as in this repository, the rewrite is cheap
@@ -273,67 +316,125 @@ and the risk shrinks.
 
 ### 2. The edit-to-result loop as the headline
 
-**What it is.** `ry test --watch` reruns the test files an edit can affect, against a lazily loaded
-package. `MEMORY.md` records it on one code base: about 2 s to the first test file against 62 s for
-`devtools::test()`, and about 1 s per edit against 68 s. Lazy `ry load` takes 0.33 to 0.41 s on an
-S4-heavy package against about 6.5 s for `load_all`. These are the largest factors ry has, they
-need the loader, the dependency graph and the runtime in one tool, and no other R implementation
-can copy them by writing a better JIT. They are also not a published suite, not on the landing
-numbers, and not a track. Making them the headline means:
+**What it is.** `ry test --watch` reloads the package after an edit and runs the affected test
+files first, then the rest. `MEMORY.md` records it on one code base: about 2 s to the first test
+file against 62 s for `devtools::test()`, and about 1 s per edit against 68 s. Lazy `ry load` takes
+0.33 to 0.41 s on a synthetic S4-heavy package where GNU R's `load_all` takes 6.3 to 7.1 s. These
+are the largest factors ry has. They need the loader, the dependency index and the runtime in one
+tool, so no other R implementation can match them by writing a better JIT. They are also not a
+published suite and not a track. Making them the headline means:
 
 - **Publish it as a fifth suite** in `benchmarks.mdx`: time from a one-line edit to the first
-  affected test result, and to the full affected set, on the three code bases, against
-  `devtools::test()`.
-- **Select by `test_that()` block, not by file**, since `Loader::callers` already knows which
-  functions a block reaches.
-- **Offer the same selection to CI**: `ry test --changed-since REF` runs the blocks a diff can
-  affect. The dependency graph makes this selection exact for static calls, where the published
-  alternative is statistical.
-- **Count `ry check` in the same loop.** A type error reported in 0.1 s on a 300,000-line package
-  replaces a test run entirely.
+  affected test result, and to the last one, on the three code bases, against `devtools::test()`.
+- **Select, and skip.** Today a test file is affected when the names it mentions meet the names
+  that reach a changed definition (`Loader::callers` over the index, `all.names()` per test file),
+  and every other file still runs afterwards. Selecting per `test_that()` block and skipping the
+  unaffected ones is new work. It also reopens a recorded choice, "Why not a test index in the
+  loader", which kept the loader ignorant of testthat for simplicity.
+- **Offer the selection to CI**: `ry test --changed-since REF` runs what a diff can affect. No such
+  option exists.
+- **Count `ry check` in the same loop.** On the 300,000-line code bases a cold check takes 1.4 to
+  1.7 s and the server settles an edit in about 40 ms (`backlog.md`, "Benchmark code bases"). A
+  type error reported that fast replaces a test run.
 
 **Who shows it works.** Bun, as argued above. Meta's
 [predictive test selection](https://arxiv.org/abs/1810.05286) "reduces the total infrastructure
 cost of testing code changes by a factor of two" while reporting over 95% of individual test
-failures. On the other side, the systems that bet on a warm JIT lose this loop: Ř's first iteration
-runs at 0.37x to 0.50x of GNU R, and on an RMarkdown workload
+failures. The systems that bet on a warm JIT lose this loop: Ř's first iteration runs at 0.37x to
+0.50x of GNU R, and on an RMarkdown workload
 "[Ř take 405 seconds](https://janvitek.org/pubs/oopsla23.pdf) ... and the interpreter 85 seconds".
 HHVM needed [Jump-Start](https://research.facebook.com/publications/hhvm-jump-start-boosting-both-warmup-and-steady-state-performance-at-scale/)
-to cut the capacity lost to warm-up by 54.9%. Test suites are cold code, which the code-base
-profile above confirms: compiled code is under 0.1% of the run.
+to cut the capacity lost to warm-up by 54.9%.
 
-**Expected effect.** 10x to 60x on the wait per edit (measured once, on one code base), and an
-estimated 2x to 10x on CI time per change, depending on how local a typical change is.
+**Expected effect.** 10x to 70x on the wait per edit (measured once, on one synthetic code base),
+and an estimated 2x to 10x on CI time per change, depending on how local a typical change is.
 
-**Cost.** Small to medium. The mechanism exists; the work is block-level selection, the CI entry
-point, the benchmark and the reporting.
+**Cost.** Small to medium. The mechanism exists for files; the work is block-level selection,
+skipping with a fallback, the CI entry point and the benchmark.
 
 **Depends on.** Nothing in the runtime tracks.
 
-**Biggest risk.** Unsound selection. A test that reaches a changed function through `do.call`,
-`get`, S4 dispatch or a data file must still run, so the selection needs a conservative fallback
-and a periodic full run, and its miss rate must be measured.
+**Biggest risk.** Unsound selection. Matching by mentioned name over-approximates static
+references, but a test that reaches a changed function through `do.call("name")`, `get`, a method
+table or a data file must still run. Skipping needs a conservative fallback, a periodic full run
+and a measured miss rate.
 
-### 3. Native kernels for base R's data-frame and object layer
+### 3. One optimizing tier that removes calls
 
-**What it is.** The probes show where untyped ry has the most room: base R's own closures over data
-frames and objects cost tens to hundreds of microseconds per call on GNU R, and ry runs them 1.05x
-to 1.5x faster, because it interprets the same R code. A 10-row filter through `[.data.frame` takes
-20 µs, `merge` on 100 rows 231 µs, `data.frame()` 105 µs, `S4 new()` 55 µs. Where ry replaced a
-base closure with a native entry, the factor is 3.4x to 6.9x (`structure`, `match.arg`,
-`stopifnot`, `Map`).
+**What it is.** The native execution model in `r-runtime.md` (slot frames, a direct calling
+convention between closures, unboxed scalars, whole-package compilation at install; the
+orchestrator's Track A) and the inlining tier in "The road to 3x" are one project, and it is the
+right one. The probes, Ř and rcp agree that the gain is in the calls, environments, promises and
+dispatches that stop existing.
 
-ry ships its own base R, so these functions are ry's code. The lever is to treat the data-frame
-family (`data.frame`, `[.data.frame`, `[[<-.data.frame`, `rbind`, `merge`, `aggregate`, `order`,
-`split`, `tapply`, `format`) and the object layer (`new`, `initialize`, `validObject`, `tryCatch`,
-`withCallingHandlers`) as a kernel layer with one design, the way "One kernel layer for R's vector
-builtins" treats arithmetic: a native implementation behind the existing hash guard, taken only for
-a plain `data.frame` with atomic columns, with the R code as the fallback for every subclass.
+Its targets mix a means with ends. They are "at least 80% of closures in rlang, cli and testthat
+running as machine code (5 to 11% today), 30% fewer instructions on the testthat workload, and the
+application workloads at twice GNU R's speed." The third is all but met at the published 1.95x.
+The second is the right kind of target. The first is not, because native is not the same as fast:
 
-This differs from the current one-function prologue ports in how the functions are chosen. Today a
-port follows a hotspot in one workload and lands a percent-level win. The kernel layer starts from
-a ranked list of base closures by inclusive time across the code bases and the corpus, and takes
-the top of it as one project.
+- ry's install-time baseline code ran 8.06G instructions against 7.96G without it, and the backlog
+  concludes that it "is no lever until baseline code inlines fast paths".
+- A baseline compiler that does inline them is worth 1.26x over GNU R's bytecode interpreter (rcp)
+  and 41% to 45% over V8's interpreter (Sparkplug alone, by the
+  [Maglev post](https://v8.dev/blog/maglev); [5% to 15%](https://v8.dev/blog/sparkplug) of V8's
+  total with the optimizing tier present). CPython's JIT gains
+  nothing over its interpreter.
+- A closure compiled to machine code that still builds an environment and promises runs at the
+  interpreter's speed, as the third group of the probe table shows.
+
+So judge the track by what a call no longer does. On the testthat workload a closure call costs
+about 8,100 instructions and frees 7 to 8 objects, 1.2 to 1.4 of them promises (`r-runtime.md`,
+`backlog.md`). The end shape in "Closure call setup: the 10x end shape" takes call setup from
+about 2,100 instructions to about 200 and from 7 objects to none on a two-function microbenchmark.
+Report those per-call counts on the workload after each merge, with the share of dynamic calls that
+run inlined.
+
+The inlining tier is the JIT track's recorded end shape and roadmap row (c), "planned". The
+backlog's optimizing layer, which carries inlining with allocation sinking, is "not queued; starts
+only on the orchestrator's go, after the call-setup enter/leave contract lands". It is the only
+part of the JIT plan with a precedent for more than 1.5x on call-heavy code, so everything before
+it should be chosen by whether it brings that layer closer.
+
+**Who shows it works, and how far.** Ř, at 1.8x on real code with all of this built. HHVM, at 7.8x
+over its interpreter on a warm server. JavaScriptCore's ladder shows the tapering: baseline about
+2x the interpreter, DFG about 5x baseline, FTL about 1.5x DFG on long-running code and
+[1.1x on JetStream 2](https://webkit.org/blog/10308/speculation-in-javascriptcore/).
+
+**Expected effect.** An estimated 1.3x to 1.5x on package and application suites, taking untyped R
+from about 2x to between 2.6x and 3x GNU R. On cold test code the gain comes only from the
+install-time part, because nothing warms up: in the code-base run above, the JIT contributes
+nothing. The model's own target of 30% fewer instructions on the testthat workload agrees with this
+estimate. The 30x in the roadmap's R-code row does not.
+
+**Cost.** Very large; it is the bulk of the runtime effort for months.
+
+**Depends on.** Slot frames in compiled code and the enter and leave contract of "Closure call
+setup: the 10x end shape".
+
+**Biggest risk.** Deoptimization that must rebuild what R's reflection can observe (`sys.call`,
+`parent.frame`, `substitute`, `on.exit`), and months of the largest effort spent on a result
+bounded near 1.5x while levers 1 and 2 wait.
+
+### 4. Native kernels for base R's data-frame layer
+
+**What it is.** The probes show where untyped ry has the most room per call: base R's closures
+over data frames cost tens to hundreds of microseconds on GNU R, and ry runs them 1.05x to 1.5x
+faster, because it interprets the same R code. A 10-row filter through `[.data.frame` takes 20 µs,
+`merge` on 100 rows 231 µs, `data.frame()` 105 µs. Where a native entry replaced a base closure,
+the factor is 3.4x to 6.9x (`structure`, `match.arg`, `stopifnot`, `Map`).
+
+The mechanism is settled: "Hot base R closures get hash-guarded native prologues" ported
+`match.arg`, `stopifnot`, `structure`, `Reduce`, `tryCatch` and others, and the methods package's
+core (`setClass`, `new`, `validObject`) runs natively the same way. The lever is to apply it to the
+data-frame family as one design instead of one hotspot at a time: `data.frame`, `[.data.frame`,
+`[[<-.data.frame`, `$<-.data.frame`, `rbind`, `merge`, `aggregate`, `split`, `tapply` and
+`format`. Each gets a native implementation behind the hash guard, taken only for a plain
+`data.frame` with atomic columns, with the R code as the fallback for every subclass.
+
+The recorded policy for package functions is "Generic first": fix every primitive under the R body
+that is slower than GNU R's, and port only what remains. The data-frame closures are what remains.
+Their bodies are long sequences of small calls. The probes put most primitives at or ahead of
+GNU R's, and these closures still gain only 1.05x to 1.5x.
 
 **Who shows it works.** ry's own native entries, at 3x to 7x per function. Morandat and others
 found GNU R spending 38% of its time in builtins and 29% in memory management
@@ -342,10 +443,13 @@ found GNU R spending 38% of its time in builtins and 29% in memory management
 systems language instead of in the guest language.
 
 **Expected effect.** An estimated 10x to 50x on the calls themselves (a 10-row filter should cost
-under 1 µs). The effect on a suite is unknown, because `--profile-summary` reports tier-0 time
-without saying whose code it ran. At a 10% share the suite gains 1.1x, at 30% it gains 1.4x.
+under 1 µs). The effect on a suite is unknown. `--profile-summary` reports tier-0 time without
+saying whose code it ran, and `r-runtime.md` ranks builtins by self time, not base closures by
+inclusive time. At a 10% share the suite gains 1.1x, at 30% it gains 1.4x. The share may be small:
+the benchmark code bases import data.table and polars, and code that uses those spends little time
+in base data frames.
 
-**Cost.** Medium: twenty to thirty functions with exact fallbacks, pinned by the oracle.
+**Cost.** Medium: ten to fifteen functions with exact fallbacks, pinned by the oracle.
 
 **Depends on.** A profile split by owning namespace ("What to measure first").
 
@@ -354,129 +458,94 @@ matrix columns), and a subclass such as a tibble or a data.table must never take
 The directive that data.table is a normal package bounds this lever: it covers base data frames
 only.
 
-### 4. One optimizing tier that removes calls
+### 5. All cores in batch runs, and plain IEEE sums on request
 
-**What it is.** Track A (slot frames, a native calling convention between locked-namespace
-closures, unboxed scalars, whole-package install-time compilation) and the inlining tier in "The
-road to 3x" are one project, and it is the right one. The probes, Ř and rcp all say the same: the
-gain is in the calls, environments, promises and dispatches that stop existing.
+**What it is.** Two settled decisions cap the vector kernels. "Single-core speed first; per-process
+costs count once per worker" defers the automatic parallelism of roadmap row (b), and results are
+bit-identical to GNU R's, which sends `sum` through an 80-bit long-double fold and rules out
+reassociation. The vector probes show the cap: the geometric mean over twelve kernels is 1.56x,
+and five of them are within 15% of GNU R.
 
-Two parts of the current plan are aimed wrong.
+The recorded reason for deferring is that the target users run test suites with one process per
+core, so every core is busy. That holds for test suites. It does not hold for the other thing
+these code bases do: a risk batch, a simulation or a model fit runs as one process beside idle
+cores. Row (b) is designed and "architecture-ready", so the proposal is to schedule its
+element-wise half for that case. Element-wise maps (`exp`, `log`, the distribution functions,
+comparisons, `ifelse`) split across threads with bit-identical results, because no element depends
+on another. `DataFrame` already runs on Polars' thread pool.
 
-The success metric is "at least 80% of closures native in rlang, cli and testthat". Native is not
-the same as fast. ry's own install-time baseline code ran 8.06G instructions against 7.96G without
-it, V8's Sparkplug gains [5% to 15%](https://v8.dev/blog/sparkplug), rcp gains 1.26x, and CPython's
-JIT gains nothing over its interpreter. A closure compiled to machine code that still builds an
-environment and promises runs at the interpreter's speed, as every row in the third group of the
-probe table shows. Judge the track by what a call no longer does, measured on the corpus profile:
-objects allocated per call (about 8 today on the testthat workload), promises per call (1.30),
-instructions per call (about 2,100 for call setup against a 200 target), and the share of dynamic
-calls that run inlined.
-
-The inlining tier itself, with a deoptimization exit that rebuilds the callee's frame, is "not
-queued; starts only on the orchestrator's go" in `backlog.md`, behind the contract work. It is the
-only part of the JIT plan with a precedent for more than a few percent on call-heavy code, so it
-should be the track's goal, not its sequel.
-
-**Who shows it works, and how far.** Ř, at 1.8x on real code with all of this built.
-JavaScriptCore's own ladder shows the tapering: baseline about 2x the interpreter, DFG about 5x
-baseline, FTL about 1.5x DFG on long-running code and
-[1.1x on JetStream 2](https://webkit.org/blog/10308/speculation-in-javascriptcore/). V8's
-optimizing compiler is 4.35x over its interpreter on JetStream and
-["over 1.5x" on Speedometer](https://v8.dev/blog/maglev), the suite that resembles application
-code.
-
-**Expected effect.** 1.3x to 1.5x on package and application suites, taking untyped R from about 2x
-to between 2.5x and 3x GNU R. On cold test code the gain comes only from the install-time part,
-because nothing warms up: in the code-base run above, the JIT contributes nothing. Track A's own
-target (testthat 30% faster) agrees with this estimate. The 5x and 30x figures in the roadmap's
-R-code rows do not.
-
-**Cost.** Very large; it is the bulk of the runtime effort for months.
-
-**Depends on.** Slot frames and the enter and leave contract, which are in progress.
-
-**Biggest risk.** Deoptimization correctness under R's reflection (`sys.call`, `parent.frame`,
-`substitute`, `on.exit`), and spending the effort on a result bounded at 1.5x while the two larger
-levers wait.
-
-### 5. All cores and plain IEEE arithmetic for ry-owned kernels
-
-**What it is.** Two settled decisions cap the vector kernels. "Single-thread first" defers
-parallelism, and results are bit-identical to GNU R's, which forces `sum` through an 80-bit
-long-double fold and forbids fused multiply-add and reassociation. The vector probes show the cap:
-the geometric mean over twelve kernels is 1.56x, and five of them are within 15% of GNU R.
-
-The reasoning for single-thread first is that users run test suites with one process per core, so
-the cores are busy. That is true of test suites and false of the other thing these code bases do: a
-risk batch, a simulation or a model fit runs as one process with idle cores. Element-wise maps
-(`exp`, `log`, the distribution functions, comparisons, `ifelse`) can be split across threads with
-bit-identical results, because no element depends on another. `DataFrame` already runs on Polars'
-thread pool. A separate opt-in numeric mode could allow vectorized sums for code that accepts a
-last-digit difference.
+Plain-double sums would be an option, off by default, for code that accepts a difference in the
+last digits. `options(ry.blas = "host")` is the precedent: the default BLAS kernels are
+bit-identical to GNU R's, and the option trades that for the host library's speed.
 
 **Who shows it works.** [Riposte](https://tableau.com/sites/default/files/2023-01/pact2012-talbot-riposte.pdf)
 ran vector R code a mean of 14.4x faster on one thread through fusion and 55x to 670x faster on
-32 threads, with no C API to preserve. The counter-evidence is pqR, whose automatic helper threads
-gave 0.50x to 1.39x. Polars and DuckDB show that the table engines that win
+32 threads, with no C API to preserve. Polars and DuckDB show that the table engines that win
 [db-benchmark](https://duckdblabs.github.io/db-benchmark/) are the parallel ones.
 
 **Expected effect.** An estimated 2x to 4x on four cores for element-wise kernels above about 1e5
 elements, and nothing on test suites.
 
-**Cost.** Medium for parallel element-wise kernels behind a size threshold. The numeric mode is
+**Cost.** Medium for parallel element-wise kernels behind a size threshold. The numeric option is
 small in code and large in testing.
 
-**Depends on.** A user decision, since both constraints are user directives or rest on one.
+**Depends on.** A user decision. "Single-thread first, parallel-ready architecture" is a user
+directive, and bit-identical numerics is a settled agent decision that the oracle enforces.
 
 **Biggest risk.** Oversubscription when a user already runs one process per core, which a
-threshold and a worker-count check must prevent, and a second numeric mode that doubles the oracle
-matrix.
+threshold and a worker-count check must prevent, and a second numeric mode that doubles part of
+the oracle's work.
 
 ## What to stop or demote
 
-- **`backlog.md`, "Open: performance and memory": "Tier-0 call entry and dispatch", "Builtin call
-  shape" and "Queued with measured ceilings"**, and the rows of "Open: data-oriented layouts and
-  explicit allocators". Each has a measured ceiling of 3.5% or less. Close them as not worth
-  doing, instead of holding them.
-- **Sub-tracks B2 to B6 as separate efforts** (S3 dispatch, `match.arg`, top-level `for` loops, xts
-  and zoo). Each lands a percent-level instruction win on one workload. Fold what remains into
-  lever 3, chosen from a ranked list. The top-level loop is the exception: 2.55 s against 0.30 s
-  is a visible defect in a first script, and compiling top-level code fixes it once.
-- **The baseline tier** ("Open: the baseline tier and JIT on against JIT off"). It is opt-in, it
-  runs 1% to 2% more instructions than the interpreter, and each execution path multiplies the
-  oracle's configurations (six gate the release). Delete it, and keep three paths: tier 0, one
-  optimizing tier with install-time images, and the typed core.
+- **10x as the forecast and the public bar for untyped R** (the 10x row of the roadmap table in
+  `r-runtime.md`). The target is the user's, so this is a recommendation to the user. Keep the
+  design rule that rejects plans capped at a local optimum.
+- **Percent-level tier-0 items that `backlog.md` keeps open or held**, under "Open: performance and
+  memory": "Tier-0 call entry and dispatch" (9.6% of self instructions in total, a few instructions
+  per item), "Builtin call shape (held: percent-level tier-0 tuning)" (ceiling 4.5%, expected gain
+  2% to 2.5%) and "Queued with measured ceilings". The user has said to stop chasing these. Close
+  them instead of holding them. In "Open: data-oriented layouts and explicit allocators", rows 7,
+  9, 10 and 11 remove frame, reference and promise work per call and belong to lever 3. The other
+  open rows top out at 3.5% each and can close too.
+- **Single-function instruction wins as separate efforts**: S3 dispatch resolution, `match.arg`,
+  and the xts and zoo paths. Each lands about a percent on one
+  workload. Fold what remains into lever 4, chosen from a ranked list. The top-level loop is the
+  exception ("Open: collector throughput on the benchmark suites"): 2.55 s against 0.30 s is a
+  visible defect in a first script, and compiling top-level code fixes it once.
+- **The baseline tier in its present state** ("Open: the baseline tier and JIT on against JIT
+  off"). It is opt-in and runs 1% to 2% more instructions than the interpreter, and it costs tier
+  tests and tier-fuzzer time. Its recorded purpose is compile latency (28 µs per body against about
+  10 µs per bytecode word for Cranelift), and the record names the fix: inlining the common
+  instructions' fast paths. Decide it. Either the fix lands and the baseline compiler becomes the
+  install-time compiler for cold code, where rcp and Sparkplug show 1.26x to 1.45x over an
+  interpreter, or the tier goes and install-time images cover the latency. An opt-in tier that is
+  slower than the interpreter is the one state not worth keeping.
 - **Fitting the 1e8-row db-benchmark joins into 15 GB** ("Open: DataFrame", top priority). The
   mandate is to outperform data.table, and `MEMORY.md` records that: 5.2 s against 27.3 s at 1e7
   rows and 22.4 s against 69.2 s on the 1e8 group-by. data.table does not fit the 1e8 joins either.
-  If the size matters, the structural answer is Polars' streaming engine
-  ("[up to 3-7x faster](https://pola.rs/posts/benchmarks/)" and out of core), not a custom
-  allocator for the reader's transients. DuckDB is the only engine that completes the 50 GB joins
-  on the public benchmark, and it does so on disk.
+  If the size matters, evaluate Polars' streaming engine before building a custom allocator for
+  the reader's transients. Polars reports it as
+  "[up to 3-7x faster](https://pola.rs/posts/benchmarks/)" than its in-memory engine, and it works
+  in batches. Whether it fits these joins in 15 GB is unverified. DuckDB is the only engine that
+  completes the 50 GB joins on the public benchmark, and it does so on disk.
 - **Typed ports of the public JIT programs as a goal.** Those programs were chosen by R compiler
-  researchers to stress untyped R. They found real gaps, listed in "Gaps the typed public ports
-  found", and that list is worth finishing. The typed column on that suite is not a measure of
-  typed ry; the distance to Rust on programs written for typed ry is.
-- **The 10x rows of the roadmap table** in `r-runtime.md` and the rule that every plan must reach
-  them.
+  researchers to stress untyped R. The ports found real gaps, listed in "Gaps the typed public
+  ports found", and that list is worth finishing. As a measure of typed ry the suite is the wrong
+  one, and it has no committed typed results. The distance to Rust on programs written for typed
+  ry is the measure.
 - **Tuning the JIT's thresholds and feedback recording.** JIT on against JIT off is within 2% on
   every call-heavy measurement in the repository and in this review. Nothing in that range changes
   the picture until the tier removes calls.
 
-The backlog's proportions are worth a look as well. By lines, about 35% is open checker, editor,
-documentation and CLI items, 15% is fuzzing and test architecture, 15% is runtime performance, 6%
-is typed ry and 3% is `DataFrame`. The two areas with measured order-of-magnitude factors hold
-under a tenth of the planning.
-
 ## Where the current tracks are right
 
-- **The ABI-compatible `libR`.** PyPy and FastR lost their ecosystems at the native boundary. ry's
-  code-base run spends 5% of its time in package native code across 293,000 `.Call`s. This was the
-  decision that mattered most, and it was made first.
-- **Track A's design**: slot frames, the enter and leave contract, frame-state maps and
-  reification on demand are the prerequisites that Ř and rcp identify. Only its metric and its
-  expectations need changing.
+- **The ABI-compatible `libR`.** PyPy and FastR lost ground at the native boundary. ry's code-base
+  run spends 5% of its time in package native code across 293,000 `.Call`s. This was the decision
+  that mattered most, and it was made first.
+- **The native execution model's design**: slot frames, the enter and leave contract, frame-state
+  maps and reification on demand are the prerequisites that Ř and rcp identify. Its forecast and
+  its first target need changing, not its design.
 - **The vector kernel layer** as one module with slice kernels and a reuse rule. Builtins are 27% of
   the code-base run.
 - **Lazy loading and `ry test`**, which produced the largest factor in the project.
@@ -484,8 +553,7 @@ under a tenth of the planning.
 - **The testthat workload as the runtime's primary metric.** Its profile (tier 0 33%, builtins 26%,
   call setup 25%, compiled code 0.7%) is close to the code-base run's (45%, 27%, 13%, under 0.1%),
   so it is a fair stand-in for shares, though the code bases are colder.
-- **The differential oracle as the release gate.** Compatibility is the product. Its cost is the
-  number of engine configurations, which deleting the baseline tier reduces.
+- **The differential oracle as the release gate.** Compatibility is the product.
 
 ## What to measure first
 
@@ -493,32 +561,32 @@ Each lever has one cheap measurement that could kill it.
 
 | Lever | Measurement | Kill or reshape if |
 | --- | --- | --- |
-| 1. Typed programs | Build the current tree and run `just climb --log`, so the typed-over-Rust score exists. Then run the code bases' tests with `RY_TYPED_LOG` and count typed closures compiled against refused, by reason | Fewer than 20% of the code bases' annotated closures can compile without being rewritten into ry's types. Then lever 1 is a migration project before it is a compiler project |
-| 2. Edit loop | Replay 200 random one-function edits on each code base and record the share of test blocks selected and the time to the first result, against `devtools::test()` | The median edit selects more than half the blocks, which would mean the call graph is too connected for selection to pay |
-| 3. Base kernels | Split tier-0 and call-setup time in `--profile-summary` by owning namespace (base and recommended, testthat with rlang, cli and withr, other packages, the user's package), and list the 50 base closures with the most inclusive time | The data-frame and object families are under 5% of every code base and of the corpus |
-| 4. Call removal | Flatten the five hottest call chains of the testthat workload by hand in R source, and time the workload. This gives the inlining tier's upper bound without building it | The flattened workload gains less than 1.3x |
+| 1. Typed programs | Build the current tree and run `just climb --log NOTE`, so the typed-over-Rust score exists. Then generate the code bases with `--typed`, run their tests with `RY_TYPED_LOG=1`, and count typed closures compiled against refused, by reason | Fewer than 20% of the code bases' annotated closures can compile without being rewritten into ry's types. Then lever 1 is a migration project before it is a compiler project |
+| 2. Edit loop | Replay 200 random one-function edits on each code base and record the share of test files and blocks whose names meet the change, and the time to the first result, against `devtools::test()` | The median edit selects more than half the tests, which would mean the call graph is too connected for selection to pay |
+| 3. Call removal | Flatten the five hottest call chains of the testthat workload by hand in R source, and time the workload. This gives the inlining tier's upper bound without building it | The flattened workload gains less than 1.3x. If it gains 3x or more, this review's ceiling is wrong, and the 10x forecast deserves another look |
+| 4. Base kernels | Split tier-0 and call-setup time in `--profile-summary` by owning namespace (base and recommended, testthat with rlang, cli and withr, other packages, the user's package), and list the 50 base closures with the most inclusive time | The data-frame family is under 5% of every code base and of the corpus |
 | 5. Cores | Time `exp`, `log` and `pnorm` kernels on one and four threads at 1e5 to 1e7 elements with a bit-identity check, and take the kernel share of one production-shaped batch run | The share of large element-wise kernels in a batch run is under 10% |
 
 One more measurement comes before all of them: run the three full-size code bases on a release
-build and publish the result as a suite. It is the benchmark `AGENTS.md` defines, and the
-repository has no current number for it.
+build and publish the result as a suite. It is the benchmark `AGENTS.md` defines, and
+`benchmarks.mdx` has no number for it.
 
 ## Blind spots
 
 - **The mandate's benchmark has no scoreboard.** `benchmarks.mdx` publishes four suites, and none
-  is the three code bases. The recorded numbers (1.21x to 1.35x slower per test, and about 3%
-  slower on a private code base) and this review's partial run (1.67x faster on a 30,000-line
+  is the three code bases. The recorded test times (1.21x to 1.35x GNU R's at full size, and about
+  3% slower on a private code base) and this review's partial run (1.67x faster on a 30,000-line
   code base) cannot both describe the current tree.
 - **The benchmarks are ry's own writing.** The code bases are generated from templates, and the
   kernels and applications are written in-house. One user's profile summary is the only outside
   data point in `r-runtime.md`. The targets should lean on more of those, because a generated code
   base rewards whatever its templates happen to exercise.
-- **The reader is increasingly an agent.** An agent runs the check and the tests hundreds of times
-  per task, so its throughput is bounded by the loop in lever 2, and it can do the rewrite lever 1
+- **Agents are users too.** An agent runs the check and the tests hundreds of times per
+  task, so its throughput is bounded by the loop in lever 2, and it can do the rewrite lever 1
   asks for. Neither the plan nor the benchmarks model that user.
-- **Typed speed is not observable.** Nothing tells a user, or the climb, when a typed call fell
-  back to the interpreter. The nightly run above lost a factor of 300 on one program without any
-  message.
+- **Typed speed is not observable.** Nothing built tells a user, or the hill climb, when a typed
+  call fell back to the interpreter. The nightly run above lost a factor of 300 on one program
+  without a message.
 - **Bit-identical numerics is a standing cost that nobody totals.** It decides the sum kernels, the
   fused loops and the software long-double path on targets without x87. Its total over the kernel
   suite is unmeasured, and so is the number of users who need the last digit.
@@ -527,3 +595,6 @@ repository has no current number for it.
 - **Twenty-four differing values.** In the code-base run, 24 of 480 passing blocks returned
   different values on the two engines. The cause may be the incomplete library or the older binary,
   and it deserves one look, because `MEMORY.md` records a 100% match at full size.
+- **This review's own limits.** Lever 2 rests on one measurement of one synthetic code base, and
+  lever 4 on per-call probes of 10-row data frames. Both need the measurements in the table above
+  before any work starts.
