@@ -54,3 +54,8 @@ e("%d", NaN); e("%d", Inf); e("%d", c(1, NaN)); e("%d", c(NA, 1)); e("%x", NaN);
 f <- function(...) withCallingHandlers(sprintf(...), warning = function(w) { print(conditionMessage(w)); invokeRestart("muffleWarning") })
 print(f("%s", 1, 2)); print(f("x", 1)); print(f("%2$s", 1, 2)); print(f(c("%s", "%s"), 1, 2, 3))
 print(f("%d", c(-2^31, -2^31, 5))); print(f("%d %d", -2^31, c(1, 2, 3))); print(f(c("%d", "%d"), c(-2^31, 4)))
+# Each conversion rounds the exact binary value as glibc's printf does, half to even on a true
+# tie, which is not how `format` rounds with its long-double power table.
+h <- c(0.125, 0.375, 2.675, 1.005, 0.5, 1.5, 2.5, 1e23, 1e22, 5e-324, 2^53 + 2, 2^63, 1e300, 2^100, 123456789012345678, 1.7976931348623157e308, 0.1, 1/3, 125, 1250, 0.00125)
+for (f in c("%.2f", "%.0f", "%.1f", "%.3e", "%.0e", "%.1e", "%.17g", "%.16g", "%.2g", "%.1g", "%.20e", "%.30f")) p(f, h)
+print(c(format(0.125, nsmall = 2), sprintf("%.2f", 0.125), format(2.675, nsmall = 2), sprintf("%.2f", 2.675), format(1e23, digits = 17), sprintf("%.17g", 1e23)))
