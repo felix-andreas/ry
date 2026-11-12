@@ -1,6 +1,6 @@
 # `ry test`: runs a package's testthat files against the package `load_all()` loaded, the way
-# `devtools::test()` does, and with `watch` reruns them after every edit, the tests an edit can
-# affect first.
+# `devtools::test()` does, in worker processes when asked to, and with `watch` reruns them after
+# every edit, the tests an edit can affect first.
 
 local({
   test_directory <- function(root) file.path(root, "tests", "testthat")
@@ -25,7 +25,61 @@ local({
       load_package = "none", stop_on_failure = FALSE, stop_on_warning = FALSE
     )
     if (!is.null(reporter)) arguments$reporter <- reporter
+    # Set while workers start, by the `queue_setup()` of `load_workers_with_ry`.
+    on.exit(Sys.unsetenv("RY_RUN_FLAGS"))
     do.call(testthat::test_dir, arguments)
+  }
+
+  # testthat decides from the environment whether the files run in worker processes and in how
+  # many: `TESTTHAT_PARALLEL` overrides the package's `Config/testthat/parallel`, and
+  # `TESTTHAT_CPUS` or the `Ncpus` option, which wins, names the count, which is 2 otherwise.
+  # `jobs` is the user's `--jobs`, which settles both; without it the package decides whether,
+  # and a count nothing names is every core.
+  choose_workers <- function(jobs, cores) {
+    if (!is.null(jobs)) {
+      Sys.setenv(TESTTHAT_PARALLEL = if (jobs > 1L) "TRUE" else "FALSE", TESTTHAT_CPUS = jobs)
+      if (jobs > 1L) options(Ncpus = jobs)
+    } else if (is.null(getOption("Ncpus")) && !nzchar(Sys.getenv("TESTTHAT_CPUS"))) {
+      Sys.setenv(TESTTHAT_CPUS = cores)
+    }
+  }
+
+  # testthat's worker processes load the package with `pkgload::load_all()`, which sources
+  # every file and refuses a package with an import that is not installed. On ry's runtime a
+  # worker loads it the way this process did instead: lazily, and under the project's switches
+  # (`switches`, which ry's `bin/R` reads from `RY_RUN_FLAGS`; the worker forgets them so that
+  # an R process a test starts gets the defaults, as in a run without workers). testthat builds
+  # the code a worker runs from its profile inside `queue_setup()`, with rlang's quasiquotation,
+  # so the call is replaced in that function's body. A testthat whose `queue_setup()` holds no
+  # such call keeps its own workers.
+  load_workers_with_ry <- function(switches) {
+    if (is.null(.ry_attach_call)) return(invisible())
+    namespace <- asNamespace("testthat")
+    setup <- get0("queue_setup", envir = namespace, mode = "function", inherits = FALSE)
+    load <- call("{", quote(Sys.unsetenv("RY_RUN_FLAGS")), .ry_attach_call,
+                 quote(load_all(!!test_dir, quiet = TRUE)))
+    replaced <- FALSE
+    replace <- function(code) {
+      if (identical(code[[1L]], quote(pkgload::load_all))) {
+        replaced <<- TRUE
+        return(load)
+      }
+      for (i in seq_along(code)) {
+        if (is.call(code[[i]])) code[[i]] <- replace(code[[i]])
+      }
+      code
+    }
+    if (!is.null(setup)) {
+      body(setup) <- call("{", bquote(Sys.setenv(RY_RUN_FLAGS = .(switches))), replace(body(setup)))
+    }
+    if (!replaced) {
+      message("This testthat's worker processes cannot use ry's loader, so they load the ",
+              "package with pkgload.")
+      return(invisible())
+    }
+    unlockBinding("queue_setup", namespace)
+    assign("queue_setup", setup, envir = namespace)
+    lockBinding("queue_setup", namespace)
   }
 
   failed <- function(results) {
@@ -60,11 +114,13 @@ local({
     }, NA)]
   }
 
-  function(root, filter, reporter, watch) {
+  function(root, filter, reporter, watch, jobs, cores, switches) {
     package <- read.dcf(file.path(root, "DESCRIPTION"), fields = "Package")[[1L]]
     # As `devtools::test()`: a developer's run is not a CRAN check, so a missing package is an
     # error rather than a skip, and `skip_on_cran()` tests run.
     if (!nzchar(Sys.getenv("NOT_CRAN"))) Sys.setenv(NOT_CRAN = "true")
+    choose_workers(jobs, cores)
+    load_workers_with_ry(switches)
     selected <- function() {
       files <- test_files(root)
       if (is.null(filter)) files else files[grepl(filter, context_name(files))]
