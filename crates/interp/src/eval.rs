@@ -732,20 +732,17 @@ pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
     let unbound = unbound();
-    let live = mark as usize..state.references_used as usize;
-    for (&reference, &target) in state
-        .references
-        .get(live.clone())
-        .unwrap_or(&[])
-        .iter()
-        .zip(state.reference_targets.get(live).unwrap_or(&[]))
-    {
+    for index in mark as usize..state.references_used as usize {
+        let reference = state.references[index];
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
         }
+        // Only an environment or code reference changes the other fields, and forcing one
+        // clears its tag again, so the attribute is compared with the target on its own.
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
         }
+        let target = state.reference_targets[index];
         if reference.attrib() != target {
             heap.set_attrib(reference, target);
         }
