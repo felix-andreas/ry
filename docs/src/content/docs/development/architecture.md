@@ -321,7 +321,11 @@ run and panics on any difference. The seeded edit simulation in `cli.rs`
 An item's subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
-(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
+(`annotations::merge_annotations`), so the checker never knows which spelling it was given. The
+rules that need no types live in `syntax::annotation`: which `#:` block attaches to a statement,
+how a declared parameter pairs with a formal, and which form wins a slot. The runtime calls the
+same module when it registers a function's signature, so the checker and the runtime cannot
+disagree about what a function declares. Names
 in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id). Literal text is not interned,
 because the interner never frees and an edit inside a string literal would otherwise keep every
 spelling it passed through; it lives in the module's own text buffer, addressed by a `Copy`

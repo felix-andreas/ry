@@ -167,7 +167,6 @@ pick <- function(df) df |> DataFrame.select("price")
 #++++
 pick: fn(df: DataFrame) -> DataFrame
 51..55 warning[unused] `pick` is assigned but never used.
-68..70 warning[interpreted] this function runs in the interpreter, because a function whose signature is written apart from it, in a `#:` comment or on the name it is assigned to, is not compiled natively yet: the runtime reads only the types written on the parameters. Write the signature inline, as in `function(x: I64) -> I64`
 72..74 error[strict] strict mode: the columns of `df` are unknown, so the column names and types this query uses are not checked. Give `df` a type that lists its columns, as in `df: DataFrame{price: TYPE}`
 
 #---- strict_mode_reports_a_query_on_a_frame_that_is_not_a_variable

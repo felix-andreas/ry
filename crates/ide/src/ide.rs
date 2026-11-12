@@ -7,7 +7,7 @@ use {
     bumpalo::Bump,
     semantics::{
         Db, DocumentKind, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
-        annotations::{block_refusal, statement_inline_site, type_definition_keyword},
+        annotations::{statement_inline_site, type_definition_keyword},
         check::{ArgumentShape, ArgumentTarget, CalleeTarget, ItemCheck, argument_targets},
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
@@ -41,6 +41,7 @@ use {
         SyntaxElement,
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
+        annotation::block_refusal,
         ast::BinaryExpr,
         highlight::{
             classify_r_name, classify_ry_token, classify_type_token, is_tag_node, tag_node_of,

@@ -151,7 +151,7 @@ warnings, and in [strict mode](/guide#strict-mode) they print every error and re
 that has one.
 
 The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at
-function boundaries](/reference/type-system#inline-annotations-at-run-time), and GNU R runs the
+function boundaries](/reference/type-system#annotations-at-run-time), and GNU R runs the
 script with them erased. ry's runtime is under construction: a script that calls something it
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
