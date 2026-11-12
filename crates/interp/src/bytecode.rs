@@ -1048,8 +1048,10 @@ pub enum Op {
     /// source references; `statement` is 1 when a statement starts there, which an attached
     /// debugger may stop on, and 0 when a block's end restores the outer srcref.
     SetSrcref,
-    /// `function expected target`: jumps unless the function is the primitive `expected`.
-    BranchUnlessPrimitive,
+    /// `src expected target`: jumps unless the value in `src` is the constant `expected` itself,
+    /// compared by identity. A call of a base function tests that the name still finds the
+    /// primitive `expected`, and a compiled `switch` tests the arm [`Op::SwitchArm`] chose.
+    BranchUnlessSame,
     /// `src target`: jumps when the value in `src` is an object (it has a class).
     BranchIfObject,
     /// `dst function call subject`: calls a dispatch-or-eval special such as `[` whose first
@@ -1105,7 +1107,8 @@ pub enum Op {
     MatchCondition,
     /// `dst src table`: the arm of a compiled `switch` that the selector in `src` chooses, as
     /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
-    /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
+    /// [`switch_table`]). The arms follow as a chain of [`Op::BranchUnlessSame`] tests, which
+    /// compare that scalar by identity, so choosing an arm costs one pointer compare per arm.
     SwitchArm,
     /// `dst variable row column value call`: `variable[row, column] <- value` or
     /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
@@ -1191,7 +1194,7 @@ pub const OPS: [Op; 52] = [
     Op::Closure,
     Op::SubAssign,
     Op::SetSrcref,
-    Op::BranchUnlessPrimitive,
+    Op::BranchUnlessSame,
     Op::BranchIfObject,
     Op::DispatchSubject,
     Op::EndStatement,
@@ -1818,10 +1821,14 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(text) => {
             let names = table.element(SWITCH_NAMES);
-            let matched = (0..length(names)).find(|&index| {
-                let name = names.element(index);
-                name == text || name.bytes() == text.bytes()
-            });
+            let count = length(names);
+            // Names and selectors are interned, so identity finds the name in the common case,
+            // and only a missing selector or one in another encoding needs its text compared.
+            let matched = (0..count)
+                .find(|&index| names.element(index) == text)
+                .or_else(|| {
+                    (0..count).find(|&index| eval::switch_name_matches(names.element(index), text))
+                });
             match matched {
                 Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
                 None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
@@ -4168,7 +4175,7 @@ impl Compiler {
                 let mut done = Vec::with_capacity(arms.len());
                 for (index, body) in arms.iter().enumerate() {
                     let number = self.constant(numbers.element(index + 1));
-                    let skip = self.emit_patchable(Op::MatchLiteral, &[dst, number, 0]);
+                    let skip = self.emit_patchable(Op::BranchUnlessSame, &[dst, number, 0]);
                     self.expression(*body, dst)?;
                     done.push(self.emit_patchable(Op::Jump, &[0]));
                     self.patch(skip);
@@ -4466,7 +4473,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let base = self.next_register;
         for _ in args {
             self.allocate();
@@ -4714,7 +4721,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let object = self.allocate();
         self.expression(subject, object)?;
         self.emit(
@@ -4873,7 +4880,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Replace => 8,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
-        Op::BranchUnlessPrimitive => 3,
+        Op::BranchUnlessSame => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
@@ -5101,7 +5108,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
-        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::BranchUnlessSame => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
         Op::Internal => &[Register, Call, Constant, Base, Count],
@@ -6443,7 +6450,7 @@ handlers! {
     run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
     run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
     run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_unless_same, step_branch_unless_same: BranchUnlessSame, false, op_branch_unless_same;
     run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
     run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
     run_ast, step_ast: Ast, true, op_ast;
@@ -6597,7 +6604,7 @@ fast_paths! {
     fast_jump: Jump, jump_fast;
     fast_constant: Constant, constant_fast;
     fast_end_statement: EndStatement, end_statement_fast;
-    fast_branch_unless_primitive: BranchUnlessPrimitive, branch_unless_primitive_fast;
+    fast_branch_unless_same: BranchUnlessSame, branch_unless_same_fast;
     fast_branch_if_object: BranchIfObject, branch_if_object_fast;
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
@@ -6824,14 +6831,14 @@ unsafe fn end_statement_fast(state: &mut Activation<'_, '_>, at: usize) -> Optio
 }
 
 #[inline(always)]
-unsafe fn branch_unless_primitive_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn branch_unless_same_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
     if *state.registers.add(*code.add(at + 1) as usize)
         != pool_constant(state, *code.add(at + 2) as usize)
     {
         return Some(*code.add(at + 3) as usize);
     }
-    Some(at + 1 + operand_count(Op::BranchUnlessPrimitive))
+    Some(at + 1 + operand_count(Op::BranchUnlessSame))
 }
 
 #[inline(always)]
@@ -9511,7 +9518,7 @@ unsafe fn op_match_condition(state: &mut Activation<'_, '_>, instruction: Instru
 }
 
 #[inline(always)]
-unsafe fn op_branch_unless_primitive(
+unsafe fn op_branch_unless_same(
     state: &mut Activation<'_, '_>,
     instruction: Instruction,
 ) -> R<Flow> {
