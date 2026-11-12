@@ -147,9 +147,22 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     if header_length as u64 > file_length {
         return Err(not_an_image());
     }
-    let mut header = vec![0u8; header_length];
-    read_at(&file, &mut header, prefix.len() as u64).map_err(cannot_read)?;
-    let mut input = Reader { bytes: &header };
+    // The header is mapped rather than read, so its bytes stay the page cache's and leave the
+    // process when the load ends, instead of a buffer the allocator keeps.
+    #[cfg(unix)]
+    let mapped = ImageFile::map(&file).map_err(cannot_read)?;
+    #[cfg(unix)]
+    let header = mapped
+        .bytes()
+        .get(prefix.len()..prefix.len() + header_length)
+        .ok_or_else(not_an_image)?;
+    #[cfg(not(unix))]
+    let mut read = vec![0u8; header_length];
+    #[cfg(not(unix))]
+    read_at(&file, &mut read, prefix.len() as u64).map_err(cannot_read)?;
+    #[cfg(not(unix))]
+    let header = &read[..];
+    let mut input = Reader { bytes: header };
     let untouched = |error: ImageError| LoadError::Untouched(error.to_string());
     // A development build changes its identity with every edit to the runtime, until the base
     // tree is rebuilt; that start is simply slow.
@@ -690,8 +703,9 @@ unsafe fn restore_state(
     Ok(())
 }
 
-/// The bytes of a file of compiled code (`crate::code_image`). On Unix the file is mapped
-/// read-only, which shares the page cache's pages instead of filling a private copy of each.
+/// The bytes of a code image (`crate::code_image`), or of a start image while its header loads.
+/// On Unix the file is mapped read-only, which shares the page cache's pages instead of filling
+/// a private copy of each.
 pub(crate) enum ImageFile {
     #[cfg(unix)]
     Mapped {
@@ -705,34 +719,39 @@ impl ImageFile {
     pub(crate) fn open(path: &Path) -> std::io::Result<ImageFile> {
         #[cfg(unix)]
         {
-            use std::os::fd::AsRawFd;
-            let file = std::fs::File::open(path)?;
-            let length = usize::try_from(file.metadata()?.len())
-                .map_err(|_| std::io::Error::other("the image does not fit in memory"))?;
-            if length == 0 {
-                return Ok(ImageFile::Read(Vec::new()));
-            }
-            // SAFETY: a read-only private mapping of an open file. The base tree is build
-            // output that nothing rewrites in place, so the bytes do not change under the map.
-            let start = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    length,
-                    libc::PROT_READ,
-                    libc::MAP_PRIVATE,
-                    file.as_raw_fd(),
-                    0,
-                )
-            };
-            if start == libc::MAP_FAILED {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(ImageFile::Mapped { start, length })
+            ImageFile::map(&std::fs::File::open(path)?)
         }
         #[cfg(not(unix))]
         {
             std::fs::read(path).map(ImageFile::Read)
         }
+    }
+
+    /// Maps the whole of the open `file` read-only.
+    #[cfg(unix)]
+    pub(crate) fn map(file: &std::fs::File) -> std::io::Result<ImageFile> {
+        use std::os::fd::AsRawFd;
+        let length = usize::try_from(file.metadata()?.len())
+            .map_err(|_| std::io::Error::other("the image does not fit in memory"))?;
+        if length == 0 {
+            return Ok(ImageFile::Read(Vec::new()));
+        }
+        // SAFETY: a read-only private mapping of an open file. The base tree is build
+        // output that nothing rewrites in place, so the bytes do not change under the map.
+        let start = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if start == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(ImageFile::Mapped { start, length })
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
