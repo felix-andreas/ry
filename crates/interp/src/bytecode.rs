@@ -501,6 +501,75 @@ pub enum Uncompilable {
     NotACall,
 }
 
+/// Iterations after which a loop the tree walker runs compiles: a `for` loop over at least this
+/// many elements compiles before its first iteration, and a `while` or `repeat` loop compiles
+/// once it has run this many.
+pub const LOOP_COMPILE_ITERATIONS: usize = 16;
+
+/// Runs `call`, a `for`, `while` or `repeat` loop the tree walker was about to evaluate in `env`,
+/// as compiled code, or returns `None` when the loop stays with the tree walker. GNU R compiles
+/// such loops in the global environment only, which is where they are not inside a function
+/// whose frame semantics (`on.exit`, `missing`, `sys.function`) the compiled loop would have
+/// to reproduce. `sequence` is a `for` loop's evaluated sequence, which the compiled loop steps
+/// through instead of evaluating the expression again.
+///
+/// The code compiles for this one evaluation and is dropped after it, as in GNU R, which also
+/// retries a loop it could not compile at each evaluation. It runs on `env`'s bindings, so code
+/// called from the loop sees every assignment at once, and in an activation with no call frame,
+/// so `parent.frame()`, `sys.call()` and the calls conditions report are those of the tree
+/// walker.
+pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    // A `return` would end the compiled activation as if it were a function, where the tree
+    // walker raises "no function to return from".
+    if env != heap.known().global_env || interp().debugger.is_some() || calls_return(call) {
+        return Ok(None);
+    }
+    let body = match sequence {
+        Some(sequence) => {
+            let arguments = call.cdr();
+            let rest = values::cons(sequence, arguments.cdr().cdr())?;
+            values::lcons(call.car(), values::cons(arguments.car(), rest)?)?
+        }
+        None => call,
+    };
+    let function = values::triple(SexpType::Closure, nil(), body, env)?;
+    let code = compile_with_locals(body, function, None)?;
+    heap.set_cdr(function, code);
+    let profile = values::ints_mut(code.cdr().element(PROFILE));
+    profile[profile::TIER_STATE] = profile::TIER_OFF;
+    profile[profile::NEXT] = i32::MAX;
+    // A closure's frame restores the source reference on leaving, and this activation has none.
+    let srcref = interp().srcref;
+    let result = run(function, code, env);
+    interp().srcref = srcref;
+    result?;
+    interp().visible = false;
+    Ok(Some(nil()))
+}
+
+/// Whether `expression` calls `return` outside the functions it defines.
+unsafe fn calls_return(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head == symbols().function {
+        return false;
+    }
+    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "return" {
+        return true;
+    }
+    let mut cell = expression;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        if calls_return(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
 /// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
 /// arguments calls this, so that such a call runs in a slot frame rather than in the environment
 /// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
@@ -731,8 +800,13 @@ pub mod profile {
     pub const ENTRIES: usize = 0;
     /// Backward jumps taken since the counter was last reset.
     pub const BACK_EDGES: usize = 1;
-    /// The optimizing tier's state for this code, which only that tier interprets.
+    /// The optimizing tier's state for this code, which only that tier interprets, apart from
+    /// [`TIER_OFF`].
     pub const TIER_STATE: usize = 2;
+    /// The [`TIER_STATE`] of a loop compiled for the tree walker ([`super::run_loop`]), which no
+    /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
+    /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
+    pub const TIER_OFF: i32 = i32::MIN;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
@@ -1483,13 +1557,27 @@ mod fusion {
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
 /// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
 unsafe fn compile(body: Sexp, function: Sexp) -> R<Sexp> {
+    compile_with_locals(body, function, local_symbols(body, function.car()))
+}
+
+/// [`compile`] with the symbols the frame can bind given, or `None` for code that reads and
+/// writes an environment's bindings, such as a loop in the global environment.
+unsafe fn compile_with_locals(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+) -> R<Sexp> {
     let threshold = crate::heap().swap_report_threshold(usize::MAX);
-    let compiled = compile_unreported(body, function);
+    let compiled = compile_unreported(body, function, locals);
     crate::heap().swap_report_threshold(threshold);
     compiled
 }
 
-unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
+unsafe fn compile_unreported(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+) -> R<Sexp> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -1497,7 +1585,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
         formal = formal.cdr();
     }
     let mut compiler = Compiler {
-        local_symbols: local_symbols(body, function.car()),
+        local_symbols: locals,
         formals: formal_symbols,
         code: Vec::new(),
         constants: Vec::new(),
@@ -10454,6 +10542,10 @@ unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+    if profile[profile::TIER_STATE] == profile::TIER_OFF {
+        profile[profile::BACK_EDGES] = 0;
+        return BackEdge::Continue(pc);
+    }
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
         && machine.code.cdr().element(TIER1) == nil()
     {
