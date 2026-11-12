@@ -60,7 +60,7 @@ use {
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
-        Heap, Liveness, Marker,
+        Heap, Liveness, Marker, WellKnown,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
@@ -6403,6 +6403,9 @@ macro_rules! fast_paths {
             state: &mut Activation<'_, '_>,
             at: usize,
         ) -> Option<usize> {
+            if OP == Op::Arithmetic as u32 {
+                return arithmetic_fast(state, at);
+            }
             $(
                 if OP == Op::$op as u32 && OP != Op::Jump as u32 {
                     return $fast(state, at);
@@ -6911,12 +6914,53 @@ unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at
     if !form_fits(left, right, real, known.nil) {
         become arithmetic_miss(state, at);
     }
+    let (value, kind) = quick_value(heap, &known, operator, real, left, right);
+    let Some(value) = value else {
+        become run_arithmetic::<false>(state, at);
+    };
+    state.record_kind(at, kind);
+    let destination = *code.add(at + 2);
+    *registers.add(destination as usize) = value;
+    (*state.interp).visible = true;
+    let next = at + 1 + operand_count(Op::Arithmetic);
+    // A comparison that the next instruction branches on, as every loop test and most `if`
+    // tests are, takes the branch itself and saves that instruction's dispatch. An NA leaves
+    // the error to the branch.
+    if kind == feedback::LOGICAL_SCALAR
+        && *code.add(next) as u32 == op_word(Op::JumpUnless)
+        && *code.add(next + 1) == destination
+    {
+        if value == known.true_value {
+            state.record_kind(next, feedback::BRANCH_NOT_TAKEN);
+            dispatch!(state, next + 1 + operand_count(Op::JumpUnless));
+        }
+        if value == known.false_value {
+            state.record_kind(next, feedback::BRANCH_TAKEN);
+            dispatch!(state, *code.add(next + 3) as usize);
+        }
+    }
+    dispatch!(state, next);
+}
+
+/// `left operator right` for two plain scalars that fit the form `real` ([`form_fits`]), as
+/// [`fast_arithmetic`] computes it, with the result's feedback kind. The value is `None` when
+/// the generic handler must compute it: an integer result that is NA or overflows, or an
+/// allocation the young generation has no room for.
+#[inline(always)]
+unsafe fn quick_value(
+    heap: &mut Heap,
+    known: &WellKnown,
+    operator: Arith,
+    real: bool,
+    left: Sexp,
+    right: Sexp,
+) -> (Option<Sexp>, u16) {
     let logical = |result: Option<bool>| match result {
         Some(true) => Some(known.true_value),
         Some(false) => Some(known.false_value),
         None => Some(known.logical_na_value),
     };
-    let (value, kind) = if real {
+    if real {
         let as_real = |value: Sexp| {
             if value.kind() == SexpType::Integer {
                 let integer = *value.data().cast::<i32>();
@@ -6968,32 +7012,32 @@ unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at
             Arith::LessEqual => (logical((!na).then_some(a <= b)), feedback::LOGICAL_SCALAR),
             _ => (logical((!na).then_some(a >= b)), feedback::LOGICAL_SCALAR),
         }
-    };
-    let Some(value) = value else {
-        become run_arithmetic::<false>(state, at);
-    };
-    state.record_kind(at, kind);
-    let destination = *code.add(at + 2);
-    *registers.add(destination as usize) = value;
-    (*state.interp).visible = true;
-    let next = at + 1 + operand_count(Op::Arithmetic);
-    // A comparison that the next instruction branches on, as every loop test and most `if`
-    // tests are, takes the branch itself and saves that instruction's dispatch. An NA leaves
-    // the error to the branch.
-    if kind == feedback::LOGICAL_SCALAR
-        && *code.add(next) as u32 == op_word(Op::JumpUnless)
-        && *code.add(next + 1) == destination
-    {
-        if value == known.true_value {
-            state.record_kind(next, feedback::BRANCH_NOT_TAKEN);
-            dispatch!(state, next + 1 + operand_count(Op::JumpUnless));
-        }
-        if value == known.false_value {
-            state.record_kind(next, feedback::BRANCH_TAKEN);
-            dispatch!(state, *code.add(next + 3) as usize);
-        }
     }
-    dispatch!(state, next);
+}
+
+/// `Arithmetic` in baseline code, for its step: the quick form's computation, chosen from the
+/// operands at each run, because baseline code calls the step of the generic instruction
+/// whatever form tier 0 wrote over it.
+#[inline(always)]
+unsafe fn arithmetic_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let operator = ARITHS.get(*code.add(at + 1) as usize)?.0;
+    let left = *registers.add(*code.add(at + 3) as usize);
+    let right = *registers.add(*code.add(at + 4) as usize);
+    let heap = &mut *state.heap;
+    let known = *heap.known();
+    let real = left.kind() != SexpType::Integer || right.kind() != SexpType::Integer;
+    if !form_fits(left, right, real, known.nil) {
+        return None;
+    }
+    quick_form(operator, real)?;
+    let (value, kind) = quick_value(heap, &known, operator, real, left, right);
+    let value = value?;
+    state.record_kind(at, kind);
+    *registers.add(*code.add(at + 2) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::Arithmetic))
 }
 
 /// A specialized form whose operands are no longer of its kinds: the site goes back to the
