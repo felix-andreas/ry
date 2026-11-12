@@ -1964,48 +1964,18 @@ grows from 107 MB to 136 MB, because the original text stays in it.
   instrumenting libR and then reordering the blocks of 6,313 functions. The release workflow
   installs the same `bolt-20`, but no release has been cut since the pipeline landed.
 
-**S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
-calling frames to their top environment uncached, because function frames gain and lose bindings
-without moving any epoch. The rest of the walk (the top environment, the generic's registered
-methods table, the imports, the base namespace and the search path) is cached in
-`dispatch::MethodCache`, keyed by the method name, the top environment, the generic's
-registered-methods table (resolved first, since replacing an existing binding's value does not
-move the epoch) and whether the top environment's own frame is searched (it is not when the
-calling frames end at the empty environment). An entry holds the binding cell rather than its value, since reassigning an existing
-binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
-value is no longer a function. The whole cache is dropped when the binding epoch changes, which
-covers bindings appearing or disappearing and enclosures changing. The cache is a GC root
-(`dispatch::trace_method_cache`), so no key's environment is freed and its address reused while the
-entry exists; dropping it on every collection instead made a dispatch-heavy loop that collects
-often (xts, zoo) repeat the full walk after each minor collection. The method name `generic.class`
-is cached beside it by the pair of symbols (`MethodCache::names`), because building and interning
-the name was about a third of a `UseMethod` on the `timeseries` workload; symbols are never freed,
-so that table needs no invalidation. A walk that passed a function
-frame, an active binding, or a non-function binding of the name is not cached, because a later
-change there would not move the epoch. xts `period.apply` with 33,335 periods went from about 262k
-to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
-case `dispatch__method_cache`).
+**S3 dispatch finds methods through one row per method symbol** ("S3 methods are found through
+one row per method symbol" below).
 
-**S3 and S4 dispatch keep a polymorphic inline cache per call site.** S3 (`dispatch::resolve_s3`)
-keys a site by its call and holds up to four entries, each keyed by the generic, the group, the
-class vector (compared element-wise, interned strings) and the defining environment. An entry
-remembers every method name it probed (`candidates`) and the sum of their `Heap::lookup_stamp`s
-plus that of `.__S3MethodsTable__.`, so defining or removing any candidate outside a function
-frame, at any level of the inherits chain, misses. A hit also requires that no frame between the
-calling frame and its top environment binds a candidate (function frames move no stamp), the same
-top and search-path start, the same registered-methods table, and that the found cell still holds a
-function (a reassignment moves no stamp either). A hit hands back the dispatch strings (`.Generic`,
-`.Class`, `.Method`) built on the miss, held not mutable, so a hit allocates nothing. NextMethod
-reuses the frame's `.Generic` and `.Group` vectors and the interned `generic.class` names. S4
+**S4 dispatch keeps a polymorphic inline cache per generic.** S4
 (`methods::S4Cache`) keys a site by the generic closure: valid while its `.SigArgs`, `.SigLength`
 and `.AllMTable` bindings hold the values seen, with up to four entries by the signature
 arguments' first classes, each holding the table's binding cell for the label and the method it
 held; `setMethod` and `removeMethod` rewrite that binding, so the entry misses. Inherited methods
-are cached only once `.InheritForDispatch` stored them under the label. Both caches are GC roots and
-are cleared when full rather than evicted. Callgrind instructions per dispatch, JIT off, GNU R
-4.3.3 in brackets: `UseMethod` 8,750 to 7,688 (9,824); `UseMethod` plus `NextMethod` 23,144 to
-19,040 (19,030, parity); `standardGeneric` 14,263 to 8,688 (11,681). Oracle cases
-`dispatch__site_cache_invalidation` and `s4__method_cache_invalidation` pin the invalidation shapes. NextMethod passes `.Class` from the class whose method it found and always defines `.Group` (`""` without a group, one shared vector), as GNU R does (`dispatch__next_method_class_and_group`).
+are cached only once `.InheritForDispatch` stored them under the label. The cache is a GC root and
+is cleared when full rather than evicted. `standardGeneric` went from 14,263 to 8,688 callgrind
+instructions per dispatch, JIT off (GNU R 4.3.3: 11,681). Oracle case
+`s4__method_cache_invalidation` pins the invalidation shapes. NextMethod passes `.Class` from the class whose method it found and always defines `.Group` (`""` without a group, one shared vector), as GNU R does (`dispatch__next_method_class_and_group`).
 
 **NextMethod runs from a method in slots.** Previously `do_nextmethod` reified the method's frame (through `call.env()`) on every call, and the method reified again on return because the next method's promises were counted against its frame, so one `NextMethod` level cost two environments.
 - **Chosen shape.** It finds the method frame by position (`Call::frame_index`, `envir::caller_index`) and reads `.Generic`, `.Class` and the other dispatch variables through `eval::pending_name` and `crate::method_vars`, with no environment. The next method's arguments are promises over the frame's pending environment, which reify keeps as the same object, so a method that assigns to a formal is seen and a promise kept past both returns still reads the method's value. A pending `.GenericCallEnv` resolves as UseMethod's caller does (`pending_enclosure`, which shares `slot_named_like_method` with `lazy_caller`).
@@ -8748,13 +8718,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - Tier 0 runs `enter`, continues its dispatch loop at the callee's first op on the new window, and runs `leave` at the callee's return op, so a call costs no Rust recursion. Resume state (caller code, pc, window, destination) is tier 0's own shadow stack, not a frame column, because machine-code frames never use it. Each Rust entry into the loop records its base depth; on an error the loop calls `leave(d, Err(e))` for each of its depths above the base, innermost first, resumes in the caller when one returns `Ok`, and returns the error to Rust at the base. Frames entered by builtins, `eval` or the general path still nest through Rust.
   - Machine code writes unboxed or boxed values into the slots following the frame-state map of "The native execution model", then calls `enter` with the site's plan already checked by its guard. A direct sibling call in an image skips the plan check because the image's check epoch guards the target.
   - Feedback for call targets is read by pc: `call_target(code, pc)` returns the closure a planned site last ran, from the site word and the plan's code column. The JIT reads this to inline; there is no map.
-- **S3 dispatch: the site cache is a column table indexed by site id.** Today `MethodCache.sites` is an `FxHashMap<Sexp, Vec<SiteEntry>>` keyed by the dispatching call object, so each site owns a heap `Vec`, a lookup hashes a pointer, and the table starts over at 8,192 sites. The target mirrors `CallPlans`:
-  - **Id.** A site id lives in the feedback word of the dispatching instruction's first operand, the word a call plan uses. The two encodings are disjoint: a plan word is `0`, a plan id plus one, or minus one minus the misses (at most 8), while a dispatch site's word is `i32::MIN + id`. `direct_plan` reads a dispatch word as too many misses and stops planning, and dispatch reads a plan word as no site.
-  - **Columns.** `S3Sites` in `bytecode::State` holds `owners` (the code's constants, weak) and `ats` (the instruction position), checked by `owned(id, owner, at)` as plans are, so a stale or saved word never matches. It also holds the entries as `[SiteEntry; 4]` plus a `u8` count per id, so a site needs no heap allocation. The hit check reads only a hot key per entry (generic, group, `with_default`, `def_env`, the private class vector), so the keys form their own column of `[EntryKey; 4]`. Candidates, the stamp, the scope and the found method sit in a parallel cold column.
-  - **Lifetime.** Ids come from a free list. `RootSource::clear_dead` frees the id of a site whose code died, which replaces the 8,192-site reset: the table is bounded by live code.
-  - **Callers.** Every dispatch that runs from an instruction passes a `Site { owner, at }`: the slot `UseMethod` path (`use_method_in_slots`), the `UseMethod` special and dispatching builtins called by a call op (through a `site` field on `builtins::Call`), `op_dispatch_subject`, and the arithmetic and comparison ops' group dispatch. Every such op has a free first-operand word, because type feedback is recorded at the op's own word (`Activation::record`). A dispatch with no instruction (`NextMethod`, an AST body, dispatch from C) uses the cache by method name, as today. That cache is keyed by symbol and environment, which have no dense numbering, and it plays the role of GNU R's global method cache.
-  - **Validity is unchanged.** An entry checks every input of the lookup (the lookup stamps of its candidates, the frames between the caller and the top environment, the methods table, and the method binding read afresh), so a misattributed site can cost a hit but never give a wrong method.
-  - **For the JIT.** `s3_site(code, pc)` returns the site's entries. A site with one entry is monomorphic, and the inlining tier guards on the class vector and the entry's stamp. This is the inline cache that the JIT's speculation reads, which is the one kind of cache the performance rules allow.
+- **S3 dispatch has no per-site state.** A method is found through its name's row ("S3 methods are found through one row per method symbol"), which a dispatch from an instruction, `NextMethod`, an AST body and C all share. A dispatch op needs no feedback word, and the JIT can guard an inlined method on the row's stamp.
 - **Remaining allocations, all off the common path.** The environment when a frame reifies, heap promises for references that escape, a `DOTSXP` chain when a reader asks for the pairlist, and closures made in the frame.
 - **Expected impact.** Call setup goes from about 2,100 to about 200 instructions on the planned pair above, and objects allocated per framed call go from about 7 to 0 on the common path. Correctness holds by construction: every observation route either reads the slot state that GNU R's environment would hold or reifies first, as today. The design removes three duplicated or derived states (handler and restart snapshots per frame, the per-call `srcref` lookup, the argument copy) and one pointer graph (`Rc` condition stacks). Incremental analysis is unaffected.
 - **Checking.** The bytecode fuzzer's reify-before-and-after agreement and `crates/ry/tests/scenarios/slot-frames.scenario` cover the new reference kinds; the oracle runs forced in all three modes. Allocations per call are compared with GNU R's from the allocation audit.
@@ -9219,6 +9183,21 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** R values enter typed code only through the per-parameter boundary, as plain vectors and scalars checked at entry. Records, tuples and tags are built inside typed code. A plain R list where a record is expected is a `type-mismatch` (`reference/type-system.mdx`, "Records from R"); a record from `as.record()` passes the check but runs in the interpreter, which `RY_TYPED_LOG` names. The typed log-rank benchmark (`tools/bench/kernels/log_rank.typed.R`) takes its columns as `List` parameters.
 - **Gap.** A record built inside typed code cannot yet hold a `List` field (`shapes::intern` stores only scalars, strings and boxes), so a typed function cannot bundle its vector parameters into a record natively (`backlog.md`).
 
+
+## S3 methods are found through one row per method symbol
+
+- **Previous shape.** S3 dispatch kept three structures between calls, all in `dispatch::MethodCache`.
+  - `S3Sites`: a polymorphic inline cache per dispatching instruction, up to four entries keyed on the generic, group, class vector and defining environment, each valid under the summed lookup stamps of every candidate name it probed.
+  - `entries`: a hash map from (method name, top environment, methods table, whether the top frame is searched) to the binding cell found, dropped whenever `Heap::binding_epoch` moved, which every definition anywhere outside a function frame does.
+  - `names`: a hash map from the (generic, class) pair to the interned `generic.class` symbol.
+- **Why they were weak.** What a site cached is a fact about a method name, so the same fact lived in a site entry and in `entries`, with two invalidation schemes. Sites hit for few resolutions (testthat 15%, objects 25%, validation 40% of 10k, 116k and 45k resolutions), because most sites run a handful of times and `$` dispatch from a builtin has no site, and `entries` started over after each definition. Every dispatch also allocated `.Generic`, `.Class` and `.Method` strings. The site table and the map were GC roots walked on full collections, about 0.4% of testthat in `trace_method_cache`.
+- **Shape.** `MethodRows` is a struct-of-arrays table with one row per method or generic symbol, and the symbol holds its row index (`SymbolObject::method_row`, which shares a word with the symbol's 32-bit stamp share, so a symbol stays 64 bytes). A row holds:
+  - the name as a shared one-string vector, which is `.Generic`, `.Group` or `.Method` without an allocation;
+  - the binding found the last time the name was looked up from a top environment on, or nil for none found, with the top environment, the generic's methods table and the symbol's lookup stamp at that lookup.
+- **Validity.** A lookup walks the calling frames below the top environment on every dispatch, as GNU R does, so a method in a function frame needs no stamp. The row answers for the rest when the top environment, the table and the stamp match and the binding still holds a function. The stamp moves when a binding of the name appears or disappears outside a function frame, a watched binding is assigned, or an enclosure changes, which covers a global mask, `rm`, `registerS3method`, `attach` and `detach`. A lookup that passed a function frame, an active binding, or a binding to a non-function stores nothing. One row holds one scope, so code that dispatches one name from two top environments alternately repeats the walk, which is the walk a miss already did. `.Class` matches GNU R: the object's class vector itself, held not mutable, when the first class has the method, `NULL` for the default method, and otherwise the remaining classes, which carry the whole vector as their `previous` attribute unless a group generic dispatched (`dispatch__dot_class_values`).
+- **The (generic, class) name.** `names` stays: a dense key would need an id per interned class string, which `CHARSXP` does not have. Interning the class string as a symbol to get a dense key costs about 81 instructions per class (`install_charsxp` 26 plus `install_char` 55), or 0.8% of the objects workload at its 274k name lookups, more than the 69-instruction hash lookup of the pair it would replace, so no id is stored per class vector either. A dense `CHARSXP` id is a strings follow-up (`backlog.md`).
+- **Measured.** Warm-iteration instructions against main, plain release builds: testthat -1.54%, validation +0.58%, objects -0.08%, functional +0.18%. Validation is the one regression, all of it in dispatch: about 45k resolutions per iteration, mostly `format()` on doubles inside `vapply`, each walking two function frames and three candidate names. The old site entry skipped that walk and the name hash on its 40% of hits, so the walk is now paid on every resolution (`lookup_in_scope` +5.7M, `method_name` +3.5M, `method_scope` +2.0M, against `resolve_s3` -4.9M and the old `EntryKey` hash -2.0M). The walk is what slot frames make cheap, so it is a closure-frame follow-up, not a reason for a site cache. Anonymous and start-image RSS are flat on all four workloads, and libR `.text` is 19 KB smaller.
+- **Checking.** Oracle cases `dispatch__method_lookup_order` (lookup order, the define, mask, `rm` and `registerS3method` sequence, one name from two top environments, base generics and `$`/`$<-` methods defined after the first call, `conditionMessage` methods) and `dispatch__r6_and_dollar_methods` (R6 `self$x`, `super$`, `$` methods on an R6 class and a classed list), with `dispatch__method_cache` and `dispatch__site_cache_invalidation`. The fuzzer's S3 block changes methods between calls of one site.
 ## A typed call that runs in the interpreter always says why
 
 - **Previous shape.** The native path (`jit::native::call` into `typed::call`) answered `None` from about a dozen places. `annotations::log_interpreted` printed only ``typed: `name` runs in the interpreter``, and a compile refusal printed on its own line without the function's name, so a fallback for an argument the native tier could not read, a debugged closure, a set result or code that gave up at run time left no reason at all. The bench ports could not tell a slow typed number from a silent fallback.
