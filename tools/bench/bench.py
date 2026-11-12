@@ -182,9 +182,8 @@ def engines(args, suite):
 
 
 def file_contains(path, needle):
-    """Whether the file holds `needle`, read in 1 MiB pieces. Reading a 120 MiB libR whole would
-    raise this process's peak RSS, which every later child inherits as the floor of its own
-    `ru_maxrss` (the kernel carries the parent's peak across fork and exec)."""
+    """Whether the file holds `needle`, read in 1 MiB pieces, so that scanning a 120 MiB libR does
+    not hold all of it in memory."""
     tail = b""
     with open(path, "rb") as file:
         while piece := file.read(1 << 20):
