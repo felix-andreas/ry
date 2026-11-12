@@ -204,6 +204,7 @@ static COUNTERS: [AtomicU64; Counter::ALL.len()] =
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
+static REIFICATIONS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -293,7 +294,23 @@ pub fn count_package_fallback(reason: u32) {
 
 /// The package calls [`count_package_fallback`] counted under each reason, largest first.
 pub fn package_fallbacks() -> Vec<(String, u64)> {
-    let mut fallbacks: Vec<(String, u64)> = PACKAGE_FALLBACKS
+    by_label(&PACKAGE_FALLBACKS)
+}
+
+/// Counts a slot frame turned into an environment, under the [`label`] of what asked for it.
+pub fn count_reification(reason: u32) {
+    if let Some(slot) = REIFICATIONS.get(reason as usize) {
+        bump(slot);
+    }
+}
+
+/// The slot frames [`count_reification`] counted under each reason, largest first.
+pub fn reifications() -> Vec<(String, u64)> {
+    by_label(&REIFICATIONS)
+}
+
+fn by_label(slots: &[AtomicU64; LABEL_SLOTS]) -> Vec<(String, u64)> {
+    let mut counts: Vec<(String, u64)> = slots
         .iter()
         .enumerate()
         .filter_map(|(id, slot)| {
@@ -306,8 +323,8 @@ pub fn package_fallbacks() -> Vec<(String, u64)> {
             })
         })
         .collect();
-    fallbacks.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    fallbacks
+    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    counts
 }
 
 pub fn counter(counter: Counter) -> u64 {
