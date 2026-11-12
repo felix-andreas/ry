@@ -2620,6 +2620,13 @@ graphical parameters, `file.append` and anonymous `file()` buffers.
   - **`options(matprod = "internal")` is GNU R's long double loop.** Each entry sums the double products in x87 long double and rounds once (`long_double_product` in `linalg.rs`); complex entries sum real and imaginary parts separately. `default` and `default.simd` keep the reference-order kernel, which equals GNU R's NaN/Inf fallback loop, so the screen changes no result. Invalid values are rejected by `validate_option`.
   - **Related long double ports.** `cumprod` keeps the running product in x87 long double like `cumsum` (`long_double::running_products`). Complex `sum`, `prod` and `mean` use per-argument long double parts, as `csum`, `cprod` and the complex `mean` do. One-argument `cor` takes the double `sqrt` of the rounded variance (`cov_complete1`), two-argument `cor` takes `sqrtl` of the long double sum. `fft`/`mvfft` port `fft.c`'s `fft_factor`/`fftmx` (`fft.rs`), so mixed-radix bits match.
 - **GNU R's quirks are kept on purpose**: `La_solve`'s condition check norms the already factored copy when `a` was not double; `La_dgecon` estimates with `n` as the leading dimension, which ry refuses for `m < n` instead of reading past the matrix.
+- **BLAS and LAPACK buffers sit at GNU R's addresses modulo 16.**
+  - **Previous shape.** Every buffer went to the library where ry happened to hold it: R vectors at their heap address (always 0 modulo 16, since `VECTOR_DATA_OFFSET` is 32 and slots are 16-aligned) and scratch space in a `Vec`. On OpenBLAS's SSE2 level-1 kernels (selected for Zen, Sandybridge, Nehalem, Atom, Prescott, Core2, Penryn, Dunnington, Nano, Barcelona, Bobcat) the result moved by one ulp against GNU R on the same library: those kernels peel a first element that is not 16-aligned, which regroups the partial sums of `dasum`, `ddot` and the like. `dtrco`, `La_dtrcon` and the `dqr*` family failed `test_linalg.rs` that way (the release CI's `dtrco` failure). Haswell, SkylakeX and Cooperlake kernels have no peel, which is why it passed locally.
+  - **GNU R's rule, measured with `.Internal(inspect())` and read from `memory.c`.** Vector data starts 48 bytes into the node. A vector of 128 data bytes or less comes from a small-vector page whose nodes sit at 8 modulo 16, so its data is at 8; a larger one comes from `malloc`, so its data is at 0. `R_alloc(n, size)` is a raw vector of `n * size + 1` bytes and follows the same rule.
+  - **Shape.** `Placed` and `PlacedInput` in `linalg.rs` hand each buffer at the address GNU R's buffer has in the same call, tagged `Allocation::Vector` or `Allocation::Scratch` per GNU R's `Lapack.c`, `array.c` and `.Fortran`. An R vector already at the right address is used in place; otherwise a copy at the right address is used and written back on drop. Only buffers of 128 bytes or less ever move. `La_svd_cmplx`'s real workspace takes GNU R's size, because the size decides the address.
+  - **Rejected: moving vector data in the heap.** Putting small vectors at 8 modulo 16 would fix package code too, but `VECTOR_DATA_OFFSET` is baked into the JIT's code generation and the start-up image, and it costs memory. Package code calling BLAS on small vectors stays exposed (`backlog.md`, "BLAS buffer addresses in package code").
+  - **Impact.** Results equal GNU R's on every OpenBLAS kernel listed above and on Haswell, SkylakeX and Cooperlake, at the cost of copying buffers of 16 doubles or fewer. The Opteron and Bulldozer-family kernels were not tested.
+  - **Pinned by** `test_linalg.rs`, run with `RY_TEST_REFERENCE_LIBRARIES=1`, GNU R on `PATH` and `OPENBLAS_CORETYPE` set to one of the kernels above.
 
 # Decision record: the default packages' utils, tools, grDevices and graphics routines
 
@@ -4795,6 +4802,17 @@ check` releases its trees once, and memoized records are compact" below).
   is that environment's own compiled closure (whose updates the compiler orders with
   `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
   copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
+- **Record fields.** `r <- (..r, field = f(r$field, ...))` lowers to `.ry_update(r, ...)`, and
+  `rebind_call` routes it to `rebind_update`, which evaluates the field's call with `r$field` as a
+  nested target, so the record is a list on the chain. That needs records to count their
+  holders: an interpreter-made plain record is a counted record (`records::allocate`) whose slots
+  `set_record_slot` keeps counted, while tuples and tags stay saturated. The fields given after
+  the updating one must be constants, because their code could otherwise see the field
+  half-updated. When the record is still solely held afterwards, the new values go into its slots;
+  otherwise the update builds a new record (`records::with_slots`). In a slot frame the compiler
+  leaves such an update to `CallRebinding` instead of evaluating its arguments into registers
+  (`eval::updates_own_field`), and the call makes the frame's environment. 2e6 updates of
+  `List.append(r$values, x)` inside a function take about 0.7 s.
 - **Moving a value into a helper's parameter** was first rejected as unsound and is now built
   with escape checks and an undo journal; see "Moving a collection into a helper's parameter".
 - **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
@@ -5023,6 +5041,16 @@ check` releases its trees once, and memoized records are compact" below).
   the object being changed. It must run before the sharing check, because ending the move makes
   the object shared again and forces the copy. A copied closure (`values` duplicate) is reported
   to `created_closure` like a fresh one.
+- **Slot frames.** A function's frame that keeps its slots has no binding cell to move from, so
+  the move names its binding as `moves::Binding` (a cell, or a slot by the header's register and
+  the slot's position) and the caller's names as `moves::Heads` (an environment, or a slot frame
+  by index). `op_call_rebinding` in `bytecode.rs` hands a closure call to
+  `moves::call_moving_from`, the same check, journal and restore that `call_moving` uses from an
+  environment, with the other arguments built as the frame's lazy promises. `resolve_function`
+  reads a slot frame's own bindings without making its environment, and the move is refused
+  while a register of the calling expression holds the value, since registers are not counted.
+  2e6 calls of `xs <- helper(xs, i)` inside a function take about 2 s for a list, a dictionary
+  and a set alike, against 5.8 s for 40,000 before.
 - **Limits.** The tail update covers only the last statement and stays off in a body that creates
   a closure. Both are in `backlog.md`.
 
@@ -9306,3 +9334,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **A copying push grows from the length.** `ry_list_push` on a shared list copies it with room from its length, not from the shared list's capacity, which otherwise doubled on every copy in a loop of field updates and asked for gigabytes after about 30 steps.
 - **Impact.** Typed pidigits runs natively, with the same checksum, in about 0.03 s against about 0.45 s untyped.
 - **Pinned by** `typed-record-list-fields.scenario` and the list-field cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs`, which also check that nothing leaks.
+
+## Typed `List.sort_with` is a merge sort with its comparator inlined, and strings order by the interpreter's collation
+
+- **Previous shape.** `List.sort_with`, a tuple index such as `entry[[2]]` and `<` on `Str` refused, so typed knucleotide ran in the interpreter.
+- **Sorting.** `sort_with` in `crates/typed/src/lower.rs` builds a bottom-up merge sort in the IR: each pass merges runs of `width` items from one buffer into a second, and the buffers trade places after the pass. The comparator is inlined once into the merge step, as `List.map` inlines its function, so no closure call or callback into native code is needed. A right item goes first only when `compare(left, right)` is `:GT` (tested with `Op::ShapeOf` against the `:GT` shape), which keeps the sort stable, as the standard-library page promises. A native sort routine that calls back would need a compiled comparator with a native entry point, which inlined lambdas do not have.
+- **Tuple index.** `[[` on a tuple with a constant position is `Op::Field`. A computed position, or any index of a named record, refuses, because a field's type depends on the position.
+- **String order.** `values::str_order` calls `interp::sort::collate`, the same function as R's `<` in the interpreter, for scalar comparisons (`ry_str_compare`) and list comparisons alike. The interpreter reruns a call that fails natively, so the two tiers must agree in every locale; calling one function is the only way to keep that true, and `collate` reads the locale on every call, so `Sys.setlocale` is honored too.
+- **Impact.** Typed knucleotide runs natively in about 0.04 s, against about 0.5 s untyped, with the same checksum.
+- **Pinned by** `typed-sort-with.scenario`, the sort and string cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs`, and `comparisons_and_logic_follow_r` in `crates/typed/tests/test_values.rs`.
