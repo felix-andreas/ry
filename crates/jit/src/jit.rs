@@ -527,8 +527,10 @@ unsafe fn compile_in<'a>(
         let plan = analysis::plan(
             analysis::Arena(arena),
             machine.code,
-            machine.function.car(),
-            enclosure,
+            analysis::Frame::Closure {
+                formals: machine.function.car(),
+                enclosure,
+            },
             patient,
             state >= 0 && state & runtime::SHARED != 0,
         )?;
