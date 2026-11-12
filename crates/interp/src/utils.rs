@@ -20,7 +20,10 @@ use {
         },
         write_console,
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+    heap::{
+        activity::set_profile_tick,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+    },
     std::{
         cell::RefCell,
         collections::BTreeMap,
@@ -1827,11 +1830,6 @@ unsafe fn do_nsl(call: &NativeCall<'_>) -> R<Sexp> {
     }
 }
 
-/// Set by the profiler's timer thread once per sampling interval, and cleared when the
-/// interpreter records a sample. GNU R takes its samples in a `SIGPROF` handler; ry instead checks
-/// this flag where calls begin, which costs one relaxed load per call while no profile runs.
-pub static PROFILE_TICK: AtomicBool = AtomicBool::new(false);
-
 /// GNU R's profiling timer cannot sample more often than this, so it raises shorter intervals
 /// to it with a warning.
 const MINIMUM_PROFILE_MICROS: u64 = 10_000;
@@ -1887,7 +1885,7 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
         .spawn(move || {
             while !timer_stop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_micros(micros));
-                PROFILE_TICK.store(true, Ordering::Relaxed);
+                set_profile_tick(true);
             }
         })
         .map_err(|failure| {
@@ -1915,14 +1913,14 @@ pub unsafe fn stop_profiler() -> R<()> {
     if profiler.timer.join().is_err() {
         return Err(error("Rprof: the profiling timer panicked"));
     }
-    PROFILE_TICK.store(false, Ordering::Relaxed);
+    set_profile_tick(false);
     profiler.output.flush().map_err(profile_write_error)
 }
 
 /// Writes one sample: the names of the calls on the stack, innermost first, after `innermost`
 /// (the builtin being called, if any).
 pub unsafe fn record_profile_sample(innermost: Option<&str>) -> R<()> {
-    PROFILE_TICK.store(false, Ordering::Relaxed);
+    set_profile_tick(false);
     let mut line = String::new();
     if let Some(name) = innermost {
         line.push_str(&format!("\"{name}\" "));

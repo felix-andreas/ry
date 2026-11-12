@@ -15,7 +15,7 @@ use {
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch, interp, moves, scope,
         unwind::{Jump, R, Rooted, Unwind, error, error_in, jump},
-        utils::{PROFILE_TICK, record_profile_sample},
+        utils::record_profile_sample,
         values::{
             self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
             unbound,
@@ -27,7 +27,6 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::sync::atomic::Ordering,
     thin_vec::ThinVec,
 };
 
@@ -1338,7 +1337,7 @@ pub unsafe fn call_direct(definition: &BuiltinDef, call: Sexp, args: &[Sexp]) ->
     let Some(direct) = definition.direct else {
         return Ok(None);
     };
-    if activity::enabled() || PROFILE_TICK.load(Ordering::Relaxed) {
+    if activity::hooks() != 0 {
         return Ok(None);
     }
     let value = scope(|| direct(call, args))
@@ -1355,10 +1354,6 @@ pub unsafe fn call_direct(definition: &BuiltinDef, call: Sexp, args: &[Sexp]) ->
 }
 
 /// [`call_builtin`], offering the builtin `reusable` to update in place (see [`Call::reusable`]).
-//
-// The common call (no profile being taken, the arity right, no names to check, no replacement
-// target to copy) runs straight through; anything else takes the out-of-line path, so this
-// frame stays small enough that entry and exit cost a handful of instructions.
 #[inline]
 pub(crate) unsafe fn call_builtin_reusing(
     definition: &BuiltinDef,
@@ -1368,9 +1363,26 @@ pub(crate) unsafe fn call_builtin_reusing(
     env: Sexp,
     reusable: Option<Sexp>,
 ) -> R<Sexp> {
+    call_builtin_blaming(definition, call, op, args, env, reusable, unbound())
+}
+
+/// [`call_builtin_reusing`], blaming `blame` for an error that names no call.
+//
+// The common call (no hook to run, the arity right, no names to check, no replacement target to
+// copy) runs straight through; anything else takes the out-of-line path, so this frame stays
+// small enough that entry and exit cost a handful of instructions.
+#[inline(always)]
+unsafe fn call_builtin_blaming(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+    blame: Sexp,
+) -> R<Sexp> {
     let checks = definition.checks;
-    if activity::enabled()
-        || PROFILE_TICK.load(Ordering::Relaxed)
+    if activity::hooks() != 0
         || (checks.arity && args.len() != definition.arity as usize)
         || (checks.names && args.iter().any(|arg| arg.tag != nil()))
         || (checks.replacement
@@ -1378,9 +1390,33 @@ pub(crate) unsafe fn call_builtin_reusing(
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
     {
-        return call_builtin_checked(definition, call, op, args, env, reusable, unbound());
+        return call_builtin_checked(definition, call, op, args, env, reusable, blame);
     }
-    run_builtin(definition, call, op, args, env, reusable, unbound())
+    run_builtin(definition, call, op, args, env, reusable, blame)
+}
+
+/// [`call_builtin`] with arguments that are all untagged and none empty, as at a call site tier 0
+/// quickened: the names check cannot fail, so only a hook, a wrong arity or a shared replacement
+/// target takes the checked path.
+#[inline(always)]
+pub(crate) unsafe fn call_builtin_positional(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+) -> R<Sexp> {
+    let checks = definition.checks;
+    if activity::hooks() != 0
+        || (checks.arity && args.len() != definition.arity as usize)
+        || (checks.replacement
+            && args
+                .first()
+                .is_some_and(|target| target.value.refcount() >= 1))
+    {
+        return call_builtin_checked(definition, call, op, args, env, None, unbound());
+    }
+    run_builtin(definition, call, op, args, env, None, unbound())
 }
 
 /// Runs the `.Internal` `definition` that compiled code inlined from its base wrapper, blaming
@@ -1400,7 +1436,7 @@ pub(crate) unsafe fn call_inlined_internal(
         state
             .assignment_call
             .replace((crate::heap().known().unbound, call, state.frames.len()));
-    let result = call_builtin_checked(definition, call, op, args, env, None, call);
+    let result = call_builtin_blaming(definition, call, op, args, env, None, call);
     interp().assignment_call = outer;
     result
 }
@@ -1445,7 +1481,7 @@ unsafe fn call_builtin_checked(
     if checks.names && args.iter().any(|arg| arg.tag != nil()) {
         check_argument_names(definition, call, args)?;
     }
-    if PROFILE_TICK.load(Ordering::Relaxed) {
+    if activity::profile_ticked() {
         record_profile_sample(Some(definition.name))?;
     }
     // A replacement primitive modifies its target in place when the target is referenced
@@ -3481,7 +3517,7 @@ unsafe fn push_frame(
         handle_mark,
         previous_owner,
     });
-    let sampled = if PROFILE_TICK.load(Ordering::Relaxed) {
+    let sampled = if activity::profile_ticked() {
         record_profile_sample(None)
     } else {
         Ok(())
