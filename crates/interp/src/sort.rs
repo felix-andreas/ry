@@ -2533,14 +2533,6 @@ fn hashed_duplicates<K: TableKey>(
 ) -> Option<Bits> {
     let mut table = PositionTable::new(count);
     let mut duplicated = Bits::new(count);
-    let mut flag = |index: usize, base: usize| -> Option<u64> {
-        let key = key_at(index);
-        match table.find_or_insert(key, index, &key_at) {
-            Some(_) => Some(1 << (index - base)),
-            None if key.exact() => Some(0),
-            None => None,
-        }
-    };
     let words = duplicated.words.len();
     for step in 0..words {
         let word_index = if from_last { words - 1 - step } else { step };
@@ -2549,11 +2541,11 @@ fn hashed_duplicates<K: TableKey>(
         let mut word = 0;
         if from_last {
             for index in span.rev() {
-                word |= flag(index, base)?;
+                word |= duplicate_bit(&mut table, &key_at, index, base)?;
             }
         } else {
             for index in span {
-                word |= flag(index, base)?;
+                word |= duplicate_bit(&mut table, &key_at, index, base)?;
             }
         }
         duplicated.words[word_index] = word;
@@ -2562,6 +2554,24 @@ fn hashed_duplicates<K: TableKey>(
         }
     }
     Some(duplicated)
+}
+
+/// Element `index`'s bit in the word starting at `base`, set when it repeats a key already in
+/// `table`, or `None` for a new key that is not [`TableKey::exact`]. Always inlined, because a
+/// call per element costs more than the probe.
+#[inline(always)]
+fn duplicate_bit<K: TableKey>(
+    table: &mut PositionTable,
+    key_at: &impl Fn(usize) -> K,
+    index: usize,
+    base: usize,
+) -> Option<u64> {
+    let key = key_at(index);
+    match table.find_or_insert(key, index, key_at) {
+        Some(_) => Some(1 << (index - base)),
+        None if key.exact() => Some(0),
+        None => None,
+    }
 }
 
 /// `flag(index)` for each of `count` indices, visited first to last or, with `from_last`, last
@@ -2705,7 +2715,9 @@ impl TableKey for Sexp {
 struct PositionTable {
     slots: SmallVec<[u32; 32]>,
     shift: u32,
-    filled: usize,
+    /// Inserts left before the table is more than half full, counted down so that an insert
+    /// tests one field rather than the slots' length, which `SmallVec` keeps behind a branch.
+    room: usize,
 }
 
 impl PositionTable {
@@ -2718,7 +2730,7 @@ impl PositionTable {
         Self {
             slots: smallvec![0; size],
             shift: 64 - size.trailing_zeros(),
-            filled: 0,
+            room: size / 2 + 1,
         }
     }
 
@@ -2744,8 +2756,8 @@ impl PositionTable {
             slot += 1;
         }
         slots[slot & mask] = position as u32 + 1;
-        self.filled += 1;
-        if 2 * self.filled > self.slots.len() {
+        self.room -= 1;
+        if self.room == 0 {
             self.grow(key_at);
         }
         None
@@ -2773,14 +2785,18 @@ impl PositionTable {
         let doubled = smallvec![0; 2 * self.slots.len()];
         let old = std::mem::replace(&mut self.slots, doubled);
         self.shift -= 1;
-        let mask = self.slots.len() - 1;
+        let slots: &mut [u32] = &mut self.slots;
+        let mask = slots.len() - 1;
+        let mut moved = 0;
         for stored in old.into_iter().filter(|&stored| stored != 0) {
             let mut slot = (key_at(stored as usize - 1).table_hash() >> self.shift) as usize;
-            while self.slots[slot & mask] != 0 {
+            while slots[slot & mask] != 0 {
                 slot += 1;
             }
-            self.slots[slot & mask] = stored;
+            slots[slot & mask] = stored;
+            moved += 1;
         }
+        self.room = slots.len() / 2 + 1 - moved;
     }
 }
 
