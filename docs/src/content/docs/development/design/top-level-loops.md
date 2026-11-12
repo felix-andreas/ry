@@ -81,6 +81,17 @@ Otherwise the tree walker runs it, as for every loop inside a function that the 
   thorough validity check at loop entry, the body rooted for the loop's lifetime, pending unwinds
   pushed on `Interp::held_unwinds` when the entry bypasses `jit::run`, and `frame_safe` only under
   the no-locals rule. Until then nothing constructs `Frame::Global`.
+- **What the global frame's planner leaves on the table.** Three gaps are known, each
+  a follow-up once the entry is wired:
+  - `ForStep` refuses, so only `while` and `repeat` loops would reach the tier, while top-level loops
+    are mostly `for (i in 1:n)`. Keeping the counter and sequence in registers and writing the
+    variable each iteration through a binding write on the environment costs what tier 0's write
+    costs.
+  - A direct call whose argument is a variable refuses, so `s <- f(s, x)` runs as a tier-0 call.
+    An argument kind that loads the binding cell, falling back like a failed load, would cover it.
+  - Every `GetVar` is a tier-0 step, so arithmetic on globals stays boxed. The larger gain needs
+    globals pinned to their binding cells (speculated, and invalidated on rebinding) or promoted
+    to registers for the loop's duration.
 - **`return` in a top-level loop.** GNU R's compiled loop treats `return(1)` as leaving the loop,
   so `for (i in 1:100) if (i == 3) return(1); cat(i)` prints `3`, where ry's tree walker raises "no
   function to return from". Such loops stay in the tree walker, which keeps today's behavior.
