@@ -5687,11 +5687,14 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
             let mut value = cell.cdr();
             if value.kind() == SexpType::Promise {
                 if value.car() == rvalues::unbound() {
-                    // Base binds its closures to lazy-load promises, which only read the
-                    // function from the package database, so forcing one is safe. A promise
-                    // anywhere else may run arbitrary code. A load that fails leaves the call to
-                    // the interpreter, which raises the error itself.
-                    if env != heap.known().base_env && env != heap.known().base_namespace {
+                    // An installed package binds its closures to lazy-load promises, which only
+                    // read the function from the package database, so forcing one is safe. A
+                    // promise of anything else may run arbitrary code. A load that fails leaves
+                    // the call to the interpreter, which raises the error itself.
+                    let reads_database = env == heap.known().base_env
+                        || env == heap.known().base_namespace
+                        || matches!(interp::serialize::lazy_record_header(value), Ok(Some(_)));
+                    if !reads_database {
                         return None;
                     }
                     value = interp::eval::force_promise(value).ok()?;

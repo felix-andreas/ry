@@ -198,8 +198,60 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
     let texts = values::string_vector(&texts)?;
     let names = values::string_vector(&names)?;
     let signature = values::list_vector(&[masks, texts, names, body])?;
-    let heap = crate::heap();
-    let weak = heap.alloc_weak_ref(key, signature, nil(), 0, false)?;
+    register(key, signature)
+}
+
+/// The name of the attribute a serialized typed closure carries its signature under. A closure in
+/// memory never has it: the registry holds the signature, keyed by the definition.
+pub const STREAM_ATTRIBUTE: &str = ".ry_signature";
+
+/// What a stream must carry for `function`'s signature to outlive the session: the masks, the
+/// annotation texts and the formal names. `None` for an untyped closure.
+pub unsafe fn stream_signature(function: Sexp) -> R<Option<Sexp>> {
+    let Some(signature) = signature_of(function) else {
+        return Ok(None);
+    };
+    let carried = values::list_vector(&[
+        signature.element(MASKS),
+        signature.element(TEXTS),
+        signature.element(NAMES),
+    ])?;
+    Ok(Some(carried))
+}
+
+/// Registers the signature a stream carried for `function`, as [`stream_signature`] wrote it. A
+/// value of any other shape registers nothing, so the closure is untyped, as it would be read
+/// by an R that knows no annotations.
+pub unsafe fn restore_signature(function: Sexp, carried: Sexp) -> R<()> {
+    if carried.kind() != SexpType::List || values::length(carried) != 3 {
+        return Ok(());
+    }
+    let (masks, texts, names) = (carried.element(0), carried.element(1), carried.element(2));
+    let slots = values::length(masks);
+    if masks.kind() != SexpType::Integer
+        || texts.kind() != SexpType::String
+        || names.kind() != SexpType::String
+        || slots < FIRST_FORMAL_SLOT
+        || values::length(texts) != slots
+    {
+        return Ok(());
+    }
+    let formals = function.car();
+    let body = crate::bytecode::closure_body(function);
+    let key = if formals.kind() == SexpType::Pairlist {
+        formals
+    } else if body.kind() == SexpType::Language {
+        body
+    } else {
+        return Ok(());
+    };
+    let signature = values::list_vector(&[masks, texts, names, body])?;
+    register(key, signature)
+}
+
+/// Makes `signature` the signature of the definition `key` names.
+unsafe fn register(key: Sexp, signature: Sexp) -> R<()> {
+    let weak = crate::heap().alloc_weak_ref(key, signature, nil(), 0, false)?;
     key.set_gp_bits(gp::TYPED_DEFINITION, true);
     let state = &mut interp().annotations;
     state.signatures.insert(key, weak);
