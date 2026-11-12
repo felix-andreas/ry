@@ -301,28 +301,38 @@ unsafe fn shape(body: Sexp, formals: Sexp, srcref: Sexp) -> u64 {
     hasher.finish()
 }
 
-/// Walks with an explicit stack, because a long left-nested chain such as `a + b + c + ...`
-/// nests calls in the car as deep as it is long.
+/// Walks each call's arguments in a loop and keeps only nested calls on an explicit stack,
+/// because a long left-nested chain such as `a + b + c + ...` nests calls in the car as deep as
+/// it is long.
 unsafe fn hash_shape(expression: Sexp, hasher: &mut rustc_hash::FxHasher) {
     let mut pending: SmallVec<[Sexp; 16]> = smallvec![expression];
-    while let Some(node) = pending.pop() {
-        (node.kind() as u8).hash(hasher);
-        match node.kind() {
-            SexpType::Language | SexpType::Pairlist => {
-                node.tag().hash(hasher);
-                pending.push(node.cdr());
-                pending.push(node.car());
+    while let Some(mut node) = pending.pop() {
+        while matches!(node.kind(), SexpType::Language | SexpType::Pairlist) {
+            (node.kind() as u8).hash(hasher);
+            node.tag().hash(hasher);
+            let head = node.car();
+            if matches!(head.kind(), SexpType::Language | SexpType::Pairlist) {
+                pending.push(head);
+            } else {
+                hash_leaf(head, hasher);
             }
-            // Reading an ALTREP vector can run R code, so one hashes by identity.
-            _ if node.is_altrep() => node.hash(hasher),
-            SexpType::Integer | SexpType::Logical if length(node) == 1 => {
-                values::ints(node).hash(hasher);
-            }
-            SexpType::Real if length(node) == 1 => {
-                values::reals(node)[0].to_bits().hash(hasher);
-            }
-            _ => node.hash(hasher),
+            node = node.cdr();
         }
+        hash_leaf(node, hasher);
+    }
+}
+
+unsafe fn hash_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    match node.kind() {
+        // Reading an ALTREP vector can run R code, so one hashes by identity.
+        _ if node.is_altrep() => node.hash(hasher),
+        SexpType::Integer | SexpType::Logical if length(node) == 1 => {
+            values::ints(node).hash(hasher);
+        }
+        SexpType::Real if length(node) == 1 => {
+            values::reals(node)[0].to_bits().hash(hasher);
+        }
+        _ => node.hash(hasher),
     }
 }
 
