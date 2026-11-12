@@ -164,6 +164,16 @@ These are hot in package code and work from the slots and the frame reference al
   `x <<- value` and `switch(selector, ...)` over the frame's `...`, which `slot_special_call` in
   `bytecode.rs` runs on the slots.
 - `parent.frame()` that is only passed on or compared (see above).
+- `x[i]` and `x[[i]]` whose other arguments are constants, empty or locals, such as `s[[field]]`
+  with `field` a formal (`slot_subject_call` in `bytecode.rs`). The subject evaluates first. An
+  object subject then looks for its method before anything else runs (GNU R's `DispatchOrEval`
+  order), starting from the enclosure, which answers as the frame would because the check refuses
+  a frame with a local named like a method of the generic or named `.packageName`. Only a method
+  found reifies the frame, so that the method's promises (a fresh promise of `field` in the frame,
+  so `substitute(i)` in the method returns `field`) have an environment to point at. Without a
+  method, the other arguments evaluate from the slots after the lookup, and a formal that is
+  missing, also deeply through the caller's promise of a missing argument, passes on as an empty
+  argument. An S4 subject and a frame subject of `[` take the environment's path.
 
 ### The C API
 

@@ -1787,6 +1787,55 @@ pub unsafe fn dispatch_evaluated_subject(
     dispatch_promised(definition, call, op, &promised, env, args)
 }
 
+/// The S3 method an object subject of the dispatch-or-eval special `definition` dispatches to,
+/// looked up from `call_env`. A slot frame passes its enclosure, which answers as the frame
+/// would when none of its locals is named like a method of the generic.
+pub(crate) unsafe fn subject_method(
+    definition: &BuiltinDef,
+    object: Sexp,
+    call_env: Sexp,
+) -> R<Option<SubjectMethod>> {
+    let _activity = activity::enter(Activity::S3Dispatch, 0);
+    let classes = implicit_class(object)?;
+    let generic = match definition.symbol {
+        Some(symbol) => symbol,
+        None => values::install(definition.name)?,
+    };
+    let method = resolve_s3(
+        generic,
+        nil(),
+        true,
+        classes,
+        call_env,
+        values::base_namespace(),
+    )?;
+    Ok(method.map(SubjectMethod))
+}
+
+/// A method [`subject_method`] found.
+pub(crate) struct SubjectMethod(S3Method);
+
+/// Calls the method [`subject_method`] found for `object`, the evaluated subject of `call`, as
+/// [`dispatch_evaluated_subject`] would from `env`: the subject as a forced promise of its
+/// expression, the other arguments as promises in `env`.
+pub(crate) unsafe fn apply_subject_method(
+    call: Sexp,
+    method: SubjectMethod,
+    object: Sexp,
+    env: Sexp,
+) -> R<Sexp> {
+    let arguments = call.cdr();
+    let mut promised: Args = smallvec::smallvec![Arg {
+        tag: arguments.tag(),
+        value: forced_promise(arguments.car(), object)?,
+    }];
+    promised.extend(eval::promise_args(arguments.cdr(), env)?);
+    let found = Found::of(method.0, env, values::base_namespace());
+    let value = apply_internal_method(call, found, &promised, env)?;
+    interp().visible = true;
+    Ok(value)
+}
+
 unsafe fn dispatch_promised(
     definition: &BuiltinDef,
     call: Sexp,
@@ -1804,7 +1853,10 @@ unsafe fn dispatch_promised(
         {
             Some(value)
         } else if let Some(found) = find_s3_method(
-            values::install(definition.name)?,
+            match definition.symbol {
+                Some(symbol) => symbol,
+                None => values::install(definition.name)?,
+            },
             object,
             env,
             values::base_namespace(),
