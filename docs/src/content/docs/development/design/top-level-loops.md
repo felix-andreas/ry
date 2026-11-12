@@ -68,13 +68,19 @@ Otherwise the tree walker runs it, as for every loop inside a function that the 
   "'missing(x)' did not find an argument". Each needs an oracle case before the rule widens. The
   testthat suite's gain would come from that step.
 - **The optimizing tier.** Deoptimization and OSR need no call frame, only the bytecode `Machine`,
-  whose header register must hold the global environment and whose `enclosure()` the epoch checks
-  key on. What the tier lacks is a rule for variables: its planner takes its locals from
-  `local_symbols` of the body and holds them in SSA across calls, which is unsound when any callee
-  can write them through `<<-`, `assign()` or an active binding. Enabling it needs a "global frame"
-  flag under which no symbol is local and every variable is re-read after each call, a thorough
-  validity check at loop entry, the body rooted for the loop's lifetime, and pending unwinds
-  pushed on `Interp::held_unwinds` when the entry bypasses `jit::run`.
+  whose header register must hold the global environment. With that header, `Machine::enclosure()`
+  returns the global environment's parent (the first search-path environment), not the global
+  environment: it is the lookup start for names the frame does not bind, and the tier's reuse and
+  epoch checks key on it. The planner takes `analysis::Frame::Global { env }` for this frame: no
+  locals and no slots, every `GetVar`, `SetVar` and element assignment a tier-0 step on the
+  environment's bindings (any callee can write them through `<<-`, `assign()` or an active
+  binding), a refusal at `ForStep`, which keeps the loop variable in a slot, and function lookups
+  speculated from the global environment itself, since its bindings may shadow the search path.
+  Because the planner's lookup start then differs from `Machine::enclosure()`, wiring the entry
+  also needs the reuse check and the activation's enclosure to use the frame's lookup start, a
+  thorough validity check at loop entry, the body rooted for the loop's lifetime, pending unwinds
+  pushed on `Interp::held_unwinds` when the entry bypasses `jit::run`, and `frame_safe` only under
+  the no-locals rule. Until then nothing constructs `Frame::Global`.
 - **`return` in a top-level loop.** GNU R's compiled loop treats `return(1)` as leaving the loop,
   so `for (i in 1:100) if (i == 3) return(1); cat(i)` prints `3`, where ry's tree walker raises "no
   function to return from". Such loops stay in the tree walker, which keeps today's behavior.
