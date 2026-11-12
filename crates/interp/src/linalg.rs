@@ -5,8 +5,8 @@
 //! Results must match GNU R bit for bit. The matrix products are ry's own kernels, which sum in
 //! reference BLAS's order and so match GNU R on its reference BLAS on every machine. The rest of
 //! the numerical work runs in the same libraries GNU R links: its BLAS and LAPACK, found at runtime (the workspace builds without them; see
-//! `library_candidates`), called with the same arguments, the same workspace queries and the
-//! same Fortran calling convention (every argument by reference, a hidden length after the
+//! `library_candidates`), called with the same arguments, the same workspace queries, buffers at
+//! the same addresses modulo 16 (see `Placed`) and the same Fortran calling convention (every argument by reference, a hidden length after the
 //! arguments for each character argument). `dqrdc2` is R's own variant of LINPACK's QR, which no system library
 //! ships, so it is written here from its description: Householder QR whose column pivoting only
 //! moves a column to the end once its remaining norm falls below `tol` times its original norm.
@@ -30,7 +30,7 @@ use {
     std::{
         cell::Cell,
         ffi::{CStr, c_char, c_int, c_void},
-        ops::Deref,
+        ops::{Deref, DerefMut},
         path::Path,
         sync::OnceLock,
     },
@@ -627,7 +627,9 @@ fn host_real_product(
     let (x_rows, x_cols, y_rows, y_cols) =
         (x_rows as i32, x_cols as i32, y_rows as i32, y_cols as i32);
     let (none, transposed, upper) = (c"N".as_ptr(), c"T".as_ptr(), c"U".as_ptr());
-    let (x, y, z_pointer) = (x.as_ptr(), y.as_ptr(), z.as_mut_ptr());
+    let (x_placed, y_placed) = (PlacedInput::vector(x), PlacedInput::vector(y));
+    let mut result = Placed::vector(&mut *z);
+    let (x, y, z_pointer) = (x_placed.as_ptr(), y_placed.as_ptr(), result.as_mut_ptr());
     // SAFETY: every call reads the operands and writes the result within the extents GNU R
     // passes for the same product, and the result has that many entries.
     unsafe {
@@ -674,6 +676,7 @@ fn host_real_product(
             ),
         }
     }
+    drop(result);
     if symmetric {
         match product {
             Product::Cross => mirror_upper(z, x_cols as usize),
@@ -712,7 +715,9 @@ fn host_complex_product(
     let (x_rows, x_cols, y_rows, y_cols) =
         (x_rows as i32, x_cols as i32, y_rows as i32, y_cols as i32);
     let (none, transposed) = (c"N".as_ptr(), c"T".as_ptr());
-    let (x, y, z) = (x.as_ptr(), y.as_ptr(), z.as_mut_ptr());
+    let (x_placed, y_placed) = (PlacedInput::vector(x), PlacedInput::vector(y));
+    let mut result = Placed::vector(z);
+    let (x, y, z) = (x_placed.as_ptr(), y_placed.as_ptr(), result.as_mut_ptr());
     // SAFETY: as for `host_real_product`.
     unsafe {
         match product {
@@ -1005,21 +1010,28 @@ unsafe fn la_solve(a: Sexp, b: Sexp, tol: Sexp) -> R<Sexp> {
     let (result, columns) = solve_right_hand_side(a, b, n, SexpType::Real)?;
     let b_values = coerce_vector(b, SexpType::Real)?;
     reals_mut(result).copy_from_slice(&reals(b_values)[..n * columns]);
+    // GNU R factors an `R_alloc` copy of a double `a`, and a coerced `a` in place.
     let a_was_real = a.kind() == SexpType::Real;
-    let mut factors = reals(coerce_vector(a, SexpType::Real)?).to_vec();
+    let mut factors = if a_was_real {
+        Placed::copy_of(reals(a), Allocation::Scratch)
+    } else {
+        Placed::copy_of(reals(coerce_vector(a, SexpType::Real)?), Allocation::Vector)
+    };
     let mut pivots = vec![0i32; n];
     let (order, rhs) = (n as i32, columns as i32);
     let mut info = 0;
+    let mut solution = Placed::vector(reals_mut(result));
     (lapack.dgesv)(
         &order,
         &rhs,
         factors.as_mut_ptr(),
         &order,
         pivots.as_mut_ptr(),
-        reals_mut(result).as_mut_ptr(),
+        solution.as_mut_ptr(),
         &order,
         &mut info,
     );
+    drop(solution);
     if info < 0 {
         return Err(error(format!(
             "argument {} of Lapack routine dgesv had invalid value",
@@ -1034,21 +1046,17 @@ unsafe fn la_solve(a: Sexp, b: Sexp, tol: Sexp) -> R<Sexp> {
     if tol > 0.0 {
         // GNU R takes the norm of its working copy, which for an integer or logical `a` is the
         // copy `dgesv` has just factored.
-        let norm_source = if a_was_real {
-            reals(a).to_vec()
-        } else {
-            factors.clone()
-        };
+        let original = a_was_real.then(|| PlacedInput::vector(reals(a)));
         let anorm = (lapack.dlange)(
             c"1".as_ptr(),
             &order,
             &order,
-            norm_source.as_ptr(),
+            original.as_deref().unwrap_or(&factors).as_ptr(),
             &order,
             std::ptr::null_mut(),
             1,
         );
-        let mut work = vec![0.0; 4 * n];
+        let mut work = Placed::zeroed(4 * n, Allocation::Scratch);
         let mut rcond = 0.0;
         (lapack.dgecon)(
             c"1".as_ptr(),
@@ -1083,20 +1091,29 @@ unsafe fn la_solve_complex(a: Sexp, b: Sexp, tol: Sexp) -> R<Sexp> {
     let b_values = coerce_vector(b, SexpType::Complex)?;
     complexes_mut(result).copy_from_slice(&complexes(b_values)[..n * columns]);
     let a_was_complex = a.kind() == SexpType::Complex;
-    let mut factors = complexes(coerce_vector(a, SexpType::Complex)?).to_vec();
+    let mut factors = if a_was_complex {
+        Placed::copy_of(complexes(a), Allocation::Scratch)
+    } else {
+        Placed::copy_of(
+            complexes(coerce_vector(a, SexpType::Complex)?),
+            Allocation::Vector,
+        )
+    };
     let mut pivots = vec![0i32; n];
     let (order, rhs) = (n as i32, columns as i32);
     let mut info = 0;
+    let mut solution = Placed::vector(complexes_mut(result));
     (lapack.zgesv)(
         &order,
         &rhs,
         factors.as_mut_ptr(),
         &order,
         pivots.as_mut_ptr(),
-        complexes_mut(result).as_mut_ptr(),
+        solution.as_mut_ptr(),
         &order,
         &mut info,
     );
+    drop(solution);
     if info < 0 {
         return Err(error(format!(
             "argument {} of Lapack routine zgesv had invalid value",
@@ -1108,22 +1125,18 @@ unsafe fn la_solve_complex(a: Sexp, b: Sexp, tol: Sexp) -> R<Sexp> {
     }
     if tol > 0.0 {
         // As in `la_solve`, a coerced `a` is normed after factoring.
-        let norm_source = if a_was_complex {
-            complexes(a).to_vec()
-        } else {
-            factors.clone()
-        };
-        let mut real_work = vec![0.0; 2 * n];
+        let original = a_was_complex.then(|| PlacedInput::vector(complexes(a)));
         let anorm = (lapack.zlange)(
             c"1".as_ptr(),
             &order,
             &order,
-            norm_source.as_ptr(),
+            original.as_deref().unwrap_or(&factors).as_ptr(),
             &order,
-            real_work.as_mut_ptr(),
+            std::ptr::null_mut(),
             1,
         );
-        let mut work = vec![Rcomplex::default(); 2 * n];
+        let mut work = Placed::<Rcomplex>::zeroed(2 * n, Allocation::Scratch);
+        let mut real_work = Placed::<f64>::zeroed(2 * n, Allocation::Scratch);
         let mut rcond = 0.0;
         (lapack.zgecon)(
             c"1".as_ptr(),
@@ -1218,7 +1231,7 @@ unsafe fn la_chol(a: Sexp, pivot: Sexp, tol: Sexp) -> R<Sexp> {
         return Err(error("'a' must have dims > 0"));
     }
     let n = rows;
-    let values_out = reals_mut(result);
+    let mut values_out = Placed::vector(reals_mut(result));
     for col in 0..n {
         for row in col + 1..n {
             values_out[row + n * col] = 0.0;
@@ -1253,7 +1266,7 @@ unsafe fn la_chol(a: Sexp, pivot: Sexp, tol: Sexp) -> R<Sexp> {
         return Ok(result);
     }
     let tol = values::as_real_scalar(tol);
-    let mut work = vec![0.0; 2 * n];
+    let mut work = Placed::zeroed(2 * n, Allocation::Scratch);
     let pivots = alloc(SexpType::Integer, n)?;
     let mut rank = 0;
     (lapack.dpstrf)(
@@ -1307,7 +1320,7 @@ unsafe fn la_chol2inv(a: Sexp, size: Sexp) -> R<Sexp> {
     }
     let source = coerce_vector(a, SexpType::Real)?;
     let result = alloc_matrix(SexpType::Real, size, size)?;
-    let (input, output) = (reals(source), reals_mut(result));
+    let (input, mut output) = (reals(source), Placed::vector(reals_mut(result)));
     output.fill(0.0);
     for col in 0..size {
         for row in 0..=col {
@@ -1357,31 +1370,34 @@ unsafe fn la_qr(a: Sexp) -> R<Sexp> {
     let mut info = 0;
     let mut query = 0.0;
     let lwork = -1;
+    let mut factor = Placed::vector(reals_mut(result));
+    let mut scalars = Placed::vector(reals_mut(tau));
     (lapack.dgeqp3)(
         &m,
         &n,
-        reals_mut(result).as_mut_ptr(),
+        factor.as_mut_ptr(),
         &m,
         ints_mut(pivots).as_mut_ptr(),
-        reals_mut(tau).as_mut_ptr(),
+        scalars.as_mut_ptr(),
         &mut query,
         &lwork,
         &mut info,
     );
     lapack_status(info < 0, info, "dgeqp3")?;
     let lwork = query as i32;
-    let mut work = vec![0.0; lwork.max(1) as usize];
+    let mut work = Placed::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.dgeqp3)(
         &m,
         &n,
-        reals_mut(result).as_mut_ptr(),
+        factor.as_mut_ptr(),
         &m,
         ints_mut(pivots).as_mut_ptr(),
-        reals_mut(tau).as_mut_ptr(),
+        scalars.as_mut_ptr(),
         work.as_mut_ptr(),
         &lwork,
         &mut info,
     );
+    drop((factor, scalars));
     lapack_status(info < 0, info, "dgeqp3")?;
     permute_column_names(result, ints(pivots))?;
     qr_list(result, rows.min(cols), tau, pivots)
@@ -1396,18 +1412,20 @@ unsafe fn la_qr_complex(a: Sexp) -> R<Sexp> {
     let pivots = alloc(SexpType::Integer, cols)?;
     ints_mut(pivots).fill(0);
     let tau = alloc(SexpType::Complex, rows.min(cols))?;
-    let mut real_work = vec![0.0; 2 * cols];
+    let mut real_work = Placed::<f64>::zeroed(2 * cols, Allocation::Scratch);
     let (m, n) = (rows as i32, cols as i32);
     let mut info = 0;
     let mut query = Rcomplex::default();
     let lwork = -1;
+    let mut factor = Placed::vector(complexes_mut(result));
+    let mut scalars = Placed::vector(complexes_mut(tau));
     (lapack.zgeqp3)(
         &m,
         &n,
-        complexes_mut(result).as_mut_ptr(),
+        factor.as_mut_ptr(),
         &m,
         ints_mut(pivots).as_mut_ptr(),
-        complexes_mut(tau).as_mut_ptr(),
+        scalars.as_mut_ptr(),
         &mut query,
         &lwork,
         real_work.as_mut_ptr(),
@@ -1415,19 +1433,20 @@ unsafe fn la_qr_complex(a: Sexp) -> R<Sexp> {
     );
     lapack_status(info < 0, info, "zgeqp3")?;
     let lwork = query.r as i32;
-    let mut work = vec![Rcomplex::default(); lwork.max(1) as usize];
+    let mut work = Placed::<Rcomplex>::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.zgeqp3)(
         &m,
         &n,
-        complexes_mut(result).as_mut_ptr(),
+        factor.as_mut_ptr(),
         &m,
         ints_mut(pivots).as_mut_ptr(),
-        complexes_mut(tau).as_mut_ptr(),
+        scalars.as_mut_ptr(),
         work.as_mut_ptr(),
         &lwork,
         real_work.as_mut_ptr(),
         &mut info,
     );
+    drop((factor, scalars));
     lapack_status(info < 0, info, "zgeqp3")?;
     permute_column_names(result, ints(pivots))?;
     qr_list(result, rows.min(cols), tau, pivots)
@@ -1483,21 +1502,24 @@ unsafe fn qr_coef_real(qr_object: Sexp, b: Sexp) -> R<Sexp> {
     let (n, rhs) = (factor.rows as i32, rhs_count as i32);
     multiply_by_q_real(&lapack, &factor, result, c"T", n, rhs, k)?;
     let mut info = 0;
+    let factor_values = PlacedInput::vector(reals(factor.qr));
+    let mut solution = Placed::vector(reals_mut(result));
     (lapack.dtrtrs)(
         c"U".as_ptr(),
         c"N".as_ptr(),
         c"N".as_ptr(),
         &k,
         &rhs,
-        reals(factor.qr).as_ptr(),
+        factor_values.as_ptr(),
         &n,
-        reals_mut(result).as_mut_ptr(),
+        solution.as_mut_ptr(),
         &n,
         &mut info,
         1,
         1,
         1,
     );
+    drop(solution);
     lapack_status(info != 0, info, "dtrtrs")?;
     Ok(result)
 }
@@ -1513,21 +1535,24 @@ unsafe fn qr_coef_complex(qr_object: Sexp, b: Sexp) -> R<Sexp> {
     let (n, rhs) = (factor.rows as i32, rhs_count as i32);
     multiply_by_q_complex(&lapack, &factor, result, c"C", n, rhs, k)?;
     let mut info = 0;
+    let factor_values = PlacedInput::vector(complexes(factor.qr));
+    let mut solution = Placed::vector(complexes_mut(result));
     (lapack.ztrtrs)(
         c"U".as_ptr(),
         c"N".as_ptr(),
         c"N".as_ptr(),
         &k,
         &rhs,
-        complexes(factor.qr).as_ptr(),
+        factor_values.as_ptr(),
         &n,
-        complexes_mut(result).as_mut_ptr(),
+        solution.as_mut_ptr(),
         &n,
         &mut info,
         1,
         1,
         1,
     );
+    drop(solution);
     lapack_status(info != 0, info, "ztrtrs")?;
     Ok(result)
 }
@@ -1598,16 +1623,19 @@ unsafe fn multiply_by_q_real(
     let mut info = 0;
     let mut query = 0.0;
     let lwork = -1;
+    let factor_values = PlacedInput::vector(reals(factor.qr));
+    let scalars = PlacedInput::vector(reals(factor.tau));
+    let mut product = Placed::vector(reals_mut(target));
     (lapack.dormqr)(
         c"L".as_ptr(),
         trans.as_ptr(),
         &n,
         &rhs,
         &k,
-        reals(factor.qr).as_ptr(),
+        factor_values.as_ptr(),
         &n,
-        reals(factor.tau).as_ptr(),
-        reals_mut(target).as_mut_ptr(),
+        scalars.as_ptr(),
+        product.as_mut_ptr(),
         &n,
         &mut query,
         &lwork,
@@ -1617,17 +1645,17 @@ unsafe fn multiply_by_q_real(
     );
     lapack_status(info != 0, info, "dormqr")?;
     let lwork = query as i32;
-    let mut work = vec![0.0; lwork.max(1) as usize];
+    let mut work = Placed::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.dormqr)(
         c"L".as_ptr(),
         trans.as_ptr(),
         &n,
         &rhs,
         &k,
-        reals(factor.qr).as_ptr(),
+        factor_values.as_ptr(),
         &n,
-        reals(factor.tau).as_ptr(),
-        reals_mut(target).as_mut_ptr(),
+        scalars.as_ptr(),
+        product.as_mut_ptr(),
         &n,
         work.as_mut_ptr(),
         &lwork,
@@ -1650,16 +1678,19 @@ unsafe fn multiply_by_q_complex(
     let mut info = 0;
     let mut query = Rcomplex::default();
     let lwork = -1;
+    let factor_values = PlacedInput::vector(complexes(factor.qr));
+    let scalars = PlacedInput::vector(complexes(factor.tau));
+    let mut product = Placed::vector(complexes_mut(target));
     (lapack.zunmqr)(
         c"L".as_ptr(),
         trans.as_ptr(),
         &n,
         &rhs,
         &k,
-        complexes(factor.qr).as_ptr(),
+        factor_values.as_ptr(),
         &n,
-        complexes(factor.tau).as_ptr(),
-        complexes_mut(target).as_mut_ptr(),
+        scalars.as_ptr(),
+        product.as_mut_ptr(),
         &n,
         &mut query,
         &lwork,
@@ -1669,17 +1700,17 @@ unsafe fn multiply_by_q_complex(
     );
     lapack_status(info != 0, info, "zunmqr")?;
     let lwork = query.r as i32;
-    let mut work = vec![Rcomplex::default(); lwork.max(1) as usize];
+    let mut work = Placed::<Rcomplex>::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.zunmqr)(
         c"L".as_ptr(),
         trans.as_ptr(),
         &n,
         &rhs,
         &k,
-        complexes(factor.qr).as_ptr(),
+        factor_values.as_ptr(),
         &n,
-        complexes(factor.tau).as_ptr(),
-        complexes_mut(target).as_mut_ptr(),
+        scalars.as_ptr(),
+        product.as_mut_ptr(),
         &n,
         work.as_mut_ptr(),
         &lwork,
@@ -1752,7 +1783,16 @@ unsafe fn svd_args(call: &Call<'_>, kind: SexpType) -> R<SvdArgs> {
 unsafe fn la_svd(call: &Call<'_>) -> R<Sexp> {
     let lapack = lapack()?;
     let args = svd_args(call, SexpType::Real)?;
-    let mut x = reals(coerce_vector(call.arg(1), SexpType::Real)?).to_vec();
+    // GNU R decomposes an `R_alloc` copy of a double `x`, and a coerced `x` in place.
+    let source = call.arg(1);
+    let mut x = if source.kind() == SexpType::Real {
+        Placed::copy_of(reals(source), Allocation::Scratch)
+    } else {
+        Placed::copy_of(
+            reals(coerce_vector(source, SexpType::Real)?),
+            Allocation::Vector,
+        )
+    };
     let smaller = args.rows.min(args.cols) as usize;
     let mut integer_work = vec![0i32; 8 * smaller];
     let job =
@@ -1760,16 +1800,19 @@ unsafe fn la_svd(call: &Call<'_>) -> R<Sexp> {
     let mut info = 0;
     let mut query = 0.0;
     let lwork = -1;
+    let mut d = Placed::vector(reals_mut(args.d));
+    let mut u = Placed::vector(reals_mut(args.u));
+    let mut vt = Placed::vector(reals_mut(args.vt));
     (lapack.dgesdd)(
         job.as_ptr(),
         &args.rows,
         &args.cols,
         x.as_mut_ptr(),
         &args.rows,
-        reals_mut(args.d).as_mut_ptr(),
-        reals_mut(args.u).as_mut_ptr(),
+        d.as_mut_ptr(),
+        u.as_mut_ptr(),
         &args.u_rows,
-        reals_mut(args.vt).as_mut_ptr(),
+        vt.as_mut_ptr(),
         &args.vt_rows,
         &mut query,
         &lwork,
@@ -1779,17 +1822,17 @@ unsafe fn la_svd(call: &Call<'_>) -> R<Sexp> {
     );
     lapack_status(info != 0, info, "dgesdd")?;
     let lwork = query as i32;
-    let mut work = vec![0.0; lwork.max(1) as usize];
+    let mut work = Placed::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.dgesdd)(
         job.as_ptr(),
         &args.rows,
         &args.cols,
         x.as_mut_ptr(),
         &args.rows,
-        reals_mut(args.d).as_mut_ptr(),
-        reals_mut(args.u).as_mut_ptr(),
+        d.as_mut_ptr(),
+        u.as_mut_ptr(),
         &args.u_rows,
-        reals_mut(args.vt).as_mut_ptr(),
+        vt.as_mut_ptr(),
         &args.vt_rows,
         work.as_mut_ptr(),
         &lwork,
@@ -1798,38 +1841,45 @@ unsafe fn la_svd(call: &Call<'_>) -> R<Sexp> {
         1,
     );
     lapack_status(info != 0, info, "dgesdd")?;
+    drop((d, u, vt));
     values::named_list(&[("d", args.d), ("u", args.u), ("vt", args.vt)])
 }
 
 unsafe fn la_svd_complex(call: &Call<'_>) -> R<Sexp> {
     let lapack = lapack()?;
     let args = svd_args(call, SexpType::Complex)?;
-    let mut x = complexes(coerce_vector(call.arg(1), SexpType::Complex)?).to_vec();
+    let mut x = Placed::copy_of(
+        complexes(coerce_vector(call.arg(1), SexpType::Complex)?),
+        Allocation::Scratch,
+    );
     let smaller = args.rows.min(args.cols) as usize;
     let larger = args.rows.max(args.cols) as usize;
+    // GNU R's size, with the 7 of LAPACK erratum 111, which sets where the buffer starts.
     let real_work_size = if args.job == "N" {
         7 * smaller
     } else {
-        (5 * smaller * smaller + 5 * smaller)
-            .max(2 * larger * smaller + 2 * smaller * smaller + smaller)
+        (5 * larger + 7).max(2 * larger + 2 * smaller + 1) * smaller
     };
-    let mut real_work = vec![0.0; real_work_size.max(1)];
+    let mut real_work = Placed::<f64>::zeroed(real_work_size, Allocation::Scratch);
     let mut integer_work = vec![0i32; 8 * smaller];
     let job =
         std::ffi::CString::new(args.job.as_str()).map_err(|_| error("invalid 'jobu' value"))?;
     let mut info = 0;
     let mut query = Rcomplex::default();
     let lwork = -1;
+    let mut d = Placed::vector(reals_mut(args.d));
+    let mut u = Placed::vector(complexes_mut(args.u));
+    let mut vt = Placed::vector(complexes_mut(args.vt));
     (lapack.zgesdd)(
         job.as_ptr(),
         &args.rows,
         &args.cols,
         x.as_mut_ptr(),
         &args.rows,
-        reals_mut(args.d).as_mut_ptr(),
-        complexes_mut(args.u).as_mut_ptr(),
+        d.as_mut_ptr(),
+        u.as_mut_ptr(),
         &args.u_rows,
-        complexes_mut(args.vt).as_mut_ptr(),
+        vt.as_mut_ptr(),
         &args.vt_rows,
         &mut query,
         &lwork,
@@ -1840,17 +1890,17 @@ unsafe fn la_svd_complex(call: &Call<'_>) -> R<Sexp> {
     );
     lapack_status(info != 0, info, "zgesdd")?;
     let lwork = query.r as i32;
-    let mut work = vec![Rcomplex::default(); lwork.max(1) as usize];
+    let mut work = Placed::<Rcomplex>::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.zgesdd)(
         job.as_ptr(),
         &args.rows,
         &args.cols,
         x.as_mut_ptr(),
         &args.rows,
-        reals_mut(args.d).as_mut_ptr(),
-        complexes_mut(args.u).as_mut_ptr(),
+        d.as_mut_ptr(),
+        u.as_mut_ptr(),
         &args.u_rows,
-        complexes_mut(args.vt).as_mut_ptr(),
+        vt.as_mut_ptr(),
         &args.vt_rows,
         work.as_mut_ptr(),
         &lwork,
@@ -1860,6 +1910,7 @@ unsafe fn la_svd_complex(call: &Call<'_>) -> R<Sexp> {
         1,
     );
     lapack_status(info != 0, info, "zgesdd")?;
+    drop((d, u, vt));
     values::named_list(&[("d", args.d), ("u", args.u), ("vt", args.vt)])
 }
 
@@ -1883,16 +1934,23 @@ unsafe fn la_rs(x: Sexp, only_values: Sexp) -> R<Sexp> {
     let lapack = lapack()?;
     let n = square_order(x, "'x' must be a square numeric matrix")?;
     let only_values = only_values_flag(only_values)?;
-    let mut matrix = reals(coerce_vector(x, SexpType::Real)?).to_vec();
+    // GNU R works on an `R_alloc` copy of a double `x`, and on a coerced `x` in place.
+    let mut matrix = if x.kind() == SexpType::Real {
+        Placed::copy_of(reals(x), Allocation::Scratch)
+    } else {
+        Placed::copy_of(reals(coerce_vector(x, SexpType::Real)?), Allocation::Vector)
+    };
     let eigenvalues = alloc(SexpType::Real, n)?;
     let vectors = if only_values {
         None
     } else {
         Some(alloc_matrix(SexpType::Real, n, n)?)
     };
-    let vectors_pointer = vectors.map_or(std::ptr::null_mut(), |vectors| {
-        reals_mut(vectors).as_mut_ptr()
-    });
+    let mut values_out = Placed::vector(reals_mut(eigenvalues));
+    let mut vectors_out = vectors.map(|vectors| Placed::vector(reals_mut(vectors)));
+    let vectors_pointer = vectors_out
+        .as_deref_mut()
+        .map_or(std::ptr::null_mut(), <[f64]>::as_mut_ptr);
     let job = if only_values { c"N" } else { c"V" };
     let order = n as i32;
     let (lower_bound, upper_bound, abstol) = (0.0f64, 0.0f64, 0.0f64);
@@ -1916,7 +1974,7 @@ unsafe fn la_rs(x: Sexp, only_values: Sexp) -> R<Sexp> {
         &upper_index,
         &abstol,
         &mut found,
-        reals_mut(eigenvalues).as_mut_ptr(),
+        values_out.as_mut_ptr(),
         vectors_pointer,
         &order,
         support.as_mut_ptr(),
@@ -1931,7 +1989,7 @@ unsafe fn la_rs(x: Sexp, only_values: Sexp) -> R<Sexp> {
     );
     lapack_status(info != 0, info, "dsyevr")?;
     let (lwork, liwork) = (query as i32, integer_query);
-    let mut work = vec![0.0; lwork.max(1) as usize];
+    let mut work = Placed::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     let mut integer_work = vec![0i32; liwork.max(1) as usize];
     (lapack.dsyevr)(
         job.as_ptr(),
@@ -1946,7 +2004,7 @@ unsafe fn la_rs(x: Sexp, only_values: Sexp) -> R<Sexp> {
         &upper_index,
         &abstol,
         &mut found,
-        reals_mut(eigenvalues).as_mut_ptr(),
+        values_out.as_mut_ptr(),
         vectors_pointer,
         &order,
         support.as_mut_ptr(),
@@ -1959,6 +2017,7 @@ unsafe fn la_rs(x: Sexp, only_values: Sexp) -> R<Sexp> {
         1,
         1,
     );
+    drop((values_out, vectors_out));
     lapack_status(info != 0, info, "dsyevr")?;
     match vectors {
         Some(vectors) => values::named_list(&[("values", eigenvalues), ("vectors", vectors)]),
@@ -1976,17 +2035,20 @@ unsafe fn la_rs_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
     let eigenvalues = alloc(SexpType::Real, n)?;
     let job = if only_values { c"N" } else { c"V" };
     let order = n as i32;
-    let mut real_work = vec![0.0; (3 * n).saturating_sub(2).max(1)];
+    let mut real_work =
+        Placed::<f64>::zeroed((3 * n).saturating_sub(2).max(1), Allocation::Scratch);
     let mut info = 0;
     let mut query = Rcomplex::default();
     let lwork = -1;
+    let mut matrix_out = Placed::vector(complexes_mut(matrix));
+    let mut values_out = Placed::vector(reals_mut(eigenvalues));
     (lapack.zheev)(
         job.as_ptr(),
         c"L".as_ptr(),
         &order,
-        complexes_mut(matrix).as_mut_ptr(),
+        matrix_out.as_mut_ptr(),
         &order,
-        reals_mut(eigenvalues).as_mut_ptr(),
+        values_out.as_mut_ptr(),
         &mut query,
         &lwork,
         real_work.as_mut_ptr(),
@@ -1996,14 +2058,14 @@ unsafe fn la_rs_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
     );
     lapack_status(info != 0, info, "zheev")?;
     let lwork = query.r as i32;
-    let mut work = vec![Rcomplex::default(); lwork.max(1) as usize];
+    let mut work = Placed::<Rcomplex>::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.zheev)(
         job.as_ptr(),
         c"L".as_ptr(),
         &order,
-        complexes_mut(matrix).as_mut_ptr(),
+        matrix_out.as_mut_ptr(),
         &order,
-        reals_mut(eigenvalues).as_mut_ptr(),
+        values_out.as_mut_ptr(),
         work.as_mut_ptr(),
         &lwork,
         real_work.as_mut_ptr(),
@@ -2011,6 +2073,7 @@ unsafe fn la_rs_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
         1,
         1,
     );
+    drop((matrix_out, values_out));
     lapack_status(info != 0, info, "zheev")?;
     if only_values {
         values::named_list(&[("values", eigenvalues)])
@@ -2024,21 +2087,22 @@ unsafe fn la_rs_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
 unsafe fn la_rg(x: Sexp, only_values: Sexp) -> R<Sexp> {
     let lapack = lapack()?;
     let n = square_order(x, "'x' must be a square numeric matrix")?;
-    let mut matrix = reals(coerce_vector(x, SexpType::Real)?).to_vec();
-    let only_values = only_values_flag(only_values)?;
-    let mut right = if only_values {
-        Vec::new()
+    // GNU R works on an `R_alloc` copy of a double `x`, and on a coerced `x` in place.
+    let mut matrix = if x.kind() == SexpType::Real {
+        Placed::copy_of(reals(x), Allocation::Scratch)
     } else {
-        vec![0.0; n * n]
+        Placed::copy_of(reals(coerce_vector(x, SexpType::Real)?), Allocation::Vector)
     };
+    let only_values = only_values_flag(only_values)?;
+    let mut right = Placed::zeroed(if only_values { 0 } else { n * n }, Allocation::Scratch);
     let right_pointer = if only_values {
         std::ptr::null_mut()
     } else {
         right.as_mut_ptr()
     };
     let job_right = if only_values { c"N" } else { c"V" };
-    let mut real_parts = vec![0.0; n];
-    let mut imaginary_parts = vec![0.0; n];
+    let mut real_parts = Placed::zeroed(n, Allocation::Scratch);
+    let mut imaginary_parts = Placed::zeroed(n, Allocation::Scratch);
     let order = n as i32;
     let mut info = 0;
     let mut query = 0.0;
@@ -2063,7 +2127,7 @@ unsafe fn la_rg(x: Sexp, only_values: Sexp) -> R<Sexp> {
     );
     lapack_status(info != 0, info, "dgeev")?;
     let lwork = query as i32;
-    let mut work = vec![0.0; lwork.max(1) as usize];
+    let mut work = Placed::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.dgeev)(
         c"N".as_ptr(),
         job_right.as_ptr(),
@@ -2085,7 +2149,7 @@ unsafe fn la_rg(x: Sexp, only_values: Sexp) -> R<Sexp> {
     lapack_status(info != 0, info, "dgeev")?;
     let complex_values = real_parts
         .iter()
-        .zip(&imaginary_parts)
+        .zip(imaginary_parts.iter())
         .any(|(real, imaginary)| imaginary.abs() > 10.0 * f64::EPSILON * real.abs());
     let (eigenvalues, vectors) = if complex_values {
         let eigenvalues = alloc(SexpType::Complex, n)?;
@@ -2152,19 +2216,24 @@ unsafe fn unscramble(imaginary_parts: &[f64], n: usize, packed: &[f64]) -> R<Sex
 unsafe fn la_rg_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
     let lapack = lapack()?;
     let n = square_order(x, "'x' must be a square numeric matrix")?;
-    let mut matrix = complexes(coerce_vector(x, SexpType::Complex)?).to_vec();
+    let mut matrix = Placed::copy_of(
+        complexes(coerce_vector(x, SexpType::Complex)?),
+        Allocation::Scratch,
+    );
     let only_values = only_values_flag(only_values)?;
     let vectors = if only_values {
         None
     } else {
         Some(alloc_matrix(SexpType::Complex, n, n)?)
     };
-    let right_pointer = vectors.map_or(std::ptr::null_mut(), |vectors| {
-        complexes_mut(vectors).as_mut_ptr()
-    });
     let job_right = if only_values { c"N" } else { c"V" };
     let eigenvalues = alloc(SexpType::Complex, n)?;
-    let mut real_work = vec![0.0; 2 * n];
+    let mut vectors_out = vectors.map(|vectors| Placed::vector(complexes_mut(vectors)));
+    let right_pointer = vectors_out
+        .as_deref_mut()
+        .map_or(std::ptr::null_mut(), <[Rcomplex]>::as_mut_ptr);
+    let mut values_out = Placed::vector(complexes_mut(eigenvalues));
+    let mut real_work = Placed::<f64>::zeroed(2 * n, Allocation::Scratch);
     let order = n as i32;
     let mut info = 0;
     let mut query = Rcomplex::default();
@@ -2175,7 +2244,7 @@ unsafe fn la_rg_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
         &order,
         matrix.as_mut_ptr(),
         &order,
-        complexes_mut(eigenvalues).as_mut_ptr(),
+        values_out.as_mut_ptr(),
         std::ptr::null_mut(),
         &order,
         right_pointer,
@@ -2189,14 +2258,14 @@ unsafe fn la_rg_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
     );
     lapack_status(info != 0, info, "zgeev")?;
     let lwork = query.r as i32;
-    let mut work = vec![Rcomplex::default(); lwork.max(1) as usize];
+    let mut work = Placed::<Rcomplex>::zeroed(lwork.max(1) as usize, Allocation::Scratch);
     (lapack.zgeev)(
         c"N".as_ptr(),
         job_right.as_ptr(),
         &order,
         matrix.as_mut_ptr(),
         &order,
-        complexes_mut(eigenvalues).as_mut_ptr(),
+        values_out.as_mut_ptr(),
         std::ptr::null_mut(),
         &order,
         right_pointer,
@@ -2208,6 +2277,7 @@ unsafe fn la_rg_complex(x: Sexp, only_values: Sexp) -> R<Sexp> {
         1,
         1,
     );
+    drop((values_out, vectors_out));
     lapack_status(info != 0, info, "zgeev")?;
     match vectors {
         Some(vectors) => values::named_list(&[("values", eigenvalues), ("vectors", vectors)]),
@@ -2227,7 +2297,7 @@ unsafe fn det_ge_real(a: Sexp, logarithm: Sexp) -> R<Sexp> {
     }
     let use_log = use_log != 0;
     let n = square_order(a, "'a' must be a square matrix")?;
-    let mut factors = reals(coerce_vector(a, SexpType::Real)?).to_vec();
+    let mut factors = Placed::copy_of(reals(coerce_vector(a, SexpType::Real)?), Allocation::Vector);
     let mut pivots = vec![0i32; n];
     let order = n as i32;
     let mut info = 0;
@@ -2302,18 +2372,22 @@ unsafe fn la_dlange(a: Sexp, norm: Sexp) -> R<Sexp> {
     let source = coerce_vector(a, SexpType::Real)?;
     let kind = norm_type(&first_text(norm), true)?;
     let (m, n) = (rows as i32, cols as i32);
-    let mut work = vec![0.0; if kind == b'I' { rows.max(1) } else { 0 }];
+    let mut work = Placed::zeroed(
+        if kind == b'I' { rows.max(1) } else { 0 },
+        Allocation::Scratch,
+    );
     let work_pointer = if kind == b'I' {
         work.as_mut_ptr()
     } else {
         std::ptr::null_mut()
     };
     let kind = [kind as c_char, 0];
+    let values_in = PlacedInput::vector(reals(source));
     let value = (lapack.dlange)(
         kind.as_ptr(),
         &m,
         &n,
-        reals(source).as_ptr(),
+        values_in.as_ptr(),
         &m.max(1),
         work_pointer,
         1,
@@ -2335,18 +2409,15 @@ unsafe fn la_dgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
     if rows < cols {
         return Err(error("'A' must be a square matrix"));
     }
-    let mut matrix = reals(coerce_vector(a, SexpType::Real)?).to_vec();
+    let mut matrix = Placed::copy_of(reals(coerce_vector(a, SexpType::Real)?), Allocation::Vector);
     let kind = norm_type(&first_text(norm), false)?;
     let (m, n) = (rows as i32, cols as i32);
-    let mut work = vec![
-        0.0;
-        if kind == b'I' && rows > 4 * cols {
-            rows
-        } else {
-            4 * cols
-        }
-        .max(1)
-    ];
+    let work_size = if kind == b'I' && rows > 4 * cols {
+        rows
+    } else {
+        4 * cols
+    };
+    let mut work = Placed::zeroed(work_size.max(1), Allocation::Scratch);
     let mut integer_work = vec![0i32; rows.max(1)];
     let kind = [kind as c_char, 0];
     let anorm = (lapack.dlange)(
@@ -2402,10 +2473,10 @@ unsafe fn la_dtrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
         return Err(error("'norm' must be a character string"));
     }
     let n = square_order(a, "'A' must be a *square* matrix")?;
-    let matrix = coerce_vector(a, SexpType::Real)?;
+    let values_in = PlacedInput::vector(reals(coerce_vector(a, SexpType::Real)?));
     let kind = [norm_type(&first_text(norm), false)? as c_char, 0];
     let order = n as i32;
-    let mut work = vec![0.0; 3 * n.max(1)];
+    let mut work = Placed::zeroed(3 * n.max(1), Allocation::Scratch);
     let mut integer_work = vec![0i32; n.max(1)];
     let mut rcond = 0.0;
     let mut info = 0;
@@ -2414,7 +2485,7 @@ unsafe fn la_dtrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
         triangle.as_ptr(),
         c"N".as_ptr(),
         &order,
-        reals(matrix).as_ptr(),
+        values_in.as_ptr(),
         &order.max(1),
         &mut rcond,
         work.as_mut_ptr(),
@@ -2440,18 +2511,21 @@ unsafe fn la_zgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
     }
     let n = square_order(a, "'A' must be a square matrix")?;
     let kind = [norm_type(&first_text(norm), false)? as c_char, 0];
-    let mut matrix = complexes(coerce_vector(a, SexpType::Complex)?).to_vec();
+    let source = coerce_vector(a, SexpType::Complex)?;
     let order = n as i32;
-    let mut real_work = vec![0.0; 2 * n.max(1)];
+    // GNU R sizes this real workspace in complex elements.
+    let mut real_work = Placed::<f64>::zeroed(4 * n.max(1), Allocation::Scratch);
+    let values_in = PlacedInput::vector(complexes(source));
     let anorm = (lapack.zlange)(
         kind.as_ptr(),
         &order,
         &order,
-        matrix.as_ptr(),
+        values_in.as_ptr(),
         &order.max(1),
         real_work.as_mut_ptr(),
         1,
     );
+    let mut matrix = Placed::copy_of(complexes(source), Allocation::Scratch);
     let mut pivots = vec![0i32; n.max(1)];
     let mut info = 0;
     (lapack.zgetrf)(
@@ -2468,7 +2542,7 @@ unsafe fn la_zgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
     if info > 0 {
         return values::scalar_real(0.0);
     }
-    let mut work = vec![Rcomplex::default(); 4 * n.max(1)];
+    let mut work = Placed::<Rcomplex>::zeroed(4 * n.max(1), Allocation::Scratch);
     let mut rcond = 0.0;
     (lapack.zgecon)(
         kind.as_ptr(),
@@ -2498,10 +2572,10 @@ unsafe fn la_ztrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
     }
     let n = square_order(a, "'A' must be a square matrix")?;
     let kind = [norm_type(&first_text(norm), false)? as c_char, 0];
-    let matrix = coerce_vector(a, SexpType::Complex)?;
+    let values_in = PlacedInput::vector(complexes(coerce_vector(a, SexpType::Complex)?));
     let order = n as i32;
-    let mut work = vec![Rcomplex::default(); 2 * n.max(1)];
-    let mut real_work = vec![0.0; n.max(1)];
+    let mut work = Placed::<Rcomplex>::zeroed(2 * n.max(1), Allocation::Scratch);
+    let mut real_work = Placed::<f64>::zeroed(n.max(1), Allocation::Scratch);
     let mut rcond = 0.0;
     let mut info = 0;
     (lapack.ztrcon)(
@@ -2509,7 +2583,7 @@ unsafe fn la_ztrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
         triangle.as_ptr(),
         c"N".as_ptr(),
         &order,
-        complexes(matrix).as_ptr(),
+        values_in.as_ptr(),
         &order.max(1),
         &mut rcond,
         work.as_mut_ptr(),
@@ -2543,16 +2617,16 @@ unsafe fn la_zlange(a: Sexp, norm: Sexp) -> R<Sexp> {
     if norm.kind() != SexpType::String {
         return Err(error("'type' must be a character string"));
     }
-    let source = coerce_vector(a, SexpType::Complex)?;
+    let values_in = PlacedInput::vector(complexes(coerce_vector(a, SexpType::Complex)?));
     let kind = norm_type(&first_text(norm), true)?;
     let (m, n) = (rows as i32, cols as i32);
-    let mut work = vec![0.0; rows.max(1)];
+    let mut work = Placed::<f64>::zeroed(2 * rows.max(1), Allocation::Scratch);
     let kind = [kind as c_char, 0];
     let value = (lapack.zlange)(
         kind.as_ptr(),
         &m,
         &n,
-        complexes(source).as_ptr(),
+        values_in.as_ptr(),
         &m.max(1),
         work.as_mut_ptr(),
         1,
@@ -2624,7 +2698,8 @@ unsafe fn backsolve(call: &Call<'_>) -> R<Sexp> {
     }
     let result = alloc_matrix(SexpType::Real, k, x_cols)?;
     if x_cols > 0 {
-        let output = reals_mut(result);
+        let triangle = PlacedInput::vector(triangle);
+        let mut output = Placed::vector(reals_mut(result));
         let input = reals(x_values);
         for col in 0..x_cols {
             output[col * k..(col + 1) * k].copy_from_slice(&input[col * x_rows..col * x_rows + k]);
@@ -2686,11 +2761,11 @@ pub unsafe fn dqrdc2(args: &[Sexp]) -> R<()> {
     if ldx < n.max(1) {
         return Err(error("invalid 'ldx' argument to 'dqrdc2'"));
     }
-    let x = real_slice(args, 0, ldx * p)?;
+    let mut x = real_slice(args, 0, ldx * p)?;
     let rank = integer_slice(args, 5, 1)?;
-    let qraux = real_slice(args, 6, p)?;
+    let mut qraux = real_slice(args, 6, p)?;
     let pivot = integer_slice(args, 7, p)?;
-    let work = real_slice(args, 8, 2 * p)?;
+    let mut work = real_slice(args, 8, 2 * p)?;
     let (downdated_norms, original_norms) = work.split_at_mut(p);
     for col in 0..p {
         let norm = blas.nrm2(&x[col * ldx..col * ldx + n]);
@@ -2758,7 +2833,7 @@ pub unsafe fn dqrdc2(args: &[Sexp]) -> R<()> {
 pub unsafe fn dqrqty(args: &[Sexp]) -> R<()> {
     let mut problem = QrProblem::read(args)?;
     let size = problem.n * problem.columns;
-    let (y, output) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
+    let (y, mut output) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
     for col in 0..problem.columns {
         let column = problem.column(col);
         let mut outputs = QrOutputs {
@@ -2774,7 +2849,7 @@ pub unsafe fn dqrqty(args: &[Sexp]) -> R<()> {
 pub unsafe fn dqrqy(args: &[Sexp]) -> R<()> {
     let mut problem = QrProblem::read(args)?;
     let size = problem.n * problem.columns;
-    let (y, output) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
+    let (y, mut output) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
     for col in 0..problem.columns {
         let column = problem.column(col);
         let mut outputs = QrOutputs {
@@ -2791,8 +2866,8 @@ pub unsafe fn dqrqy(args: &[Sexp]) -> R<()> {
 pub unsafe fn dqrcf(args: &[Sexp]) -> R<()> {
     let mut problem = QrProblem::read(args)?;
     let (n, k) = (problem.n, problem.k);
-    let y = real_slice(args, 4, n * problem.columns)?;
-    let coefficients = real_slice(args, 6, k * problem.columns)?;
+    let mut y = real_slice(args, 4, n * problem.columns)?;
+    let mut coefficients = real_slice(args, 6, k * problem.columns)?;
     let info = integer_slice(args, 7, 1)?;
     for col in 0..problem.columns {
         let column = problem.column(col);
@@ -2811,7 +2886,7 @@ pub unsafe fn dqrcf(args: &[Sexp]) -> R<()> {
 pub unsafe fn dqrrsd(args: &[Sexp]) -> R<()> {
     let mut problem = QrProblem::read(args)?;
     let size = problem.n * problem.columns;
-    let (y, residuals) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
+    let (mut y, mut residuals) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
     for col in 0..problem.columns {
         let column = problem.column(col);
         let input = y[column.clone()].to_vec();
@@ -2829,7 +2904,7 @@ pub unsafe fn dqrrsd(args: &[Sexp]) -> R<()> {
 pub unsafe fn dqrxb(args: &[Sexp]) -> R<()> {
     let mut problem = QrProblem::read(args)?;
     let size = problem.n * problem.columns;
-    let (y, fitted) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
+    let (mut y, mut fitted) = (real_slice(args, 4, size)?, real_slice(args, 6, size)?);
     for col in 0..problem.columns {
         let column = problem.column(col);
         let input = y[column.clone()].to_vec();
@@ -2847,10 +2922,10 @@ pub unsafe fn dqrxb(args: &[Sexp]) -> R<()> {
 /// rows and rank `k`, and the number of right-hand side columns.
 struct QrProblem<'a> {
     blas: DirectFortran<Blas>,
-    qr: &'a mut [f64],
+    qr: Placed<'a, f64>,
     n: usize,
     k: usize,
-    qraux: &'a [f64],
+    qraux: Placed<'a, f64>,
     columns: usize,
 }
 
@@ -3017,8 +3092,8 @@ pub unsafe fn dtrco(args: &[Sexp]) -> R<()> {
         return Err(error("invalid 'ldt' argument to 'dtrco'"));
     }
     let t = real_slice(args, 0, ldt * n)?;
-    let rcond = real_slice(args, 3, 1)?;
-    let z = real_slice(args, 4, n)?;
+    let mut rcond = real_slice(args, 3, 1)?;
+    let mut z = real_slice(args, 4, n)?;
     let lower = integer_arg(args, 5)? == 0;
     let at = |row: usize, col: usize| t[row + col * ldt];
     let mut t_norm = 0.0f64;
@@ -3036,7 +3111,7 @@ pub unsafe fn dtrco(args: &[Sexp]) -> R<()> {
         }
         if (ek - z[k]).abs() > at(k, k).abs() {
             let s = at(k, k).abs() / (ek - z[k]).abs();
-            blas.scal(s, z);
+            blas.scal(s, &mut z);
             ek *= s;
         }
         let mut wk = ek - z[k];
@@ -3067,15 +3142,15 @@ pub unsafe fn dtrco(args: &[Sexp]) -> R<()> {
         }
         z[k] = wk;
     }
-    let s = 1.0 / blas.asum(z);
-    blas.scal(s, z);
+    let s = 1.0 / blas.asum(&z);
+    blas.scal(s, &mut z);
     let mut y_norm = 1.0f64;
     // Solve t z = y.
     for step in 0..n {
         let k = if lower { step } else { n - 1 - step };
         if z[k].abs() > at(k, k).abs() {
             let s = at(k, k).abs() / z[k].abs();
-            blas.scal(s, z);
+            blas.scal(s, &mut z);
             y_norm *= s;
         }
         if at(k, k) != 0.0 {
@@ -3090,8 +3165,8 @@ pub unsafe fn dtrco(args: &[Sexp]) -> R<()> {
             blas.axpy(w, column, &mut z[start..start + n - step - 1]);
         }
     }
-    let s = 1.0 / blas.asum(z);
-    blas.scal(s, z);
+    let s = 1.0 / blas.asum(&z);
+    blas.scal(s, &mut z);
     y_norm *= s;
     rcond[0] = if t_norm != 0.0 { y_norm / t_norm } else { 0.0 };
     Ok(())
@@ -3122,14 +3197,15 @@ unsafe fn real_arg(args: &[Sexp], index: usize) -> R<f64> {
     }
 }
 
-/// Argument `index` as at least `count` doubles: the bounds a Fortran routine silently assumes.
-unsafe fn real_slice<'a>(args: &[Sexp], index: usize, count: usize) -> R<&'a mut [f64]> {
+/// The first `count` doubles of argument `index`, placed where GNU R's `.Fortran` places the
+/// whole vector. `count` is the extent a Fortran routine silently assumes.
+unsafe fn real_slice<'a>(args: &[Sexp], index: usize, count: usize) -> R<Placed<'a, f64>> {
     match args
         .get(index)
         .copied()
         .filter(|value| value.kind() == SexpType::Real)
     {
-        Some(value) if length(value) >= count => Ok(&mut reals_mut(value)[..count]),
+        Some(value) if length(value) >= count => Ok(Placed::vector_prefix(reals_mut(value), count)),
         _ => Err(error(format!(
             "argument {} must be a double vector of length {count} or more",
             index + 1
@@ -3228,6 +3304,223 @@ fn lapack_status(failed: bool, info: i32, routine: &str) -> R<()> {
         )));
     }
     Ok(())
+}
+
+// Buffer placement.
+//
+// A BLAS kernel's rounding can depend on where its buffer starts. OpenBLAS's SSE2 level-1
+// kernels, which it selects on Zen, Sandybridge, Nehalem and the older x86 targets, process the
+// first element of a buffer that is not 16-byte aligned on its own. That regroups the partial
+// sums of `dasum`, `ddot` and the like, so the last bit of a result depends on the buffer's
+// address modulo 16, and LAPACK inherits the dependence through the BLAS it calls. GNU R puts a
+// vector's data at 8 modulo 16 when it takes 128 bytes or less, because such a vector comes from
+// a small-vector page, and at 0 modulo 16 when `malloc` allocates it. Its `R_alloc` scratch space
+// is a raw vector one byte longer than the request. ry's heap puts all vector data at 0 modulo
+// 16, so each buffer ry hands to BLAS or LAPACK is a `Placed` buffer at the address modulo 16
+// GNU R's buffer has in the same call. Only buffers of 128 bytes or less ever move, so the copy
+// costs little, and a large R vector is used in place.
+
+/// How GNU R allocates a buffer it hands to BLAS or LAPACK, which fixes its address modulo 16.
+#[derive(Clone, Copy)]
+enum Allocation {
+    /// An R vector: `allocVector`, `duplicate` or `coerceVector`.
+    Vector,
+    /// `R_alloc` scratch space.
+    Scratch,
+}
+
+/// GNU R's address modulo 16 for a buffer of `bytes` allocated as `allocation`.
+fn gnu_r_residue(allocation: Allocation, bytes: usize) -> usize {
+    let vector_bytes = match allocation {
+        Allocation::Vector => bytes,
+        Allocation::Scratch => bytes + 1,
+    };
+    if vector_bytes <= 128 { 8 } else { 0 }
+}
+
+/// The element types of BLAS and LAPACK buffers. Each is a whole number of `f64` words with
+/// `f64`'s alignment, which lets `Placed` keep any of them in `f64` storage.
+trait Element: Copy + 'static {}
+
+impl Element for f64 {}
+
+impl Element for Rcomplex {}
+
+/// A mutable buffer at GNU R's address modulo 16 for the same call. It is either an R vector
+/// used in place, or a copy at the right address that writes itself back to the R vector it was
+/// taken from, if any, when dropped.
+struct Placed<'a, T: Element> {
+    buffer: Buffer<'a, T>,
+}
+
+enum Buffer<'a, T> {
+    InPlace(&'a mut [T]),
+    Moved {
+        storage: Vec<f64>,
+        start: usize,
+        len: usize,
+        home: &'a mut [T],
+    },
+}
+
+impl<'a, T: Element> Placed<'a, T> {
+    /// The R vector `home`.
+    fn vector(home: &'a mut [T]) -> Self {
+        let len = home.len();
+        Placed::vector_prefix(home, len)
+    }
+
+    /// The first `len` elements of the R vector `home`, placed by the whole vector's size, as
+    /// GNU R allocated it.
+    fn vector_prefix(home: &'a mut [T], len: usize) -> Self {
+        let residue = gnu_r_residue(Allocation::Vector, size_of_val(home));
+        let home = &mut home[..len];
+        if home.as_ptr() as usize % 16 == residue {
+            return Placed {
+                buffer: Buffer::InPlace(home),
+            };
+        }
+        let (mut storage, start) = placed_storage::<T>(len, residue);
+        // SAFETY: `storage` holds `len` elements of `T` from word `start` on, and `T` has
+        // `f64`'s alignment.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                home.as_ptr(),
+                storage.as_mut_ptr().add(start).cast::<T>(),
+                len,
+            );
+        }
+        Placed {
+            buffer: Buffer::Moved {
+                storage,
+                start,
+                len,
+                home,
+            },
+        }
+    }
+}
+
+impl<T: Element> Placed<'static, T> {
+    /// `len` zeroed elements allocated as `allocation`.
+    fn zeroed(len: usize, allocation: Allocation) -> Self {
+        let residue = gnu_r_residue(allocation, len * size_of::<T>());
+        let (storage, start) = placed_storage::<T>(len, residue);
+        Placed {
+            buffer: Buffer::Moved {
+                storage,
+                start,
+                len,
+                home: &mut [],
+            },
+        }
+    }
+
+    /// A copy of `values` allocated as `allocation`.
+    fn copy_of(values: &[T], allocation: Allocation) -> Self {
+        let mut placed = Placed::zeroed(values.len(), allocation);
+        placed.copy_from_slice(values);
+        placed
+    }
+}
+
+/// Zeroed `f64` storage for `len` elements of `T`, and the word at which they start so that the
+/// first one lies at `residue` modulo 16.
+fn placed_storage<T: Element>(len: usize, residue: usize) -> (Vec<f64>, usize) {
+    let words = len * size_of::<T>() / size_of::<f64>();
+    let storage = vec![0.0; words + 1];
+    let start = if storage.as_ptr() as usize % 16 == residue {
+        0
+    } else {
+        1
+    };
+    (storage, start)
+}
+
+impl<T: Element> Deref for Placed<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match &self.buffer {
+            Buffer::InPlace(values) => values,
+            // SAFETY: `placed_storage` sized `storage` for `len` elements from word `start`.
+            Buffer::Moved {
+                storage,
+                start,
+                len,
+                ..
+            } => unsafe {
+                std::slice::from_raw_parts(storage.as_ptr().add(*start).cast::<T>(), *len)
+            },
+        }
+    }
+}
+
+impl<T: Element> DerefMut for Placed<'_, T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match &mut self.buffer {
+            Buffer::InPlace(values) => values,
+            // SAFETY: as for `deref`.
+            Buffer::Moved {
+                storage,
+                start,
+                len,
+                ..
+            } => unsafe {
+                std::slice::from_raw_parts_mut(storage.as_mut_ptr().add(*start).cast::<T>(), *len)
+            },
+        }
+    }
+}
+
+impl<T: Element> Drop for Placed<'_, T> {
+    fn drop(&mut self) {
+        if let Buffer::Moved {
+            storage,
+            start,
+            len,
+            home,
+        } = &mut self.buffer
+        {
+            // SAFETY: as for `deref`, and `home` holds `len` elements unless it is empty.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    storage.as_ptr().add(*start).cast::<T>(),
+                    home.as_mut_ptr(),
+                    home.len().min(*len),
+                );
+            }
+        }
+    }
+}
+
+/// A read-only R vector at GNU R's address modulo 16: the vector itself when it is already
+/// there, otherwise a copy.
+enum PlacedInput<'a, T: Element> {
+    InPlace(&'a [T]),
+    Moved(Placed<'static, T>),
+}
+
+impl<'a, T: Element> PlacedInput<'a, T> {
+    fn vector(values: &'a [T]) -> Self {
+        let residue = gnu_r_residue(Allocation::Vector, size_of_val(values));
+        if values.as_ptr() as usize % 16 == residue {
+            PlacedInput::InPlace(values)
+        } else {
+            PlacedInput::Moved(Placed::copy_of(values, Allocation::Vector))
+        }
+    }
+}
+
+impl<T: Element> Deref for PlacedInput<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match self {
+            PlacedInput::InPlace(values) => values,
+            PlacedInput::Moved(placed) => placed,
+        }
+    }
 }
 
 // The libraries. Each table is opened on first use; a missing library is an error only for the

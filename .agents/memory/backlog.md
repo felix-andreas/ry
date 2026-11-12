@@ -154,11 +154,9 @@ Compile strict typed ry to machine code before it runs, as Bun's `--aot` does fo
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
 
-## Open: `test_linalg` library cases fail on some OpenBLAS kernels
+## Open: BLAS buffer addresses in package code
 
-- On CI (ubuntu runner, OpenBLAS, probably an AMD Zen CPU) `linear_algebra_matches_gnu_r` fails on `dtrco` by one ulp against a live GNU R on the same libraries. It reproduces locally with `OPENBLAS_CORETYPE=Zen`, `Sandybridge` or `Nehalem` (and `Prescott` fails on `dqrcf`); the default, Haswell and SkylakeX kernels pass.
-- Cause: ry's vector data starts on a 16-byte boundary (`VECTOR_DATA_OFFSET == 32` in `crates/heap/src/object.rs`), GNU R's 8 bytes past one. Those OpenBLAS kernels peel a misaligned first element, so the summation order differs. Copying `dtrco`'s buffers to an 8-byte offset made it match exactly; `La_dtrcon` then failed the same way.
-- Options: (a) pass BLAS/LAPACK buffers at GNU R's alignment (matches GNU R bit for bit on every kernel; heap layout or copy cost), (b) compare live only on kernels that ignore alignment, (c) install `libblas3 liblapack3` in ci.yml so CI uses the reference libraries and the pinned bits (workflow edit, human only). (c) is the quick unblock; (a) is the faithful fix.
+- Base's BLAS and LAPACK calls hand buffers at GNU R's addresses modulo 16 (`decisions.md`, "BLAS and LAPACK buffers sit at GNU R's addresses modulo 16"). A package's compiled code that calls BLAS on `REAL()` of a vector of 16 doubles or fewer still sees 0 modulo 16 where GNU R has 8, so on an OpenBLAS SSE2 kernel (Zen, Sandybridge, Nehalem and older x86 targets) its last bit can differ from GNU R's. Closing it means putting small vector data at 8 modulo 16 in the heap (`VECTOR_DATA_OFFSET`, the small-object slot sizes), which the JIT and the start-up image also depend on. Unmeasured on real packages.
 
 ## Open: what bundling base R left undone
 
