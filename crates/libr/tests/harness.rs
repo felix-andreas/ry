@@ -419,6 +419,18 @@ impl R<'_> {
         unsafe { (self.api().ry_set_gc_stress)(on as c_int) };
     }
 
+    /// Young stress: every allocation runs an intermediate collection that also frees untenured
+    /// survivors of earlier collections.
+    pub fn stress_young(&self) {
+        unsafe { (self.api().ry_set_gc_stress)(2) };
+    }
+
+    /// Parses `code` and evaluates it in the global environment, returning the last value.
+    pub fn eval_text(&self, code: &str) -> Result<Sexp, String> {
+        let parsed = self.eval("parse", &[(Some("text"), self.string(code))])?;
+        self.eval("eval", &[(None, parsed)])
+    }
+
     pub fn stats(&self) -> GcStats {
         let mut stats = GcStats::default();
         unsafe { (self.api().ry_gc_stats)(&mut stats) };
