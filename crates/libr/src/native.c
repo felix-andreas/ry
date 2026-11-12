@@ -1309,8 +1309,8 @@ SEXP ry_task_callback_names(void)
 }
 
 /* R_maphashC's callback is native code; the status is unused because an error jumps instead. */
-void ry_maphash_call(void (*function)(SEXP, SEXP, void *), SEXP key, SEXP value, void *data,
-                     int *status)
+void ry_maphash_call(SEXP (*function)(SEXP, SEXP, void *), SEXP key, SEXP value, void *data,
+                     SEXP *result, int *status)
 {
     RyContext context;
     ry_context_push(&context);
@@ -1319,7 +1319,7 @@ void ry_maphash_call(void (*function)(SEXP, SEXP, void *), SEXP key, SEXP value,
         *status = 1;
         return;
     }
-    function(key, value, data);
+    *result = function(key, value, data);
     ry_context_pop(&context);
     *status = 0;
 }
