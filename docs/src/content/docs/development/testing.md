@@ -360,7 +360,10 @@ against values read from data.table, `test_lazy.rs` there checks the Polars-styl
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
-without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
+without R. The optimizer cases `test_numerics.rs` holds bit for bit are skipped, with a message,
+where they cannot match: against a fresh GNU R that does not call the reference BLAS, and, for the
+trust-region case, where the C library's `hypot` rounds differently from the recording's (its
+`hypot` case fingerprints it). `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
 extreme arguments. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
