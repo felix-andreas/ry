@@ -1,0 +1,23 @@
+[stdout]
+| + zd :
+|    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
+| re   NA   NA  NaN    0  Inf    0  Inf -Inf    0     1
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
+| + dz :
+|    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
+| re   NA  NaN  NaN    0  Inf    0  Inf -Inf    0     1
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
+| + zna :
+|    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
+| re   NA   NA  NaN   NA   NA   NA   NA   NA   NA    NA
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
+| + nas :
+|    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
+| re   NA   NA   NA   NA   NA   NA   NA   NA   NA    NA
+| im   NA   NA   NA   NA   NA   NA   NA   NA   NA    NA
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
