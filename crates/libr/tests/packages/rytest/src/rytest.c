@@ -545,6 +545,31 @@ SEXP rytest_environment(void)
     return out;
 }
 
+/* R_getVarEx() hands back its last argument for an unbound name, and Rcpp passes a C NULL
+   there to ask whether a binding exists. */
+SEXP rytest_get_var(void)
+{
+    SEXP env = PROTECT(R_NewEnv(R_EmptyEnv, TRUE, 0));
+    SEXP bound = install("rytest.bound"), unbound = install("rytest.unbound");
+    defineVar(bound, ScalarInteger(7), env);
+    SEXP child = PROTECT(R_NewEnv(env, TRUE, 0));
+    SEXP out = PROTECT(allocVector(INTSXP, 7));
+    INTEGER(out)[0] = R_getVarEx(unbound, env, FALSE, NULL) == NULL;
+    INTEGER(out)[1] = R_getVarEx(unbound, child, TRUE, NULL) == NULL;
+    INTEGER(out)[2] = R_getVarEx(unbound, env, FALSE, R_UnboundValue) == R_UnboundValue;
+    INTEGER(out)[3] = R_getVarEx(unbound, env, FALSE, R_NilValue) == R_NilValue;
+    INTEGER(out)[4] = asInteger(R_getVarEx(bound, env, FALSE, NULL));
+    INTEGER(out)[5] = R_getVarEx(bound, child, FALSE, NULL) == NULL;
+    INTEGER(out)[6] = asInteger(R_getVar(bound, child, TRUE));
+    UNPROTECT(3);
+    return out;
+}
+
+SEXP rytest_get_var_unbound(void)
+{
+    return R_getVar(install("rytest.unbound"), R_EmptyEnv, TRUE);
+}
+
 SEXP rytest_duplicate(SEXP x)
 {
     SEXP copy = PROTECT(duplicate(x));
@@ -1426,6 +1451,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_matrix", (DL_FUNC) &rytest_matrix, 2},
     {"rytest_extents", (DL_FUNC) &rytest_extents, 1},
     {"rytest_environment", (DL_FUNC) &rytest_environment, 0},
+    {"rytest_get_var", (DL_FUNC) &rytest_get_var, 0},
+    {"rytest_get_var_unbound", (DL_FUNC) &rytest_get_var_unbound, 0},
     {"rytest_duplicate", (DL_FUNC) &rytest_duplicate, 1},
     {"rytest_identical", (DL_FUNC) &rytest_identical, 2},
     {"rytest_unif", (DL_FUNC) &rytest_unif, 1},
