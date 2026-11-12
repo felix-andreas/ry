@@ -124,10 +124,14 @@ perf:
 
 # Times one published benchmark suite (public, packages, kernels, applications, or all) on GNU R, ry and,
 # where a program has a typed version, ry typed in strict mode, in paired shuffled rounds with a checksum gate
-# against GNU R, e.g. `just bench kernels --rounds 3 --filter fib` or `just bench all --write` (10+ rounds,
+# against GNU R, e.g. `just bench kernels --rounds 3 --filter fib` on target/release, or
+# `just bench all --release ry-x86_64-unknown-linux-gnu.tar.gz --write` on a tagged release archive (10+ rounds,
 # stores each suite's results.json, which the READMEs and the benchmarks page render).
 bench suite *args:
-    cargo build --release -p ry-lang -p libr -p rcmd
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A release archive brings its own build; anything else measures target/release.
+    case " {{ args }} " in *" --release "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
@@ -142,7 +146,7 @@ climb *args:
     python3 -I tools/climb/run.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
-# and docs/public/diagnostic.svg from a real `ry check` run on the README's Payment example.
+# and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.
 # `--check` only reports what differs.
 readme *args:
     #!/usr/bin/env bash

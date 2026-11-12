@@ -55,6 +55,10 @@ jobs:
       # libR links zlib, bzip2 and xz, as GNU R's does (crates/libr/build.rs).
       - name: link libraries
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+      # The locales oracle cases switch to (`# oracle: requires locale`); a case whose locale is
+      # missing does not run.
+      - name: oracle locales
+        run: sudo bash tools/oracle-locales.sh
       # ry's own base R, for the scenarios that hide GNU R (`hide gnu-r`).
       - name: base R
         run: just base-r dev

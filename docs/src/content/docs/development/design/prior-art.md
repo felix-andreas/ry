@@ -205,7 +205,7 @@ refers to its steps.
 | Inline caches as the profile the optimizer reads | JavaScriptCore, V8 | **Built, extend** | Tier 0 function lookups; tier 1 speculates on the cached cell |
 | Shapes as cache keys, adapted to frames: remember slot k, check the symbol there | JavaScriptCore, V8 | **Built** | `Frame::find_hinted`: a slot hint per tier 0 variable and function lookup site |
 | Watchpoint sets per binding | JavaScriptCore | **Adopt** | Watched binding cells list dependent bodies; replaces the epoch and stamp check at entry |
-| Polymorphic inline caches | JavaScriptCore, V8 | **Adopt, scoped** | S3 dispatch sites, keyed on the class vector; the global method cache as megamorphic fallback |
+| Polymorphic inline caches | JavaScriptCore, V8 | **Rejected for S3**, adopted for S4 | S3 finds methods through one row per method symbol, valid under its lookup stamp; S4 keeps a cache per generic |
 | Value profiling of call targets and classes | JavaScriptCore | **Adopt** | Beside tier 0's value-kind feedback |
 | OSR entry and exit | JavaScriptCore, LuaJIT, V8 | **Built** | Loop headers; deoptimization to tier 0 |
 | Register-based interpreter with per-instruction tail-call dispatch and fast paths inside handlers | JavaScriptCore (LLInt), LuaJIT 2 | **Adopt, planned** (step 3); the assembly is rejected | Tier 0 handlers ending in a `become` call through a handler table |
@@ -754,16 +754,15 @@ its hot builtins in Zig and C++.[^bun]
   covers today, is not a watched cell. Section 5 of the runtime design plans watch sets; this is
   their concrete shape. **Adopt.**
   How often `valid()` reaches the per-symbol loop on a real test suite is not yet measured.
-- **Polymorphic inline caches for S3 dispatch.** S3 method lookup goes through one global table
-  (`MethodCache` in `crates/interp/src/dispatch.rs`) that is cleared whenever the binding epoch or
-  the collection count changes. A per-site cache in the style of a polymorphic property cache would
-  hold up to four entries, keyed on the class attribute: first by the pointer of the class vector,
-  which objects from one constructor usually share (unverified), then by comparing its elements,
-  which are interned `CHARSXP`s and so compare by pointer. An object without a class attribute is
-  keyed on its implicit class (type and `dim`). Past four classes the site goes megamorphic and
-  uses the global table. The entries are invalidated by the lookup stamps of the method names,
-  which per-binding watch sets make precise. **Adopt, scoped** to `UseMethod` and the internally
-  dispatching builtins.
+- **Polymorphic inline caches for S3 dispatch.** Built and then replaced. Per-site entries keyed
+  on the class vector hit for only 15 to 40% of resolutions on the measured workloads, because most
+  dispatch sites run a few times and `$` dispatch has no site. What a site cached is a fact about
+  a method name, not about the site, so S3 dispatch keeps it once per name: the method symbol
+  carries the index of a row that holds the binding found from the top environment on, valid
+  under the symbol's lookup stamp (`MethodRows` in `crates/interp/src/dispatch.rs`;
+  `decisions.md`, "S3 methods are found through one row per method symbol"). The JIT can guard
+  an inlined method on that stamp, as it does for global function lookups. **Rejected** in the
+  per-site form.
 - **Value profiling, extended.** Tier 0 records a bit set of eleven value kinds per instruction
   (`feedback` in `bytecode.rs`). JavaScriptCore also profiles call targets and structures; ry's
   equivalents are the closure a call site called and the class a dispatch site saw, which the
