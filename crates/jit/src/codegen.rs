@@ -3323,13 +3323,12 @@ impl<'p> Translator<'p> {
         }
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
-        let volatile_constant = iconst(&mut self.builder, volatile as usize);
         let result = self
             .call(
                 runtime::jit_load as *const () as usize,
-                &[I64, I64, I64, I64],
+                &[I64, I64, I64],
                 Some(I32),
-                &[self.activation, pc_constant, slot_constant, volatile_constant],
+                &[self.activation, pc_constant, slot_constant],
             )
             .ok_or(Refusal("a helper without a result"))?;
         let error =

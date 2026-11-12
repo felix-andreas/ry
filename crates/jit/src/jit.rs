@@ -668,6 +668,7 @@ unsafe fn compile_in<'a>(
                 .map(|_| Cell::new(u64::MAX))
                 .collect(),
             osr,
+            volatile: plan.volatile.iter().copied().collect(),
             exits,
         });
         // Everything the machine code and the speculations point to stays reachable from the

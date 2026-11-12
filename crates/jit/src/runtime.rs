@@ -7,7 +7,7 @@
 //! and compiled code reacts by deoptimizing, which hands the unwind to the interpreter.
 
 use {
-    crate::analysis::{Speculation, resolve_function},
+    crate::analysis::{Speculation, bit, resolve_function},
     heap::{
         object::{
             Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
@@ -159,6 +159,9 @@ pub struct Compiled {
     pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
+    /// By slot, a bitset of the variables the code loads at every read because a read called
+    /// an active binding.
+    pub volatile: Box<[u64]>,
     /// Each deoptimization point's write-back, indexed by the number compiled code passes to
     /// [`jit_deopt_exit`].
     pub exits: Box<[Exit]>,
@@ -568,14 +571,7 @@ pub unsafe extern "C" fn jit_fused(activation: *mut Activation, pc: i64) -> i32 
 }
 
 /// Loads the variable `GetVar` at `pc` reads into its slot. Returns the slot's status.
-/// `volatile` is nonzero when the compiled code already loads the variable at every read, as it
-/// does once a read has called an active binding.
-pub unsafe extern "C" fn jit_load(
-    activation: *mut Activation,
-    pc: i64,
-    slot: i64,
-    volatile: i64,
-) -> i32 {
+pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
@@ -586,10 +582,12 @@ pub unsafe extern "C" fn jit_load(
             // Code that would reuse the value of a load that called an active binding hands the
             // activation to tier 0 after the load, and the recompile reads the variable again at
             // every use. Comparing a count also catches a binding that a forced promise read,
-            // which only costs that variable its reuse.
-            if volatile == 0
-                && result != outcome::LOAD_FAILED
+            // which only costs that variable its reuse. Code that already loads the variable at
+            // every read says so in its metadata rather than in an argument, because an extra
+            // argument at every load site costs the register allocator an instruction in loops.
+            if result != outcome::LOAD_FAILED
                 && interp::interp().active_binding_reads != reads
+                && !bit(&compiled(activation).volatile, slot as usize)
             {
                 bytecode::record_active_binding(machine.code, pc as usize);
                 return outcome::LOAD_INVALIDATED;

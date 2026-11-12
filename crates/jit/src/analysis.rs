@@ -512,7 +512,7 @@ impl Live<'_> {
     }
 }
 
-fn bit(words: &[u64], index: usize) -> bool {
+pub(crate) fn bit(words: &[u64], index: usize) -> bool {
     words
         .get(index / 64)
         .is_some_and(|word| word & (1 << (index % 64)) != 0)
@@ -1071,6 +1071,9 @@ pub struct Plan<'a> {
     pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
     pub loop_headers: List<'a, usize>,
+    /// By slot, a bitset of the variables loaded at every read because a read called an
+    /// active binding.
+    pub volatile: List<'a, u64>,
 }
 
 /// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
@@ -1473,6 +1476,7 @@ pub unsafe fn plan<'a>(
         edges,
         states: builder.states,
         loop_headers,
+        volatile: builder.volatile,
     })
 }
 
