@@ -70,14 +70,16 @@ pub struct RCall {
     /// current.
     pub function: Sexp,
     pub call: Sexp,
-    /// The environment the function is called from: the typed closure's, since compiled code
-    /// has no frame of its own.
+    /// The typed closure's environment, which the conversions run in.
     pub env: Sexp,
     pub arguments: SmallVec<[RArgument; 4]>,
     /// The `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r` call the result goes
     /// through and the type it gives, or `None` when the call is a statement whose value is
     /// unused.
     pub result: Option<(Conversion, Type)>,
+    /// Whether the call is `stop()`, which raises an error and never returns, so it cannot
+    /// change a variable a lazy argument reads before R would force it.
+    pub diverges: bool,
 }
 
 /// An argument of an [`RCall`]: a native value of `ty`, passed through `conversion` when the
@@ -186,6 +188,7 @@ pub unsafe fn lower(
         r_calls: Vec::new(),
         r_use: None,
         converted: None,
+        pending: Vec::new(),
     };
     let mut assigned = Vec::new();
     assigned_symbols(body, &mut assigned);
@@ -311,14 +314,20 @@ struct Lowering<'c> {
     /// The destination of the last converted R call, which tells the conversion that its
     /// argument was one.
     converted: Option<Local>,
+    /// Each empty list literal of records or tags whose item type the code has not shown yet,
+    /// with the locals that hold it. The preflight names only the storage of such a list, so it
+    /// starts as a list of any tag and takes the item type of the first item appended to it or
+    /// list assigned over it ([`Lowering::settle`]).
+    pending: Vec<SmallVec<[Local; 4]>>,
 }
 
-/// Where typed code may call an R function: where the value is unused, or where a conversion
-/// gives it a ry type.
+/// Where typed code may call an R function: where the value is unused, where a conversion
+/// gives it a ry type, or as `stop()`, which never returns.
 #[derive(Clone, Copy)]
 enum RUse {
     Unused,
     Converted(Conversion),
+    Diverges,
 }
 
 /// An argument of a call, by name or position.
@@ -533,9 +542,10 @@ impl Lowering<'_> {
     }
 
     unsafe fn assign(&mut self, symbol: Sexp, value: Local) -> Result<Local, Refusal> {
-        let ty = self.builder.ty(value);
         match self.lookup_assignable(symbol) {
             Some(variable) => {
+                self.unify_pending(variable, value)?;
+                let ty = self.builder.ty(value);
                 let fits = match (self.builder.ty(variable), ty) {
                     (Type::Tag(held), Type::Tag(found)) => shapes::within(found, held),
                     (held, found) => held == found,
@@ -559,11 +569,187 @@ impl Lowering<'_> {
                 {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
-                let variable = self.builder.emit(ty, Op::Copy(value));
+                let variable = self.builder.emit(self.builder.ty(value), Op::Copy(value));
+                if let Some(family) = self.pending_family(value) {
+                    self.pending[family].push(variable);
+                }
                 self.bind(symbol, Binding::Value(variable));
                 Ok(variable)
             }
         }
+    }
+
+    /// The index of the pending empty list `local` holds, if it holds one.
+    fn pending_family(&self, local: Local) -> Option<usize> {
+        self.pending
+            .iter()
+            .position(|family| family.contains(&local))
+    }
+
+    /// Refuses to read the items of a pending empty list, whose item type is a placeholder.
+    fn known_items(&self, list: Local) -> Result<(), Refusal> {
+        match self.pending_family(list) {
+            Some(_) => Err(Refusal::new(
+                "an empty list read before anything shows its item type",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Gives a pending empty list the item type of the list it meets in an assignment, or joins
+    /// two pending ones.
+    fn unify_pending(&mut self, a: Local, b: Local) -> Result<(), Refusal> {
+        match (self.pending_family(a), self.pending_family(b)) {
+            (Some(first), Some(second)) if first != second => {
+                let merged = self.pending.swap_remove(first.max(second));
+                self.pending[first.min(second)].extend(merged);
+                Ok(())
+            }
+            (Some(_), Some(_)) | (None, None) => Ok(()),
+            (Some(_), None) => match self.builder.ty(b) {
+                Type::Vector { item, array: true } => self.settle(a, item),
+                _ => Ok(()),
+            },
+            (None, Some(_)) => match self.builder.ty(a) {
+                Type::Vector { item, array: true } => self.settle(b, item),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Makes the pending empty list `list` holds a list of `item`, retyping every local that
+    /// holds it and the instruction that allocated it. Only copies and lengths may have read it
+    /// before, since any other operation chose its code by the placeholder item type.
+    fn settle(&mut self, list: Local, item: Item) -> Result<(), Refusal> {
+        let Some(family) = self.pending_family(list) else {
+            return Ok(());
+        };
+        let members = self.pending.swap_remove(family);
+        let function = &mut self.builder.function;
+        for inst in function
+            .blocks
+            .iter_mut()
+            .flat_map(|block| &mut block.insts)
+        {
+            let reads = inst
+                .op
+                .operands()
+                .iter()
+                .any(|operand| members.contains(operand));
+            if reads && !matches!(inst.op, Op::Copy(_) | Op::Length(_) | Op::Relabel(..)) {
+                return Err(Refusal::new(
+                    "an empty list read before anything shows its item type",
+                ));
+            }
+            if inst.dest.is_some_and(|dest| members.contains(&dest)) {
+                match &mut inst.op {
+                    Op::NewVector(held, _) => *held = item,
+                    Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
+                    _ => {}
+                }
+            }
+        }
+        for member in members {
+            if let Some(Type::Vector { item: held, .. }) =
+                function.locals.get_mut(member.0 as usize)
+            {
+                *held = item;
+            }
+        }
+        Ok(())
+    }
+
+    /// A list literal `[a, b, ...]` (`.ry_array`), or an empty one whose storage the preflight
+    /// named (`hint`). An empty list of records or tags is pending until its item type shows.
+    unsafe fn list_literal(
+        &mut self,
+        arguments: &Arguments,
+        hint: Option<&str>,
+    ) -> Result<Local, Refusal> {
+        let mut values: SmallVec<[Local; 4]> = SmallVec::new();
+        for &(ref name, item) in &arguments.items {
+            if name.is_some() {
+                return Err(Refusal::new("a list literal with a named item"));
+            }
+            let value = self.value(item)?;
+            self.usable(value)?;
+            values.push(value);
+        }
+        let item = match values.first() {
+            Some(&first) => {
+                let ty = self.builder.ty(first);
+                let item = ty.item().ok_or(Refusal::new(
+                    "a list literal of something a list cannot hold",
+                ))?;
+                if values
+                    .iter()
+                    .any(|&value| self.builder.ty(value).item() != Some(item))
+                {
+                    return Err(Refusal::new("a list literal whose items differ in type"));
+                }
+                item
+            }
+            None => match hint {
+                None => Item::Lgl,
+                Some("I64") => Item::I64,
+                Some("F64") => Item::Dbl,
+                Some("Str") => Item::Str,
+                Some("list") => Item::Tag(shapes::ANY),
+                Some(_) => return Err(Refusal::new("an empty list of an unknown item type")),
+            },
+        };
+        let zero = self.int(0);
+        let fresh = self
+            .builder
+            .emit(Type::vector(item), Op::NewVector(item, zero));
+        let ty = Type::Vector { item, array: true };
+        let mut list = self.builder.emit(ty, Op::Relabel(fresh, ty));
+        if values.is_empty() && hint == Some("list") {
+            self.pending.push(SmallVec::from_slice(&[fresh, list]));
+        }
+        for value in values {
+            list = self.builder.emit(ty, Op::Push(list, value));
+        }
+        Ok(list)
+    }
+
+    /// `List.append(list, item)`, which grows a uniquely held list in place.
+    unsafe fn append(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, item] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.append`"));
+        };
+        let list = self.value(list)?;
+        let value = self.value(item)?;
+        self.usable(list)?;
+        self.usable(value)?;
+        let item = self
+            .builder
+            .ty(value)
+            .item()
+            .ok_or(Refusal::new("an append of something a list cannot hold"))?;
+        self.settle(list, item)?;
+        let ty = self.builder.ty(list);
+        let fits = match (ty, item) {
+            (
+                Type::Vector {
+                    item: Item::Tag(held),
+                    array: true,
+                },
+                Item::Tag(found),
+            ) => shapes::within(found, held),
+            (
+                Type::Vector {
+                    item: held,
+                    array: true,
+                },
+                found,
+            ) => held == found,
+            _ => return Err(Refusal::new("an append to something other than a ry list")),
+        };
+        if !fits {
+            return Err(Refusal::new("an append of an item of another type"));
+        }
+        Ok(self.builder.emit(ty, Op::Push(list, value)))
     }
 
     /// The variable an assignment in the current scope writes, if it exists there.
@@ -631,8 +817,27 @@ impl Lowering<'_> {
             "function" => return Err(Refusal::new("a function literal that escapes")),
             "<<-" => return Err(Refusal::new("a superassignment")),
             "stop" => {
-                // The interpreter raises the error, with its message and call.
-                self.builder.terminate(Terminator::Fail);
+                // R raises the error, with its message and the typed function's call, so code
+                // that has called R, and cannot run again, reports it as the interpreter would.
+                // A message typed code cannot pass to R gives up instead, and the interpreter
+                // raises it.
+                let raise = self.builder.block();
+                self.builder.terminate(Terminator::Jump(raise));
+                self.builder.switch_to(raise);
+                let checkpoint = self.checkpoint();
+                let raised = match resolve_function(head, self.env) {
+                    Some(speculation) => {
+                        let function = speculation.function;
+                        self.speculations.push(speculation);
+                        self.r_call(call, function, RUse::Diverges)
+                    }
+                    None => Err(Refusal::new("`stop` is not a function")),
+                };
+                if raised.is_ok() {
+                    self.builder.terminate(Terminator::Fail);
+                } else if !self.rewind(checkpoint, raise) {
+                    return raised.map(|_| None);
+                }
                 let unreachable = self.builder.block();
                 self.builder.switch_to(unreachable);
                 return Ok(None);
@@ -681,9 +886,10 @@ impl Lowering<'_> {
     unsafe fn r_call(&mut self, call: Sexp, function: Sexp, r_use: RUse) -> Result<Local, Refusal> {
         let name = || interp::deparse::deparse_first_line(call.car());
         let result = match r_use {
-            RUse::Unused => None,
+            RUse::Unused | RUse::Diverges => None,
             RUse::Converted(conversion) => Some((conversion, conversion_type(conversion)?)),
         };
+        let diverges = matches!(r_use, RUse::Diverges);
         let calls = self.r_calls.len();
         let mut arguments: SmallVec<[RArgument; 4]> = SmallVec::new();
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
@@ -701,8 +907,16 @@ impl Lowering<'_> {
             let ty = self.builder.ty(value);
             let passes = match (conversion.is_some(), ty) {
                 (_, Type::Set(_) | Type::Dict { .. }) => false,
-                (false, Type::I64 | Type::Vector { item: Item::I64, .. }) => false,
-                (true, ty) => matches!(ty, Type::I64 | Type::Dbl | Type::Vector { array: true, .. }),
+                (
+                    false,
+                    Type::I64
+                    | Type::Vector {
+                        item: Item::I64, ..
+                    },
+                ) => false,
+                (true, ty) => {
+                    matches!(ty, Type::I64 | Type::Dbl | Type::Vector { array: true, .. })
+                }
                 (false, _) => true,
             };
             if !passes {
@@ -735,6 +949,7 @@ impl Lowering<'_> {
             env: self.env,
             arguments,
             result,
+            diverges,
         });
         let site = self.r_calls.len() - 1;
         Ok(match result {
@@ -1106,6 +1321,7 @@ impl Lowering<'_> {
             Some((start, end, step)) => (start, end, step, None),
             None => {
                 let vector = self.value(sequence)?;
+                self.known_items(vector)?;
                 let ty = self.builder.ty(vector);
                 ty.items()
                     .ok_or(Refusal::new("a `for` over something that is not a vector"))?;
@@ -2281,6 +2497,7 @@ impl Lowering<'_> {
                         )),
                     };
                 }
+                self.known_items(vector)?;
                 let index = self.integer_index(index)?;
                 let item = ty
                     .items()
@@ -2294,11 +2511,21 @@ impl Lowering<'_> {
             }
             // A typed list carries its item type, so the runtime's empty-list storage fix is moot.
             ".ry_items" => {
-                let [list, _] = arguments.exactly(2)?[..] else {
+                let [list, hint] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `.ry_items`"));
                 };
+                if list.kind() == SexpType::Language
+                    && list.car().kind() == SexpType::Symbol
+                    && rvalues::symbol_name(list.car()) == ".ry_array"
+                    && list.cdr() == rvalues::nil()
+                {
+                    let hint = constant_string(hint);
+                    return self.list_literal(&Arguments { items: Vec::new() }, hint.as_deref());
+                }
                 self.value(list)
             }
+            ".ry_array" => self.list_literal(&arguments, None),
+            "List.append" => self.append(&arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
             "$" => {
@@ -2466,9 +2693,11 @@ impl Lowering<'_> {
                 ))))
             }
             // A standard library function's module is capitalized, as in `Num.to_r`.
-            _ if name.starts_with(|first: char| first.is_ascii_uppercase()) => Err(Refusal(
-                Cow::Owned(format!("it calls `{name}`, which the typed core does not compile yet")),
-            )),
+            _ if name.starts_with(|first: char| first.is_ascii_uppercase()) => {
+                Err(Refusal(Cow::Owned(format!(
+                    "it calls `{name}`, which the typed core does not compile yet"
+                ))))
+            }
             _ => match r_use {
                 Some(r_use) => self.r_call(call, function, r_use),
                 None => Err(r_value_refusal(call.car())),
@@ -2922,19 +3151,7 @@ impl Lowering<'_> {
             // A shape only confirmed somewhere, which the code may never see, whose arm does not
             // lower (a field of another type than the annotation says, say) gives up for that
             // shape alone rather than for the whole function.
-            let checkpoint = (!exhaustive && case.is_some()).then(|| Checkpoint {
-                scopes: self.scopes.clone(),
-                loops: self.loops.len(),
-                inlined: self.inlined.clone(),
-                speculations: self.speculations.len(),
-                nesting: self.nesting,
-                control: self.control,
-                unusable: self.unusable.len(),
-                returned: self.returned,
-                constructed: self.constructed.len(),
-                r_calls: self.r_calls.len(),
-                blocks: self.builder.function.blocks.len(),
-            });
+            let checkpoint = (!exhaustive && case.is_some()).then(|| self.checkpoint());
             let completed = match (arm(self, case), checkpoint) {
                 (Err(refusal), Some(checkpoint)) => {
                     if !self.rewind(checkpoint, body) {
@@ -2987,6 +3204,22 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Fail);
         }
         Ok(result)
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            scopes: self.scopes.clone(),
+            loops: self.loops.len(),
+            inlined: self.inlined.clone(),
+            speculations: self.speculations.len(),
+            nesting: self.nesting,
+            control: self.control,
+            unusable: self.unusable.len(),
+            returned: self.returned,
+            constructed: self.constructed.len(),
+            r_calls: self.r_calls.len(),
+            blocks: self.builder.function.blocks.len(),
+        }
     }
 
     /// Forgets everything lowered since `checkpoint`, which an arm starting at block `body` took,

@@ -30,6 +30,7 @@ use {
         },
         time::{Duration, Instant},
     },
+    syntax::testing::cargo_build,
 };
 
 #[test]
@@ -911,23 +912,21 @@ fn which(program: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The directory of the `ry` under test, which the helper binaries are built beside.
+fn profile_directory() -> Result<&'static Path, String> {
+    Path::new(env!("CARGO_BIN_EXE_ry"))
+        .parent()
+        .ok_or_else(|| "the ry binary has no directory".to_owned())
+}
+
 /// ry's `libR.so`, built first: `cargo test` of this package does not build libr, and `ry run`
 /// loads the copy beside the binary, which only `cargo build` refreshes.
 fn libr_path() -> Result<&'static PathBuf, String> {
     static LIBR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     LIBR.get_or_init(|| {
-        let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
-            .parent()
-            .ok_or("the ry binary has no directory")?;
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-q", "-p", "libr"]);
-        if profile_directory
-            .file_name()
-            .is_some_and(|name| name == "release")
-        {
-            build.arg("--release");
-        }
-        let status = build
+        let profile_directory = profile_directory()?;
+        let status = cargo_build(profile_directory)
+            .args(["-p", "libr"])
             .status()
             .map_err(|error| format!("building libr: {error}"))?;
         if !status.success() {
@@ -945,19 +944,10 @@ fn r_home() -> Result<&'static PathBuf, String> {
     static HOME: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     HOME.get_or_init(|| {
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scenario-r-home");
-        let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
-            .parent()
-            .ok_or("the ry binary has no directory")?;
+        let profile_directory = profile_directory()?;
         // `ry-rcmd` is another package's binary, so cargo test does not build it.
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
-        if profile_directory
-            .file_name()
-            .is_some_and(|name| name == "release")
-        {
-            build.arg("--release");
-        }
-        let status = build
+        let status = cargo_build(profile_directory)
+            .args(["-p", "rcmd", "--bin", "ry-rcmd"])
             .status()
             .map_err(|error| format!("building ry-rcmd: {error}"))?;
         if !status.success() {
@@ -994,19 +984,10 @@ fn single_ry() -> Result<&'static PathBuf, String> {
     SINGLE
         .get_or_init(|| {
             let libr = libr_path()?;
-            let profile_directory = Path::new(env!("CARGO_BIN_EXE_ry"))
-                .parent()
-                .ok_or("the ry binary has no directory")?;
-            let release = profile_directory
-                .file_name()
-                .is_some_and(|name| name == "release");
             let base = ry_base().ok_or("ry's base R is not built; build it with `just base-r`")?;
             let build = |embed: Option<(&Path, &Path)>| -> Result<(), String> {
-                let mut command = Command::new(env!("CARGO"));
-                command.args(["build", "-q", "-p", "ry-lang", "--bin", "ry"]);
-                if release {
-                    command.arg("--release");
-                }
+                let mut command = cargo_build(profile_directory()?);
+                command.args(["-p", "ry-lang", "--bin", "ry"]);
                 match embed {
                     Some((library, base)) => command
                         .env("RY_EMBED_RUNTIME", library)

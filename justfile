@@ -146,7 +146,7 @@ climb *args:
     python3 -I tools/climb/run.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
-# and docs/public/diagnostic.svg from a real `ry check` run on the README's Payment example.
+# and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.
 # `--check` only reports what differs.
 readme *args:
     #!/usr/bin/env bash
