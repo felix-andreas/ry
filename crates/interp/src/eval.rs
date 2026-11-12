@@ -2358,7 +2358,9 @@ unsafe fn plannable(function: Sexp) -> Option<(CallShape, Option<usize>)> {
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
         let index = shape.formals as usize;
-        if index >= slots || index >= bytecode::MAX_SLOT_FORMALS || names.element(index) != formal.tag()
+        if index >= slots
+            || index >= bytecode::MAX_SLOT_FORMALS
+            || names.element(index) != formal.tag()
         {
             return None;
         }

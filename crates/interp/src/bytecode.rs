@@ -7728,8 +7728,8 @@ unsafe fn direct_plan(
     // cannot plan for.
     let misses = misses + i32::from(existing.is_some() || plan.is_none());
     let word = match (plan, existing) {
-        (Some((shape, sources)), _) => {
-            let id = plans.store(existing, owner, instruction.at, formals, body, shape, &sources);
+        (Some(plan), _) => {
+            let id = plans.store(existing, owner, instruction.at, formals, body, &plan);
             plans.misses[id] = misses as u8;
             values::ints_mut(owner.element(FEEDBACK))[word_at] = id as i32 + 1;
             return Ok(Some(id as u32));
@@ -7824,8 +7824,7 @@ impl CallPlans {
         at: usize,
         formals: Sexp,
         body: Sexp,
-        shape: eval::CallShape,
-        sources: &[i32],
+        (shape, sources): &eval::CallPlan,
     ) -> usize {
         self.generation = self.generation.wrapping_add(1);
         let id = match existing.or_else(|| self.free.pop().map(|id| id as usize)) {
@@ -7848,7 +7847,7 @@ impl CallPlans {
         self.sites[id] = at as u32;
         self.formals[id] = formals;
         self.bodies[id] = body;
-        self.shapes[id] = shape;
+        self.shapes[id] = *shape;
         self.pins[id] = unbound();
         let length = sources.len() as u32;
         if length > self.sources_capacity[id] {
