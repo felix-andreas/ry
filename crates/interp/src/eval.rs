@@ -2179,7 +2179,13 @@ pub unsafe fn bind_arguments(
 #[derive(Clone, Copy)]
 pub enum CallFrame {
     Env(Sexp),
-    Slots { header: u32, missing: u64 },
+    /// A slot frame at `header` whose left-out formals are `missing`, of which `promised` have
+    /// a default that is code, not a literal ([`CallShape`]).
+    Slots {
+        header: u32,
+        missing: u64,
+        promised: u64,
+    },
 }
 
 /// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
@@ -2218,6 +2224,7 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
     let missing_value = missing_arg();
     let mut bound: SmallVec<[Sexp; 12]> = SmallVec::new();
     let mut missing = 0u64;
+    let mut promised = 0u64;
     let mut defaults = None;
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
@@ -2237,6 +2244,9 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
                 return Ok(None);
             }
             missing |= 1 << index;
+            if !(default.kind().is_atomic() || default == nil()) {
+                promised |= 1 << index;
+            }
             bound.push(default);
         } else {
             bound.push(actual);
@@ -2258,6 +2268,7 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
     Ok(Some(CallFrame::Slots {
         header: header as u32,
         missing,
+        promised,
     }))
 }
 
@@ -3027,7 +3038,12 @@ pub unsafe fn run_frame(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
-    let CallFrame::Slots { header, missing } = frame else {
+    let CallFrame::Slots {
+        header,
+        missing,
+        promised,
+    } = frame
+    else {
         return run_frame_general(call, function, frame, sys_parent, args, entry, method_vars);
     };
     let entered = enter(
@@ -3038,7 +3054,7 @@ pub unsafe fn run_frame(
         method_vars,
         header,
         missing,
-        promised_defaults(function, missing),
+        promised,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
@@ -3084,7 +3100,11 @@ pub unsafe fn enter(
         || function == state.namespace_loader
         || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP))
     {
-        let frame = CallFrame::Slots { header, missing };
+        let frame = CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        };
         let value = run_frame_general(
             call,
             function,
@@ -3206,9 +3226,13 @@ unsafe fn run_frame_general(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
-    let (env, slots, missing) = match frame {
-        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
-        CallFrame::Slots { header, missing } => (nil(), header, missing),
+    let (env, slots, missing, promised) = match frame {
+        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0, 0),
+        CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        } => (nil(), header, missing, promised),
     };
     let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
@@ -3260,13 +3284,7 @@ unsafe fn run_frame_general(
     let signature = match entry {
         // A slot frame's closure is never typed (`bind_slots`).
         _ if slots != crate::NO_SLOTS => {
-            default_promises(
-                depth - 1,
-                function,
-                slots as usize,
-                promised_defaults(function, missing),
-            )
-            .map(|()| None)
+            default_promises(depth - 1, function, slots as usize, promised).map(|()| None)
         }
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
@@ -3630,7 +3648,7 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
     }
 }
 
-/// Replaces the default of each formal in `promised` ([`promised_defaults`]), which the binding
+/// Replaces the default of each formal in `promised`, which the binding
 /// put in its slot as the bare expression, with a promise of its code over the slot frame at
 /// `owner`.
 unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
@@ -3649,23 +3667,6 @@ unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised
         );
     }
     Ok(())
-}
-
-/// The formals among `missing` whose default [`default_promises`] makes a promise of: code,
-/// not a literal.
-unsafe fn promised_defaults(function: Sexp, missing: u64) -> u64 {
-    let mut promised = 0;
-    let mut formal = function.car();
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist && missing.checked_shr(index).unwrap_or(0) != 0 {
-        let default = formal.car();
-        if missing & (1 << index) != 0 && !(default.kind().is_atomic() || default == nil()) {
-            promised |= 1 << index;
-        }
-        formal = formal.cdr();
-        index += 1;
-    }
-    promised
 }
 
 /// How many of the frame's unforced promises are its own defaults that nothing but their slot

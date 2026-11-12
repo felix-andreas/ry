@@ -110,6 +110,15 @@ describes it, and the open gaps are marked.
   writes them like any plan. The plan is refused for a `..N` argument or a left-out formal whose
   default is not a literal, and those calls bind through `bind_slots`. `call_with_plan` checks per call what can change after planning (machine code for the
   body, the debugger, move tracking), and takes the generic path when any holds.
+- **Call shape.** Each plan row also holds the callee's `CallShape`: its formal count, slot and
+  register counts, and two bitsets of the formals that have a default and of those whose default
+  is code. Binding reads the shape instead of walking the formals and the slot table, writes a
+  left-out formal's default by walking the formals only as far as the last one left out, and
+  makes default promises only for the code bits that are also missing. The shape lives in the
+  plan, not in the compiled body, because a closure whose formals were replaced keeps its body:
+  the defaults are a fact of the formals and body together, which is the plan's key. The site
+  reads its row after collecting the arguments, which runs no R code; a generation counter that
+  every store and free moves confirms the row is unchanged with one compare.
 - **Forwarding `...`.** A call that passes `...` appends the promises the frame's `...` slot holds,
   to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
   argument is a constant or a slotted local), so `f(x, ...)`, `list(...)` and `c(x, ...)` leave the
