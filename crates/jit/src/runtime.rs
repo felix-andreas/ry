@@ -421,6 +421,8 @@ unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     value
 }
 
+/// Holds `unwind` until compiled code hands the activation back. The collector traces it there
+/// through [`interp::Interp::held_unwinds`].
 fn park(activation: &mut Activation, unwind: Unwind) {
     activation.pending = Some(unwind);
 }

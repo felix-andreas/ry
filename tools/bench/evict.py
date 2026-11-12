@@ -10,8 +10,10 @@ not, so evict both builds before comparing them.
 
 The files are the executable's own directory, the base R tree `rcmd::base::installed` would find
 for it (beside it, under `../lib/ry`, or in any directory up to the cargo target directory, or
-`RY_BASE_R`), ry's cache directory with every extracted runtime and R home in it, and the
-package libraries `R_LIBS` and `R_LIBS_USER` name. Each tree is walked recursively, following
+`RY_BASE_R`), ry's cache directory with every extracted runtime and R home in it, the R home
+`R_HOME` names (a separate home per build, made with `ry-rcmd start-image`, lives anywhere), and
+the package libraries `R_LIBS` and `R_LIBS_USER` name. `R_HOME` may list several homes, separated
+as a path list, so one call evicts every build's home. Each tree is walked recursively, following
 symbolic links, since ry's cached R home links into the base R tree.
 
 Usage: `python3 tools/bench/evict.py RY [RY ...]`, or `evict(paths)` from Python.
@@ -55,7 +57,7 @@ def runtime_roots(executables):
                     break
     cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     roots.append(pathlib.Path(cache) / "ry")
-    for variable in ("RY_BASE_R", "R_LIBS", "R_LIBS_USER"):
+    for variable in ("RY_BASE_R", "R_HOME", "R_LIBS", "R_LIBS_USER"):
         roots += [pathlib.Path(part) for part in os.environ.get(variable, "").split(os.pathsep) if part]
     return [root for root in roots if root.exists()]
 
