@@ -319,9 +319,18 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
 
 /// Two runs of the same program make the same collections: the trigger reads only the bytes the
 /// program allocated, never wall time, RSS or an address-dependent hash. The workload grows a
-/// kept list, fills hashed environments, interns fresh strings and builds closures, so all three
-/// collection kinds run. Instruction counts compared between builds rely on this; so does
-/// reading one process's `RY_GC_LOG` against another's.
+/// kept list, fills hashed environments, interns fresh strings and builds closures. Instruction
+/// counts compared between builds rely on this; so does reading one process's `RY_GC_LOG`
+/// against another's.
+///
+/// A minor collection escalates to an intermediate one only when the old generation's small
+/// objects fill the node limit to within a fifth of its minimum, about 25.6 MiB after start-up.
+/// The last eight rounds' tables are therefore held together with 10,000 small vectors each, so
+/// they outlive several minor collections and are promoted before they die. With them the old
+/// generation crosses that line about a third of the way through the loop, which leaves room
+/// for base R's start-up heap to shrink or grow. No `gc()` runs inside the loop, because a major
+/// collection would empty the old generation before it fills; the final one guarantees a major
+/// collection.
 #[test]
 fn identical_runs_make_identical_collections() {
     if let Some(reason) =
@@ -331,14 +340,16 @@ fn identical_runs_make_identical_collections() {
         return;
     }
     let script = "kept <- list()\n\
+                  recent <- vector(\"list\", 8)\n\
                   for (round in 1:40) {\n\
                   \x20 table <- new.env(hash = TRUE)\n\
                   \x20 for (i in 1:2000) assign(paste0(\"key\", round, \"_\", i), list(i, as.character(i)), envir = table)\n\
                   \x20 kept[[round]] <- mget(ls(table)[1:50], envir = table)\n\
+                  \x20 recent[[round %% 8 + 1]] <- list(table, as.list(seq_len(10000) + round))\n\
                   \x20 adders <- lapply(1:500, function(i) function(x) x + i)\n\
                   \x20 total <- sum(vapply(adders, function(f) f(1), 0))\n\
-                  \x20 if (round %% 10 == 0) gc()\n\
                   }\n\
+                  invisible(gc())\n\
                   cat(length(kept), total, \"\\n\")\n";
     let directory = tempfile::tempdir().expect("temporary directory");
     fs::write(directory.path().join("work.R"), script).expect("write the workload");
