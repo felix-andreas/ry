@@ -1,0 +1,49 @@
+# Typed code compiles the scalar `Num` functions natively: bit operations and shifts on an
+# `I64`'s 64 bits, `Num.abs`, `Num.pow_int`, `Num.compare` and `Num.is_nan`, and a record update
+# `(..record, name = value)`. Inputs the library rejects, such as `NA` or a shift past 63 bits,
+# leave the call to the interpreter, which raises the library's error.
+
+requires ry-runtime
+
+file num.R
+| alias Ball = Record{x: F64, x_vel: F64}
+|
+| bits <- function(a: I64, b: I64) -> List<I64> {
+|   [Num.bitwise_and(a, b), Num.bitwise_or(a, b), Num.bitwise_xor(a, b), Num.bitwise_not(a),
+|    Num.shift_left_by(a, 40), Num.shift_right_by(-a, 2), Num.shift_right_zf_by(-a, 60)]
+| }
+| powers <- function(depth: I64) -> I64 Num.pow_int(2, depth) + Num.pow_int(depth, 3)
+| order <- function(a: I64, b: I64) -> Str {
+|   match (Num.compare(a, b)) {
+|     :LT => "less"
+|     :EQ => "equal"
+|     :GT => "greater"
+|   }
+| }
+| nan <- function(x: F64) -> Bool Num.is_nan(x)
+| shift_far <- function(a: I64) -> I64 Num.shift_left_by(a, 64)
+| bounce <- function(ball: Ball) -> Ball {
+|   moved <- (..ball, x = ball$x + ball$x_vel)
+|   if (moved$x > 10) (..moved, x = 10, x_vel = 0 - Num.abs(moved$x_vel)) else moved
+| }
+| run <- function(steps: I64) -> F64 {
+|   ball <- (x = 0f64, x_vel = 4f64)
+|   for (i in List.range(1, steps)) ball <- bounce(ball)
+|   ball$x + ball$x_vel
+| }
+|
+| print(bits(12, 10))
+| print(powers(10))
+| print(c(order(1, 2), order(2, 2), order(3, 2)))
+| print(c(nan(0 / 0), nan(1)))
+| print(tryCatch(nan(NA_real_), error = function(e) conditionMessage(e)))
+| print(tryCatch(shift_far(1), error = function(e) conditionMessage(e)))
+| print(run(4))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry num.R
+expect exit 0
+expect stdout "[8i64, 14i64, 6i64, -13i64, 13194139533312i64, -3i64, 15i64]\n2024i64\n[1] \"less\"    \"equal\"   \"greater\"\n[1]  TRUE FALSE\n[1] \"`number` must be a single number, not `NA`\"\n[1] \"`bits` must be from 0 to 63, not 64\"\n[1] 2"
+expect stderr "typed: compiled for [I64, I64] -> Vector { item: I64, array: true }"
+expect stderr "typed: compiled for [I64] -> Dbl"
+expect stderr "typed: `nan` runs in the interpreter"

@@ -8,7 +8,7 @@
 //! `FUZZ_ITERS` raises the budget.
 
 use {
-    heap::{Heap, object::Sexp},
+    heap::{GcStress, Heap, object::Sexp},
     interp::{
         deparse, eval, lower,
         unwind::{Jump, Unwind},
@@ -468,6 +468,39 @@ fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
                 ["FALSE", "TRUE", "TRUE", "FALSE", "TRUE", "FALSE"]
             );
         }
+    });
+}
+
+/// `Dict.len` and `Set.len` return a ry `I64`, so compiled code must not return the count as an
+/// R integer. A short loop runs the body in tier 0 and a long one enters it in compiled code, so
+/// both paths are pinned.
+#[test]
+fn collection_lengths_keep_their_type_in_compiled_code() {
+    with_interpreter(|| unsafe {
+        let definitions = [
+            "dict_len <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.len(d) }",
+            "set_len <- function(n) { s <- Set.insert(Set.empty(), 2L); for (i in 1:n) NULL; Set.len(s) }",
+            "dict_empty <- function(n) { d <- Dict.empty(); for (i in 1:n) NULL; Dict.is_empty(d) }",
+        ];
+        for definition in definitions {
+            run(definition);
+        }
+        let calls = |mode| {
+            jit::install_mode(mode);
+            let outcomes: Vec<String> = ["dict_len", "set_len", "dict_empty"]
+                .iter()
+                .flat_map(|name| {
+                    ["3L", "100000L"].map(|n| run(&format!(".Internal(typeof({name}({n})))")))
+                })
+                .collect();
+            jit::install_mode(Mode::Off);
+            outcomes
+        };
+        let interpreted = calls(Mode::Off);
+        assert_eq!(interpreted[..4], ["\"I64\""; 4], "{interpreted:?}");
+        assert_eq!(interpreted[4], "\"logical\"", "{interpreted:?}");
+        assert_eq!(calls(Mode::On), interpreted);
+        assert_eq!(calls(Mode::Force), interpreted);
     });
 }
 
@@ -1416,7 +1449,7 @@ fn break_and_next_route_through_nested_steps() {
     // of its own. A `break` or `next` forced inside the inner body must still resume the outer
     // loop after the inner step returns, rather than the inner one or the step's caller. The
     // `break` in `outer` also makes the optimizing tier hand back a resume at the loop's exit,
-    // the instruction right after the backward `Jump`, which baseline code must take as such.
+    // the instruction right after the backward `Jump`.
     let definitions = [
         "inner <- function(n, v) { t <- 0; for (j in seq_len(n)) { if (j == 2) next; t <- t + j }; t + v }",
         "outer <- function(m) { s <- 0; for (i in 1:m) { s <- s + inner(i, if (i == 4) break else if (i == 2) next else i) }; s }",
@@ -1585,7 +1618,7 @@ unsafe fn has_compiled_code(name: &str) -> bool {
 }
 
 /// The outcome of four calls of a closure with `body` under tier 0, then of four calls of a
-/// fresh closure with the same body under the forced JIT and four under the baseline tier alone.
+/// fresh closure with the same body under the forced JIT.
 /// Each closure is new, so each run starts from its own profile.
 unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>) {
     unsafe {
@@ -1603,13 +1636,7 @@ unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>)
         jit::install_mode(Mode::Force);
         let compiled_name = format!("compiled_{case}");
         define(&compiled_name);
-        let mut compiled = calls(&compiled_name);
-        // The baseline tier compiles at the first entry and never tiers up in this mode, so
-        // every call after the first runs its machine code.
-        jit::install_mode(Mode::Baseline);
-        let baseline_name = format!("baseline_{case}");
-        define(&baseline_name);
-        compiled.extend(calls(&baseline_name));
+        let compiled = calls(&compiled_name);
         jit::install_mode(Mode::Off);
         for outcome in &reference[1..] {
             assert_eq!(
@@ -1641,7 +1668,7 @@ unsafe fn run(text: &str) -> String {
             Err(Unwind::Error(error)) => format!("error: {}", error.message),
             // An error no handler caught ran the default handler, which recorded the message
             // after a head that names the call.
-            Err(Unwind::Jump(jump)) if matches!(jump, Jump::TopLevel) => {
+            Err(Unwind::Jump(Jump::TopLevel)) => {
                 let text = &interp::interp().error_message;
                 // The head breaks the line when the call is long, so the break moves with the
                 // closure's name and is normalized away.
@@ -2940,6 +2967,44 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- :A(\"s\"); FUNCTION(x) }",
             ],
         ),
+        // A tag from R whose payload is a ry list converts deeply. An empty list converts when
+        // its storage records the item type, and a bare `[]` leaves the call to tier 0.
+        (
+            "function(t: :Many(List<I64>) | :One(I64)) -> I64 match (t) { :Many(xs) => \
+             List.sum(xs)\n :One(x) => x }",
+            &[
+                "{ x <- :Many([1i64, 2i64, 39i64]); FUNCTION(x) }",
+                "{ x <- :Many(.ry_items([], \"I64\")); FUNCTION(x) }",
+                "{ x <- :Many([]); FUNCTION(x) }",
+            ],
+        ),
+        // A tag from R of a shape the annotation rejects, such as `:One(2.5)` for `:One(I64)`,
+        // gives up for that shape alone: the function keeps its code for the calls after it. A
+        // whole double converts to the declared `I64` as the interpreter's return check does.
+        (
+            "function(t: :One(I64) | :Two) -> I64 match (t) { :One(x) => x\n :Two => 0i64 }",
+            &[
+                "{ x <- :One(3i64); FUNCTION(x) }",
+                "{ x <- :One(2.5); FUNCTION(x) }",
+                "{ x <- :One(2); FUNCTION(x) }",
+                "{ x <- :One(\"s\"); FUNCTION(x) }",
+                "{ x <- :Two; FUNCTION(x) }",
+            ],
+        ),
+        // Lists of lists, of strings and of tags convert too, and a list whose items differ
+        // in type is released before the call falls back.
+        (
+            "function(t: :Rows(List<List<F64>>) | :Names(List<Str>) | :Kids(List<:Leaf(I64)>)) \
+             -> F64 match (t) { :Rows(rows) => List.walk(rows, 0, \\(acc, r) acc + \
+             Num.to_f64(List.len(r)))\n :Names(ns) => Num.to_f64(List.len(ns))\n \
+             :Kids(ks) => List.walk(ks, 0, \\(acc, k) acc + match (k) { :Leaf(v) => Num.to_f64(v) }) }",
+            &[
+                "{ x <- :Rows([[1.5, 2.5], [3.5]]); FUNCTION(x) }",
+                "{ x <- :Names([\"a\", \"b\"]); FUNCTION(x) }",
+                "{ x <- :Kids([:Leaf(1i64), :Leaf(2i64)]); FUNCTION(x) }",
+                "{ x <- :Rows([[1.5], [:Leaf(1i64)]]); FUNCTION(x) }",
+            ],
+        ),
         // A tag result crosses back to R.
         (
             "function(n: I64) -> Result<I64, :Odd> if (n %% 2i64 == 0i64) :Ok(n) else :Err(:Odd)",
@@ -3010,6 +3075,59 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- \"abz\"; FUNCTION(x) }",
                 "{ x <- \"b\"; FUNCTION(x) }",
             ],
+        ),
+        // A record field holds a list. Each update copies the list the old record still holds,
+        // and the copy's capacity grows from its length, past the point where doubling a shared
+        // list's capacity on every copy used to ask for gigabytes.
+        (
+            "function(n: I64) -> I64 { column <- (name = \"a\", values = [0i64])\n \
+             original <- column\n i <- 0i64\n while (i < n) { column <- (..column, values = \
+             List.append(column$values, i))\n i <- i + 1i64 }\n \
+             List.sum(column$values) + List.len(original$values) }",
+            &["{ k <- 40i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> List<List<I64>> List.append([[n], [n, n]], List.repeat(0i64, 2))",
+            &["{ k <- 7i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- [[n], [n, n]]\n total <- 0i64\n \
+             for (row in rows) total <- total + List.sum(row)\n total + List.len(rows[[2]]) }",
+            &["{ k <- 7i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> Record{name: Str, values: List<I64>} (name = \"b\", values = [n, n + 1i64])",
+            &["{ k <- 1i64; FUNCTION(k) }"],
+        ),
+        // A `return` of a comparison and a later `Bool.false` join as a logical.
+        (
+            "function(x: I64, y: I64) -> Bool { if (x < y) return(Bool.true)\n Bool.false }",
+            &[
+                "{ a <- 1i64; b <- 2i64; FUNCTION(a, b) }",
+                "{ a <- 2i64; b <- 1i64; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> I64 List.sum(List.drop_last([n], 1)) + List.sum(List.repeat(n, 0i64) * 2i64)",
+            &["{ k <- 3i64; FUNCTION(k) }"],
+        ),
+        // A merge sort with the comparator inlined: stable, so equal keys keep their order, and
+        // the strings it compares order as R's `<` does.
+        (
+            "function(n: I64) -> List<Tuple{Str, I64}> { xs <- List.map(List.range(1, n), \\(i) \
+             (if (i %% 2i64 == 0i64) \"b\" else \"a\", i %% 3i64))\n \
+             List.sort_with(xs, \\(a, b) match (Num.compare(b[[2]], a[[2]])) { \
+             :EQ => if (a[[1]] < b[[1]]) :LT else if (a[[1]] > b[[1]]) :GT else :EQ\n \
+             order => order }) }",
+            &[
+                "{ k <- 9i64; FUNCTION(k) }",
+                "{ k <- 1i64; FUNCTION(k) }",
+                "{ k <- 0i64; FUNCTION(k) }",
+            ],
+        ),
+        (
+            "function(xs: List<Str>, s: Str) -> List<Bool> xs <= s",
+            &["{ a <- List.from_r(c(\"B\", \"a\", \"b\", \"\")); b <- \"b\"; FUNCTION(a, b) }"],
         ),
     ];
     with_interpreter(|| {
@@ -3260,6 +3378,15 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             "function(n: I64) -> I64 List.sum(.ry_items(List.map(List.range(1, n), \\(v) v * 2i64), \"I64\"))",
             &["{ x <- 3i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
         ),
+        // `List.with_capacity` gets its item type from `.ry_items` and fails on a negative room.
+        (
+            "function(n: I64) -> I64 { xs <- .ry_items(List.with_capacity(n), \"I64\"); for (i in List.range(1, n)) xs <- List.append(xs, i); List.sum(xs) }",
+            &[
+                "{ x <- 5i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+                "{ x <- -1i64; FUNCTION(x) }",
+            ],
+        ),
     ];
     with_interpreter(|| {
         for (case, &(definition, calls)) in cases.iter().enumerate() {
@@ -3353,4 +3480,158 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             assert!(after.contains("10"), "shadowed Num.e gave {after}");
         }
     });
+}
+
+/// The element operations compiled code hands to tier 0's handlers, each the body of a loop
+/// over `i` with `x <- list(a = 1, b = 2)`, `p <- list(a = 1, bbb = 2)`, `v <- c(1, 2, 3, 4, 5,
+/// 6)` and `k <- 2L` in scope. The last three take tier 0's generic handlers: a range subscript,
+/// an append that converts the vector, and a partial match.
+const ELEMENT_OPS: &[&str] = &[
+    "y <- x[[k]]",
+    "y <- x[2L]",
+    "x[[k]] <- 5",
+    "x[k] <- list(5)",
+    "x$b <- k",
+    "y <- x$b",
+    "y <- x[[\"b\"]]",
+    "y <- v[k:4L]",
+    "w <- c(1, 2); w[[3L]] <- k",
+    "y <- p$bb",
+];
+
+#[test]
+fn a_body_at_a_dead_bodys_address_runs_its_own_code() {
+    // Compiled code is found through the body it was compiled from, by the body's address. Once
+    // a body dies, the allocator places new bodies at its address, and each must run its own
+    // code rather than the dead one's.
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            for i in 1..=300 {
+                run(&format!(
+                    "g <- function() {{ s <- 0; for (k in 1:3) s <- s + {i}; s }}"
+                ));
+                let outcome = run("g()");
+                run("rm(g)");
+                if i % 10 == 0 {
+                    interp::heap().collect(heap::Collection::Major);
+                }
+                assert_eq!(outcome, (3 * i).to_string(), "{mode:?}, body {i}");
+            }
+            jit::install_mode(Mode::Off);
+        }
+    });
+}
+
+#[test]
+fn a_parked_return_value_survives_its_exit() {
+    // Forcing `x` runs `return(...)` for `h`, which compiled `g` parks in its activation until
+    // the deoptimization exit hands it to tier 0. The exit writes `i` back first, which
+    // allocates, and the returned list exists nowhere but in the parked unwind.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("g <- function(n, x) { i <- n + 1L; x; i }");
+        run("h <- function(n) g(n, return(list(n, n * 2L)))");
+        for n in 1..=3 {
+            assert_eq!(run(&format!("h({n}L)")), format!("list({n}L, {}L)", 2 * n));
+        }
+        let heap = interp::heap();
+        heap.update_policy(|policy| policy.stress = GcStress::EveryAllocation);
+        let outcome = run("h(5L)");
+        heap.update_policy(|policy| policy.stress = GcStress::Off);
+        jit::install_mode(Mode::Off);
+        assert_eq!(outcome, "list(5L, 10L)");
+    });
+}
+
+/// A compiled element operation must never cost more instructions than tier 0's handler for the
+/// same shape. The machine has no hardware counters to read, so each shape runs in a child of
+/// this test binary under cachegrind, which counts instructions exactly; the cost of one
+/// iteration is the difference between two loop lengths, which cancels startup. Without
+/// valgrind the test has nothing to measure with and passes with a note.
+#[test]
+fn element_ops_cost_no_more_than_tier_zero() {
+    const NAME: &str = "element_ops_cost_no_more_than_tier_zero";
+    if let (Ok(shape), Ok(mode), Ok(iterations)) = (
+        std::env::var("RY_ELEMENT_SHAPE"),
+        std::env::var("RY_ELEMENT_MODE"),
+        std::env::var("RY_ELEMENT_ITERATIONS"),
+    ) {
+        let body = ELEMENT_OPS[shape.parse::<usize>().expect("a shape index")];
+        with_interpreter(|| unsafe {
+            jit::install_mode(if mode == "force" {
+                Mode::Force
+            } else {
+                Mode::Off
+            });
+            run(&format!(
+                "f <- function(n) {{ x <- list(a = 1, b = 2); p <- list(a = 1, bbb = 2); v <- c(1, 2, 3, 4, 5, 6); k <- 2L; for (i in 1:n) {{ {body} }}; 0 }}"
+            ));
+            for _ in 0..3 {
+                run("f(10L)");
+            }
+            assert_eq!(run(&format!("f({iterations}L)")), "0");
+            jit::install_mode(Mode::Off);
+        });
+        return;
+    }
+    if std::process::Command::new("valgrind")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("{NAME}: valgrind is not installed, so nothing was measured");
+        return;
+    }
+    let executable = std::env::current_exe().expect("the test binary's path");
+    let instructions = |shape: usize, mode: &str, iterations: u64| -> u64 {
+        let output = std::process::Command::new("valgrind")
+            .args([
+                "--tool=cachegrind",
+                "--cache-sim=no",
+                "--smc-check=all-non-file",
+                "--cachegrind-out-file=/dev/null",
+            ])
+            .arg(&executable)
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env("RY_ELEMENT_SHAPE", shape.to_string())
+            .env("RY_ELEMENT_MODE", mode)
+            .env("RY_ELEMENT_ITERATIONS", iterations.to_string())
+            .output()
+            .expect("valgrind runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "the child failed:\n{stderr}");
+        stderr
+            .lines()
+            .find_map(|line| line.split_once("I refs:"))
+            .and_then(|(_, count)| count.trim().replace(',', "").parse().ok())
+            .unwrap_or_else(|| panic!("no instruction count in:\n{stderr}"))
+    };
+    let (short, long) = (2_000, 4_000);
+    let per_iteration = |shape: usize, mode: &str| {
+        (instructions(shape, mode, long) - instructions(shape, mode, short)) / (long - short)
+    };
+    let measured: Vec<(u64, u64)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..ELEMENT_OPS.len())
+            .map(|shape| {
+                scope.spawn(move || (per_iteration(shape, "off"), per_iteration(shape, "force")))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a measuring thread"))
+            .collect()
+    });
+    let report: Vec<String> = ELEMENT_OPS
+        .iter()
+        .zip(&measured)
+        .map(|(body, (off, force))| format!("{body}: tier 0 {off}, compiled {force}"))
+        .collect();
+    eprintln!("{}", report.join("\n"));
+    for (body, (off, force)) in ELEMENT_OPS.iter().zip(&measured) {
+        assert!(
+            force <= off,
+            "`{body}` costs {force} instructions per iteration compiled but {off} in tier 0"
+        );
+    }
 }

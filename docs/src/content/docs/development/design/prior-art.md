@@ -172,8 +172,8 @@ refers to its steps.
 | Borrowed arguments: a callee that only reads an argument leaves its count alone | Roc, Bend | **Adopt, as a speculation** | The JIT, for callees it can see entirely |
 | Escape analysis, inspired by Bend's share inference | Bend | **Adopt, scoped** | Temporaries in compiled code that native code never sees |
 | Call-site specialization of known closures, inspired by lambda sets | Roc | **Adopt, scoped** | `lapply`, `vapply`, `Map`, `Reduce` in compiled code |
-| One IR feeding several backends | Roc | **Adopt** | Bytecode feeds the interpreter, the baseline tier and the Cranelift tier |
-| A fast dev backend beside an optimizing one | Roc | **Adopt, built** (step 4) | The Sparkplug-style baseline tier, with its own x86-64 and aarch64 assembler |
+| One IR feeding several backends | Roc | **Adopt** | Bytecode feeds the interpreter and the Cranelift tier |
+| A fast dev backend beside an optimizing one | Roc | **Built, measured and removed** | A Sparkplug-style baseline tier ran more instructions than tier 0, because tier 0's dispatch is only about 3% of the time (`decisions.md`, "No baseline tier, and code images hold bytecode only") |
 | Static dispatch only | Roc | **Reject** | S3, S4 and R6 are dynamic; ry speculates on the class instead |
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
@@ -195,17 +195,17 @@ refers to its steps.
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Closed bindings per locked namespace: the bindings are closed though their values are not | Bun | **Adopt** (step 2) | Direct calls to sibling namespace functions and imports, invalidated by `unlockBinding` and `assignInNamespace` |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt as a hybrid, built for numeric functions** | `ry install` compiles from checker, closed-namespace and effect-free facts into the code image's native section; tier 0 keeps `eval` and NSE, the JIT keeps hot loops |
+| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt for strict typed code only** | Untyped package closures measured neutral and were removed (`decisions.md`, "No baseline tier, and code images hold bytecode only"); typed closures are the open target |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | Mapped images shared across worker processes | Bun | **Adopt, planned** (step 5) | callr, parallel and doParallel workers map the same package images; measured as resident memory per worker |
-| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry install --explain` |
+| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt, planned** | For strict typed code, beside its ahead-of-time compiler |
 | Each program runs interpreted, compiled, and compiled with types erased; guesses forced to fail; facts checked | Bun | **Adopt** | Typed differential tests and fuzzing |
 | No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first call that needs it |
 | A standalone executable with its machine code mapped from the file | Bun | **Adopt** | `ry build --exe` |
 | Inline caches as the profile the optimizer reads | JavaScriptCore, V8 | **Built, extend** | Tier 0 function lookups; tier 1 speculates on the cached cell |
 | Shapes as cache keys, adapted to frames: remember slot k, check the symbol there | JavaScriptCore, V8 | **Built** | `Frame::find_hinted`: a slot hint per tier 0 variable and function lookup site |
 | Watchpoint sets per binding | JavaScriptCore | **Adopt** | Watched binding cells list dependent bodies; replaces the epoch and stamp check at entry |
-| Polymorphic inline caches | JavaScriptCore, V8 | **Adopt, scoped** | S3 dispatch sites, keyed on the class vector; the global method cache as megamorphic fallback |
+| Polymorphic inline caches | JavaScriptCore, V8 | **Rejected for S3**, adopted for S4 | S3 finds methods through one row per method symbol, valid under its lookup stamp; S4 keeps a cache per generic |
 | Value profiling of call targets and classes | JavaScriptCore | **Adopt** | Beside tier 0's value-kind feedback |
 | OSR entry and exit | JavaScriptCore, LuaJIT, V8 | **Built** | Loop headers; deoptimization to tier 0 |
 | Register-based interpreter with per-instruction tail-call dispatch and fast paths inside handlers | JavaScriptCore (LLInt), LuaJIT 2 | **Adopt, planned** (step 3); the assembly is rejected | Tier 0 handlers ending in a `become` call through a handler table |
@@ -216,7 +216,7 @@ refers to its steps.
 | Trace compilation | LuaJIT | **Reject** | Promises and dispatch make traces fragile; Cranelift is a method JIT |
 | Dense feedback slots, allocated lazily | V8 | **Adopt** (lazy half built) | Feedback only for value-producing instructions |
 | Fast mid tier on feedback | V8 (Maglev) | **Adopt, scoped** | Tier 1, compiled off the main thread, with lower thresholds |
-| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Adopt, built** (step 4), preferred over copy-and-patch; not on by default | Per instruction, a call to tier 0's handler with immediate operands and native jumps (`crates/jit/src/baseline.rs`). Against tail-call tier-0 handlers that alone measures level, so the baseline pays off only once it inlines the fast paths of variable access and arithmetic |
+| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Built, measured and removed** | Per instruction, a call to tier 0's handler with immediate operands and native jumps. It ran 6.7% more instructions than tier 0 on `testthat_full`, against a ceiling of about 3.1% for all of tier 0's dispatch |
 | Accumulator bytecode | V8 (Ignition) | **Reject** | Tier 0 keeps named registers |
 | Sea-of-nodes optimizer, a fourth tier | V8, JavaScriptCore | **Reject** | Tier 1 is the top tier |
 | In-place instruction specialization (quickening), de-specialized on a miss | CPython (PEP 659)[^pep-659] | **Adopt the idea** (step 3) | Tier 0 instructions rewrite themselves to a specialized form and back; CPython is not the performance bar, JavaScriptCore is |
@@ -306,8 +306,8 @@ into the host through the C ABI.
   code, so the JIT cannot specialize it.
 - **One IR for every tier.** ry's bytecode feeds the tier 0 interpreter, and tier 1 compiles from
   the same bytecode through the mid-level SSA IR of `crates/ssa`, which the typed core shares, as
-  Roc's backends share their lower-level IR. Roc's fast dev backend corresponds to the
-  Sparkplug-style baseline tier (see V8 below).
+  Roc's backends share their lower-level IR. A counterpart of Roc's fast dev backend, a
+  Sparkplug-style baseline tier, was measured and removed (see V8 below).
 
 **What ry rejects.**
 
@@ -615,22 +615,12 @@ that apply Bun's closed-world reasoning to untyped packages:
   `ry build --exe`, which writes a standalone executable as `bun compile` does. Worker processes
   started by callr, parallel and doParallel load the same packages, so mapping each package's image
   read-only lets them share it (planned as step 5, measured as resident memory per worker).
-- **Ahead-of-time machine code at install time, as one tier of a hybrid** (built for a package's
-  numeric functions, for the argument types their annotations or constant defaults declare, and
-  otherwise for guessed scalar and vector types; the checker's inferred types are not used yet).
-  `ry install` compiles each package to machine code from facts it can prove without running
-  anything: ry's checker and inferred types, the closed bindings of the locked namespace, and the
-  effect-free fact per function. A value from outside the package (an argument from user code, a result of `.Call`)
-  is tested once where it enters, and a failed test takes the tier-0 path for that call. The code
-  goes through the one SSA IR and `cranelift-object` into the native section of the package's code
-  image, mapped read-only so the test processes of one CI machine share it. Tier 0 keeps `eval` and
-  non-standard evaluation, and the JIT keeps hot loops, because Bun's numbers show ahead-of-time
-  code losing to a JIT once warm. `ry install --explain` lists the functions left in the
-  interpreter and, for each native specialization, the arguments it tests on entry and the names it
-  looks up. It is measured on the testthat workload and on package load
-  time.
-- **`ry install --explain`** for the slow-path report. With no profile, it ranks the functions
-  left in the interpreter by size.
+- **Ahead-of-time machine code for strict typed code.** Inside typed code a type is a fact, so
+  the code needs no guesses and tests an R value once at the typed boundary. For untyped package
+  closures the idea was built and measured: scalar numeric functions compiled at install covered
+  5 to 11% of closures and left the testthat workload unchanged, and baseline code for every body
+  could save at most about 3% of its instructions, so code images hold bytecode only
+  (`decisions.md`, "No baseline tier, and code images hold bytecode only").
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
 **What ry rejects.**
@@ -679,8 +669,8 @@ runs a compiled slow second version of the function.
   values, which is what Bun's flow analysis needs, and untyped R stays on the JIT.
 - **A slow second version instead of the interpreter.** A compiled copy that takes the failing
   argument as a plain R value would keep the call native without discarding code.
-- **A free, tested and by-name split** in `ry install --explain`, which today lists entry tests and
-  looked-up names per specialization but gives no program-wide count.
+- **A free, tested and by-name split** in a slow-path report for typed code, with a
+  program-wide count.
 
 ## Production JITs: JavaScriptCore, LuaJIT and V8
 
@@ -754,16 +744,15 @@ its hot builtins in Zig and C++.[^bun]
   covers today, is not a watched cell. Section 5 of the runtime design plans watch sets; this is
   their concrete shape. **Adopt.**
   How often `valid()` reaches the per-symbol loop on a real test suite is not yet measured.
-- **Polymorphic inline caches for S3 dispatch.** S3 method lookup goes through one global table
-  (`MethodCache` in `crates/interp/src/dispatch.rs`) that is cleared whenever the binding epoch or
-  the collection count changes. A per-site cache in the style of a polymorphic property cache would
-  hold up to four entries, keyed on the class attribute: first by the pointer of the class vector,
-  which objects from one constructor usually share (unverified), then by comparing its elements,
-  which are interned `CHARSXP`s and so compare by pointer. An object without a class attribute is
-  keyed on its implicit class (type and `dim`). Past four classes the site goes megamorphic and
-  uses the global table. The entries are invalidated by the lookup stamps of the method names,
-  which per-binding watch sets make precise. **Adopt, scoped** to `UseMethod` and the internally
-  dispatching builtins.
+- **Polymorphic inline caches for S3 dispatch.** Built and then replaced. Per-site entries keyed
+  on the class vector hit for only 15 to 40% of resolutions on the measured workloads, because most
+  dispatch sites run a few times and `$` dispatch has no site. What a site cached is a fact about
+  a method name, not about the site, so S3 dispatch keeps it once per name: the method symbol
+  carries the index of a row that holds the binding found from the top environment on, valid
+  under the symbol's lookup stamp (`MethodRows` in `crates/interp/src/dispatch.rs`;
+  `decisions.md`, "S3 methods are found through one row per method symbol"). The JIT can guard
+  an inlined method on that stamp, as it does for global function lookups. **Rejected** in the
+  per-site form.
 - **Value profiling, extended.** Tier 0 records a bit set of eleven value kinds per instruction
   (`feedback` in `bytecode.rs`). JavaScriptCore also profiles call targets and structures; ry's
   equivalents are the closure a call site called and the class a dispatch site saw, which the
@@ -884,13 +873,13 @@ only once the function has run a few times.[^v8-lite]
   On the `validation` workload, tier 1 compiles 73 bodies in about 15 ms of the run's 3 s, about
   0.2 ms per body including planning, so compile time is not what keeps code in tier 0 there: the
   thresholds are. The split between planning and Cranelift is not yet measured.
-- **A Sparkplug-style baseline tier, preferred over copy-and-patch.** ry's tier 0 and tier 1
-  already share the register window, which is Sparkplug's key property. ry's baseline tier emits,
-  per instruction, a call to that instruction's tier 0 handler with its operands as immediates and
-  its branches as native jumps. That removes decoding and dispatch, and keeps the allocations,
-  guards and frame searches that the other roadmap steps attack. It is simpler to build and
-  maintain than copy-and-patch stencils, and it reuses the handlers step 3 writes. **Adopt,
-  planned** as step 4 of the roadmap.
+- **A Sparkplug-style baseline tier.** ry built one: per instruction, a call to that
+  instruction's tier 0 handler with its operands as immediates and its branches as native jumps,
+  sharing tier 0's register window. It removes only decoding and dispatch, which are about 3.1% of
+  `testthat_full`, and it ran 6.7% more instructions than tier 0 there, so it was removed
+  (`decisions.md`, "No baseline tier, and code images hold bytecode only"). The time is in the op
+  bodies (allocations, guards and frame searches), which the other roadmap steps attack.
+  **Rejected after measurement.**
 
 **What ry rejects.**
 
@@ -965,14 +954,11 @@ does as well as or better than a classical flow-based type analysis on all its
 benchmarks.[^lbbv] Shopify reports YJIT about 20% faster than the CRuby interpreter on
 railsbench.[^yjit]
 
-**What ry adopts.** Block versioning as the second stage of the baseline tier (step 4 of the
-[roadmap](/development/design/r-runtime/#untyped-performance-roadmap)). The baseline starts in
-Sparkplug's shape, a call to tier 0's handler per instruction, because that is the cheapest tier
-that removes decoding and dispatch. Versioning then fits on top: tier 0's value-kind feedback says
-which register kinds a block sees, and a version of the block for "both operands are double
-scalars" calls the double handlers directly, with one check at the block's entry instead of one in
-every handler. The two are measured against each other, and versions are capped per block, as a
-polymorphic inline cache caps its entries.
+**What ry adopts.** Nothing yet. Block versioning was planned as the second stage of a baseline
+tier, which was measured and removed: a call-threaded baseline ran more instructions than tier 0
+(`decisions.md`, "No baseline tier, and code images hold bytecode only"). The idea that survives is
+the one versioning shares with tier 1's speculation, a check at a block's entry instead of one in
+every instruction, and tier 1 already specializes on tier 0's value-kind feedback.
 
 ### Deegen and LuaJIT Remake
 

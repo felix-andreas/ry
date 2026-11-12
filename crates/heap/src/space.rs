@@ -23,8 +23,8 @@
 use {
     crate::{
         env::Frame,
-        image::{ImageError, Reader, Writer},
-        object::{Sexp, SexpType, Shape, flag_bits, gc_bits},
+        image::{Fill, ImageError, Reader, Writer},
+        object::{Sexp, SexpType, VectorObject, flag_bits, gc_bits},
     },
     std::{collections::VecDeque, ptr::NonNull},
 };
@@ -74,9 +74,11 @@ const NO_PAGE: u32 = u32::MAX;
 /// The class of a page that holds no objects and can be given to any class.
 const EMPTY_PAGE: u8 = u8::MAX;
 /// `offset * SLOT_INDEX_MULTIPLIERS[class] >> 32` is the index of the slot at byte `offset` of a
-/// page, exact for every slot start because offsets stay below 2^16.
-const SLOT_INDEX_MULTIPLIERS: [u64; CLASS_COUNT] = {
-    let mut multipliers = [0u64; CLASS_COUNT];
+/// page, exact for every slot start because offsets stay below 2^16. The table covers every
+/// `u8`, so indexing it with a page's class needs no bounds check; a byte that names no class,
+/// such as [`EMPTY_PAGE`], maps to zero.
+const SLOT_INDEX_MULTIPLIERS: [u64; 256] = {
+    let mut multipliers = [0u64; 256];
     let mut class = 0;
     while class < CLASS_COUNT {
         multipliers[class] = (1u64 << 32).div_ceil(SLOT_SIZES[class] as u64);
@@ -326,8 +328,7 @@ impl Space {
                 } else {
                     None
                 };
-                if let Some((start, end)) =
-                    claim_run(&mut self.allocated[page], held, slots, from)
+                if let Some((start, end)) = claim_run(&mut self.allocated[page], held, slots, from)
                 {
                     // SAFETY: both offsets are inside a committed page.
                     let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
@@ -404,9 +405,9 @@ impl Space {
     fn locate(&self, object: Sexp) -> Option<(usize, usize, u64)> {
         let offset = (object.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize);
         let page = offset >> PAGE_SHIFT;
-        let class = *self.page_class.get(page)? as usize;
+        let class = *self.page_class.get(page)?;
         let in_page = (offset & (PAGE_SIZE - 1)) as u64;
-        let slot = (in_page * SLOT_INDEX_MULTIPLIERS.get(class)?) >> 32;
+        let slot = (in_page * SLOT_INDEX_MULTIPLIERS[class as usize]) >> 32;
         Some((page, (slot >> 6) as usize, 1 << (slot & 63)))
     }
 
@@ -435,7 +436,10 @@ impl Space {
             return false;
         }
         *marks |= bit;
-        unsafe { self.age(object, Some((page, word, bit))) };
+        if unsafe { self.age(object) } {
+            // The bound holds for the reason above: every bitmap matches `page_class`.
+            unsafe { *self.tenured.get_unchecked_mut(page).get_unchecked_mut(word) |= bit };
+        }
         true
     }
 
@@ -446,13 +450,14 @@ impl Space {
         }
         unsafe {
             object.set_gc_bit(gc_bits::MARK, true);
-            self.age(object, None);
+            self.age(object);
         }
         true
     }
 
-    #[inline(never)]
-    unsafe fn age(&mut self, object: Sexp, location: Option<(usize, usize, u64)>) {
+    /// Ages a newly marked object by one generation and says whether it is tenured now.
+    #[inline(always)]
+    unsafe fn age(&mut self, object: Sexp) -> bool {
         let bits = unsafe { object.gc_bits() };
         let promote = if bits & gc_bits::OLD == 0 {
             gc_bits::OLD
@@ -466,12 +471,11 @@ impl Space {
         }
         let cells = unsafe { vector_cells(object) };
         self.marked_vector_cells += cells;
-        if promote & gc_bits::TENURED != 0 {
+        let tenured = promote & gc_bits::TENURED != 0;
+        if tenured {
             self.tenured_vector_cells += cells;
-            if let Some((page, word, bit)) = location {
-                self.tenured[page][word] |= bit;
-            }
         }
+        tenured
     }
 
     /// [`Space::mark`] for a child of a tenured object in a deeper collection, which must also
@@ -488,7 +492,9 @@ impl Space {
         let newly = *marks & bit == 0;
         if newly {
             *marks |= bit;
-            unsafe { self.age(object, Some((page, word, bit))) };
+            if unsafe { self.age(object) } {
+                unsafe { *self.tenured.get_unchecked_mut(page).get_unchecked_mut(word) |= bit };
+            }
         }
         let tenured = unsafe { *self.tenured.get_unchecked(page).get_unchecked(word) } & bit != 0;
         (newly, tenured)
@@ -1035,6 +1041,11 @@ impl Space {
         ranges
     }
 
+    /// Whether page `page` of an image holds no object, so the image leaves it out of its file.
+    pub fn is_empty_page(&self, page: usize) -> bool {
+        self.page_class.get(page) == Some(&EMPTY_PAGE)
+    }
+
     /// Records the slots allocated now as ones [`Space::compact_for_image`] must not move.
     pub fn pin_allocated(&mut self) {
         // A cursor's claimed run counts as allocated, but nothing holds its slots yet.
@@ -1223,8 +1234,8 @@ impl Space {
     }
 
     /// Takes over the pages and metadata [`Space::write_image`] wrote, in place of everything the
-    /// space held. `fill` receives the memory of the image's pages, at the space's base, and
-    /// fills it with the pages' bytes. The caller has checked that the space allocated exactly
+    /// space held. `fill` receives each run of the image's pages that hold objects, in the space's
+    /// memory, with the offset of the run's bytes among the stored pages. The caller has checked that the space allocated exactly
     /// what the writer's had when its image's objects began, so the objects allocated since live
     /// where the image's copies of them go.
     ///
@@ -1235,7 +1246,7 @@ impl Space {
         &mut self,
         input: &mut Reader<'_>,
         held: &[Sexp],
-        fill: &mut dyn FnMut(&mut [u8]) -> Result<(), ImageError>,
+        fill: Fill<'_>,
     ) -> Result<(), ImageError> {
         let page_count = input.u32()? as usize;
         let invalid = |message: &str| ImageError::Invalid(message.to_owned());
@@ -1259,12 +1270,10 @@ impl Space {
         for bitmap in &mut bitmaps {
             let bytes = input.take(page_count * size_of::<Bitmap>())?;
             bitmap.reserve_exact(page_count);
-            for page in bytes.chunks_exact(size_of::<Bitmap>()) {
+            for page in bytes.as_chunks::<{ size_of::<Bitmap>() }>().0 {
                 let mut words = [0u64; BITMAP_WORDS];
-                for (word, bytes) in words.iter_mut().zip(page.chunks_exact(8)) {
-                    let mut array = [0u8; 8];
-                    array.copy_from_slice(bytes);
-                    *word = u64::from_le_bytes(array);
+                for (word, bytes) in words.iter_mut().zip(page.as_chunks::<8>().0) {
+                    *word = u64::from_le_bytes(*bytes);
                 }
                 bitmap.push(words);
             }
@@ -1303,11 +1312,34 @@ impl Space {
         }
         // The image's pages replace every frame these pages hold.
         self.drop_frames();
-        // SAFETY: the first `page_count` pages are committed, and the objects in them are
-        // replaced by the image's copies as a whole.
-        fill(unsafe {
-            std::slice::from_raw_parts_mut(self.base.as_ptr(), page_count * PAGE_SIZE)
-        })?;
+        // The file holds only the pages that keep an object, back to back. An empty page past
+        // the ones this process used is untouched zeroed memory, so it is left alone and costs
+        // no memory until an allocation claims it; an empty page this process used is cleared.
+        let used = self.page_count;
+        let mut stored = 0;
+        let mut page = 0;
+        while page < page_count {
+            let empty = page_class[page] == EMPTY_PAGE;
+            let end = (page..page_count)
+                .find(|&next| (page_class[next] == EMPTY_PAGE) != empty)
+                .unwrap_or(page_count);
+            // SAFETY: the first `page_count` pages are committed, and the objects in them are
+            // replaced by the image's copies as a whole.
+            let memory = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.base.as_ptr().add(page * PAGE_SIZE),
+                    (end - page) * PAGE_SIZE,
+                )
+            };
+            if !empty {
+                fill(memory, stored)?;
+                stored += memory.len();
+            } else if page < used {
+                let dirty = (end.min(used) - page) * PAGE_SIZE;
+                memory[..dirty].fill(0);
+            }
+            page = end;
+        }
         let [marks, tenured, allocated, finalizable, interned] = bitmaps;
         self.page_count = page_count;
         self.page_class = page_class;
@@ -1578,18 +1610,37 @@ fn run_mask(bit: usize, run: usize) -> u64 {
 }
 
 /// The 8-byte cells `object`'s vector data takes, as GNU R's `Vcells` count it, or zero for an
-/// object that is not a vector. An ALTREP vector's data lives in the objects it points at.
+/// object that is not a vector. A small vector counts the whole of its slot past the vector
+/// header, as GNU R counts a small vector by its size class, so the count needs no length and
+/// no arithmetic on the hot path of marking. A large vector counts its elements. An ALTREP
+/// vector's data lives in the objects it points at.
+#[inline]
 pub(crate) unsafe fn vector_cells(object: Sexp) -> u64 {
     let kind = unsafe { object.kind() };
-    if kind.shape() != Shape::Vector || unsafe { object.is_altrep() } {
-        return 0;
-    }
     let Some(element) = kind.element_size() else {
         return 0;
     };
+    if unsafe { object.is_altrep() } {
+        return 0;
+    }
+    let class = unsafe { object.size_class() };
+    if let Some(&cells) = SLOT_VECTOR_CELLS.get(class as usize) {
+        return cells;
+    }
     let elements = unsafe { object.length() } as usize + usize::from(kind == SexpType::Char);
     (elements * element).div_ceil(8) as u64
 }
+
+/// The vector cells of a small vector in each class: its slot past the vector header.
+const SLOT_VECTOR_CELLS: [u64; CLASS_COUNT] = {
+    let mut cells = [0u64; CLASS_COUNT];
+    let mut class = 0;
+    while class < CLASS_COUNT {
+        cells[class] = ((SLOT_SIZES[class] - size_of::<VectorObject>()) / 8) as u64;
+        class += 1;
+    }
+    cells
+};
 
 /// The slots of word `word` that exist in a page of `slots` slots.
 fn valid_slots(slots: usize, word: usize) -> u64 {

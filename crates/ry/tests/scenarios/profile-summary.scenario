@@ -47,6 +47,8 @@ expect file load-summary.md lacks "privatepkg"
 # so the workers a test suite starts are profiled too. A relative directory is taken from where
 # the session started, so the parent's summary does not follow it into the temporary directory
 # the session deletes when it ends.
+# The child must be ry's own Rscript: an `R_HOME` naming a GNU R makes `R.home()` that R's.
+hide gnu-r
 env RY_PROFILE_SUMMARY_DIR profiles
 run ry load -e "status <- system2(file.path(R.home('bin'), 'Rscript'), c('-e', shQuote('cat(\"child\\n\")'))); stopifnot(status == 0L); setwd(tempdir())"
 expect exit 0

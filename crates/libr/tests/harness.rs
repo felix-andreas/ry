@@ -469,6 +469,12 @@ fn run(command: &mut Command) {
     );
 }
 
+/// The test packages compute the inputs and callbacks that both toolchains' builds must round
+/// alike, so neither may fuse `a * b + c` into one fused multiply-add. A compiler that targets
+/// FMA by default (gcc on Ubuntu's x86-64-v3 builds, clang on arm64) otherwise does so at `-O2`,
+/// and an optimizer's iterates then drift from the recorded ones.
+const NO_CONTRACTION: &str = "-ffp-contract=off";
+
 /// Compiles a package's `src/` into `<name>.so`, against ry's headers or through GNU R's
 /// `R CMD SHLIB`, which uses GNU R's headers and links GNU R's `-lR`.
 pub fn build_package(name: &str, headers: Headers) -> PathBuf {
@@ -494,7 +500,7 @@ pub fn build_package(name: &str, headers: Headers) -> PathBuf {
                 cpp |= is_cpp;
                 let compiler = if is_cpp { "c++" } else { "cc" };
                 run(Command::new(compiler)
-                    .args(["-fPIC", "-O1", "-g", "-Wall", "-c"])
+                    .args(["-fPIC", "-O1", "-g", "-Wall", NO_CONTRACTION, "-c"])
                     .arg("-I")
                     .arg(&include)
                     .arg(source)
@@ -536,6 +542,8 @@ pub fn build_package(name: &str, headers: Headers) -> PathBuf {
                 .collect();
             run(Command::new("R")
                 .current_dir(&output)
+                .env("PKG_CFLAGS", NO_CONTRACTION)
+                .env("PKG_CXXFLAGS", NO_CONTRACTION)
                 .args(["CMD", "SHLIB", "-o"])
                 .arg(format!("{name}.so"))
                 .args(&names));

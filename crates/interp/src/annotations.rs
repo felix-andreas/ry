@@ -198,8 +198,61 @@ pub unsafe fn register_definition(node: &SyntaxNode, formals: Sexp, body: Sexp) 
     let texts = values::string_vector(&texts)?;
     let names = values::string_vector(&names)?;
     let signature = values::list_vector(&[masks, texts, names, body])?;
-    let heap = crate::heap();
-    let weak = heap.alloc_weak_ref(key, signature, nil(), 0, false)?;
+    register(key, signature)
+}
+
+/// The name of the attribute a serialized typed closure carries its signature under. A closure in
+/// memory never has it: the registry holds the signature, keyed by the definition.
+pub const STREAM_ATTRIBUTE: &str = ".ry_signature";
+
+/// What a stream must carry for `function`'s signature to outlive the session: the masks, the
+/// annotation texts and the formal names. `None` for an untyped closure.
+pub unsafe fn stream_signature(function: Sexp) -> R<Option<Sexp>> {
+    let Some(signature) = signature_of(function) else {
+        return Ok(None);
+    };
+    let carried = values::list_vector(&[
+        signature.element(MASKS),
+        signature.element(TEXTS),
+        signature.element(NAMES),
+    ])?;
+    Ok(Some(carried))
+}
+
+/// Registers the signature a stream carried for `function`, as [`stream_signature`] wrote it. A
+/// value of any other shape registers nothing, so the closure is untyped, as it would be read
+/// by an R that knows no annotations.
+pub unsafe fn restore_signature(function: Sexp, carried: Sexp) -> R<()> {
+    if carried.kind() != SexpType::List || values::length(carried) != 3 {
+        return Ok(());
+    }
+    let (masks, texts, names) = (carried.element(0), carried.element(1), carried.element(2));
+    let slots = values::length(masks);
+    if masks.kind() != SexpType::Integer
+        || texts.kind() != SexpType::String
+        || names.kind() != SexpType::String
+        || slots < FIRST_FORMAL_SLOT
+        || values::length(texts) != slots
+        || values::length(names) + FIRST_FORMAL_SLOT != slots
+    {
+        return Ok(());
+    }
+    let formals = function.car();
+    let body = crate::bytecode::closure_body(function);
+    let key = if formals.kind() == SexpType::Pairlist {
+        formals
+    } else if body.kind() == SexpType::Language {
+        body
+    } else {
+        return Ok(());
+    };
+    let signature = values::list_vector(&[masks, texts, names, body])?;
+    register(key, signature)
+}
+
+/// Makes `signature` the signature of the definition `key` names.
+unsafe fn register(key: Sexp, signature: Sexp) -> R<()> {
+    let weak = crate::heap().alloc_weak_ref(key, signature, nil(), 0, false)?;
     key.set_gp_bits(gp::TYPED_DEFINITION, true);
     let state = &mut interp().annotations;
     state.signatures.insert(key, weak);
@@ -406,6 +459,12 @@ pub unsafe fn declared_return_type(function: Sexp) -> Option<Declared> {
     declared(mask_at(signature.element(MASKS), RETURN_SLOT))
 }
 
+/// The annotation text of what a typed closure returns, such as `F64` or `Str`.
+pub unsafe fn return_annotation(function: Sexp) -> Option<String> {
+    let text = text_at(signature_of(function)?, RETURN_SLOT);
+    (!text.is_empty()).then_some(text)
+}
+
 /// Whether the formal at `position` of a typed closure declares `I64`, so a whole R number
 /// passed there converts to one (see [`check_value`]).
 pub unsafe fn declares_i64(function: Sexp, position: usize) -> bool {
@@ -586,15 +645,53 @@ pub fn typed_logging() -> bool {
     *LOGGING.get_or_init(|| std::env::var_os("RY_TYPED_LOG").is_some())
 }
 
-/// Reports, once per name, that a call of the typed closure `call` names runs in the
-/// interpreter because no native code took it. A typed function that should run natively and
-/// shows up here has fallen off the native path, which is otherwise invisible except as time.
-pub unsafe fn log_interpreted(call: Sexp) {
-    thread_local! {
-        static LOGGED: RefCell<FxHashSet<String>> = Default::default();
+thread_local! {
+    /// Why the native path declined the typed call being attempted, under `RY_TYPED_LOG`.
+    static DECLINED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Starts an attempt to run a typed call natively, forgetting why an earlier one declined.
+pub fn attempt_native() {
+    if typed_logging() {
+        DECLINED.with_borrow_mut(|declined| *declined = None);
     }
+}
+
+/// Records why the native path declines the typed call being attempted. `reason` runs only under
+/// `RY_TYPED_LOG`, so a decline on a hot path costs one test of a cached flag. The last reason
+/// recorded wins, because the attempt's own decline comes after anything the calls it ran
+/// recorded.
+pub fn decline(reason: impl FnOnce() -> String) {
+    if typed_logging() {
+        let reason = reason();
+        DECLINED.with_borrow_mut(|declined| *declined = Some(reason));
+    }
+}
+
+/// Reports, once per name and reason, that a call of the typed closure `call` names runs in the
+/// interpreter, with the reason the native path recorded. A typed function that should run
+/// natively and shows up here has fallen off the native path, which is otherwise invisible
+/// except as time.
+pub unsafe fn log_interpreted(call: Sexp) {
     if !typed_logging() {
         return;
+    }
+    let reason = DECLINED
+        .with_borrow_mut(Option::take)
+        .unwrap_or_else(|| String::from("the native path recorded no reason, which is a bug"));
+    log_fallback(call, &reason);
+}
+
+/// [`log_interpreted`] for a call whose reason the interpreter itself knows.
+pub unsafe fn log_interpreted_because(call: Sexp, reason: &str) {
+    if typed_logging() {
+        log_fallback(call, reason);
+    }
+}
+
+unsafe fn log_fallback(call: Sexp, reason: &str) {
+    thread_local! {
+        static LOGGED: RefCell<FxHashSet<String>> = Default::default();
     }
     let head = call.car();
     let name = if head.kind() == SexpType::Symbol {
@@ -602,8 +699,9 @@ pub unsafe fn log_interpreted(call: Sexp) {
     } else {
         String::from("an anonymous function")
     };
-    if LOGGED.with_borrow_mut(|logged| logged.insert(name.clone())) {
-        eprintln!("typed: `{name}` runs in the interpreter");
+    let line = format!("typed: `{name}` runs in the interpreter: {reason}");
+    if LOGGED.with_borrow_mut(|logged| logged.insert(line.clone())) {
+        eprintln!("{line}");
     }
 }
 

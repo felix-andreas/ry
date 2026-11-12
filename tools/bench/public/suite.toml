@@ -389,6 +389,8 @@ group = "rcp"
 display = "Growing a list, for loop"
 summary = "Grows an empty list to 1.5e6 elements by [[<- in a for loop"
 source = "tools/bench/public/rcp/list-for.R"
+# Typed: a ry List grown by List.append, which a uniquely held list does in place.
+typed_source = "tools/bench/public/rcp/list-for.typed.R"
 
 [[programs]]
 id = "list-while"
@@ -396,6 +398,8 @@ group = "rcp"
 display = "Growing a list, while loop"
 summary = "Grows an empty list to 1.5e6 elements by [[<- in a while loop with a double index"
 source = "tools/bench/public/rcp/list-while.R"
+# Typed: a ry List grown by List.append, which a uniquely held list does in place.
+typed_source = "tools/bench/public/rcp/list-while.typed.R"
 
 [[programs]]
 id = "matrix-for"

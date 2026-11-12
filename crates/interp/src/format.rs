@@ -418,15 +418,38 @@ pub fn push_real_with(
 /// digits. A vector whose exponents need three digits pads its shorter elements to the common
 /// width with spaces, not with exponent zeros, as GNU R does.
 pub fn scientific_text(value: f64, decimals: usize) -> String {
-    let text = format!("{:.*e}", decimals, value);
-    let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    let sign = if exponent < 0 { '-' } else { '+' };
-    format!(
-        "{mantissa}e{sign}{:0width$}",
-        exponent.unsigned_abs(),
-        width = 2
-    )
+    let mut text = String::new();
+    push_scientific(&mut text, value, decimals);
+    text
+}
+
+/// [`scientific_text`] appended to `out`: C's `%.*e`. Rust writes the exponent bare (`1e-5`),
+/// so it is rewritten in place to C's explicit sign and at least two digits.
+pub fn push_scientific(out: &mut String, value: f64, decimals: usize) {
+    let begin = out.len();
+    // Writing to a `String` cannot fail.
+    write!(out, "{:.*e}", decimals, value).ok();
+    rewrite_exponent(out, begin);
+}
+
+/// Rewrites the bare exponent Rust wrote after the last `e` from `begin` in C's form.
+fn rewrite_exponent(out: &mut String, begin: usize) {
+    let Some(marker) = out[begin..].rfind('e').map(|offset| begin + offset) else {
+        return;
+    };
+    let (negative, digits) = match out.as_bytes().get(marker + 1) {
+        Some(b'-') => (true, marker + 2),
+        _ => (false, marker + 1),
+    };
+    let exponent = out[digits..]
+        .bytes()
+        .fold(0u32, |sum, digit| sum * 10 + u32::from(digit - b'0'));
+    out.truncate(marker + 1);
+    out.push(if negative { '-' } else { '+' });
+    if exponent < 10 {
+        out.push('0');
+    }
+    write!(out, "{exponent}").ok();
 }
 
 /// One double formatted on its own at `digits` significant digits, as `as.character` and
@@ -1303,6 +1326,20 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     ) {
         return Err(call.error("unsupported type "));
     }
+    format_c_vector(vector, &mode, width, digits, &format, &flag)
+}
+
+/// The body of `formatC()`'s internal on an integer, double or character `vector`, for callers
+/// that hold the arguments as Rust values. `mode` is `"character"`, `"integer"` or another mode
+/// that formats doubles.
+pub(crate) unsafe fn format_c_vector(
+    vector: Sexp,
+    mode: &str,
+    width: i32,
+    digits: i32,
+    format: &str,
+    flag: &str,
+) -> R<Sexp> {
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();
@@ -1325,7 +1362,7 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             if format == "fg" && value == 0.0 {
                 number.push('0');
             } else {
-                c_format_into(&mut number, value, &format, digits, &flag, integer);
+                c_format_into(&mut number, value, format, digits, flag, integer);
             }
             &number
         };
@@ -1409,33 +1446,41 @@ pub fn c_format_into(
         "d" => {
             write!(out, "{}", value.round() as i64).ok();
         }
-        "f" => {
-            if !fixed_fast(out, value, precision) {
-                write!(out, "{:.*}", precision, value).ok();
+        "f" => push_fixed(out, value, precision),
+        "e" | "E" => {
+            let begin = out.len();
+            push_scientific(out, value, precision);
+            if format == "E" {
+                out[begin..].make_ascii_uppercase();
             }
         }
-        "e" => out.push_str(&scientific_text(value, precision)),
-        "E" => out.push_str(&scientific_text(value, precision).to_uppercase()),
         "fg" => out.push_str(&fixed_significant(
             value,
             precision.max(1),
             digits < 0 || flag.contains('#'),
         )),
         "g" | "G" => {
-            let text = c_general(value, precision.max(1), flag.contains('#'));
+            let begin = out.len();
+            push_general(out, value, precision.max(1), flag.contains('#'));
             if format == "G" {
-                out.push_str(&text.to_uppercase());
-            } else {
-                out.push_str(&text);
+                out[begin..].make_ascii_uppercase();
             }
         }
         _ => {
             if integer {
                 write!(out, "{}", value as i64).ok();
             } else {
-                out.push_str(&c_general(value, precision.max(1), false));
+                push_general(out, value, precision.max(1), false);
             }
         }
+    }
+}
+
+/// C's `%.*f`, appended to `out`.
+pub fn push_fixed(out: &mut String, value: f64, precision: usize) {
+    if !fixed_fast(out, value, precision) {
+        // Writing to a `String` cannot fail.
+        write!(out, "{:.*}", precision, value).ok();
     }
 }
 
@@ -1467,9 +1512,21 @@ fn fixed_fast(out: &mut String, value: f64, precision: usize) -> bool {
     if distance > 0.0 || (distance == 0.0 && digits % 2 == 1) {
         digits += 1;
     }
-    let mut buffer = [0u8; 20];
+    // The text is built backwards in a stack buffer and pushed once: the fraction digits (zeros
+    // where the number has fewer), the point, the integral digits, then the sign. The scaled
+    // value is below 2^52, so it has at most 16 digits, and the precision is at most 15.
+    let mut buffer = [0u8; 40];
     let mut cursor = buffer.len();
     let mut rest = digits;
+    for _ in 0..precision {
+        cursor -= 1;
+        buffer[cursor] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+    }
+    if precision > 0 {
+        cursor -= 1;
+        buffer[cursor] = b'.';
+    }
     loop {
         cursor -= 1;
         buffer[cursor] = b'0' + (rest % 10) as u8;
@@ -1478,26 +1535,13 @@ fn fixed_fast(out: &mut String, value: f64, precision: usize) -> bool {
             break;
         }
     }
-    let written = &buffer[cursor..];
     // C keeps the sign of any negative value, including one that rounds to zero.
     if value.is_sign_negative() {
-        out.push('-');
+        cursor -= 1;
+        buffer[cursor] = b'-';
     }
-    if written.len() <= precision {
-        out.push('0');
-        if precision > 0 {
-            out.push('.');
-            out.extend(std::iter::repeat_n('0', precision - written.len()));
-            out.extend(written.iter().map(|&byte| byte as char));
-        }
-    } else {
-        let (integral, fraction) = written.split_at(written.len() - precision);
-        out.extend(integral.iter().map(|&byte| byte as char));
-        if precision > 0 {
-            out.push('.');
-            out.extend(fraction.iter().map(|&byte| byte as char));
-        }
-    }
+    // SAFETY: the buffer holds only ASCII digits, the point and the sign.
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&buffer[cursor..]) });
     true
 }
 
@@ -1506,34 +1550,64 @@ fn fixed_fast(out: &mut String, value: f64, precision: usize) -> bool {
 /// `keep_zeros` is C's `#` flag: trailing zeros stay, and the decimal point stays even with no
 /// digits after it.
 pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
+    let mut text = String::new();
+    push_general(&mut text, value, significant, keep_zeros);
+    text
+}
+
+/// [`c_general`] appended to `out`.
+pub fn push_general(out: &mut String, value: f64, significant: usize, keep_zeros: bool) {
     if value == 0.0 && !keep_zeros {
         // C keeps the sign of a negative zero.
-        return if value.is_sign_negative() { "-0" } else { "0" }.into();
+        out.push_str(if value.is_sign_negative() { "-0" } else { "0" });
+        return;
     }
-    let text = format!("{:.*e}", significant.saturating_sub(1), value.abs());
-    let exponent: i32 = text
-        .split_once('e')
-        .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
+    if value.is_sign_negative() {
+        out.push('-');
+    }
+    let magnitude = value.abs();
+    if !magnitude.is_finite() {
+        out.push_str(if magnitude.is_nan() { "nan" } else { "inf" });
+        return;
+    }
+    let begin = out.len();
+    // The exponent of the value rounded to `significant` digits picks the notation, so the
+    // scientific form is written first and kept when it wins.
+    write!(out, "{:.*e}", significant.saturating_sub(1), magnitude).ok();
+    let marker = out[begin..]
+        .rfind('e')
+        .map_or(out.len(), |offset| begin + offset);
+    let exponent: i32 = out[marker + 1..].parse().unwrap_or(0);
     if exponent < -4 || exponent >= significant as i32 {
-        let text = scientific_text(value, significant.saturating_sub(1));
-        if keep_zeros && significant <= 1 {
-            text.replacen('e', ".e", 1)
-        } else if keep_zeros {
-            text
+        if keep_zeros {
+            // glibc drops the mantissa zeros when rounding carries a value just below
+            // 10^significant up to it, so 99.95 at two digits prints as `1.e+02`, not `1.0e+02`.
+            let carried = exponent == significant as i32
+                && format!("1e{significant}")
+                    .parse::<f64>()
+                    .is_ok_and(|power| magnitude < power);
+            if carried {
+                out.replace_range(begin..marker, "1.");
+            } else if significant <= 1 {
+                out.insert(marker, '.');
+            }
+            rewrite_exponent(out, begin);
         } else {
-            let (mantissa, rest) = text.split_once('e').unwrap_or((&text, ""));
-            let mantissa = trim_zeros(mantissa);
-            format!("{mantissa}e{rest}")
+            let kept = begin + trim_zeros(&out[begin..marker]).len();
+            out.replace_range(kept..marker, "");
+            rewrite_exponent(out, begin);
         }
     } else {
+        out.truncate(begin);
         let decimals = (significant as i32 - 1 - exponent).max(0) as usize;
-        let text = format!("{value:.decimals$}");
-        if keep_zeros && decimals == 0 {
-            format!("{text}.")
-        } else if keep_zeros {
-            text
+        push_fixed(out, magnitude, decimals);
+        if keep_zeros {
+            if decimals == 0 {
+                out.push('.');
+            }
         } else {
-            trim_zeros(&text).to_owned()
+            let kept = begin + trim_zeros(&out[begin..]).len();
+            out.truncate(kept);
         }
     }
 }

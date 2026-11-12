@@ -32,6 +32,9 @@ pub enum Item {
     Record(u32),
     /// A boxed tag of this union of shapes.
     Tag(u32),
+    /// A ry list of the items [`crate::shapes::array_item`] gives for this id, which lets a
+    /// record field or a list item be a list while an item stays one word.
+    Array(u32),
 }
 
 /// The type of a local.
@@ -69,6 +72,11 @@ pub enum Type {
     Record(u32),
     /// A boxed tag whose shape is one of a union's ([`crate::shapes::ANY`] for any shape).
     Tag(u32),
+    /// A value of ry's table API: a `DataFrame`, a `LazyFrame`, a `GroupBy` or an expression.
+    /// Typed code holds the R object itself and never looks inside it, so only the API's own
+    /// functions make one or take one apart. The collector owns the object, which the call that
+    /// entered typed code keeps alive, so it is not counted.
+    Table,
 }
 
 impl Type {
@@ -109,6 +117,10 @@ impl Type {
             Item::I64 => Type::I64,
             Item::Record(shape) => Type::Record(shape),
             Item::Tag(union) => Type::Tag(union),
+            Item::Array(id) => Type::Vector {
+                item: crate::shapes::array_item(id),
+                array: true,
+            },
         }
     }
 
@@ -123,6 +135,15 @@ impl Type {
             Type::Record(shape) => Some(Item::Record(shape)),
             Type::Tag(union) => Some(Item::Tag(union)),
             _ => None,
+        }
+    }
+
+    /// The item a value of this type is when a ry list or a record holds it: a scalar's item, or
+    /// a ry list as an [`Item::Array`].
+    pub fn held_item(self) -> Option<Item> {
+        match self {
+            Type::Vector { item, array: true } => Some(Item::Array(crate::shapes::array_of(item))),
+            _ => self.item(),
         }
     }
 
@@ -280,6 +301,19 @@ pub enum Math {
     RoundAway = 15,
 }
 
+/// A bit operation on the 64-bit two's complement of two `I64`s.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bits {
+    And,
+    Or,
+    Xor,
+    ShiftLeft,
+    /// Shifts right, copying the sign bit in.
+    ShiftRight,
+    /// Shifts right, filling with zeros.
+    ShiftRightZf,
+}
+
 /// A reduction of a vector to a scalar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
@@ -317,6 +351,10 @@ pub enum Op {
     Or(Local, Local),
     /// A scalar function of a double (or, for `Neg` and `Abs`, of an integer).
     Math(Math, Item, Local),
+    /// A bit operation on two `I64`s. A shift fails unless its count is from 0 to 63.
+    Bits(Bits, Local, Local),
+    /// Whether a double is `NaN`, as a `Bool`. It fails on `NA`, which no library function takes.
+    IsNan(Local),
     /// `round(x, digits)` of a scalar double.
     RoundDigits(Local, Local),
     /// An integer, logical or `I64` scalar as a double.
@@ -325,6 +363,8 @@ pub enum Op {
     ToI64(Local),
     /// A logical scalar as an integer.
     LglToInt(Local),
+    /// An `I64` count as an integer, failing unless it is in `0..=i32::MAX`.
+    CountOfI64(Local),
     /// A logical as a branch condition: fails on `NA`.
     Truth(Local),
     /// Whether two integers that are not `NA` are equal, as a branch condition.
@@ -341,8 +381,20 @@ pub enum Op {
     /// The vector or list with item `index` (1-based) replaced: `x[[i]] <- value`. Fails out of
     /// range.
     Set(Local, Local, Local),
+    /// `List.swap(list, first, second)` of 1-based `I64` positions; out of range, the list is
+    /// unchanged.
+    Swap(Local, Local, Local),
+    /// `List.concat(first, second)` of two lists of one item type. A unique first list grows in
+    /// place.
+    Extend(Local, Local),
+    /// The items of a list from 0-based `I64` `start` for `count` items. Fails unless the range
+    /// lies within the list.
+    Slice(Local, Local, Local),
     /// A new vector of this many default items (`numeric(n)`, `character(n)`).
     NewVector(Item, Local),
+    /// An empty ry list with room for this many items (`List.with_capacity(n)`), failing for a
+    /// negative count.
+    EmptyList(Item, Local),
     /// `seq_len(n)`, failing for a negative `n`.
     SeqLen(Local),
     /// `from:to` of integers.
@@ -397,8 +449,21 @@ pub enum Op {
         program: SmallVec<[u32; 8]>,
         inputs: SmallVec<[Local; 4]>,
     },
+    /// How many items of a logical ry list are true, as an `I64`, failing for an `NA` item.
+    /// With an empty `program` the list is input 0; otherwise the list is the last step of
+    /// `program`, which `values::ry_count_true` encodes: comparisons of numeric lists and
+    /// scalars, and `&`, `|` and `!` of their results, fused into one pass with borrowed inputs
+    /// and no list for any step ([`crate::fusion`] builds it).
+    CountTrue {
+        program: SmallVec<[u32; 8]>,
+        inputs: SmallVec<[Local; 4]>,
+    },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
+    /// A call of an R function ([`crate::lower::RCall`]) with borrowed arguments, whose result,
+    /// if the destination exists, is converted to a native value. It fails when the R function
+    /// raises an error, which the call then raises.
+    CallR(usize, SmallVec<[Local; 4]>),
     /// A new box of this shape holding the fields, which it owns, in the shape's field order.
     Construct(u32, SmallVec<[Local; 4]>),
     /// Field `index` of a box known to have this shape.
@@ -407,6 +472,10 @@ pub enum Op {
     ShapeOf(Local),
     /// `Str.count_utf8_bytes`, as an `I64`.
     ByteCount(Local),
+    /// `Str.to_utf8`: the string's bytes, as a list of `I64`s.
+    ToUtf8(Local),
+    /// `Str.from_utf8_lossy` of a list of `I64`s, failing for an item outside 0 to 255.
+    FromUtf8Lossy(Local),
     /// `Str.repeat(string, count)`, failing for a negative count.
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
@@ -426,6 +495,12 @@ pub enum Op {
     DictInsert(Local, Local, Local),
     /// The dictionary without the key.
     DictRemove(Local, Local),
+    /// How many entries the dictionary holds, as an `I64`.
+    DictLen(Local),
+    /// The dictionary's keys in insertion order, as a ry list.
+    DictKeys(Local),
+    /// The dictionary's values in insertion order, as a ry list.
+    DictValues(Local),
     /// The list with the item appended, which it then owns.
     Push(Local, Local),
     /// Fails when an interrupt is pending.
@@ -443,12 +518,15 @@ impl Op {
             Copy(a)
             | Not(a)
             | Math(_, _, a)
+            | IsNan(a)
             | ToDbl(a)
             | ToI64(a)
             | LglToInt(a)
+            | CountOfI64(a)
             | Truth(a)
             | Length(a)
             | NewVector(_, a)
+            | EmptyList(_, a)
             | SeqLen(a)
             | VectorNot(a)
             | VectorMath(_, _, a)
@@ -467,9 +545,15 @@ impl Op {
             | Field(a, _, _)
             | ShapeOf(a)
             | ByteCount(a)
+            | ToUtf8(a)
+            | FromUtf8Lossy(a)
+            | DictLen(a)
+            | DictKeys(a)
+            | DictValues(a)
             | Parse(a)
             | Parses(_, a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
+            | Bits(_, a, b)
             | Compare(_, _, a, b)
             | And(a, b)
             | Or(a, b)
@@ -493,15 +577,22 @@ impl Op {
             | DictContains(a, b)
             | DictGet(a, b)
             | DictRemove(a, b)
-            | Push(a, b) => SmallVec::from_slice(&[*a, *b]),
-            Set(a, b, c) | DictInsert(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
+            | Push(a, b)
+            | Extend(a, b) => SmallVec::from_slice(&[*a, *b]),
+            Set(a, b, c) | DictInsert(a, b, c) | Swap(a, b, c) | Slice(a, b, c) => {
+                SmallVec::from_slice(&[*a, *b, *c])
+            }
             Concat(parts, separator) | PasteVectors(parts, separator) => {
                 let mut operands = parts.clone();
                 operands.push(*separator);
                 operands
             }
             CallTyped(_, arguments)
+            | CallR(_, arguments)
             | Construct(_, arguments)
+            | CountTrue {
+                inputs: arguments, ..
+            }
             | Elementwise {
                 inputs: arguments, ..
             } => arguments.clone(),
@@ -519,7 +610,8 @@ impl Op {
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
             Set(..) | DictInsert(..) => position != 1,
-            DictRemove(..) => position == 0,
+            DictRemove(..) | Swap(..) | Slice(..) => position == 0,
+            Extend(..) => position < 2,
             Push(..) => true,
             // A box owns its fields.
             Construct(..) => true,
@@ -535,13 +627,13 @@ impl Op {
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
             | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
-            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_) => {
-                false
-            }
+            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
+            | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_) | DictValues(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,
             Math(..) => true,
+            Bits(op, ..) => !matches!(op, self::Bits::And | self::Bits::Or | self::Bits::Xor),
             // `NA` formats differently in `as.character`, `paste` and `sprintf`, so the
             // interpreter formats it.
             Format(_) | FormatFixed(..) | FormatPadded(..) => true,

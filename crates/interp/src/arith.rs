@@ -20,6 +20,7 @@
 
 use {
     crate::{
+        AltrepSummary,
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         bytecode::Arith,
@@ -715,8 +716,8 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
         values::as_integer_scalar(call.arg(6)),
         bounds,
     );
-    if let Some(message) = &result.warning {
-        crate::conditions::warning(message.clone())?;
+    for message in result.warnings {
+        crate::conditions::warning(message)?;
     }
     if bounds {
         return values::named_list(&[
@@ -740,21 +741,24 @@ pub struct Pretty {
     pub high: f64,
     pub count: i32,
     pub unit: f64,
-    /// GNU R's warning when the step size had to be clamped into the double range.
-    pub warning: Option<String>,
+    /// GNU R's warnings about a range it had to clamp into the double range.
+    pub warnings: Vec<String>,
 }
 
 /// The step size is kept at most this factor below the largest double, so that a few steps
 /// beyond the range stay finite.
 const LARGEST_CELL_FACTOR: f64 = 1.25;
 
-/// The rounding behind `pretty()` and axis ticks: about `count` intervals of 1, 2 or 5 times a
-/// power of ten that cover `[low, high]`. The step is never below `smallest_factor` times the
-/// smallest normal double.
+/// Unit counts within this fraction of an integer count as that integer.
+const SNAP: f64 = 1e-10;
+
+/// The rounding behind `pretty()`, axis ticks and the C API's `R_pretty`: about `count`
+/// intervals of 1, 2 or 5 times a power of ten that cover `[low, high]`. The step is never below
+/// `smallest_factor` times the smallest normal double.
 #[allow(clippy::too_many_arguments)]
 pub fn pretty(
-    mut low: f64,
-    mut high: f64,
+    low: f64,
+    high: f64,
     count: i32,
     min_count: i32,
     shrink: f64,
@@ -762,12 +766,15 @@ pub fn pretty(
     eps_correction: i32,
     bounds: bool,
 ) -> Pretty {
-    let (original_low, original_high) = (low, high);
     let range = high - low;
-    let scale = low.abs().max(high.abs());
-    let small = if range == 0.0 && scale == 0.0 {
-        true
+    let mut warnings = Vec::new();
+    let mut cell;
+    let small;
+    if range == 0.0 && high == 0.0 {
+        cell = 1.0;
+        small = true;
     } else {
+        cell = low.abs().max(high.abs());
         let bias = 1.0
             + if five_bias >= 1.5 * high_bias + 0.5 {
                 1.0 / (1.0 + high_bias)
@@ -776,45 +783,49 @@ pub fn pretty(
             };
         // The tolerance is formed before it scales the range, so a huge range cannot overflow.
         let tolerance = bias * count.max(1) as f64 * f64::EPSILON;
-        range < scale * tolerance * 3.0
-    };
-    let mut cell;
+        small = range < cell * tolerance * 3.0;
+    }
     if small {
-        cell = if scale == 0.0 { 1.0 } else { scale };
-        if scale > 10.0 {
+        if cell > 10.0 {
             cell = 9.0 + cell / 10.0;
         }
         cell *= shrink;
         if min_count > 1 {
             cell /= min_count as f64;
         }
-    } else if range.is_finite() {
-        cell = range;
-        if count > 1 {
-            cell /= count as f64;
-        }
     } else {
-        // The range overflows, so each bound is divided before they are subtracted.
-        let divisor = count.max(1) as f64;
-        cell = high / divisor - low / divisor;
+        cell = range;
+        if range.is_finite() {
+            if count > 1 {
+                cell /= count as f64;
+            }
+        } else if count < 2 {
+            warnings.push(format!(
+                "R_pretty(): infinite range; *ndiv={count}, should have ndiv >= 2"
+            ));
+        } else {
+            // The range overflows, so each bound is divided before they are subtracted.
+            cell = high / count as f64 - low / count as f64;
+        }
     }
-    let mut warning = None;
     let smallest = match smallest_factor * f64::MIN_POSITIVE {
         0.0 => f64::MIN_POSITIVE,
         smallest => smallest,
     };
     let largest = f64::MAX / LARGEST_CELL_FACTOR;
     if cell < smallest {
-        warning = Some(format!(
-            "R_pretty(): very small range 'cell'={}, corrected to {}",
-            crate::format::format_g(cell),
-            crate::format::format_g(smallest)
-        ));
+        if cell > 0.0 {
+            warnings.push(format!(
+                "R_pretty(): very small range 'cell'={}, increased to {}",
+                crate::format::c_general(cell, 3, false),
+                crate::format::format_g(smallest)
+            ));
+        }
         cell = smallest;
     } else if cell > largest {
-        warning = Some(format!(
-            "R_pretty(): very large range 'cell'={}, corrected to {}",
-            crate::format::format_g(cell),
+        warnings.push(format!(
+            "R_pretty(): very large range 'cell'={}, decreased to {}",
+            crate::format::c_general(cell, 3, false),
             crate::format::format_g(largest)
         ));
         cell = largest;
@@ -830,27 +841,40 @@ pub fn pretty(
             }
         }
     }
-    let mut start = (low / unit + 1e-10).floor();
-    let mut end = (high / unit - 1e-10).ceil();
+    let mut start = (low / unit + SNAP).floor();
+    let mut end = (high / unit - SNAP).ceil();
+    // The eps correction widens the bounds outward by one rounding step, so that a bound a
+    // rounding error past a multiple of the unit does not cost a whole extra step.
+    let (mut covered_low, mut covered_high) = (low, high);
     if eps_correction != 0 && (eps_correction > 1 || !small) {
-        if low != 0.0 {
-            low *= 1.0 - f64::EPSILON
+        covered_low = if low < 0.0 {
+            low * (1.0 + f64::EPSILON)
+        } else if low > 0.0 {
+            low * (1.0 - f64::EPSILON)
         } else {
-            low = -f64::MIN_POSITIVE
-        }
-        if high != 0.0 {
-            high *= 1.0 + f64::EPSILON
+            -unit.min(f64::MIN_POSITIVE)
+        };
+        covered_high = if high < 0.0 {
+            high * (1.0 - f64::EPSILON)
+        } else if high > 0.0 {
+            // Widening the largest doubles would overflow.
+            if high < f64::MAX * (1.0 - f64::EPSILON / 2.0) {
+                high * (1.0 + f64::EPSILON)
+            } else {
+                high
+            }
         } else {
-            high = f64::MIN_POSITIVE
-        }
+            unit.min(f64::MIN_POSITIVE)
+        };
     }
-    while start * unit > low + 1e-10 * unit {
+    while start * unit > covered_low + SNAP * unit {
         start -= 1.0;
     }
+    // GNU R loops on these unguarded, so a NaN unit would never leave them.
     while !(start * unit).is_finite() && start < 0.0 {
         start += 1.0;
     }
-    while end * unit < high - 1e-10 * unit {
+    while end * unit < covered_high - SNAP * unit {
         end += 1.0;
     }
     while !(end * unit).is_finite() && end > 0.0 {
@@ -860,10 +884,11 @@ pub fn pretty(
     if steps < min_count {
         let missing = min_count - steps;
         let (half, rest) = ((missing / 2) as f64, (missing % 2) as f64);
-        // A range that starts or ends at zero keeps that end and grows away from it.
-        if original_low == 0.0 {
+        // A range that starts or ends at zero on a whole unit keeps that end and grows away
+        // from it.
+        if low == 0.0 && start == 0.0 && high != 0.0 {
             end += missing as f64;
-        } else if original_high == 0.0 {
+        } else if high == 0.0 && end == 0.0 && low != 0.0 {
             start -= missing as f64;
         } else if start >= 0.0 {
             end += half;
@@ -874,27 +899,30 @@ pub fn pretty(
         }
         steps = min_count;
     }
-    if bounds {
-        if start * unit < low {
-            low = start * unit;
-        }
-        if end * unit > high {
-            high = end * unit;
-        }
-    } else {
-        low = start;
-        high = end;
+    if !bounds {
+        return Pretty {
+            low: start,
+            high: end,
+            count: steps,
+            unit,
+            warnings,
+        };
+    }
+    if start * unit < covered_low {
+        covered_low = start * unit;
+    }
+    if end * unit > covered_high {
+        covered_high = end * unit;
     }
     Pretty {
-        low,
-        high,
+        low: covered_low,
+        high: covered_high,
         count: steps,
         unit,
-        warning,
+        warnings,
     }
 }
 
-/// `sequence(nvec, from, by)`.
 /// `sequence(nvec, from, by)`, plus R 4.4's `recycle`: `TRUE` recycles all three to the longest,
 /// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
 /// to `nvec`, with a warning when that drops elements.
@@ -1873,7 +1901,7 @@ fn infinite_product(mut a: f64, mut b: f64, mut c: f64, mut d: f64) -> Option<Rc
         (a, b, c, d) = (zeroed(a), zeroed(b), zeroed(c), zeroed(d));
         recalculate = true;
     }
-    recalculate.then(|| Rcomplex {
+    recalculate.then_some(Rcomplex {
         r: f64::INFINITY * (a * c - b * d),
         i: f64::INFINITY * (a * d + b * c),
     })
@@ -3110,6 +3138,32 @@ enum Summary {
     Min,
 }
 
+/// The answer of an integer or double ALTREP vector's class when the vector is the only value
+/// summarized, as GNU R asks the class before it reads any element; `None` when the class has
+/// none and the elements must be read.
+unsafe fn altrep_summary(call: &Call<'_>, function: Summary) -> R<Option<Sexp>> {
+    let which = match function {
+        Summary::Sum => AltrepSummary::Sum,
+        Summary::Min => AltrepSummary::Min,
+        Summary::Max => AltrepSummary::Max,
+        Summary::Product => return Ok(None),
+    };
+    let na_rm = symbols().na_rm;
+    let mut values = call.args.iter().filter(|arg| arg.tag != na_rm);
+    let (Some(only), None) = (values.next(), values.next()) else {
+        return Ok(None);
+    };
+    let x = only.value;
+    if !x.is_altrep() || !matches!(x.kind(), SexpType::Integer | SexpType::Real) {
+        return Ok(None);
+    }
+    let remove_na = call
+        .args
+        .iter()
+        .any(|arg| arg.tag == na_rm && values::as_logical_scalar(arg.value) == 1);
+    (interp().hooks.altrep_summary)(x, which, remove_na)
+}
+
 /// The values a summary function reduces, and whether `na.rm` was set.
 unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
     let mut items = SmallVec::new();
@@ -3126,6 +3180,9 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
+    if let Some(answer) = altrep_summary(call, function)? {
+        return Ok(answer);
+    }
     let (items, na_rm) = summary_args(call)?;
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())

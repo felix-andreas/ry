@@ -1704,7 +1704,6 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
                         "--ry-no-code-image" => options.code_image = false,
-                        "--ry-explain" => options.explain = true,
                         "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
                         // A single-architecture build has nothing to skip, and every build
@@ -1910,8 +1909,6 @@ pub struct InstallOptions {
     pub code_image: bool,
     /// The workload the code image is trained on before it is written (`--ry-train=`).
     pub training: Training,
-    /// Prints what kept each function from install-time machine code (`--ry-explain`).
-    pub explain: bool,
 }
 
 /// The workload an install runs before it writes the package's code image, so that the image
@@ -1959,7 +1956,6 @@ impl Default for InstallOptions {
             driver_flags: Vec::new(),
             code_image: true,
             training: Training::None,
-            explain: false,
         }
     }
 }
@@ -2368,20 +2364,14 @@ fn write_code_image(
                 staged_library.display().to_string(),
                 build.display().to_string(),
                 training,
-                options.explain.to_string(),
             ],
             r_libs,
         )
     });
     match written {
         Ok(output) => {
-            let mut lines: Vec<&str> = output.lines().collect();
-            let counts = lines.pop().unwrap_or_default();
-            if options.explain {
-                format!("{}\ncode image: {counts}", lines.join("\n"))
-            } else {
-                format!("code image: {counts}")
-            }
+            let counts = output.lines().last().unwrap_or_default();
+            format!("code image: {counts}")
         }
         Err(error) => format!("Warning: the code image of '{name}' was not written\n{error}"),
     }

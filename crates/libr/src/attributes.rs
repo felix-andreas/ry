@@ -418,13 +418,15 @@ unsafe fn get_attrib_direct(object: Sexp, name: Sexp) -> Option<Reachable> {
             cell = cell.cdr();
         }
         // A one-dimensional array reports its only dimnames as its names, as `get_attrib` does.
-        if dim.kind() == SexpType::Integer && dim.length() == 1 {
-            if dimnames.kind() == SexpType::List && dimnames.length() >= 1 {
-                if dim.is_altrep() || dimnames.is_altrep() {
-                    return None;
-                }
-                return Some(Reachable(dimnames.slice::<Sexp>()[0]));
+        if dim.kind() == SexpType::Integer
+            && dim.length() == 1
+            && dimnames.kind() == SexpType::List
+            && dimnames.length() >= 1
+        {
+            if dim.is_altrep() || dimnames.is_altrep() {
+                return None;
             }
+            return Some(Reachable(dimnames.slice::<Sexp>()[0]));
         }
         return Some(Reachable(names));
     }
@@ -880,7 +882,7 @@ pub unsafe extern "C" fn LEVELS(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SETLEVELS(object: Sexp, value: c_int) -> c_int {
-    interp::code_image::set_flags_from_c(object, value as u16);
+    object.set_gp(value as u16);
     value
 }
 

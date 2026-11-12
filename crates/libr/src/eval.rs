@@ -93,10 +93,17 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         compact_sequence_steps: |object| unsafe { crate::altrep::compact_sequence_steps(object) },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         altrep_int_elt: |object, index| unsafe {
-            Ok(crate::altrep::int_elt(object, index as crate::R_xlen_t)?)
+            crate::altrep::int_elt(object, index as crate::R_xlen_t)
         },
         altrep_real_elt: |object, index| unsafe {
-            Ok(crate::altrep::real_elt(object, index as crate::R_xlen_t)?)
+            crate::altrep::real_elt(object, index as crate::R_xlen_t)
+        },
+        altrep_summary: |object, which, remove_na| unsafe {
+            match which {
+                interp::AltrepSummary::Sum => crate::altrep::sum(object, remove_na),
+                interp::AltrepSummary::Min => crate::altrep::min(object, remove_na),
+                interp::AltrepSummary::Max => crate::altrep::max(object, remove_na),
+            }
         },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
@@ -990,9 +997,9 @@ unsafe fn c_values_finite(value: Sexp) -> ApiResult<bool> {
     })
 }
 
-/// A `DLLInfo` object: name, path, dynamic lookup flag, and the handle and record pointers.
+/// A `DLLInfo` object: name, path, lookup flags, and the handle and record pointers.
 unsafe fn dll_info(dll: *mut Dll) -> ApiResult<Sexp> {
-    let info = interp::native::dll_info(&(*dll).name, &(*dll).path)?;
+    let info = interp::native::dll_info(&(*dll).name, &(*dll).path, (*dll).forces_symbols())?;
     let record = interp::values::list_get(info, "info");
     record.set_external_address(dll.cast());
     let handle = interp::values::list_get(info, "handle");
@@ -1033,7 +1040,7 @@ unsafe fn do_dyn_unload(call: &Call<'_>) -> ApiResult<Sexp> {
 }
 
 unsafe fn loaded_dlls() -> ApiResult<Sexp> {
-    let mut items = vec![interp::native::dll_info("base", "base")?];
+    let mut items = vec![interp::native::base_dll_info()?];
     let mut names = vec!["base".to_owned()];
     for (name, info) in builtin_libraries::loaded()? {
         items.push(info);
@@ -1200,9 +1207,7 @@ unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
         RoutineKind::Fortran,
     ]
     .into_iter()
-    .any(|kind| find_routine(&name, package.as_deref(), kind).is_ok())
-        || (package.as_deref().is_none_or(|package| package == "base")
-            && interp::native::is_base_routine(&name));
+    .any(|kind| find_routine(&name, package.as_deref(), kind).is_ok());
     interp::values::scalar_bool(found)
 }
 
@@ -1439,7 +1444,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         return false;
     }
     if let Some((heap::GcStressStart::Script, stress)) = heap::gc_stress_requested() {
-        runtime().heap.update_policy(|policy| policy.stress = stress);
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = stress);
     }
     // As under `Rscript`, SIGINT interrupts the script's evaluation, which R code can catch,
     // instead of killing the process.
@@ -1750,6 +1757,8 @@ pub unsafe extern "C" fn ry_loader_changed() -> c_int {
 
 /// SIGINT requests a user interrupt, which the evaluator delivers at its next interrupt check. At
 /// the console the terminal is raw while it reads input, so Ctrl-C reaches the line editor then.
+/// A process started with SIGINT ignored, such as a background job of a non-interactive shell,
+/// keeps ignoring it, as GNU R's `init_signal_handlers` does.
 #[cfg(unix)]
 fn install_interrupt_handler() {
     extern "C" fn request_interrupt(_signal: c_int) {
@@ -1757,6 +1766,12 @@ fn install_interrupt_handler() {
     }
     // SAFETY: the handler only performs atomic stores, which are async-signal-safe.
     unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+        {
+            return;
+        }
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = request_interrupt as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);

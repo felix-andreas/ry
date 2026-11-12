@@ -28,6 +28,13 @@ under 0.1 s (a program whose GNU R time is that short is also left out of the ge
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
 typed program, with the refusal that `RY_TYPED_LOG` printed.
 
+The published numbers measure the official release archive itself, so `--write` takes
+`--release ARCHIVE`, the Linux x86_64 archive of a tagged release (`ry-x86_64-unknown-linux-gnu.tar.gz`).
+The runner unpacks it into a private directory with its own cache directory, where the archive's
+`ry` extracts the runtime and base R it embeds, and results.json records the release tag and the
+archive's sha256. A nightly archive runs too, but `--write` refuses it. Without `--release`, `--ry`
+names the build under test.
+
 Every suite checks before it runs that the corpus library holds each package its programs load, at
 the version lock.tsv pins (for the packages suite, every locked package), and stops with the list of
 missing ones. `--partial` runs anyway: the summary and results.json say the run is partial and name
@@ -48,12 +55,12 @@ refuses it.
 FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
-Usage: tools/bench/bench.py SUITE... | all [--ry PATH] [--rscript PATH] [--rounds N] [--seed N]
+Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial]
 """
-import argparse, json, math, os, pathlib, platform, random, shlex, statistics
-import subprocess, sys, re, tempfile, threading, time, tomllib
+import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
+import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -80,12 +87,18 @@ PROGRAM_TIMEOUT = 300
 IMAGE_UNUSED = "ry: image unused: "
 IMAGE_WRITTEN = "ry: image written: "
 STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
+# A typed call that first runs in the interpreter to observe an R value's type logs this, then
+# compiles on its next call, so the line is not a refusal.
+AWAITING = "it waits on the interpreter to run `"
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("suites", nargs="+", metavar="SUITE", help=f"{', '.join(SUITES)} or all")
-    parser.add_argument("--ry", default=str(root / "target/release/ry"))
+    build = parser.add_mutually_exclusive_group()
+    build.add_argument("--ry", default=str(root / "target/release/ry"), help="the ry build under test")
+    build.add_argument("--release", metavar="ARCHIVE", type=pathlib.Path,
+                       help="the release archive under test, which --write requires")
     parser.add_argument("--rscript", default=os.environ.get("ORACLE_R_RSCRIPT", "Rscript"),
                         help="GNU R's Rscript")
     parser.add_argument("--rounds", type=int, default=PUBLISHED_ROUNDS)
@@ -107,17 +120,25 @@ def main():
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
+    release = None
+    if args.release:
+        args.ry, release = unpack_release(args.release)
     if args.write:
+        if release is None:
+            sys.exit("error: --write records the official release archive; pass --release ARCHIVE, "
+                     "the ry-x86_64-unknown-linux-gnu.tar.gz of the tagged release")
+        if release["nightly"]:
+            sys.exit(f"error: --write records a tagged release, and {release['tag']} is a nightly build")
         if args.rounds < PUBLISHED_ROUNDS:
             sys.exit(f"error: --write needs at least {PUBLISHED_ROUNDS} rounds")
         if args.filter or args.baseline or args.jit_off:
             sys.exit("error: --write records every program on the published engines only")
         if args.partial:
             sys.exit("error: --write records complete runs only, so it does not take --partial")
-        changes = sorted({line for tree in {checkout_of(args.ry), str(root)} for line in changed_paths(tree)})
+        changes = changed_paths(str(root))
         if changes:
-            sys.exit("error: --write records a clean commit, but the working tree has changes; commit or "
-                     "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
+            sys.exit("error: --write records a clean commit of the benchmark programs, but the working "
+                     "tree has changes; commit or remove them:\n" + "\n".join(f"  {line}" for line in changes))
     for binary in filter(None, [args.ry, args.baseline]):
         refuse_unreleased(binary)
     refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
@@ -127,9 +148,10 @@ def main():
         sys.exit("error: the corpus library lacks packages the suites load; run "
                  "`just bench-packages install`, or pass --partial to run without them:\n"
                  + "\n".join(f"  {suite}: {', '.join(names)}" for suite, names in missing.items() if names))
-    meta = metadata(args)
+    meta = metadata(args, release)
     print(f"Machine: {meta['machine']['cpu']}, {meta['machine']['cores']} cores, {meta['machine']['kernel']}")
-    print(f"GNU R: {meta['gnu_r']['version']}, BLAS {meta['gnu_r']['blas']}; ry {meta['ry_commit']}\n")
+    measured = f"release {release['tag']} (sha256 {release['sha256']})" if release else meta["ry_commit"]
+    print(f"GNU R: {meta['gnu_r']['version']}, BLAS {meta['gnu_r']['blas']}; ry {measured}\n")
     failed = False
     for suite in suites:
         failed |= run_suite(suite, manifests[suite], missing[suite], args, meta)
@@ -194,30 +216,35 @@ def refuse_foreign_images(binaries):
     it finds if they are missing; the probe loads a function from stats, so it opens a code image as
     well as the start-up image, and it must report no unused image. A package library gets code
     images only when a package is installed, so a package there that has only another build's code
-    image stops the run with the list of packages to reinstall.
+    image stops the run with the list of packages to reinstall. A release carries its runtime inside
+    itself and extracts it on its first start, so its runtime is read from the R home it reports,
+    whose `.libr` names the runtime library on its first line.
     """
     for binary in dict.fromkeys(binaries):
-        runtime = runtime_of(binary)
-        if runtime is not None and not file_contains(runtime, b"RY_IMAGE_LOG"):
-            sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot "
-                     "report a start-up or code image it does not use, and its timings may measure a "
-                     "slow start; compare a build that has it")
         with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
             script = pathlib.Path(work) / "probe.R"
-            script.write_text("invisible(stats::median(c(3, 1, 2)))\n")
+            script.write_text("invisible(stats::median(c(3, 1, 2)))\ncat(R.home())\n")
             env = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1")
             status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], env, cwd=work,
                                            check_images=False)
         if status != 0:
-            sys.exit(f"error: {binary} cannot run a one-line R script: {failure_reason(out, err)}")
+            sys.exit(f"error: {binary} cannot run a two-line R script: {failure_reason(out, err)}")
+        runtime = runtime_of(binary)
+        if runtime is None:
+            home = pathlib.Path(out.strip())
+            try:
+                runtime = pathlib.Path((home / ".libr").read_text().splitlines()[0])
+            except (OSError, IndexError) as error:
+                sys.exit(f"error: {binary} reported the R home {home}, which names no runtime library: {error}")
+        if not file_contains(runtime, b"RY_IMAGE_LOG"):
+            sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot "
+                     "report a start-up or code image it does not use, and its timings may measure a "
+                     "slow start; compare a build that has it")
         unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
         if unused:
             sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would "
                      "time a slow start:\n" + "\n".join(f"  {line}" for line in unused))
-        identity = runtime_identity(runtime) if runtime is not None else None
-        if identity is None:
-            # A release carries its runtime inside itself, so its identity cannot be read here.
-            continue
+        identity = runtime_identity(runtime)
         libraries = [corpus.corpus / "library"]
         libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
                       for part in os.environ.get(variable, "").split(os.pathsep) if part]
@@ -450,6 +477,14 @@ def same_checksum(value, reference):
     return value == reference or math.isclose(number, expected, rel_tol=1e-10, abs_tol=1e-300)
 
 
+def interpreted(line):
+    """The function a `RY_TYPED_LOG` line says runs in the interpreter, or the line itself. The
+    harness's own functions log a reason that quotes the program's argument, so the harness
+    baseline matches them by name."""
+    name, marker, _ = line.removeprefix("typed: ").partition(" runs in the interpreter: ")
+    return name if marker else line
+
+
 def failure_reason(out, err):
     return ((err.strip() or out.strip() or "failed").splitlines() or ["failed"])[-1][:300]
 
@@ -493,13 +528,12 @@ class WorkloadRunner:
             status, out, err, _, _ = spawn(engine.command + [script.name], env, cwd=self.work / "typed")
             if status != 0:
                 sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
-            return [line for line in err.splitlines() if line.startswith("typed: ") and "compiled for" not in line]
+            return [line for line in err.splitlines()
+                    if line.startswith("typed: ") and "compiled for" not in line and AWAITING not in line]
         if "" not in self.refusals:
-            self.refusals[""] = log('measure("empty", function() Num.to_f64(0))\n')
-        lines = log((root / program["typed_source"]).read_text())
-        for line in self.refusals[""]:
-            if line in lines:
-                lines.remove(line)
+            self.refusals[""] = {interpreted(line) for line in log('measure("empty", function() Num.to_f64(0))\n')}
+        lines = [line for line in log((root / program["typed_source"]).read_text())
+                 if interpreted(line) not in self.refusals[""]]
         return "; ".join(dict.fromkeys(line.removeprefix("typed: ") for line in lines)) or None
 
     def close(self):
@@ -544,7 +578,7 @@ class PublicRunner:
         if status != 0:
             sys.exit(f"error: the typed refusal log run failed: {failure_reason(out, err)}")
         lines = [line.removeprefix("typed: ") for line in err.splitlines()
-                 if line.startswith("typed: ") and "compiled for" not in line]
+                 if line.startswith("typed: ") and "compiled for" not in line and AWAITING not in line]
         return "; ".join(dict.fromkeys(lines)) or None
 
     def close(self):
@@ -575,7 +609,9 @@ class PackageRunner:
                 sys.exit(f"error: {name} ships no tests; drop it from packages/suite.toml")
             self.unpacked[name] = unpacked
         kind, tests = self.unpacked[name]
-        env = dict(engine.env, TESTTHAT_CPUS="1", _R_CHECK_FORCE_SUGGESTS_="false")
+        # A package whose DESCRIPTION asks for parallel tests would otherwise run them in a
+        # testthat worker process, outside the measured process and with its own start-up.
+        env = dict(engine.env, TESTTHAT_PARALLEL="false", TESTTHAT_CPUS="1", _R_CHECK_FORCE_SUGGESTS_="false")
         env.pop("NOT_CRAN", None)
         for variable in ("http_proxy", "https_proxy", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
             env[variable] = self.proxy.url
@@ -799,6 +835,51 @@ def refuse_unreleased(binary):
                  "only, so build it with `cargo build --release -p ry-lang -p libr`")
 
 
+def unpack_release(archive):
+    """Unpacks a release archive into a private directory and returns its `ry` with what results.json
+    records about it: the tag, the archive's file name and sha256, and whether it is a nightly.
+
+    The cache directory moves into that private directory too (XDG_CACHE_HOME), so the archive's
+    `ry` extracts the runtime and base R it embeds afresh and reads no other build's from the user's
+    cache, and RY_LIBR, RY_BASE_R and R_HOME are cleared so they cannot point it at another build.
+    """
+    try:
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    except OSError as error:
+        sys.exit(f"error: cannot read the release archive {archive}: {error}")
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-release-"))
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    try:
+        with tarfile.open(archive) as tar:
+            tar.extractall(scratch / "archive", filter="data")
+    except (OSError, tarfile.TarError) as error:
+        sys.exit(f"error: cannot unpack the release archive {archive}: {error}")
+    ry = scratch / "archive" / "ry"
+    if not ry.is_file():
+        sys.exit(f"error: {archive} holds no `ry` at its top level, so it is not a Linux or macOS release archive")
+    os.environ["XDG_CACHE_HOME"] = str(scratch / "cache")
+    for variable in ("RY_LIBR", "RY_BASE_R", "R_HOME"):
+        os.environ.pop(variable, None)
+    try:
+        version = subprocess.run([ry, "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"error: cannot run the release archive's ry: {error}")
+    tag, nightly = release_tag(version)
+    if tag is None:
+        sys.exit(f"error: the release archive's ry names no release (`ry --version` printed {version!r})")
+    return str(ry), {"tag": tag, "nightly": nightly, "archive": archive.name, "sha256": digest}
+
+
+def release_tag(version):
+    """The tag `ry --version` names and whether it is a nightly: `ry 0.4.4-beta` is release tag
+    `0.4.4-beta`, and `ry 0.4.3-beta (nightly.20261110.1955.a15ce0)` is the nightly of that name.
+    A local build names its profile instead (`(iterate build)`), which is no tag."""
+    match = re.fullmatch(r"ry (\S+)(?: \((nightly\.[\w.]+)\))?", version)
+    if match is None:
+        return None, False
+    return (match[2] or match[1]), match[2] is not None
+
+
 def runtime_identity(library):
     """The identity of the runtime library `library`, which names every image it writes."""
     import ctypes
@@ -807,7 +888,7 @@ def runtime_identity(library):
     return function().decode()
 
 
-def metadata(args):
+def metadata(args, release):
     cpu = platform.processor() or platform.machine()
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
@@ -822,12 +903,20 @@ def metadata(args):
     version, lapack, blas = (probe + ["", "", ""])[:3]
     return {
         "date": time.strftime("%Y-%m-%d"),
-        "ry_commit": commit(args.ry),
+        "ry_commit": release_commit(release["tag"]) if release else commit(args.ry),
+        "release": None if release is None else {key: release[key] for key in ("tag", "archive", "sha256")},
         "too_short_seconds": SHORT,
         "gnu_r": {"version": version.strip(), "blas": (blas or lapack).strip()},
         "machine": {"cpu": cpu, "cores": os.cpu_count(), "kernel": f"{platform.system()} {platform.release()}"},
         "command": "tools/bench/bench.py " + " ".join(shlex.quote(argument) for argument in sys.argv[1:]),
     }
+
+
+def release_commit(tag):
+    """The commit a release tag names in this checkout, or None when the tag is not fetched."""
+    found = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
+                           capture_output=True, text=True)
+    return found.stdout.strip() or None
 
 
 def commit(ry):

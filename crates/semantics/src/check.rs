@@ -23,6 +23,7 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
+        native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
         stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
@@ -357,6 +358,28 @@ pub enum NativeValueKind {
     List,
 }
 
+/// What only the checker knows about a value the runtime builds empty: the storage of a list's
+/// items, or the key and value types of a dictionary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum Empty {
+    List(ListItems),
+    /// A `Dict` of `I64`, `F64` or `Str` keys and values, the ones typed code holds unboxed.
+    Dict {
+        key: ListItems,
+        value: ListItems,
+    },
+}
+
+impl Empty {
+    /// The name `.ry_items` takes: `"I64"` for a list, `"Dict<Str, I64>"` for a dictionary.
+    pub fn name(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Empty::List(items) => items.name().into(),
+            Empty::Dict { key, value } => format!("Dict<{}, {}>", key.name(), value.name()).into(),
+        }
+    }
+}
+
 /// The run-time storage of a ry list's items, for a list the runtime may build empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum ListItems {
@@ -403,6 +426,9 @@ pub enum OperandExpectation {
 pub struct ItemCheck<'db> {
     pub errors: ThinVec<TypeError<'db>>,
     pub strict_origins: ThinVec<StrictOrigin>,
+    /// What keeps the item's native functions off native code, in source order. Recorded only
+    /// where strict origins are, because the finding is a strict-mode one.
+    pub native_blockers: ThinVec<NativeBlocker>,
     pub scheme: Option<TypeScheme<'db>>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
@@ -421,12 +447,14 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
-    /// The list expressions whose item type only this check knows: an empty `[]`, and a call to
-    /// a library function whose result items come from a callback rather than from a list it
-    /// was given (`List.map`). An empty list is stored by its items' storage, and one built
-    /// from no items is `logical`, so the code ry's runtime runs passes each of these through
-    /// `.ry_items` with the item type (`preflight` in the `ry` crate). In id order.
-    pub typed_lists: ThinVec<(ExprId, ListItems)>,
+    /// The expressions whose item types only this check knows: an empty `[]`, a call to a
+    /// library function whose result items come from a callback rather than from a list it was
+    /// given (`List.map`), and a library call that builds a dictionary from no entries
+    /// (`Dict.empty()`). An empty list is stored by its items' storage, and one built from no
+    /// items is `logical`, and typed code lays a dictionary out by its key and value types, so
+    /// the code ry's runtime runs passes each of these through `.ry_items` with the types
+    /// (`preflight` in the `ry` crate). In id order.
+    pub typed_empties: ThinVec<(ExprId, Empty)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// one-shot check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
@@ -714,6 +742,7 @@ pub trait GlobalEnv<'db> {
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
 pub static CHECK_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
 
+#[allow(clippy::too_many_arguments)]
 pub fn check_item_with_annotation<'db>(
     db: &'db dyn Db,
     module: &Module,
@@ -989,7 +1018,7 @@ fn check_item_in<'db>(
                 .then_some(id)
         })
         .collect();
-    let mut typed_lists: ThinVec<(ExprId, ListItems)> = recorded
+    let mut typed_empties: ThinVec<(ExprId, Empty)> = recorded
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| {
@@ -1005,9 +1034,10 @@ fn check_item_in<'db>(
                                 .globals
                                 .and_then(|globals| globals.library_candidates(name))
                                 .is_some_and(|candidates| {
-                                    candidates
-                                        .iter()
-                                        .any(|scheme| builds_fresh_items(db, scheme))
+                                    candidates.iter().any(|scheme| {
+                                        builds_fresh_items(db, scheme)
+                                            || builds_empty_dict(db, scheme)
+                                    })
                                 })
                     }
                     _ => false,
@@ -1018,14 +1048,106 @@ fn check_item_in<'db>(
                 return None;
             }
             let ty = context.table.resolve(db, (*slot)?);
-            list_items(db, crate::types::array_element(db, ty)?).map(|items| (id, items))
+            if let Some((key, value)) = crate::types::dict_entries(db, ty) {
+                let scalar = |ty| list_items(db, ty).filter(|&items| items != ListItems::RyValues);
+                // A dictionary key is always a single value, so an R string key such as `"a"` is
+                // held as a `Str`, the value the runtime hashes it as.
+                let key = match key.kind(db) {
+                    TyKind::Scalar(Atomic::Character) => Some(ListItems::Str),
+                    _ => scalar(key),
+                };
+                return Some((
+                    id,
+                    Empty::Dict {
+                        key: key?,
+                        value: scalar(value)?,
+                    },
+                ));
+            }
+            list_items(db, crate::types::array_element(db, ty)?)
+                .map(|items| (id, Empty::List(items)))
         })
         .collect();
-    typed_lists.sort_unstable_by_key(|(id, _)| id.index());
+    typed_empties.sort_unstable_by_key(|(id, _)| id.index());
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
     });
+    let native_blockers = if context.record_strict_origins {
+        // The declaration as written decides whether a function is judged, so a formal the
+        // author left untyped keeps the function out.
+        let mut signatures: FxHashMap<ExprId, FunctionType<'db>> = FxHashMap::default();
+        let mut detached: FxHashSet<ExprId> = FxHashSet::default();
+        let declared_function = |annotation: &Annotation<'db>| {
+            if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
+                return None;
+            }
+            let declared = annotation.declared.as_ref()?;
+            match declared.body.kind(db) {
+                TyKind::Function(function) if !has_r_bound(declared) => {
+                    Some((function.clone(), annotation.inline_signature))
+                }
+                _ => None,
+            }
+        };
+        for id in module.expression_ids() {
+            match *module.kind(id) {
+                ExpressionKind::Function { .. } => {
+                    if let Some((function, inline)) = context
+                        .expression_annotations
+                        .get(&id)
+                        .and_then(declared_function)
+                    {
+                        signatures.insert(id, function);
+                        if !inline {
+                            detached.insert(id);
+                        }
+                    }
+                }
+                ExpressionKind::Assign { value, .. }
+                    if matches!(module.kind(value), ExpressionKind::Function { .. })
+                        && !context.expression_annotations.contains_key(&value) =>
+                {
+                    let item_annotation = if Some(id) == module.root {
+                        annotation
+                    } else {
+                        None
+                    };
+                    if let Some((function, inline)) = context
+                        .expression_annotations
+                        .get(&id)
+                        .or(item_annotation)
+                        .and_then(declared_function)
+                    {
+                        signatures.insert(value, function);
+                        if !inline {
+                            detached.insert(value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if signatures.is_empty() {
+            ThinVec::new()
+        } else {
+            native_blockers(Judged {
+                db,
+                module,
+                naming,
+                definitions: context.table.definitions,
+                globals: context.globals,
+                types: &|id| {
+                    let ty = (*recorded.get(id.index())?)?;
+                    Some(context.table.resolve(db, ty))
+                },
+                signatures: &signatures,
+                detached: &detached,
+            })
+        }
+    } else {
+        ThinVec::new()
+    };
     let editor_facts = db.editor_facts();
     let mut editor = None;
     if editor_facts {
@@ -1127,9 +1249,10 @@ fn check_item_in<'db>(
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         i64_literals,
-        typed_lists,
+        typed_empties,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
+        native_blockers,
         scheme,
         editor,
         masked_reads: context.masked_reads.into_iter().collect(),
@@ -7834,6 +7957,20 @@ impl<'db> Checker<'db, '_> {
         use BinaryOperator::*;
         let left = self.structural(left);
         let right = self.structural(right);
+        // A DataFrame expression beside another one, or beside a ry value that shares R's
+        // representation, builds a bigger expression, as `Ops.Expr` does at run time. `I64` is
+        // left to the ordinary rule, which rejects it: an R operator cannot read one.
+        for (expression, other) in [(left, right), (right, left)] {
+            if is_expr_type(self.db, expression)
+                && (is_expr_type(self.db, other)
+                    || matches!(
+                        other.kind(self.db),
+                        TyKind::Native(NativeScalar::F64 | NativeScalar::Bool | NativeScalar::Str)
+                    ))
+            {
+                return Some(expression);
+            }
+        }
         let (known, known_side, other, other_ty) =
             match (self.ry_number_class(left), self.ry_number_class(right)) {
                 (Some(class), _) => (class, left, rhs, right),
@@ -8595,7 +8732,8 @@ impl<'db> Checker<'db, '_> {
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
         ];
-        let class_of = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+        // Resolved fully, so an alias of a class dispatches as the class it names.
+        let class_of = |ty: Ty<'db>| match self.table.resolve(self.db, ty).kind(self.db) {
             TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
             _ => None,
         };
@@ -11929,8 +12067,15 @@ impl<'db> Checker<'db, '_> {
             return operand.ty;
         }
         match self.recorded.get(&value) {
-            Some(&ty) if !is_expr_type(self.db, ty) => self.table.resolve(self.db, ty),
-            _ => operand.ty,
+            Some(&ty) => {
+                let ty = self.table.resolve(self.db, ty);
+                if is_expr_type(self.db, ty) {
+                    operand.ty
+                } else {
+                    ty
+                }
+            }
+            None => operand.ty,
         }
     }
 
@@ -11945,7 +12090,8 @@ impl<'db> Checker<'db, '_> {
         if let Some(column) = self.frame_expression(value, columns, frame) {
             return Some(column);
         }
-        let ty = *self.recorded.get(&value)?;
+        // Resolved first, so an alias of `Expr` reads as the expression it names.
+        let ty = self.table.resolve(self.db, *self.recorded.get(&value)?);
         if is_expr_type(self.db, ty) {
             return None;
         }
@@ -19088,6 +19234,20 @@ fn builds_fresh_items<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
             .iter()
             .chain(function.named.iter().map(|parameter| &parameter.ty))
             .any(|&parameter| crate::types::array_element(db, parameter) == Some(item))
+}
+
+/// Whether a library function returns a `Dict` and takes none, so only the checker knows its
+/// key and value types (`Dict.empty`, `Dict.with_capacity`).
+fn builds_empty_dict<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
+    let TyKind::Function(function) = scheme.body.kind(db) else {
+        return false;
+    };
+    crate::types::dict_entries(db, function.ret).is_some()
+        && !function
+            .positional
+            .iter()
+            .chain(function.named.iter().map(|parameter| &parameter.ty))
+            .any(|&parameter| crate::types::dict_entries(db, parameter).is_some())
 }
 
 /// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's

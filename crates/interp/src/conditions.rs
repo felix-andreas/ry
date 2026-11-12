@@ -20,7 +20,7 @@ use {
         activity::{self, Counter},
         object::{NA_INTEGER, Sexp, SexpType},
     },
-    std::{rc::Rc, sync::atomic::Ordering},
+    std::{cell::Cell, rc::Rc, sync::atomic::Ordering},
 };
 
 pub type HandlerStack = Option<Rc<Handler>>;
@@ -241,9 +241,7 @@ pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Unwind::Jump(caught)) if matches!(caught, Jump::Return { env, .. } if env == target) => {
-            Ok(None)
-        }
+        Err(Unwind::Jump(Jump::Return { env, .. })) if env == target => Ok(None),
         Err(unwind) => Err(unwind),
     }
 }
@@ -510,11 +508,22 @@ pub unsafe fn format_error(call: Sexp, message: &str) -> String {
     }
 }
 
+thread_local! {
+    static WARNINGS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many warnings native code has raised through [`warning_call`], which tells typed code
+/// whether an R call it treats as free of effects did something a second run would repeat.
+pub fn warnings_raised() -> u64 {
+    WARNINGS.get()
+}
+
 /// Signals a warning from a builtin through `.signalSimpleWarning(message, base::quote(call))`,
 /// whose `.dfltWarn` defers or prints it per `options(warn)`. GNU R takes this route even with no
 /// warning handler established, and the frames it pushes are observable: rlang recognises a
 /// warning promoted to an error by finding `.signalSimpleWarning` on the stack.
 pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
+    WARNINGS.set(WARNINGS.get() + 1);
     let call = resolve_call(call);
     let message = message.into();
     let hook = values::install(".signalSimpleWarning")?;

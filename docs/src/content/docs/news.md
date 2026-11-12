@@ -5,6 +5,14 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Faster formatC
+
+A scalar `formatC()` call takes about 40% fewer instructions: its native path calls the formatting code directly instead of building R arguments for it, and reads `options(OutDec)` without calling `getOption()` when `decimal.mark` is left out. The report benchmark, which formats 20,000 account numbers with `formatC()`, takes 12% fewer instructions.
+
+### Faster sprintf
+
+`sprintf()` formats numbers with the same native code as `format()` and `paste()`, and it parses its formats once per call instead of once per element. A scalar `sprintf("%.2f", x)` takes half the instructions it did, and the report benchmark, which builds 20,000 lines with `sprintf`, takes 8% fewer instructions overall. The output matches GNU R byte for byte, including glibc's edge cases: a negative `*` precision, `%#g` when rounding carries to the next power of ten, and `%#o`.
+
 ### Faster namespace loads
 
 Loading a package's namespace does less work in R. `ls()` sorts names by a byte key per name, `methods::cacheMetaData()` handles packages whose old classes ask for the `Ops` group natively, the registered native routines are bound in one pass, and `readRDS()` of a path reads the file whole instead of through a connection. `loadNamespace("rlang")` in a fresh process takes 31 ms instead of 45 ms, and 30 load and unload cycles in one process take 0.54 s instead of 0.66 s.

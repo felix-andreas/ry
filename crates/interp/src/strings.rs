@@ -17,7 +17,7 @@ use {
         coerce::{coerce_vector, integer_digits},
         conditions::warning,
         eval,
-        format::{display_width, scientific_text},
+        format::{display_width, push_fixed, push_general, push_scientific},
         pcre::{CompileError, PerlRegex},
         unwind::{R, error},
         values::{
@@ -657,9 +657,10 @@ pub unsafe fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T
 
 /// One `%` conversion of a format string.
 struct Conversion<'a> {
-    /// The conversion as written, for error messages.
+    /// The conversion as written, for error messages, which show it the way GNU R hands it to C
+    /// (see [`spec_as_run`]).
     text: &'a str,
-    argument: usize,
+    argument: u32,
     left: bool,
     plus: bool,
     space: bool,
@@ -670,24 +671,29 @@ struct Conversion<'a> {
     kind: char,
 }
 
-/// A width or precision, written out or taken from an argument by `*`.
+/// A width or precision, written out or taken from an argument by `*`. The payloads are 32-bit
+/// so a conversion stays small enough that the pieces of a typical format fit inline.
 #[derive(Clone, Copy)]
 enum Amount {
-    Fixed(usize),
-    Argument(usize),
+    Fixed(u32),
+    Argument(u32),
 }
 
-enum FormatPiece<'a> {
-    Text(&'a str),
-    Conversion(Conversion<'a>),
+/// A conversion and the literal text before it. A `%%`, and the text after a format's last
+/// conversion, end a piece with no conversion, so a format with three conversions fits the inline
+/// pieces.
+struct FormatPiece<'a> {
+    literal: &'a str,
+    conversion: Option<Conversion<'a>>,
 }
 
-/// A parsed format string: a few literals and conversions, so it stays on the stack.
-type FormatPieces<'a> = SmallVec<[FormatPiece<'a>; 8]>;
+/// The pieces of every format string of a call, one format after another.
+type FormatPieces<'a> = SmallVec<[FormatPiece<'a>; 4]>;
 
 /// An argument of `sprintf` and the conversions it needs, computed once per call.
 struct FormatArgument {
     value: Sexp,
+    kind: SexpType,
     length: usize,
     /// `as.character(value)`, for `%s`.
     text: Option<Sexp>,
@@ -700,6 +706,9 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     if formats.kind() != SexpType::String {
         return Err(error("'fmt' is not a character vector"));
     }
+    if call.len() > 100 {
+        return Err(error("only 100 arguments are allowed"));
+    }
     values::refuse_bytes(formats)?;
     for arg in call.args.iter().skip(1) {
         values::refuse_bytes(arg.value)?;
@@ -708,14 +717,16 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         SmallVec::with_capacity(call.len().saturating_sub(1));
     for (position, arg) in call.args.iter().enumerate().skip(1) {
         let value = arg.value;
-        if matches!(value.kind(), SexpType::Symbol | SexpType::Language) {
+        let kind = value.kind();
+        if matches!(kind, SexpType::Symbol | SexpType::Language) {
             return Err(error(format!(
                 "invalid type of argument[{position}]: '{}'",
-                value.kind().name()
+                kind.name()
             )));
         }
         arguments.push(FormatArgument {
             value,
+            kind,
             length: length(value),
             text: None,
             whole: None,
@@ -725,27 +736,26 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     if format_count == 0 || arguments.iter().any(|argument| argument.length == 0) {
         return alloc(SexpType::String, 0);
     }
-    let kinds: SmallVec<[SexpType; 8]> = arguments
-        .iter()
-        .map(|argument| argument.value.kind())
-        .collect();
     // One bit per argument, set once a conversion reads it.
     let mut used: SmallVec<[u64; 2]> = smallvec![0; arguments.len().div_ceil(64)];
     // An `NA` format is the text "NA", as in GNU R.
     let texts: SmallVec<[Cow<'_, str>; 1]> = (0..format_count)
         .map(|index| string_at(formats, index).unwrap_or(Cow::Borrowed("NA")))
         .collect();
-    let mut parsed: SmallVec<[FormatPieces<'_>; 1]> = SmallVec::with_capacity(format_count);
+    // The pieces of format `i` are `pieces[ends[i - 1]..ends[i]]`.
+    let mut pieces = FormatPieces::new();
+    let mut ends: SmallVec<[usize; 2]> = SmallVec::with_capacity(format_count);
     for text in &texts {
-        parsed.push(parse_format(text, &kinds, &mut used)?);
+        parse_format(text, &arguments, &mut used, &mut pieces)?;
+        ends.push(pieces.len());
     }
     // `%s` converts a classed argument with its `as.character` method first, and the result's
     // length is what recycles, so a condition formats as one string.
-    for piece in parsed.iter().flatten() {
-        if let FormatPiece::Conversion(conversion) = piece
+    for piece in &pieces {
+        if let Some(conversion) = &piece.conversion
             && conversion.kind == 's'
         {
-            let argument = &mut arguments[conversion.argument];
+            let argument = &mut arguments[conversion.argument as usize];
             if argument.text.is_none() && argument.value.is_object() {
                 let text = as_character(argument.value, || call.env())?;
                 argument.text = Some(text);
@@ -760,10 +770,10 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         }
         count = count.max(argument.length);
     }
-    if count % format_count != 0
+    if !count.is_multiple_of(format_count)
         || arguments
             .iter()
-            .any(|argument| count % argument.length != 0)
+            .any(|argument| !count.is_multiple_of(argument.length))
     {
         return Err(error("arguments cannot be recycled to the same length"));
     }
@@ -771,12 +781,14 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     with_text_buffer(|text| {
         for row in 0..count {
             text.clear();
-            for piece in &parsed[row % format_count] {
-                match piece {
-                    FormatPiece::Text(literal) => text.push_str(literal),
-                    FormatPiece::Conversion(conversion) => {
-                        format_conversion(conversion, &mut arguments, row, call.env()?, text)?;
-                    }
+            let format = row % format_count;
+            let start = if format == 0 { 0 } else { ends[format - 1] };
+            for piece in &pieces[start..ends[format]] {
+                if !piece.literal.is_empty() {
+                    text.push_str(piece.literal);
+                }
+                if let Some(conversion) = &piece.conversion {
+                    format_conversion(conversion, &mut arguments, row, call.env()?, text)?;
                 }
             }
             values::set_mkchar(result, row, text)?;
@@ -791,7 +803,12 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         } else {
             format!("{unused} arguments")
         };
-        warning(format!("{what} not used by format '{}'", texts[0]))?;
+        // GNU R names the format only when there is one.
+        if format_count == 1 {
+            warning(format!("{what} not used by format '{}'", texts[0]))?;
+        } else {
+            warning(format!("{what} not used by format"))?;
+        }
     }
     Ok(result)
 }
@@ -799,17 +816,21 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
 /// The conversion letters `sprintf` accepts.
 const CONVERSIONS: &[u8] = b"dioxXfeEgGaAs";
 
-/// Splits a format string into literal text and conversions, resolving which argument each
-/// conversion (and each `*`) reads. `used` gets a bit set for each argument read.
-fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<FormatPieces<'a>> {
+/// Splits a format string into pieces, resolving which argument each conversion (and each `*`)
+/// reads. `used` gets a bit set for each argument read.
+fn parse_format<'a>(
+    format: &'a str,
+    arguments: &[FormatArgument],
+    used: &mut [u64],
+    pieces: &mut FormatPieces<'a>,
+) -> R<()> {
     // Every byte the parser looks for is ASCII, which never occurs inside a multibyte UTF-8
     // character, so it steps through bytes and slices only at ASCII positions.
     let bytes = format.as_bytes();
-    let mut pieces = FormatPieces::new();
     let mut literal_start = 0;
     let mut next_argument = 0;
     let mut index = 0;
-    let mut take = |explicit: Option<usize>, used: &mut [u64]| -> R<usize> {
+    let mut take = |explicit: Option<usize>, used: &mut [u64]| -> R<u32> {
         let argument = match explicit {
             Some(argument) => argument,
             None => {
@@ -817,9 +838,10 @@ fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<
                 next_argument - 1
             }
         };
-        if argument < kinds.len() {
+        if argument < arguments.len() {
             used[argument / 64] |= 1 << (argument % 64);
-            return Ok(argument);
+            // `sprintf` takes at most 100 arguments.
+            return Ok(argument as u32);
         }
         match explicit {
             Some(argument) => Err(error(format!(
@@ -836,7 +858,10 @@ fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<
         }
         if bytes.get(index + 1) == Some(&b'%') {
             // The literal runs through the first `%`, and the second is skipped.
-            pieces.push(FormatPiece::Text(&format[literal_start..=index]));
+            pieces.push(FormatPiece {
+                literal: &format[literal_start..=index],
+                conversion: None,
+            });
             index += 2;
             literal_start = index;
             continue;
@@ -877,6 +902,14 @@ fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<
         if bytes.get(index) == Some(&b'.') {
             index += 1;
             if bytes.get(index) == Some(&b'*') {
+                if conversion
+                    .width
+                    .is_some_and(|width| matches!(width, Amount::Argument(_)))
+                {
+                    return Err(error(
+                        "at most one asterisk '*' is supported in each conversion specification",
+                    ));
+                }
                 index += 1;
                 let star = positional_reference(bytes, &mut index);
                 conversion.precision = Some(Amount::Argument(take(star, used)?));
@@ -896,10 +929,10 @@ fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<
                 return Err(error(format!("unrecognised format specification '{rest}'")));
             };
             let chunk = &format[start..=start + 1 + letter];
-            if kinds.is_empty() {
+            if arguments.is_empty() {
                 return Err(error("too few arguments"));
             }
-            let advice = match kinds[take(explicit, used)?] {
+            let advice = match arguments[take(explicit, used)? as usize].kind {
                 SexpType::Real => "use format %f, %e, %g or %a for numeric objects",
                 SexpType::Integer => "use format %d, %i, %o, %x or %X for integer objects",
                 SexpType::Logical => "use format %d or %i for logical objects",
@@ -909,21 +942,24 @@ fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<
         };
         conversion.kind = char::from(kind);
         conversion.text = &format[start..=index];
-        if kinds.is_empty() {
+        if arguments.is_empty() {
             return Err(error("too few arguments"));
         }
         conversion.argument = take(explicit, used)?;
-        if literal_start < start {
-            pieces.push(FormatPiece::Text(&format[literal_start..start]));
-        }
-        pieces.push(FormatPiece::Conversion(conversion));
+        pieces.push(FormatPiece {
+            literal: &format[literal_start..start],
+            conversion: Some(conversion),
+        });
         index += 1;
         literal_start = index;
     }
     if literal_start < bytes.len() {
-        pieces.push(FormatPiece::Text(&format[literal_start..]));
+        pieces.push(FormatPiece {
+            literal: &format[literal_start..],
+            conversion: None,
+        });
     }
-    Ok(pieces)
+    Ok(())
 }
 
 /// Reads an `n$` argument reference, which is 1-based, if one is written at `index`.
@@ -932,19 +968,19 @@ fn positional_reference(bytes: &[u8], index: &mut usize) -> Option<usize> {
     let number = read_number(bytes, &mut cursor)?;
     if bytes.get(cursor) == Some(&b'$') && number > 0 {
         *index = cursor + 1;
-        Some(number - 1)
+        Some(number as usize - 1)
     } else {
         None
     }
 }
 
-fn read_number(bytes: &[u8], index: &mut usize) -> Option<usize> {
+fn read_number(bytes: &[u8], index: &mut usize) -> Option<u32> {
     let start = *index;
-    let mut value: usize = 0;
+    let mut value: u32 = 0;
     while let Some(&digit) = bytes.get(*index).filter(|byte| byte.is_ascii_digit()) {
         value = value
             .saturating_mul(10)
-            .saturating_add(usize::from(digit - b'0'));
+            .saturating_add(u32::from(digit - b'0'));
         *index += 1;
     }
     (*index > start).then_some(value)
@@ -959,29 +995,45 @@ unsafe fn format_conversion(
     out: &mut String,
 ) -> R<()> {
     let mut left = conversion.left;
+    // The value of this row's `*`, which error messages splice into the specification.
+    let mut star = None;
     let width = match conversion.width {
         None => 0,
-        Some(Amount::Fixed(width)) => width,
+        Some(Amount::Fixed(width)) => width as usize,
         Some(Amount::Argument(position)) => {
-            let value = star_value(&arguments[position], row)?;
+            let value = star_value(&arguments[position as usize], row)?;
+            star = Some(value);
             if value < 0 {
                 left = true;
             }
             value.unsigned_abs() as usize
         }
     };
+    // GNU R writes a `*` precision into the specification as digits, so a negative one becomes
+    // `%.-3f`, which glibc cannot parse and echoes instead of a value.
+    let mut negative_precision = None;
     let precision = match conversion.precision {
         None => None,
-        Some(Amount::Fixed(precision)) => Some(precision),
+        Some(Amount::Fixed(precision)) => Some(precision as usize),
         Some(Amount::Argument(position)) => {
-            let value = star_value(&arguments[position], row)?;
+            let value = star_value(&arguments[position as usize], row)?;
+            star = Some(value);
+            if value < 0 {
+                negative_precision = Some(value);
+            }
             (value >= 0).then_some(value as usize)
         }
     };
-    let argument = &mut arguments[conversion.argument];
+    let argument = &mut arguments[conversion.argument as usize];
     let index = row % argument.length;
     let value = argument.value;
     let begin = out.len();
+    if let Some(negative) = negative_precision
+        && conversion.kind == 's'
+    {
+        push_unparsed(out, conversion, width, negative, 's');
+        return Ok(());
+    }
     if conversion.kind == 's' {
         let text = match argument.text {
             Some(text) => text,
@@ -992,17 +1044,28 @@ unsafe fn format_conversion(
             }
         };
         out.push_str(&string_at(text, index).unwrap_or(Cow::Borrowed("NA")));
-        // The precision cuts the string to at most that many bytes, not inside a character.
+        // The precision cuts the string to at most that many bytes, inside a character too, as
+        // GNU R does. The bytes of a cut character travel as their stand-ins, which count one
+        // byte each toward the width.
+        let mut stand_ins = 0;
         if let Some(precision) = precision
             && out.len() - begin > precision
         {
-            let mut end = begin + precision;
+            let cut = begin + precision;
+            let mut end = cut;
             while !out.is_char_boundary(end) {
                 end -= 1;
             }
+            let mut partial = [0u8; 4];
+            let partial = &mut partial[..cut - end];
+            partial.copy_from_slice(&out.as_bytes()[end..cut]);
             out.truncate(end);
+            for &byte in partial.iter() {
+                out.push(values::stand_in(byte));
+            }
+            stand_ins = partial.len() * 3;
         }
-        pad_from(out, begin, width, left);
+        pad_from(out, begin, width + stand_ins, left);
         return Ok(());
     }
     let integer_conversion = matches!(conversion.kind, 'd' | 'i' | 'o' | 'x' | 'X');
@@ -1010,7 +1073,7 @@ unsafe fn format_conversion(
         SexpType::String => {
             return Err(error(format!(
                 "invalid format '{}'; use format %s for character objects",
-                conversion.text
+                spec_as_run(conversion.text, star)
             )));
         }
         SexpType::Logical | SexpType::Integer | SexpType::Real => {}
@@ -1019,19 +1082,33 @@ unsafe fn format_conversion(
     if integer_conversion {
         let integer = match value.kind() {
             SexpType::Real => {
-                let whole = *argument.whole.get_or_insert_with(|| {
-                    values::reals(value).iter().all(|&number| {
-                        number.is_nan() || (number == number.trunc() && number.abs() < 2147483648.0)
-                    })
-                });
+                let whole = match argument.whole {
+                    Some(whole) => whole,
+                    None => {
+                        // GNU R takes a double for `%d` when C's `(int) x == x` holds for every
+                        // element or it is `NA`, so NaN, the infinities and 2^31 fail while -2^31
+                        // passes and then becomes NA in the coercion, which warns once.
+                        let numbers = values::reals(value);
+                        let whole = numbers.iter().all(|&number| {
+                            is_na_real(number)
+                                || (number == number.trunc()
+                                    && (-2147483648.0..2147483648.0).contains(&number))
+                        });
+                        argument.whole = Some(whole);
+                        if whole && numbers.contains(&-2147483648.0) {
+                            warning("NAs introduced by coercion to integer range")?;
+                        }
+                        whole
+                    }
+                };
                 if !whole {
                     return Err(error(format!(
                         "invalid format '{}'; use format %f, %e, %g or %a for numeric objects",
-                        conversion.text
+                        spec_as_run(conversion.text, star)
                     )));
                 }
                 let number = values::reals(value)[index];
-                if number.is_nan() {
+                if is_na_real(number) || number == -2147483648.0 {
                     NA_INTEGER
                 } else {
                     number as i32
@@ -1039,8 +1116,20 @@ unsafe fn format_conversion(
             }
             _ => values::ints(value)[index],
         };
+        if let Some(negative) = negative_precision {
+            // An integer NA goes through `%s`, so the echo names that conversion.
+            let kind = if integer == NA_INTEGER {
+                's'
+            } else {
+                conversion.kind
+            };
+            push_unparsed(out, conversion, width, negative, kind);
+            return Ok(());
+        }
         if integer == NA_INTEGER {
-            out.push_str("NA");
+            // GNU R prints an integer NA through `%s` with the same width and precision, so the
+            // precision cuts the text.
+            out.push_str(&"NA"[..precision.unwrap_or(2).min(2)]);
             pad_from(out, begin, width, left);
             return Ok(());
         }
@@ -1058,10 +1147,12 @@ unsafe fn format_conversion(
         }
     };
     if !number.is_finite() {
+        // GNU R prints the specials through `%s`, which keeps the width but not the precision,
+        // after putting the sign or space the flags ask for in front.
         out.push_str(if is_na_real(number) {
-            "NA"
+            if conversion.space { " NA" } else { "NA" }
         } else if number.is_nan() {
-            "NaN"
+            if conversion.space { " NaN" } else { "NaN" }
         } else if number < 0.0 {
             "-Inf"
         } else if conversion.plus {
@@ -1074,7 +1165,65 @@ unsafe fn format_conversion(
         pad_from(out, begin, width, left);
         return Ok(());
     }
+    if let Some(negative) = negative_precision {
+        push_unparsed(out, conversion, width, negative, conversion.kind);
+        return Ok(());
+    }
     push_real(out, number, conversion, width, left, precision)
+}
+
+/// A specification the way GNU R hands it to C, which is how its error messages show it: without
+/// the `n$` reference, and with the value of the `*` (and its own `n$`) written in as a number.
+fn spec_as_run(text: &str, star: Option<i32>) -> String {
+    let bytes = text.as_bytes();
+    let mut index = 1;
+    positional_reference(bytes, &mut index);
+    let mut spec = String::with_capacity(text.len() + 8);
+    spec.push('%');
+    let rest = &text[index..];
+    match (star, rest.find('*')) {
+        (Some(value), Some(at)) => {
+            spec.push_str(&rest[..at]);
+            spec.push_str(&value.to_string());
+            let mut after = index + at + 1;
+            positional_reference(bytes, &mut after);
+            spec.push_str(&text[after..]);
+        }
+        _ => spec.push_str(rest),
+    }
+    spec
+}
+
+/// Appends what glibc prints for a specification it cannot parse, here one with a negative
+/// precision: the flags in glibc's own order (with `0` dropped under `-`), the width, `.0` for the
+/// empty precision, and then the rest of the specification as text.
+fn push_unparsed(
+    out: &mut String,
+    conversion: &Conversion<'_>,
+    width: usize,
+    negative: i32,
+    kind: char,
+) {
+    out.push('%');
+    if conversion.alternate {
+        out.push('#');
+    }
+    if conversion.plus {
+        out.push('+');
+    } else if conversion.space {
+        out.push(' ');
+    }
+    if conversion.left {
+        out.push('-');
+    } else if conversion.zero {
+        out.push('0');
+    }
+    if width > 0 {
+        out.push_str(&width.to_string());
+    }
+    out.push_str(".0");
+    out.push_str(&negative.to_string());
+    out.push(kind);
 }
 
 unsafe fn star_value(argument: &FormatArgument, row: usize) -> R<i32> {
@@ -1112,8 +1261,6 @@ fn push_integer(
     // `%o`, `%x` and `%X` print the bits as unsigned, as C does.
     let bits = value as u32;
     match conversion.kind {
-        // An octal zero already starts with the `0` that `#` asks for.
-        'o' if conversion.alternate && bits != 0 => out.push('0'),
         'x' if conversion.alternate && value != 0 => out.push_str("0x"),
         'X' if conversion.alternate && value != 0 => out.push_str("0X"),
         'o' | 'x' | 'X' => {}
@@ -1137,6 +1284,14 @@ fn push_integer(
         } else if digits < precision {
             insert_fill(out, digits_at, '0', precision - digits);
         }
+    }
+    // `#` makes octal start with a zero, adding one only when the digits (padded to the
+    // precision) do not already.
+    if conversion.kind == 'o'
+        && conversion.alternate
+        && out.as_bytes().get(digits_at) != Some(&b'0')
+    {
+        out.insert(digits_at, '0');
     }
     let zero_pad = conversion.zero && !left && precision.is_none();
     finish_number(out, begin, digits_at, width, left, zero_pad);
@@ -1164,14 +1319,22 @@ fn push_real(
     let mut digits_at = out.len();
     match conversion.kind {
         'f' => {
-            write!(out, "{:.*}", precision.unwrap_or(6), magnitude)
-                .map_err(|_| error("formatting a number failed"))?;
+            push_fixed(out, magnitude, precision.unwrap_or(6));
             if alternate && !out[digits_at..].contains('.') {
                 out.push('.');
             }
         }
-        'e' | 'E' => out.push_str(&exponent_form(magnitude, precision.unwrap_or(6), alternate)),
-        'g' | 'G' => out.push_str(&general_form(magnitude, precision.unwrap_or(6), alternate)),
+        'e' | 'E' => {
+            let precision = precision.unwrap_or(6);
+            push_scientific(out, magnitude, precision);
+            if alternate
+                && precision == 0
+                && let Some(marker) = out[digits_at..].find('e')
+            {
+                out.insert(digits_at + marker, '.');
+            }
+        }
+        'g' | 'G' => push_general(out, magnitude, precision.unwrap_or(6).max(1), alternate),
         _ => {
             // The `0x` prefix goes before any zero padding.
             out.push_str(&hexadecimal_form(magnitude, precision, alternate));
@@ -1223,61 +1386,6 @@ pub(crate) fn insert_fill(out: &mut String, at: usize, fill: char, count: usize)
     // SAFETY: the rotation moves the ASCII fill bytes, which are whole characters, to `at`, a
     // character boundary, and keeps every other character's bytes together and in order.
     unsafe { out.as_mut_vec()[at..].rotate_right(count) };
-}
-
-/// C's `%e`: one digit before the point and an exponent of at least two digits.
-fn exponent_form(magnitude: f64, precision: usize, alternate: bool) -> String {
-    let text = scientific_text(magnitude, precision);
-    if alternate && precision == 0 {
-        text.replacen('e', ".e", 1)
-    } else {
-        text
-    }
-}
-
-/// C's `%g`: `%e` when the exponent is below -4 or at least the precision, `%f` otherwise,
-/// with trailing zeros removed unless `#` is given.
-fn general_form(magnitude: f64, precision: usize, alternate: bool) -> String {
-    let precision = precision.max(1);
-    let exponent = if magnitude == 0.0 {
-        0
-    } else {
-        let text = format!("{:.*e}", precision - 1, magnitude);
-        text.split_once('e')
-            .and_then(|(_, exponent)| exponent.parse::<i32>().ok())
-            .unwrap_or(0)
-    };
-    let text = if exponent < -4 || exponent >= precision as i32 {
-        scientific_text(magnitude, precision - 1)
-    } else {
-        format!(
-            "{:.*}",
-            (precision as i32 - 1 - exponent).max(0) as usize,
-            magnitude
-        )
-    };
-    if alternate {
-        if text.contains('.') {
-            return text;
-        }
-        return match text.split_once('e') {
-            Some((mantissa, exponent)) => format!("{mantissa}.e{exponent}"),
-            None => format!("{text}."),
-        };
-    }
-    let (mantissa, exponent) = match text.split_once('e') {
-        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
-        None => (text.as_str(), None),
-    };
-    let mantissa = if mantissa.contains('.') {
-        mantissa.trim_end_matches('0').trim_end_matches('.')
-    } else {
-        mantissa
-    };
-    match exponent {
-        Some(exponent) => format!("{mantissa}e{exponent}"),
-        None => mantissa.to_owned(),
-    }
 }
 
 /// C's `%a`: a hexadecimal significand with one leading digit and a binary exponent.
