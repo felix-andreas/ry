@@ -492,6 +492,19 @@ the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it 
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
 
+Judge a change's peak RSS in three parts, because they behave differently. Anonymous memory and
+the start image's resident pages must not grow. The resident pages of `libR.so`'s code are not
+judged per change. A plain release build has no function ordering, so where the linker happens to
+place hot functions decides which neighbouring code readahead and fault-around map in with them,
+and how far that moves depends on the change rather than its size. On the validation workload, a
+no-op exported function added to an otherwise unchanged build moved resident `libR.so` text by
+under 0.1 MB, while a change that grew `.text` by 5 KB moved it by +2.4 MB, with identical
+anonymous and image RSS. That change's extra resident pages held code the workload never runs (the
+analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
+size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
+grow only by about what the change adds. Resident text is checked on the shipped layout
+(`tools/layout/optimize.sh`) when a release is cut.
+
 Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
 loads only into the runtime build that wrote it, and any other build silently ignores it, so that
 build starts on the slow path and runs the package without its compiled code. A start rewrites a

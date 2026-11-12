@@ -9074,3 +9074,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
   Constants already pass as themselves. The rest of what promises cost is code promises and the fixed cost of each promise, not the argument's shape.
 - **Revisit** only with a caller-side proof that the frame's locals cannot be written during the call, and a workload where variable arguments to callees that are not effect-free are at least 2% of the instructions.
+
+## Peak RSS is judged as anonymous, image and code size, not as one number
+
+- **Previous rule.** A change's peak RSS, one number per workload, must not grow against main.
+- **Weakness.** Release builds are fat LTO with no function ordering, so the resident pages of `libR.so`'s code depend on where the linker places hot functions. Two changes were blocked by this alone: one showed +2.6 MB peak RSS, all of it `libR.so` resident text (14.2 to 16.6 MB) with identical anonymous and start-image RSS; another showed +0.6 and +1.4 MB of file-backed RSS on two applications with equal anonymous RSS. The number mixed a real signal with layout noise of the same size.
+- **Target rule.** `tools/bench/bench.py` reports anonymous RSS, start-image RSS and `libR.so` file RSS separately, plus the size of `libR.so`'s `.text` section (`size -A`). Anonymous and image RSS must not grow. Resident text is not judged per change; `.text` size is, and the reviewer accepts growth that matches the code the change adds. Resident text is checked on the shipped layout (`tools/layout/optimize.sh`, PGO plus BOLT) when a release is cut, and a regression there becomes a backlog item.
+- **Impact.** The real memory signal (heap and image) stays strict, and the noisy one is replaced by a deterministic measure. Implementing the split in `bench.py` and recording the measured layout swing of a no-op change in `development/testing.md` are open work.
+
