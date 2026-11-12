@@ -88,12 +88,25 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
 /// `dnrm2` and friends, whose rounding depends on the BLAS build, so even the direct ones agree
 /// only to rounding.
 fn tolerance(case: &str) -> f64 {
+    if bit_exact(case) {
+        return 0.0;
+    }
     match case {
-        "lbfgsb" | "optif9_trust_region" => 0.0,
         "optif9" | "quadrature" => 1e-6,
         _ => 1e-10,
     }
 }
+
+/// The cases whose answers follow the reference BLAS's sums bit for bit, through the BLAS calls
+/// in GNU R's L-BFGS-B and UNCMIN code.
+fn bit_exact(case: &str) -> bool {
+    matches!(case, "lbfgsb" | "optif9_trust_region")
+}
+
+/// The case that fingerprints the C library's `hypot`, and the cases whose answers follow its
+/// last bit (see `case_hypot` in the package).
+const HYPOT_FINGERPRINT: &str = "hypot";
+const HYPOT_CASES: &[&str] = &["optif9_trust_region"];
 
 fn tokens_agree(expected: &str, actual: &str, tolerance: f64) -> bool {
     if expected == actual {
@@ -141,30 +154,42 @@ fn clear_console() {
         .clear();
 }
 
-/// Runs every recorded case in ry and lists the disagreements.
-fn compare_cases(r: &R, cases: &[Case]) -> Vec<String> {
+/// Runs every recorded case in ry, except the `skipped` ones, and lists the disagreements. The
+/// cases that follow the C library's `hypot` are skipped too, with a message, when ry's C library
+/// rounds it differently from the one GNU R's answers came from: the iterates then diverge, and
+/// no tolerance tells a real disagreement from that.
+fn compare_cases(r: &R, cases: &[Case], skipped: &[&str]) -> Vec<String> {
     let mut problems = Vec::new();
+    let mut skipped = skipped.to_vec();
+    if let Some(recorded) = cases.iter().find(|case| case.name == HYPOT_FINGERPRINT) {
+        match run_case(r, HYPOT_FINGERPRINT) {
+            Ok((values, _)) if values == recorded.values => {}
+            Ok(_) => {
+                println!(
+                    "skipping {HYPOT_CASES:?}: this C library's hypot rounds differently from \
+                     the one GNU R's answers came from"
+                );
+                skipped.extend_from_slice(HYPOT_CASES);
+            }
+            Err(error) => problems.push(format!("{HYPOT_FINGERPRINT}: {error}")),
+        }
+    }
     // samin draws from norm_rand, which the Rmath module provides.
     let has_norm_rand = has_symbol(r, "norm_rand");
     for case in cases {
-        if case.name == "samin" && !has_norm_rand {
+        if case.name == HYPOT_FINGERPRINT
+            || skipped.contains(&case.name.as_str())
+            || (case.name == "samin" && !has_norm_rand)
+        {
             continue;
         }
-        unsafe { (r.api().ry_set_seed)(1) };
-        clear_console();
-        let name = r.string(&case.name);
-        let result = match r.call("num_case", &[name]) {
-            Ok(result) => result,
+        let (actual, printed) = match run_case(r, &case.name) {
+            Ok(answers) => answers,
             Err(error) => {
                 problems.push(format!("{}: {error}", case.name));
                 continue;
             }
         };
-        let actual: Vec<String> = r
-            .strings(result)
-            .into_iter()
-            .map(|token| token.unwrap_or_else(|| "NA".into()))
-            .collect();
         if actual.len() != case.values.len() {
             problems.push(format!(
                 "{}: {} values, GNU R has {}",
@@ -183,7 +208,6 @@ fn compare_cases(r: &R, cases: &[Case]) -> Vec<String> {
                 ));
             }
         }
-        let printed = console_lines();
         if printed != case.printed {
             problems.push(format!(
                 "{}: printed {printed:?}, GNU R {:?}",
@@ -194,13 +218,27 @@ fn compare_cases(r: &R, cases: &[Case]) -> Vec<String> {
     problems
 }
 
+/// Runs one case in ry after `set.seed(1)`, returning its values and the lines it printed.
+fn run_case(r: &R, name: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    unsafe { (r.api().ry_set_seed)(1) };
+    clear_console();
+    let name = r.string(name);
+    let result = r.call("num_case", &[name])?;
+    let values = r
+        .strings(result)
+        .into_iter()
+        .map(|token| token.unwrap_or_else(|| "NA".into()))
+        .collect();
+    Ok((values, console_lines()))
+}
+
 #[test]
 fn numerics_agree_with_gnu_r() {
     let text = std::fs::read_to_string(expected_path()).expect("the recorded expectations");
     let (cases, _) = parse_expectations(&text);
     let r = r();
     numerics(&r);
-    let problems = compare_cases(&r, &cases);
+    let problems = compare_cases(&r, &cases, &[]);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -211,7 +249,7 @@ fn numerics_survive_collection_stress() {
     let r = r();
     numerics(&r);
     r.stress(true);
-    let problems = compare_cases(&r, &cases);
+    let problems = compare_cases(&r, &cases, &[]);
     r.stress(false);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
@@ -299,6 +337,33 @@ fn expectations_match_a_fresh_gnu_r_run() {
     // tolerance, and ry must agree with the fresh run under the same tolerances.
     let (fresh_cases, fresh_pretty) = parse_expectations(&fresh);
     let (recorded_cases, recorded_pretty) = parse_expectations(&recorded);
+    // The recording comes from the reference BLAS, whose sums the bit-exact cases follow; under
+    // another BLAS they take another path, so they can be checked only on the reference BLAS.
+    let mut skipped: Vec<&str> = Vec::new();
+    if !gnu_r_uses_reference_blas() {
+        skipped.extend(
+            fresh_cases
+                .iter()
+                .map(|case| case.name.as_str())
+                .filter(|name| bit_exact(name)),
+        );
+        println!("skipping {skipped:?}: GNU R does not call the reference BLAS");
+    }
+    // The recording's C library may round hypot differently from this one, and the cases that
+    // follow it then diverge from the recording without the recording being stale.
+    let fingerprint = |cases: &[Case]| {
+        cases
+            .iter()
+            .find(|case| case.name == HYPOT_FINGERPRINT)
+            .map(|case| case.values.clone())
+    };
+    let hypot_differs = fingerprint(&fresh_cases) != fingerprint(&recorded_cases);
+    if hypot_differs {
+        println!(
+            "not checking {HYPOT_CASES:?} for staleness: this C library's hypot rounds \
+             differently from the recording's"
+        );
+    }
     let mut stale = Vec::new();
     if fresh_cases.len() != recorded_cases.len() || fresh_pretty.len() != recorded_pretty.len() {
         stale.push(format!(
@@ -310,14 +375,19 @@ fn expectations_match_a_fresh_gnu_r_run() {
         ));
     }
     for (fresh, recorded) in fresh_cases.iter().zip(&recorded_cases) {
-        let tolerance = tolerance(&fresh.name);
+        let name = fresh.name.as_str();
+        let unchecked = name == HYPOT_FINGERPRINT
+            || skipped.contains(&name)
+            || (hypot_differs && HYPOT_CASES.contains(&name));
+        let tolerance = tolerance(name);
         let values_agree = fresh.values.len() == recorded.values.len()
             && fresh
                 .values
                 .iter()
                 .zip(&recorded.values)
                 .all(|(fresh, recorded)| tokens_agree(fresh, recorded, tolerance));
-        if fresh.name != recorded.name || !values_agree || fresh.printed != recorded.printed {
+        let answers_agree = values_agree && fresh.printed == recorded.printed;
+        if fresh.name != recorded.name || !(unchecked || answers_agree) {
             stale.push(format!(
                 "case {:?} (recorded as {:?})",
                 fresh.name, recorded.name
@@ -336,12 +406,34 @@ fn expectations_match_a_fresh_gnu_r_run() {
     );
     let r = r();
     numerics(&r);
-    let problems = compare_cases(&r, &fresh_cases);
+    let problems = compare_cases(&r, &fresh_cases, &skipped);
     assert!(
         problems.is_empty(),
         "ry disagrees with a fresh GNU R run:\n{}",
         problems.join("\n")
     );
+}
+
+/// Whether GNU R calls the reference BLAS: R's own `libRblas`, or the netlib build Debian and
+/// Ubuntu install under `blas/`. A reference BLAS compiled to fuse multiply-adds (Ubuntu's
+/// x86-64-v3 build) still rounds `daxpy` differently, and the bit-exact cases then fail.
+fn gnu_r_uses_reference_blas() -> bool {
+    let output = Command::new("Rscript")
+        .args(["-e", "cat(extSoftVersion()[['BLAS']])"])
+        .output()
+        .expect("Rscript runs");
+    assert!(output.status.success());
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let directory = path
+        .parent()
+        .and_then(|directory| directory.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    file.starts_with("libRblas") || directory == "blas"
 }
 
 /// The package built by GNU R's toolchain against GNU R's headers runs in ry with the same
@@ -356,7 +448,7 @@ fn gnu_r_binary_agrees_too() {
     let library = gnu_r_build();
     let r = r();
     r.load(library);
-    let problems = compare_cases(&r, &cases);
+    let problems = compare_cases(&r, &cases, &[]);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
