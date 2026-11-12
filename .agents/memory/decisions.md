@@ -1835,13 +1835,20 @@ Measured with the JIT off: a loop passing `i * 2 + 1` and `sqrt(i) - i / 3` to a
 about 1.6x faster, and `sd(x)`, whose closure arguments are mostly bare symbols (a symbol stays
 an ordinary promise), went from about 115.4k to 114.8k instructions.
 
-**`switch` compiles to one table lookup and a chain of literal tests.** `SwitchArm dst src table`
+**`switch` compiles to one table lookup and a chain of identity tests.** `SwitchArm dst src table`
 maps the selector to an arm number through a constant table built at compile time (the tag
-names, the first non-empty arm at or after each name, the arm per position, the default), and
-each arm then tests that number with the existing `MatchLiteral` and jumps past the others. One
-opcode with a jump table would be faster to dispatch, but every op in the JIT's control-flow
-graph has at most one jump target, and the arm chain keeps that invariant, so the JIT needed only
-a read and a liveness arm for the new op. A `switch` whose selector is tagged, dots or missing,
+names, the first non-empty arm at or after each name, the arm per position, the default). The
+number is one of the table's own integer scalars, so each arm tests it with `BranchUnlessSame`,
+a pointer compare against that scalar, and jumps past the others. The arms first tested the
+number with `MatchLiteral`, the `match` literal test, which read both scalars by kind and cost
+9% of expr_tree's warm instructions (a `switch` on `node$kind` per node); the identity test cut
+expr_tree by 11%. `BranchUnlessSame` is also the op a base call uses to check that its name
+still finds the primitive, and every tier already runs it inline. A name lookup tries identity
+first, because names and selectors are interned, and compares text only for a selector in
+another encoding or `NA` (`eval::switch_name_matches`): GNU R matches as `pmatch` does, by
+translated text and with `NA` spelled "NA". One opcode with
+a jump table would dispatch in constant time, but every op in the JIT's control-flow graph has at
+most one jump target, and the arm chain keeps that invariant. A `switch` whose selector is tagged, dots or missing,
 whose alternatives contain `...`, or which has two defaults stays an AST call, which keeps those
 rare shapes on one implementation (`switch_compiles`). Both paths read the selector through
 `eval::switch_selector`, so they share its checks and warnings. Errors match GNU R's AST

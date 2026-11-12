@@ -1056,7 +1056,7 @@ pub unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
             Some(Scalar::Complex(left_real, left_imaginary)),
             Some(Scalar::Complex(right_real, right_imaginary)),
         ) => left_real == right_real && left_imaginary == right_imaginary,
-        (Some(Scalar::Text(left)), Some(Scalar::Text(right))) => left == right,
+        (Some(Scalar::Text(left)), Some(Scalar::Text(right))) => values::same_string(left, right),
         _ => false,
     }
 }
@@ -1066,7 +1066,8 @@ enum Scalar {
     Number(f64),
     Logical(bool),
     Complex(f64, f64),
-    Text(Vec<u8>),
+    /// The `CHARSXP`, compared through the string cache rather than copied.
+    Text(Sexp),
 }
 
 unsafe fn scalar(value: Sexp) -> Option<Scalar> {
@@ -1101,7 +1102,7 @@ unsafe fn scalar(value: Sexp) -> Option<Scalar> {
             if text == values::na_string() {
                 Scalar::Missing
             } else {
-                Scalar::Text(text.bytes().to_vec())
+                Scalar::Text(text)
             }
         }
         _ => return None,

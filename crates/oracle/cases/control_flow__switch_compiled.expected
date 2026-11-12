@@ -123,6 +123,9 @@
 | $visible
 | [1] FALSE
 | 
+| [1] "latin1" "summer" "summer"
+| [1] "latin1" "summer" "summer"
+| [1] "latin1" "summer" "summer"
 [messages]
 [warnings]
 - EXPR is a "factor", treated as integer.\n Consider using 'switch(as.character( * ), ...)' instead. (in switch(x, "p", "q"))

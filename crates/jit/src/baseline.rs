@@ -227,7 +227,7 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                         label_of(operand(1))?,
                     );
                 }
-                Op::BranchUnlessPrimitive => {
+                Op::BranchUnlessSame => {
                     let primitive = constants.element(operand(1));
                     asm.load_object(operand(0) as u32);
                     asm.branch_object_is(
@@ -686,7 +686,7 @@ fn branch_target(op: Op, operand: &impl Fn(usize) -> usize) -> Option<usize> {
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(operand(1)),
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(operand(2)),
         Op::Item => Some(operand(4)),
-        Op::BranchUnlessPrimitive => Some(operand(2)),
+        Op::BranchUnlessSame => Some(operand(2)),
         Op::ForStep => Some(operand(3)),
         Op::LogicLeft => Some(operand(4)),
         Op::Guard => Some(operand(4)),
