@@ -1615,7 +1615,7 @@ mod tests {
                 input.extend_from_slice(pieces[rng.below(pieces.len())]);
             }
             let capacity = rng.below(input.len() + 4);
-            let mut run = |converter: &mut Iconv| {
+            let run = |converter: &mut Iconv| {
                 let mut rest = &input[..];
                 let mut output = vec![0u8; capacity];
                 let (written, outcome) = converter.convert(&mut rest, &mut output);

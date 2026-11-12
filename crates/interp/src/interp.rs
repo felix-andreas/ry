@@ -25,6 +25,21 @@
 // what keeps its state in registers between instructions. The toolchain is a pinned nightly.
 #![feature(explicit_tail_calls)]
 #![allow(incomplete_features)]
+// Numeric ports (loess, splines, fft, linpack) keep the reference algorithms' index-based loops and
+// literal constants so they stay comparable line by line with the C and Fortran originals, and the
+// byte-level readers keep explicit chunk sizes.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::excessive_precision,
+    clippy::explicit_counter_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::assign_op_pattern,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::type_complexity
+)]
 
 pub mod annotations;
 pub mod apply_results;
@@ -272,6 +287,12 @@ impl FrameStack {
 
     pub fn clear(&mut self) {
         self.truncate(0);
+    }
+}
+
+impl Default for FrameStack {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

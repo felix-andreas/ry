@@ -1024,12 +1024,14 @@ pub fn runnable_cases(
     for (case, requirements) in cases.into_iter().zip(required) {
         let absent: Vec<String> = requirements
             .into_iter()
-            .filter(|requirement| match requirement.strip_prefix(LOCALE_REQUIREMENT) {
-                Some(locale) => !locale_installed(locale),
-                None => installed
-                    .as_ref()
-                    .is_some_and(|installed| !installed.iter().any(|name| name == requirement)),
-            })
+            .filter(
+                |requirement| match requirement.strip_prefix(LOCALE_REQUIREMENT) {
+                    Some(locale) => !locale_installed(locale),
+                    None => installed
+                        .as_ref()
+                        .is_some_and(|installed| !installed.iter().any(|name| name == requirement)),
+                },
+            )
             .collect();
         match absent.is_empty() {
             true => runnable.push(case),

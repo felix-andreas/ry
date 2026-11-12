@@ -210,7 +210,8 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// empty. An empty list built at run time from no items, such as `List.map` over an empty list, is
 /// stored as `logical`, so the preflight wraps each list expression whose item type only the
 /// checker knows (`preflight::elaborate`). The names are `"I64"`, `"F64"`, `"Str"` and
-/// `"list"`, the storage of records, tuples, tags and nested lists.
+/// `"list"`, the storage of records, tuples, tags and nested lists. A dictionary passes through
+/// unchanged: its `"Dict<K, V>"` name is for typed code, which lays the dictionary out by it.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     if !list.is_array() || length(list) != 0 {

@@ -350,7 +350,11 @@ fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -
     }
     let (runnable, missing) = runnable_cases(found, installed);
     for (case, requirements) in &missing {
-        println!("skip    {}: needs {}", case.display(), requirements.join(", "));
+        println!(
+            "skip    {}: needs {}",
+            case.display(),
+            requirements.join(", ")
+        );
     }
     Selection {
         runnable,

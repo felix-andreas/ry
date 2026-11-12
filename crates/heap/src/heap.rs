@@ -124,9 +124,6 @@ pub struct Heap {
     /// Bytes of large vectors allocated since the last major collection.
     large_allocated_since_major: usize,
     remembered: Vec<Sexp>,
-    /// While a deeper collection traces a tenured object: whether one of its children seen so
-    /// far is younger, which puts the object in the remembered set.
-    younger_child: bool,
     /// The vector cells of the tenured objects, as of the last intermediate or major collection,
     /// to which an intermediate one adds what it tenures.
     tenured_vector_cells: u64,
@@ -226,9 +223,10 @@ pub struct Heap {
     allocation_reporter: Option<fn(usize) -> bool>,
     report_threshold: usize,
     /// The file `RY_GC_LOG` names, which receives one line per collection: its kind, its
-    /// elapsed time in nanoseconds and the bytes of small objects and large vectors it found
-    /// young and the old generation's bytes after it. Measuring pause distributions over a whole test suite needs every pause, which
-    /// `gc.time()`'s totals cannot give.
+    /// elapsed time in nanoseconds, the bytes of small objects and large vectors it found young,
+    /// the old generation's bytes after it and the process id, since a test suite's worker
+    /// processes append to the same file. Measuring pause distributions over a whole test suite
+    /// needs every pause, which `gc.time()`'s totals cannot give.
     pause_log: Option<std::fs::File>,
     /// How many namespace loads are running ([`Heap::enter_namespace_load`]).
     namespace_loads: u32,
@@ -779,7 +777,6 @@ impl Heap {
             untenured_freed: 0,
             large_allocated_since_major: 0,
             remembered: Vec::new(),
-            younger_child: false,
             tenured_vector_cells: 0,
             escaped: Vec::new(),
             escaped_lists: Vec::new(),
@@ -3592,9 +3589,7 @@ impl Heap {
                         parent.clear_cards();
                     }
                 } else if parent.is_carded() {
-                    self.younger_child = false;
-                    self.mark_child::<true>(parent.attrib());
-                    let attrib_younger = self.younger_child;
+                    let attrib_younger = self.mark_child::<true>(parent.attrib());
                     let cards_younger = self.scan_cards(parent, Collection::Intermediate);
                     if attrib_younger || cards_younger {
                         self.remember(parent);
@@ -3802,9 +3797,9 @@ impl Heap {
                 Collection::Major => "major",
             };
             let line = format!(
-                "{kind} {} {young} {young_large} {}\n",
+                "{kind} {} {young} {young_large} {old_bytes} {}\n",
                 started.elapsed().as_nanos(),
-                old_bytes
+                std::process::id()
             );
             if let Err(error) = log.write_all(line.as_bytes()) {
                 panic!("cannot write the collection log RY_GC_LOG names: {error}");
@@ -3818,24 +3813,33 @@ impl Heap {
 
     #[inline(always)]
     unsafe fn mark(&mut self, object: Sexp) {
-        self.mark_child::<false>(object);
+        if self.space.mark(object) && !is_leaf(object, self.known.nil) {
+            self.mark_stack.push(object);
+        }
     }
 
     /// Marks a child of an object being traced. `TENURED` says whether that object is tenured
-    /// in a deeper collection, which must notice a younger child; a minor collection never
-    /// traces one, so its loops carry no test for it.
+    /// in a deeper collection, which must notice a younger child, and then the result says
+    /// whether this child is younger; a minor collection never traces a tenured object, so its
+    /// loops carry no test for it.
     #[inline(always)]
-    unsafe fn mark_child<const TENURED: bool>(&mut self, object: Sexp) {
-        let newly = if TENURED {
+    unsafe fn mark_child<const TENURED: bool>(&mut self, object: Sexp) -> bool {
+        // Most attribute, CDR and tag fields hold `NULL`, which `mark_roots` marks before any
+        // tracing and which is tenured from the first collection, so comparing with it skips
+        // locating its slot.
+        if object == self.known.nil {
+            return false;
+        }
+        let (newly, younger) = if TENURED {
             let (newly, tenured) = self.space.mark_beside_tenured(object);
-            self.younger_child |= !tenured;
-            newly
+            (newly, !tenured)
         } else {
-            self.space.mark(object)
+            (self.space.mark(object), false)
         };
         if newly && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
         }
+        younger
     }
 
     unsafe fn mark_roots(&mut self, kind: Collection) {
@@ -3913,6 +3917,7 @@ impl Heap {
         }
     }
 
+    #[inline(always)]
     unsafe fn trace(&mut self, object: Sexp) {
         // Collection ages each survivor by one generation, so a deeper collection can leave a
         // tenured object pointing at a child it aged only to the younger old generation; the
@@ -3921,21 +3926,21 @@ impl Heap {
             self.trace_children::<false>(object);
             return;
         }
-        self.younger_child = false;
-        self.trace_children::<true>(object);
-        if self.younger_child && object.gc_bits() & gc_bits::REMEMBERED == 0 {
+        if self.trace_children::<true>(object) && object.gc_bits() & gc_bits::REMEMBERED == 0 {
             object.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(object);
         }
     }
 
-    unsafe fn trace_children<const TENURED: bool>(&mut self, object: Sexp) {
-        self.mark_child::<TENURED>(object.attrib());
+    /// Marks the children of `object` and says whether one of them is younger, which only a
+    /// deeper collection tracing a tenured `object` (`TENURED`) can find.
+    unsafe fn trace_children<const TENURED: bool>(&mut self, object: Sexp) -> bool {
+        let mut has_younger = self.mark_child::<TENURED>(object.attrib());
         if object.is_altrep() {
-            self.mark_child::<TENURED>(object.car());
-            self.mark_child::<TENURED>(object.cdr());
-            self.mark_child::<TENURED>(object.tag());
-            return;
+            has_younger |= self.mark_child::<TENURED>(object.car());
+            has_younger |= self.mark_child::<TENURED>(object.cdr());
+            has_younger |= self.mark_child::<TENURED>(object.tag());
+            return has_younger;
         }
         match object.kind().shape() {
             Shape::Vector => {
@@ -3948,34 +3953,32 @@ impl Heap {
                     // list remembered never marks a pair strongly, because a minor collection
                     // that rescans it comes back to this branch.
                     if TENURED {
-                        self.younger_child |= (0..object.length() as usize)
+                        has_younger |= (0..object.length() as usize)
                             .any(|index| younger(object, object.stored_element(index)));
                     }
                     self.weak_pairs.push(object);
                 } else if TENURED && object.is_carded() {
                     // A deeper collection derives each card of a tenured vector from scratch:
                     // dirty exactly where an element is younger than the vector.
-                    let attrib_younger = self.younger_child;
                     let length = object.length() as usize;
                     let cards = object.cards();
-                    let mut any = false;
                     for card in 0..object.card_count() {
-                        self.younger_child = false;
                         let start = card * CARD_ELEMENTS;
+                        let mut card_younger = false;
                         for index in start..(start + CARD_ELEMENTS).min(length) {
-                            self.mark_child::<TENURED>(object.stored_element(index));
+                            card_younger |=
+                                self.mark_child::<TENURED>(object.stored_element(index));
                         }
-                        *cards.add(card) = if self.younger_child {
+                        *cards.add(card) = if card_younger {
                             CARD_UNTENURED
                         } else {
                             CARD_CLEAN
                         };
-                        any |= self.younger_child;
+                        has_younger |= card_younger;
                     }
-                    self.younger_child = attrib_younger || any;
                 } else if object.kind() == SexpType::String && object.length() <= 16 {
                     for &element in object.slice::<Sexp>() {
-                        self.mark_child::<TENURED>(element);
+                        has_younger |= self.mark_child::<TENURED>(element);
                     }
                 } else if object.kind() == SexpType::String {
                     // A character vector usually repeats a few strings, like a column of
@@ -3991,39 +3994,40 @@ impl Heap {
                             continue;
                         }
                         marked[slot] = address;
-                        self.mark_child::<TENURED>(element);
+                        has_younger |= self.mark_child::<TENURED>(element);
                     }
                 } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
-                    for index in 0..object.length() as usize {
-                        self.mark_child::<TENURED>(object.element(index));
+                    for &element in object.slice::<Sexp>() {
+                        has_younger |= self.mark_child::<TENURED>(element);
                     }
                 }
             }
             Shape::Triple => {
-                self.mark_child::<TENURED>(object.car());
-                self.mark_child::<TENURED>(object.cdr());
-                self.mark_child::<TENURED>(object.tag());
+                has_younger |= self.mark_child::<TENURED>(object.car());
+                has_younger |= self.mark_child::<TENURED>(object.cdr());
+                has_younger |= self.mark_child::<TENURED>(object.tag());
             }
             Shape::Environment => {
-                self.mark_child::<TENURED>(object.enclosure());
+                has_younger |= self.mark_child::<TENURED>(object.enclosure());
                 for cell in (*object.frame_ptr()).cells() {
-                    self.mark_child::<TENURED>(cell);
+                    has_younger |= self.mark_child::<TENURED>(cell);
                 }
             }
             Shape::ExternalPtr => {
-                self.mark_child::<TENURED>(object.external_tag());
-                self.mark_child::<TENURED>(object.external_protected());
+                has_younger |= self.mark_child::<TENURED>(object.external_tag());
+                has_younger |= self.mark_child::<TENURED>(object.external_protected());
             }
             Shape::Record => {
                 for index in 0..object.record_slot_count() {
                     if let Some(handle) = object.record_handle(index) {
-                        self.mark_child::<TENURED>(handle);
+                        has_younger |= self.mark_child::<TENURED>(handle);
                     }
                 }
             }
             // Weak references are traced by `process_weak_refs`.
             Shape::WeakRef | Shape::Primitive => {}
         }
+        has_younger
     }
 
     /// Marks the elements in the dirty cards of a remembered carded vector that `kind` of
@@ -4048,24 +4052,22 @@ impl Heap {
             if *cards.add(card) < threshold {
                 continue;
             }
-            self.younger_child = false;
             let start = card * CARD_ELEMENTS;
+            let mut card_younger = false;
             for index in start..(start + CARD_ELEMENTS).min(length) {
                 match kind {
                     Collection::Minor => self.mark(vector.stored_element(index)),
                     Collection::Intermediate | Collection::Major => {
-                        self.mark_child::<true>(vector.stored_element(index))
+                        card_younger |= self.mark_child::<true>(vector.stored_element(index))
                     }
                 }
             }
             *cards.add(card) = match kind {
                 Collection::Minor => after_minor,
-                Collection::Intermediate | Collection::Major if self.younger_child => {
-                    CARD_UNTENURED
-                }
+                Collection::Intermediate | Collection::Major if card_younger => CARD_UNTENURED,
                 Collection::Intermediate | Collection::Major => CARD_CLEAN,
             };
-            any |= self.younger_child;
+            any |= card_younger;
         }
         any
     }
@@ -4666,17 +4668,7 @@ unsafe fn younger(parent: Sexp, child: Sexp) -> bool {
 /// capacity for the rest of the session.
 #[inline]
 unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
-    matches!(
-        object.kind(),
-        SexpType::Char
-            | SexpType::Logical
-            | SexpType::Integer
-            | SexpType::Real
-            | SexpType::I64
-            | SexpType::Complex
-            | SexpType::Raw
-    ) && !object.is_altrep()
-        && object.attrib() == nil
+    object.kind().holds_no_references() && !object.is_altrep() && object.attrib() == nil
 }
 
 impl Default for GcPolicy {
