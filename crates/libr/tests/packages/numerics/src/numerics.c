@@ -824,6 +824,28 @@ static void uncmin_rosenbrock_hessian(int nr, int n, double *x, double *h, void 
     h[nr + 1] = 200;
 }
 
+/* A fingerprint of the C library's hypot, which UNCMIN's secant update calls to rotate its QR
+ * factor, so the trust-region iterates follow its last bit. Builds of one C library round it
+ * differently (Ubuntu's glibc for x86-64-v3 disagrees with its baseline build on one pair in
+ * eight here), and the tests compare the trust-region case with a recording only when this
+ * fingerprint matches the recording's. */
+static void case_hypot(void)
+{
+    unsigned long long hash = 0;
+    lcg_state = 1;
+    for (int i = 0; i < 1024; i++) {
+        double a = lcg() + lcg() / 65536.0 + lcg() / 4294967296.0;
+        double b = lcg() + lcg() / 65536.0 + lcg() / 4294967296.0;
+        double h = hypot(a, b);
+        unsigned long long bits;
+        memcpy(&bits, &h, sizeof bits);
+        hash = hash * 1000003u ^ bits;
+    }
+    char buffer[32];
+    snprintf(buffer, sizeof buffer, "0x%016llx", hash);
+    put_text(buffer);
+}
+
 /* The trust-region strategies on Rosenbrock's valley, whose steps are rejected, shrunk and
  * retried, so the exact iterate, iteration count and evaluation count show whether the double
  * dogleg (method 2) and the More-Hebdon step (method 3) took GNU R's path. */
@@ -995,6 +1017,7 @@ static const struct {
     {"optim_traces", case_optim_traces},
     {"max_col_ties", case_max_col_ties},
     {"optif9", case_optif9},
+    {"hypot", case_hypot},
     {"optif9_trust_region", case_optif9_trust_region},
     {"quadrature", case_quadrature},
     {"strings", case_strings},
