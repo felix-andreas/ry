@@ -23,7 +23,7 @@
 use {
     crate::{
         env::Frame,
-        image::{ImageError, Reader, Writer},
+        image::{Fill, ImageError, Reader, Writer},
         object::{Sexp, SexpType, VectorObject, flag_bits, gc_bits},
     },
     std::{collections::VecDeque, ptr::NonNull},
@@ -1041,6 +1041,11 @@ impl Space {
         ranges
     }
 
+    /// Whether page `page` of an image holds no object, so the image leaves it out of its file.
+    pub fn is_empty_page(&self, page: usize) -> bool {
+        self.page_class.get(page) == Some(&EMPTY_PAGE)
+    }
+
     /// Records the slots allocated now as ones [`Space::compact_for_image`] must not move.
     pub fn pin_allocated(&mut self) {
         // A cursor's claimed run counts as allocated, but nothing holds its slots yet.
@@ -1229,8 +1234,8 @@ impl Space {
     }
 
     /// Takes over the pages and metadata [`Space::write_image`] wrote, in place of everything the
-    /// space held. `fill` receives the memory of the image's pages, at the space's base, and
-    /// fills it with the pages' bytes. The caller has checked that the space allocated exactly
+    /// space held. `fill` receives each run of the image's pages that hold objects, in the space's
+    /// memory, with the offset of the run's bytes among the stored pages. The caller has checked that the space allocated exactly
     /// what the writer's had when its image's objects began, so the objects allocated since live
     /// where the image's copies of them go.
     ///
@@ -1241,7 +1246,7 @@ impl Space {
         &mut self,
         input: &mut Reader<'_>,
         held: &[Sexp],
-        fill: &mut dyn FnMut(&mut [u8]) -> Result<(), ImageError>,
+        fill: Fill<'_>,
     ) -> Result<(), ImageError> {
         let page_count = input.u32()? as usize;
         let invalid = |message: &str| ImageError::Invalid(message.to_owned());
@@ -1307,11 +1312,34 @@ impl Space {
         }
         // The image's pages replace every frame these pages hold.
         self.drop_frames();
-        // SAFETY: the first `page_count` pages are committed, and the objects in them are
-        // replaced by the image's copies as a whole.
-        fill(unsafe {
-            std::slice::from_raw_parts_mut(self.base.as_ptr(), page_count * PAGE_SIZE)
-        })?;
+        // The file holds only the pages that keep an object, back to back. An empty page past
+        // the ones this process used is untouched zeroed memory, so it is left alone and costs
+        // no memory until an allocation claims it; an empty page this process used is cleared.
+        let used = self.page_count;
+        let mut stored = 0;
+        let mut page = 0;
+        while page < page_count {
+            let empty = page_class[page] == EMPTY_PAGE;
+            let end = (page..page_count)
+                .find(|&next| (page_class[next] == EMPTY_PAGE) != empty)
+                .unwrap_or(page_count);
+            // SAFETY: the first `page_count` pages are committed, and the objects in them are
+            // replaced by the image's copies as a whole.
+            let memory = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.base.as_ptr().add(page * PAGE_SIZE),
+                    (end - page) * PAGE_SIZE,
+                )
+            };
+            if !empty {
+                fill(memory, stored)?;
+                stored += memory.len();
+            } else if page < used {
+                let dirty = (end.min(used) - page) * PAGE_SIZE;
+                memory[..dirty].fill(0);
+            }
+            page = end;
+        }
         let [marks, tenured, allocated, finalizable, interned] = bitmaps;
         self.page_count = page_count;
         self.page_class = page_class;
