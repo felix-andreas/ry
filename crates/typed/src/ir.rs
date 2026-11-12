@@ -378,6 +378,9 @@ pub enum Op {
     RangeI64(Local, Local),
     /// Item `index` (1-based) of a vector or list. Fails out of range.
     Get(Local, Local),
+    /// Item `position` (1-based) of a list, for a position a loop counts from 1 to the length of
+    /// a list it holds, which is why the read carries no range check.
+    ItemAt(Local, Local),
     /// The vector or list with item `index` (1-based) replaced: `x[[i]] <- value`. Fails out of
     /// range.
     Set(Local, Local, Local),
@@ -559,6 +562,7 @@ impl Op {
             | Or(a, b)
             | RoundDigits(a, b)
             | Get(a, b)
+            | ItemAt(a, b)
             | Range(a, b)
             | RangeI64(a, b)
             | Same(a, b)
@@ -626,7 +630,7 @@ impl Op {
             Const(_) | Copy(_) | Compare(..) | Not(_) | And(..) | Or(..) | ToDbl(_)
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
-            | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
+            | Same(..) | Step(..) | ItemAt(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
             | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
             | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_) | DictValues(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function

@@ -731,6 +731,7 @@ pub unsafe extern "C" fn ry_elementwise(
 
 /// The operand slice of item chunk `start..start + chunk`: an input list's items, a scalar's
 /// copies, or an earlier step's chunk.
+#[inline(always)]
 unsafe fn operand<'a, T: Copy>(
     index: usize,
     inputs: &[u64],
@@ -956,6 +957,39 @@ pub unsafe extern "C" fn ry_count_true(
     lists: u32,
     out: *mut i64,
 ) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        return count_true_avx2(program, steps, inputs, input_count, lists, out);
+    }
+    count_true(program, steps, inputs, input_count, lists, out)
+}
+
+/// [`count_true`] compiled for AVX2, whose 256-bit integer compares and byte operations the
+/// chunk loops vectorize with. The baseline x86-64 instruction set has no 64-bit integer
+/// compare, so there the loops over `I64` items stay scalar.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn count_true_avx2(
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    out: *mut i64,
+) -> u32 {
+    count_true(program, steps, inputs, input_count, lists, out)
+}
+
+/// The body of [`ry_count_true`], inlined into one copy per instruction set.
+#[inline(always)]
+unsafe fn count_true(
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    out: *mut i64,
+) -> u32 {
     let (steps, input_count) = (steps as usize, input_count as usize);
     if steps > ELEMENTWISE_STEPS || input_count == 0 || input_count > ELEMENTWISE_INPUTS {
         return 1;
@@ -1018,10 +1052,10 @@ pub unsafe extern "C" fn ry_count_true(
         return 1;
     };
     let length = length as usize;
-    let lane = |item: i32| match item {
-        NA_LOGICAL => LANE_NA,
-        0 => LANE_FALSE,
-        _ => LANE_TRUE,
+    // Without a branch, so the loop over a logical list's items vectorizes.
+    let lane = |item: i32| {
+        let defined = if item != 0 { LANE_TRUE } else { LANE_FALSE };
+        if item == NA_LOGICAL { LANE_NA } else { defined }
     };
     let mut wholes = [[0i64; CHUNK]; ELEMENTWISE_INPUTS];
     let mut doubles = [[0.0f64; CHUNK]; ELEMENTWISE_INPUTS];
@@ -1115,6 +1149,7 @@ pub unsafe extern "C" fn ry_count_true(
 
 /// Comparison `op` of two chunks as lanes, `NA` where either item is `undefined`. The match on
 /// `op` sits outside the loops so that each loop compiles to vector code.
+#[inline(always)]
 fn compare_lanes<T: PartialOrd + Copy>(
     op: u32,
     x: &[T],
@@ -1122,22 +1157,32 @@ fn compare_lanes<T: PartialOrd + Copy>(
     target: &mut [u8],
     undefined: impl Fn(T) -> bool + Copy,
 ) {
-    let mut fill = |test: fn(&T, &T) -> bool| {
+    // Generic over the test, not a function pointer, so each comparison gets its own loop
+    // that the compiler can vectorize.
+    #[inline(always)]
+    fn fill<T: Copy>(
+        x: &[T],
+        y: &[T],
+        target: &mut [u8],
+        undefined: impl Fn(T) -> bool,
+        test: impl Fn(&T, &T) -> bool,
+    ) {
         for (slot, (x, y)) in target.iter_mut().zip(x.iter().zip(y)) {
-            *slot = if undefined(*x) || undefined(*y) {
-                LANE_NA
-            } else {
+            let defined = !(undefined(*x) | undefined(*y));
+            *slot = if defined {
                 test(x, y) as u8 * LANE_TRUE
+            } else {
+                LANE_NA
             };
         }
-    };
+    }
     match op {
-        EQ => fill(T::eq),
-        NE => fill(T::ne),
-        LT => fill(T::lt),
-        LE => fill(T::le),
-        GT => fill(T::gt),
-        _ => fill(T::ge),
+        EQ => fill(x, y, target, undefined, T::eq),
+        NE => fill(x, y, target, undefined, T::ne),
+        LT => fill(x, y, target, undefined, T::lt),
+        LE => fill(x, y, target, undefined, T::le),
+        GT => fill(x, y, target, undefined, T::gt),
+        _ => fill(x, y, target, undefined, T::ge),
     }
 }
 

@@ -29,6 +29,7 @@ pub mod ir;
 pub mod lower;
 pub mod ownership;
 pub mod shapes;
+pub mod unbox;
 pub mod values;
 
 use {
@@ -419,6 +420,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
     if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
         return Err(Refusal::new("the types fail the closure's annotations"));
     }
+    unbox::unbox(&mut ir);
     fusion::fuse(&mut ir);
     ownership::insert(&mut ir);
     let sites: Vec<usize> = lowered

@@ -162,6 +162,12 @@ pub const SELF: usize = usize::MAX;
 
 /// How deeply local functions inline into each other.
 const MAX_INLINE_DEPTH: usize = 8;
+/// How deep in inlined functions a call of a typed function may still inline, which leaves
+/// the levels below `MAX_INLINE_DEPTH` to the local functions of the inlined bodies.
+const MAX_TYPED_INLINE_DEPTH: usize = 4;
+/// The most calls and operators the body of a typed function may hold and still inline into
+/// its callers.
+const MAX_INLINE_CALLS: usize = 48;
 /// How deeply expressions nest, which bounds the lowering's own recursion.
 const MAX_NESTING: usize = 256;
 
@@ -193,6 +199,7 @@ pub unsafe fn lower(
         scopes: vec![Scope::default()],
         loops: Vec::new(),
         inlined: Vec::new(),
+        inlining: SmallVec::new(),
         speculations: Vec::new(),
         nesting: 0,
         control: 0,
@@ -308,6 +315,9 @@ struct Lowering<'c> {
     /// The `next` and `break` targets of the loops around the current point.
     loops: Vec<(BlockId, BlockId)>,
     inlined: Vec<Inlined>,
+    /// The typed functions whose bodies are being lowered into this one, outermost first, so a
+    /// function that calls itself through another is called, not inlined without end.
+    inlining: SmallVec<[Sexp; 4]>,
     speculations: Vec<Speculation>,
     nesting: usize,
     /// How many branches and loop bodies enclose the current point in the current scope.
@@ -989,7 +999,7 @@ impl Lowering<'_> {
         if let Some(Binding::Function(formals, body, scope)) = self.lookup(head) {
             let arguments = Arguments::of(call);
             let values = self.call_arguments(&arguments)?;
-            return self.inline(formals, body, scope, &values);
+            return self.inline(formals, body, scope + 1, &values, inline_storage);
         }
         if self.lookup(head).is_some() {
             return Err(Refusal::new("a call of a local variable"));
@@ -1019,6 +1029,22 @@ impl Lowering<'_> {
                 return Err(Refusal::new("a typed call with named arguments"));
             }
             let values = self.call_arguments(&arguments)?;
+            // A small function lowers into its caller, where its records need no allocation
+            // and its arguments no call.
+            let body = interp::bytecode::closure_body(function);
+            if function != self.closure
+                && function.tag() == self.env
+                && !self.inlining.contains(&function)
+                && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
+                && rvalues::pairlist_items(function.car()).len() == values.len()
+                && !tail_invisible(body)
+                && small_body(body, head, &mut 0)
+            {
+                self.inlining.push(function);
+                let value = self.inline(function.car(), body, 0, &values, crate::storage);
+                self.inlining.pop();
+                return value;
+            }
             return self.typed_call(function, &values).map(Some);
         }
         if let Some(r_use) = r_use {
@@ -1538,6 +1564,62 @@ impl Lowering<'_> {
     }
 
     /// The loop header that checks for an interrupt and the condition block after it.
+    /// Opens a loop over the positions of `held`, a list the caller holds for the whole loop,
+    /// and leaves the builder in the loop's body.
+    fn positions(&mut self, held: Local) -> Positions {
+        let count = self.builder.emit(Type::I64, Op::Length(held));
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        self.count_up(one, count)
+    }
+
+    /// Opens a loop whose `I64` counter runs from `start` to `end`, with no iteration when `end`
+    /// is below `start`, and leaves the builder in the loop's body. The loop leaves once the
+    /// counter has reached `end`, so the step never passes it and cannot overflow.
+    fn count_up(&mut self, start: Local, end: Local) -> Positions {
+        let counter = self.builder.emit(Type::I64, Op::Copy(start));
+        let empty = self
+            .builder
+            .emit(Type::Bool, Op::Compare(Compare::Lt, Item::I64, end, start));
+        let (body, exit) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: empty,
+            then: exit,
+            otherwise: body,
+        });
+        self.builder.switch_to(body);
+        let header = self.loop_header();
+        Positions {
+            counter,
+            end,
+            header,
+            exit,
+        }
+    }
+
+    /// Closes the body of a `count_up` loop: steps the counter unless it has reached the end,
+    /// and continues after the loop.
+    fn next_position(&mut self, positions: Positions) {
+        let Positions {
+            counter,
+            end,
+            header,
+            exit,
+        } = positions;
+        let done = self.builder.emit(Type::Bool, Op::Same(counter, end));
+        let step = self.builder.block();
+        self.builder.terminate(Terminator::Branch {
+            condition: done,
+            then: exit,
+            otherwise: step,
+        });
+        self.builder.switch_to(step);
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let next = self.builder.emit(Type::I64, Op::Step(counter, one));
+        self.builder.push(Some(counter), Op::Copy(next));
+        self.builder.terminate(Terminator::Jump(header));
+        self.builder.switch_to(exit);
+    }
+
     fn loop_header(&mut self) -> BlockId {
         let header = self.builder.block();
         self.builder.terminate(Terminator::Jump(header));
@@ -1562,10 +1644,9 @@ impl Lowering<'_> {
                     .ok_or(Refusal::new("a `for` over something that is not a vector"))?;
                 // The loop reads the value the sequence had when it started.
                 let held = self.builder.emit(ty, Op::Copy(vector));
-                let one = self.int(1);
-                let length = self.builder.emit(Type::Int, Op::Length(held));
-                let step = self.int(1);
-                (one, length, Step::FromOne(step), Some(held))
+                let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+                let length = self.builder.emit(Type::I64, Op::Length(held));
+                (one, length, Step::FromOne(one), Some(held))
             }
         };
         let counter_ty = self.builder.ty(start);
@@ -1591,7 +1672,10 @@ impl Lowering<'_> {
             // `seq_len`, `seq_along` and a vector count up from 1 to an end that is not `NA` and
             // not negative, and run no iteration when it is 0.
             Step::FromOne(step) => {
-                let zero = self.int(0);
+                let zero = match counter_ty {
+                    Type::I64 => self.builder.emit(Type::I64, Op::Const(Constant::I64(0))),
+                    _ => self.int(0),
+                };
                 let empty = self.builder.emit(Type::Bool, Op::Same(end, zero));
                 let go = self.builder.block();
                 self.builder.terminate(Terminator::Branch {
@@ -1643,7 +1727,7 @@ impl Lowering<'_> {
                         .items()
                         .ok_or(Refusal::new("a loop over a non-vector"))?,
                 ),
-                Op::Get(held, counter),
+                Op::ItemAt(held, counter),
             ),
             None => counter,
         };
@@ -1899,13 +1983,17 @@ impl Lowering<'_> {
         ))
     }
 
-    /// Inlines a local function or function literal called with `arguments`.
+    /// Inlines a function called with `arguments`: a local function, a function literal, or a
+    /// small typed function defined beside this one. `storage` gives the R storage type the
+    /// function's annotations check each value as, which is the one a separate call of that
+    /// function would check.
     unsafe fn inline(
         &mut self,
         formals: Sexp,
         body: Sexp,
-        scope_index: usize,
+        visible: usize,
         arguments: &[Local],
+        storage: fn(Type) -> Option<(SexpType, bool)>,
     ) -> Result<Option<Local>, Refusal> {
         if self.inlined.len() >= MAX_INLINE_DEPTH {
             return Err(Refusal::new("local functions inline too deeply"));
@@ -1941,11 +2029,10 @@ impl Lowering<'_> {
             scope.names.insert(symbol, Binding::Value(variable));
         }
         // The body sees the names of the scope that defines the function, as R's lexical scoping
-        // does, not those of the inlined functions that call it. A `break` or `next` in it does
-        // not reach the caller's loops, and its own branches start at its own top level.
-        let hidden = self
-            .scopes
-            .split_off((scope_index + 1).min(self.scopes.len()));
+        // does, not those of the inlined functions that call it: the first `visible` scopes,
+        // which is none of them for a function defined outside this one. A `break` or `next` in
+        // it does not reach the caller's loops, and its own branches start at its own top level.
+        let hidden = self.scopes.split_off(visible.min(self.scopes.len()));
         let loops = std::mem::take(&mut self.loops);
         let control = std::mem::replace(&mut self.control, 0);
         self.scopes.push(scope);
@@ -1975,9 +2062,9 @@ impl Lowering<'_> {
                 };
                 let kinds: SmallVec<[Option<(SexpType, bool)>; 4]> = arguments
                     .iter()
-                    .map(|&argument| inline_storage(self.builder.ty(argument)))
+                    .map(|&argument| storage(self.builder.ty(argument)))
                     .collect();
-                let result_kind = inline_storage(self.builder.ty(value));
+                let result_kind = storage(self.builder.ty(value));
                 if !interp::annotations::admits_inline(definition, body, &kinds, result_kind) {
                     return Err(Refusal::new(
                         "a local function whose annotations reject its types",
@@ -2370,6 +2457,21 @@ impl Lowering<'_> {
                 Ok(self
                     .builder
                     .emit(Type::Dbl, Op::Math(Math::Sqrt, Item::Dbl, a)))
+            }
+            "Num.exp" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Num.exp`"));
+                };
+                let a = self.value(a)?;
+                let a = match self.builder.ty(a) {
+                    Type::Int | Type::Dbl => self.as_double(a)?,
+                    _ => return Err(Refusal::new("a `Num.exp` of something other than an F64")),
+                };
+                let power = self
+                    .builder
+                    .emit(Type::Dbl, Op::Math(Math::Exp, Item::Dbl, a));
+                self.fail_if_nan(power);
+                Ok(power)
             }
             "Num.pow" => {
                 let [base, exponent] = arguments.exactly(2)?[..] else {
@@ -3209,25 +3311,10 @@ impl Lowering<'_> {
         // The result's type is known only once the body is lowered, so the output vector is
         // allocated in the preheader afterwards.
         let output = self.builder.local(Type::Null);
-        let counter = self.builder.local(Type::Int);
-        let one = self.int(1);
-        self.builder.push(Some(counter), Op::Copy(one));
-        let header = self.loop_header();
-        let past = self.builder.emit(
-            Type::Lgl,
-            Op::Compare(Compare::Gt, Item::Int, counter, count),
-        );
-        let past = self.builder.emit(Type::Bool, Op::Truth(past));
-        let (body_block, exit) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch {
-            condition: past,
-            then: exit,
-            otherwise: body_block,
-        });
-        self.builder.switch_to(body_block);
+        let positions = self.positions(held);
         let element = self
             .builder
-            .emit(Type::of_item(item), Op::Get(held, counter));
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
         let value = self
             .apply(callable, &[element])?
             .ok_or(Refusal::new("a mapped function that never completes"))?;
@@ -3252,13 +3339,9 @@ impl Lowering<'_> {
         self.builder.function.locals[output.0 as usize] = output_ty;
         let updated = self
             .builder
-            .emit(output_ty, Op::Set(output, counter, value));
+            .emit(output_ty, Op::Set(output, positions.counter, value));
         self.builder.push(Some(output), Op::Copy(updated));
-        let next = self
-            .builder
-            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
-        self.builder.push(Some(counter), Op::Copy(next));
-        self.builder.terminate(Terminator::Jump(header));
+        self.next_position(positions);
         // The output is allocated before the loop, now that its type is known.
         self.builder.switch_to(preheader);
         let fresh = self
@@ -3270,7 +3353,7 @@ impl Lowering<'_> {
             self.builder.emit(output_ty, Op::Relabel(fresh, output_ty))
         };
         self.builder.push(Some(output), Op::Copy(fresh));
-        self.builder.switch_to(exit);
+        self.builder.switch_to(positions.exit);
         Ok(output)
     }
 
@@ -3472,11 +3555,22 @@ impl Lowering<'_> {
                 (false, &[list, state, f]) => (list, Some(state), f),
                 _ => return Err(Refusal::new("a walk of an unsupported form")),
             };
-        let list = self.value(list)?;
-        let ty = self.builder.ty(list);
-        let item = match ty {
-            Type::Vector { item, array: true } | Type::List(item) => item,
-            _ => return Err(Refusal::new("a walk over something that is not a list")),
+        // A walk over `List.range(from, to)` counts from `from` to `to` and builds no list.
+        let range = if self.is_library_call(list, "List.range", 2)? {
+            self.counted_range(list)?
+        } else {
+            None
+        };
+        let (list, ty) = match range {
+            Some(_) => (None, Type::Null),
+            None => {
+                let list = self.value(list)?;
+                let ty = self.builder.ty(list);
+                if !matches!(ty, Type::Vector { array: true, .. } | Type::List(_)) {
+                    return Err(Refusal::new("a walk over something that is not a list"));
+                }
+                (Some(list), ty)
+            }
         };
         let callable = self.function_argument(function)?;
         // Counting a list of logicals with the identity counts its true items, which the fusion
@@ -3490,6 +3584,7 @@ impl Lowering<'_> {
             && let Callable::Inline(formals, body, _) = callable
             && let [(name, _)] = rvalues::pairlist_items(formals)[..]
             && body == name
+            && let Some(list) = list
         {
             return Ok(self.builder.emit(
                 Type::I64,
@@ -3517,28 +3612,28 @@ impl Lowering<'_> {
             None => self.builder.emit(Type::I64, Op::Const(Constant::I64(0))),
         };
         let state_ty = self.builder.ty(state);
-        let held = self.builder.emit(ty, Op::Copy(list));
-        let count = self.builder.emit(Type::Int, Op::Length(held));
         let total = self.builder.emit(state_ty, Op::Copy(state));
-        let counter = self.builder.local(Type::Int);
-        let one = self.int(1);
-        self.builder.push(Some(counter), Op::Copy(one));
-        let header = self.loop_header();
-        let past = self.builder.emit(
-            Type::Lgl,
-            Op::Compare(Compare::Gt, Item::Int, counter, count),
-        );
-        let past = self.builder.emit(Type::Bool, Op::Truth(past));
-        let (body_block, exit) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch {
-            condition: past,
-            then: exit,
-            otherwise: body_block,
-        });
-        self.builder.switch_to(body_block);
-        let element = self
-            .builder
-            .emit(Type::of_item(item), Op::Get(held, counter));
+        let (positions, element) = match (range, list) {
+            (Some((start, end, _)), _) => {
+                let positions = self.count_up(start, end);
+                let element = self
+                    .builder
+                    .emit(Type::I64, Op::Copy(positions.counter));
+                (positions, element)
+            }
+            (None, Some(list)) => {
+                let item = ty
+                    .items()
+                    .ok_or(Refusal::new("a walk over something that is not a list"))?;
+                let held = self.builder.emit(ty, Op::Copy(list));
+                let positions = self.positions(held);
+                let element = self
+                    .builder
+                    .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+                (positions, element)
+            }
+            (None, None) => return Err(Refusal::new("a walk over nothing")),
+        };
         if counting {
             let answer = self
                 .apply(callable, &[element])?
@@ -3572,12 +3667,7 @@ impl Lowering<'_> {
             }
             self.builder.push(Some(total), Op::Copy(step));
         }
-        let next = self
-            .builder
-            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
-        self.builder.push(Some(counter), Op::Copy(next));
-        self.builder.terminate(Terminator::Jump(header));
-        self.builder.switch_to(exit);
+        self.next_position(positions);
         Ok(total)
     }
 
@@ -3626,7 +3716,9 @@ impl Lowering<'_> {
         arguments: &[Local],
     ) -> Result<Option<Local>, Refusal> {
         match callable {
-            Callable::Inline(formals, body, scope) => self.inline(formals, body, scope, arguments),
+            Callable::Inline(formals, body, scope) => {
+                self.inline(formals, body, scope + 1, arguments, inline_storage)
+            }
             Callable::Typed(function) => self.typed_call(function, arguments).map(Some),
         }
     }
@@ -4084,29 +4176,13 @@ impl Lowering<'_> {
         let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
         let kept = if oks { ok } else { err };
         let held = self.builder.emit(ty, Op::Copy(list));
-        let count = self.builder.emit(Type::Int, Op::Length(held));
         let preheader = self.builder.current;
         // The output's item type is the payload's, known once the function is lowered.
         let output = self.builder.local(Type::Null);
-        let counter = self.builder.local(Type::Int);
-        let one = self.int(1);
-        self.builder.push(Some(counter), Op::Copy(one));
-        let header = self.loop_header();
-        let past = self.builder.emit(
-            Type::Lgl,
-            Op::Compare(Compare::Gt, Item::Int, counter, count),
-        );
-        let past = self.builder.emit(Type::Bool, Op::Truth(past));
-        let (body_block, exit) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch {
-            condition: past,
-            then: exit,
-            otherwise: body_block,
-        });
-        self.builder.switch_to(body_block);
+        let positions = self.positions(held);
         let element = self
             .builder
-            .emit(Type::of_item(item), Op::Get(held, counter));
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
         let result = self
             .apply(callable, &[element])?
             .ok_or(Refusal::new("a function that never completes"))?;
@@ -4149,11 +4225,7 @@ impl Lowering<'_> {
                 lowering.builder.emit(Type::Null, Op::Const(Constant::Null)),
             ))
         })?;
-        let next = self
-            .builder
-            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
-        self.builder.push(Some(counter), Op::Copy(next));
-        self.builder.terminate(Terminator::Jump(header));
+        self.next_position(positions);
         self.builder.switch_to(preheader);
         let zero = self.int(0);
         let fresh = self
@@ -4161,7 +4233,7 @@ impl Lowering<'_> {
             .emit(Type::vector(payload), Op::NewVector(payload, zero));
         let fresh = self.builder.emit(output_ty, Op::Relabel(fresh, output_ty));
         self.builder.push(Some(output), Op::Copy(fresh));
-        self.builder.switch_to(exit);
+        self.builder.switch_to(positions.exit);
         // The interpreter's list of no items has no item type, which a typed list cannot match.
         let kept_count = self.builder.emit(Type::Int, Op::Length(output));
         let zero = self.int(0);
@@ -4235,7 +4307,6 @@ impl Lowering<'_> {
             },
             Op::DictValues(dict),
         );
-        let count = self.builder.emit(Type::Int, Op::Length(keys));
         let item = Item::Record(shape);
         let zero = self.int(0);
         let fresh = self
@@ -4244,37 +4315,17 @@ impl Lowering<'_> {
         let ty = Type::Vector { item, array: true };
         let empty = self.builder.emit(ty, Op::Relabel(fresh, ty));
         let pairs = self.builder.emit(ty, Op::Copy(empty));
-        let counter = self.builder.local(Type::Int);
-        let one = self.int(1);
-        self.builder.push(Some(counter), Op::Copy(one));
-        let header = self.loop_header();
-        let past = self.builder.emit(
-            Type::Lgl,
-            Op::Compare(Compare::Gt, Item::Int, counter, count),
-        );
-        let past = self.builder.emit(Type::Bool, Op::Truth(past));
-        let (body, exit) = (self.builder.block(), self.builder.block());
-        self.builder.terminate(Terminator::Branch {
-            condition: past,
-            then: exit,
-            otherwise: body,
-        });
-        self.builder.switch_to(body);
+        let positions = self.positions(keys);
         let entry_key = self
             .builder
-            .emit(Type::of_item(key), Op::Get(keys, counter));
+            .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
         let entry_value = self
             .builder
-            .emit(Type::of_item(value), Op::Get(values, counter));
+            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
         let pair = self.boxed(layout, false, &[entry_key, entry_value])?;
         let grown = self.builder.emit(ty, Op::Push(pairs, pair));
         self.builder.push(Some(pairs), Op::Copy(grown));
-        let next = self
-            .builder
-            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
-        self.builder.push(Some(counter), Op::Copy(next));
-        self.builder.terminate(Terminator::Jump(header));
-        self.builder.switch_to(exit);
+        self.next_position(positions);
         Ok(pairs)
     }
 
@@ -5360,6 +5411,16 @@ fn arith_op(name: &str) -> Arith {
     }
 }
 
+/// A counted loop: its `I64` counter, the last value the counter takes, and the blocks of its
+/// header and its exit.
+#[derive(Clone, Copy)]
+struct Positions {
+    counter: Local,
+    end: Local,
+    header: BlockId,
+    exit: BlockId,
+}
+
 /// How a counted loop steps from its start to its end.
 #[derive(Clone, Copy)]
 enum Step {
@@ -5475,6 +5536,27 @@ unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
     for (_, item) in items {
         assigned_symbols(item, out);
     }
+}
+
+/// Whether `expression`, the body of the typed function `name`, is small enough to lower into
+/// a caller: at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which
+/// would leave the caller, or a call of the function itself.
+unsafe fn small_body(expression: Sexp, name: Sexp, calls: &mut usize) -> bool {
+    if expression.kind() != SexpType::Language {
+        return true;
+    }
+    *calls += 1;
+    let head = expression.car();
+    if *calls > MAX_INLINE_CALLS
+        || head == name
+        || head.kind() == SexpType::Symbol && rvalues::symbol_name(head) == "return"
+    {
+        return false;
+    }
+    small_body(head, name, calls)
+        && rvalues::pairlist_items(expression.cdr())
+            .into_iter()
+            .all(|(_, item)| small_body(item, name, calls))
 }
 
 /// Whether `expression` calls `return` outside nested function literals.

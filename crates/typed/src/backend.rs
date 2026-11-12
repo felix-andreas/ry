@@ -920,6 +920,17 @@ impl Emitter<'_> {
                 self.dup(Type::of_item(item), &values);
                 values
             }
+            Op::ItemAt(a, position) => {
+                let item = ty(*a)
+                    .items()
+                    .ok_or(Refusal::new("an item of a non-vector"))?;
+                let pointer = self.one(*a)?;
+                let position = self.one(*position)?;
+                let address = self.item_address_unchecked(pointer, position, item);
+                let values = self.load_item(address, item);
+                self.dup(Type::of_item(item), &values);
+                values
+            }
             Op::Set(a, index, value) => {
                 let item = ty(*a)
                     .items()
