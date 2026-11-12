@@ -453,6 +453,9 @@ pub struct Interp {
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
+    /// which [`crate::base_fast_paths::finish`] answers by clearing it.
+    pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
     /// The dispatch variables of every method slot frame, back to back in frame order (see
@@ -686,6 +689,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     state.interp = Some(Interp {
         frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),

@@ -167,7 +167,7 @@ fn compile(program: &[Statement]) -> usize {
     builder.ins().return_(&[value]);
     builder.seal_all_blocks();
     let function = builder.finalize();
-    let compiled = ssa::with_module(|module| -> Result<usize, ssa::Error> {
+    let compiled = ssa::with_module(ssa::Allocator::Backtracking, |module| -> Result<usize, ssa::Error> {
         let id = module.declare(&signature)?;
         module.define(id, &function)?;
         module.finalize()?;
