@@ -283,9 +283,18 @@ a case:
 | GNU R at hand | `verify` | `record`, `RY_BLESS=1` | `recorded_outcomes_match_gnu_r` |
 |---|---|---|---|
 | same release and libraries | runs | runs | runs |
-| other BLAS or LAPACK | warns, runs | warns, runs | warns, runs |
+| other BLAS or LAPACK | warns, runs | warns, runs | warns, runs all but the library-dependent cases |
 | other release | refuses (exit 2) | refuses (exit 2) | skips, naming both builds |
 | no build file | warns, runs | writes the file | fails (bless writes it) |
+
+A case whose expected digits are those of the numerical libraries declares it in a leading
+`# oracle: library-dependent` line: matrix products, `lm`, `optim` and the other cases that print
+BLAS or LAPACK results to the last bit, where another library also moves an optimizer's iteration
+count and warnings. Only a GNU R on the recorded libraries can confirm those expectations, so
+`recorded_outcomes_match_gnu_r` skips them on other BLAS or LAPACK libraries and names each one
+it skips. The C math library moves digits too, but the build file does not name it: glibc's
+x86-64-v3 build, which CI's Ubuntu runner uses, changes `pgamma`, `fft` and `nlm` results, so
+those cases carry the marker as well, and they are compared only where BLAS and LAPACK match too.
 
 On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. To move the suite
 to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it
