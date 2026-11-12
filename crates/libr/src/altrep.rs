@@ -1484,12 +1484,18 @@ unsafe fn new_sequence(
     first: f64,
     increment: f64,
 ) -> ApiResult<Sexp> {
+    // Nothing is rooted: the interpreter builds a sequence for every `a:b` it evaluates, and
+    // a handle per sequence would pin each one until the enclosing call returns. The altrep
+    // allocation keeps `info` alive itself, and a native caller roots the result on its way
+    // out of `enter`.
     let info = runtime().heap.alloc_vector(SexpType::Real, 3)?;
-    runtime().heap.root(info);
     info.slice_mut::<f64>()
         .copy_from_slice(&[length as f64, first, increment]);
     let nil = runtime().nil();
-    let sequence = new_altrep(class, info, nil)?;
+    let kind = class_methods(class).kind;
+    let sequence = runtime()
+        .heap
+        .alloc_altrep(kind, class.pointer, info, nil)?;
     // As in GNU R, a compact sequence is never modified in place, so its expanded data always
     // agrees with its info and it serializes compactly even after expanding.
     sequence.mark_not_mutable();
