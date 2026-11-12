@@ -2996,7 +2996,7 @@ impl<'a> Builder<'a> {
                 Some((keys, values))
             }
         };
-        let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
+        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> = lowering
             .scope
             .iter()
             .map(|&(_, register)| {
@@ -3005,6 +3005,7 @@ impl<'a> Builder<'a> {
                     .registers
                     .get(register)
                     .and_then(|ty| ty.storage())
+                    .map(|kind| (kind, false))
             })
             .collect();
         let (result, broke) = match traversal.fold {
@@ -3017,7 +3018,7 @@ impl<'a> Builder<'a> {
         let result_ty = lowering.state.registers[result];
         let returned = match broke {
             Some(_) => None,
-            None => result_ty.storage(),
+            None => result_ty.storage().map(|kind| (kind, false)),
         };
         if !annotations::admits_inline(formals, body, &arguments, returned) {
             return None;
@@ -3320,10 +3321,14 @@ impl<'a> Builder<'a> {
             .zip(scope)
             .collect();
         // The body may rebind a formal, so the argument types are read before it runs.
-        let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
+        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> = lowering
             .scope
             .iter()
-            .map(|&(_, register)| lowering.state.registers[register].storage())
+            .map(|&(_, register)| {
+                lowering.state.registers[register]
+                    .storage()
+                    .map(|kind| (kind, false))
+            })
             .collect();
         let outer_closed = std::mem::replace(&mut lowering.closed, closed);
         let outer_inlined = std::mem::replace(&mut lowering.inlined, true);
@@ -3334,7 +3339,9 @@ impl<'a> Builder<'a> {
         let result = result?;
         // Inlined code has no frame to check annotations in, so a typed closure is inlined only
         // when its checks are known to pass; tier 0 runs any other call and reports the failure.
-        let returned = lowering.state.registers[result].storage();
+        let returned = lowering.state.registers[result]
+            .storage()
+            .map(|kind| (kind, false));
         annotations::admits_inline(formals, body, &arguments, returned).then_some(result)
     }
 

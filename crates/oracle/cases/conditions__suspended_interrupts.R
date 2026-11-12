@@ -1,6 +1,7 @@
 # A user interrupt that arrives while interrupts are suspended stays pending. Leaving
 # suspendInterrupts() does not deliver it: the next statement runs, and the next interrupt check,
-# here in the loop, signals it. The loop inside the block gives the signal time to land.
+# here a wait, signals it. A process with other threads (GNU R's BLAS) can take the signal on one
+# of them a little later, so the waits poll for up to five seconds instead of assuming a duration.
 events <- character()
 tryCatch({
   suspendInterrupts({
@@ -9,7 +10,7 @@ tryCatch({
     events <- c(events, "suspended block done")
   })
   events <- c(events, "after suspendInterrupts")
-  for (i in seq_len(1e5)) i
+  for (i in seq_len(500)) Sys.sleep(0.01)
   events <- c(events, "not reached")
 }, interrupt = function(condition) events <<- c(events, "interrupt"))
 events
@@ -21,7 +22,7 @@ tryCatch(
     tools::pskill(Sys.getpid(), tools::SIGINT)
     for (i in seq_len(1e4)) i
     events <- c(events, "before Sys.sleep")
-    Sys.sleep(0.01)
+    for (i in seq_len(500)) Sys.sleep(0.01)
     events <- c(events, "not reached")
   }),
   interrupt = function(condition) events <<- c(events, "interrupt")

@@ -337,8 +337,9 @@ pub unsafe extern "C" fn PRINTNAME(symbol: Sexp) -> Sexp {
     })
 }
 
-/// `Riconv_open`: GNU R's wrapper over `iconv_open`, where `""` names the native encoding,
-/// which is UTF-8 here. The descriptor is a boxed `Iconv`, so the same contract holds on
+/// `Riconv_open`: GNU R's wrapper over `iconv_open`, where `""` names the codeset of the
+/// current `LC_CTYPE`, so a UTF-8 identity conversion is chosen only when that codeset is
+/// UTF-8. The descriptor is a boxed `Iconv`, so the same contract holds on
 /// Windows, where the conversion is ry's own; failure is `(void *) -1`, as from `iconv_open`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riconv_open(
@@ -346,7 +347,7 @@ pub unsafe extern "C" fn Riconv_open(
     from: *const c_char,
 ) -> *mut std::ffi::c_void {
     let name = |name: *const c_char| match c_bytes(name) {
-        b"" => "UTF-8".to_string(),
+        b"" => platform::native_codeset(),
         bytes => String::from_utf8_lossy(bytes).into_owned(),
     };
     match Iconv::open(&name(from), &name(to)) {
