@@ -1946,9 +1946,10 @@ impl Lowering<'_> {
                 let a = self.value(a)?;
                 match self.builder.ty(a) {
                     Type::Lgl | Type::Bool => Ok(self.builder.emit(Type::Lgl, Op::Not(a))),
-                    Type::Vector {
+                    // `!` of a ry list is a ry list.
+                    ty @ Type::Vector {
                         item: Item::Lgl, ..
-                    } => Ok(self.builder.emit(Type::vector(Item::Lgl), Op::VectorNot(a))),
+                    } => Ok(self.builder.emit(ty, Op::VectorNot(a))),
                     _ => Err(Refusal::new("a `!` of something other than logicals")),
                 }
             }
@@ -2182,7 +2183,7 @@ impl Lowering<'_> {
                 }
                 let a = self.to_i64(a)?;
                 let b = self.to_i64(b)?;
-                let op = match &*name {
+                let op = match name {
                     "Num.bitwise_and" => Bits::And,
                     "Num.bitwise_or" => Bits::Or,
                     "Num.bitwise_xor" => Bits::Xor,
@@ -2279,7 +2280,7 @@ impl Lowering<'_> {
                     _ => Err(Refusal::new("a `Num.round` of something other than an F64")),
                 }
             }
-            "List.count_if" | "List.walk" => self.walk(&name, &arguments),
+            "List.count_if" | "List.walk" => self.walk(name, &arguments),
             "length" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `length`"));
@@ -2716,6 +2717,13 @@ impl Lowering<'_> {
                     let hint = constant_string(hint);
                     return self.list_literal(&Arguments { items: Vec::new() }, hint.as_deref());
                 }
+                if self.is_library_call(list, "Dict.empty")? {
+                    let ty = constant_string(hint)
+                        .as_deref()
+                        .and_then(dict_type)
+                        .ok_or(Refusal::new("an empty dictionary of an unknown type"))?;
+                    return Ok(self.builder.emit(ty, Op::DictNew));
+                }
                 self.value(list)
             }
             ".ry_array" => self.list_literal(&arguments, None),
@@ -2740,7 +2748,7 @@ impl Lowering<'_> {
                 Ok(self.builder.emit(Type::Bool, Op::Truth(empty)))
             }
             "List.sublist" | "List.take_first" | "List.take_last" | "List.drop_first"
-            | "List.drop_last" => self.slice(&name, &arguments),
+            | "List.drop_last" => self.slice(name, &arguments),
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
             ".ry_update" => self.update(&arguments),
@@ -2773,6 +2781,50 @@ impl Lowering<'_> {
                 self.keep_results(name == "List.keep_oks", &arguments)
             }
             "Dict.get" => self.dict_get(&arguments),
+            "Dict.insert" => self.dict_insert(&arguments),
+            "Dict.to_list" => self.dict_to_list(&arguments),
+            "Dict.len" | "Dict.keys" | "Dict.values" => {
+                let [dict] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Dict` function"));
+                };
+                let dict = self.value(dict)?;
+                let Type::Dict { key, value } = self.builder.ty(dict) else {
+                    return Err(Refusal::new(
+                        "a `Dict` function of something other than a dictionary",
+                    ));
+                };
+                Ok(match name {
+                    "Dict.len" => self.builder.emit(Type::I64, Op::DictLen(dict)),
+                    "Dict.keys" => self.builder.emit(
+                        Type::Vector {
+                            item: key,
+                            array: true,
+                        },
+                        Op::DictKeys(dict),
+                    ),
+                    _ => self.builder.emit(
+                        Type::Vector {
+                            item: value,
+                            array: true,
+                        },
+                        Op::DictValues(dict),
+                    ),
+                })
+            }
+            "Dict.contains" | "Dict.remove" => {
+                let [dict, key] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed `Dict` function"));
+                };
+                let dict = self.value(dict)?;
+                let key = self.value(key)?;
+                let key = self.dict_key(dict, key)?;
+                Ok(if name == "Dict.contains" {
+                    self.builder.emit(Type::Bool, Op::DictContains(dict, key))
+                } else {
+                    let ty = self.builder.ty(dict);
+                    self.builder.emit(ty, Op::DictRemove(dict, key))
+                })
+            }
             "Dict.update" => self.dict_update(&arguments),
             "Str.to_i64" | "Str.to_f64" => self.parse_number(name == "Str.to_i64", &arguments),
             ".ry_text" | "Num.to_str" => {
@@ -3068,6 +3120,26 @@ impl Lowering<'_> {
             _ => return Err(Refusal::new("a walk over something that is not a list")),
         };
         let callable = self.function_argument(function)?;
+        // Counting a list of logicals with the identity counts its true items, which the fusion
+        // pass can then compute from the comparisons that built the list without building it.
+        if counting
+            && ty
+                == (Type::Vector {
+                    item: Item::Lgl,
+                    array: true,
+                })
+            && let Callable::Inline(formals, body, _) = callable
+            && let [(name, _)] = rvalues::pairlist_items(formals)[..]
+            && body == name
+        {
+            return Ok(self.builder.emit(
+                Type::I64,
+                Op::CountTrue {
+                    program: SmallVec::new(),
+                    inputs: SmallVec::from_slice(&[list]),
+                },
+            ));
+        }
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty")? => {
                 // An empty dictionary's type is the one the step function declares for its state.
@@ -3745,6 +3817,103 @@ impl Lowering<'_> {
         self.lookup_result(dict, key, "KeyNotFound")
     }
 
+    /// `Dict.insert(dict, key, value)`, which updates a uniquely held dictionary in place.
+    unsafe fn dict_insert(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [dict, key, value] = arguments.exactly(3)?[..] else {
+            return Err(Refusal::new("a malformed `Dict.insert`"));
+        };
+        let dict = self.value(dict)?;
+        let key = self.value(key)?;
+        let value = self.value(value)?;
+        let key = self.dict_key(dict, key)?;
+        let dict_ty = self.builder.ty(dict);
+        let Type::Dict { value: item, .. } = dict_ty else {
+            return Err(Refusal::new(
+                "a `Dict.insert` into something other than a dictionary",
+            ));
+        };
+        // The interpreter checks the value against the dictionary's value type, and converts
+        // nothing.
+        if self.convert_scalar(value, item)? != value {
+            return Err(Refusal::new("an insert of a value of another type"));
+        }
+        Ok(self.builder.emit(dict_ty, Op::DictInsert(dict, key, value)))
+    }
+
+    /// `Dict.to_list(dict)`: a list of `(key, value)` tuples in insertion order, built in a loop
+    /// over the dictionary's keys and values.
+    unsafe fn dict_to_list(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [dict] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `Dict.to_list`"));
+        };
+        let dict = self.value(dict)?;
+        let Type::Dict { key, value } = self.builder.ty(dict) else {
+            return Err(Refusal::new(
+                "a `Dict.to_list` of something other than a dictionary",
+            ));
+        };
+        let (layout, _) =
+            interp::records::constructor_layout(None, &[rvalues::nil(), rvalues::nil()], false)
+                .ok_or(Refusal::new("a pair the interpreter rejects"))?;
+        let shape = shapes::intern(layout, &[key, value])
+            .ok_or(Refusal::new("a pair a box cannot hold"))?;
+        let keys = self.builder.emit(
+            Type::Vector {
+                item: key,
+                array: true,
+            },
+            Op::DictKeys(dict),
+        );
+        let values = self.builder.emit(
+            Type::Vector {
+                item: value,
+                array: true,
+            },
+            Op::DictValues(dict),
+        );
+        let count = self.builder.emit(Type::Int, Op::Length(keys));
+        let item = Item::Record(shape);
+        let zero = self.int(0);
+        let fresh = self
+            .builder
+            .emit(Type::vector(item), Op::NewVector(item, zero));
+        let ty = Type::Vector { item, array: true };
+        let empty = self.builder.emit(ty, Op::Relabel(fresh, ty));
+        let pairs = self.builder.emit(ty, Op::Copy(empty));
+        let counter = self.builder.local(Type::Int);
+        let one = self.int(1);
+        self.builder.push(Some(counter), Op::Copy(one));
+        let header = self.loop_header();
+        let past = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Gt, Item::Int, counter, count),
+        );
+        let past = self.builder.emit(Type::Bool, Op::Truth(past));
+        let (body, exit) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: past,
+            then: exit,
+            otherwise: body,
+        });
+        self.builder.switch_to(body);
+        let entry_key = self
+            .builder
+            .emit(Type::of_item(key), Op::Get(keys, counter));
+        let entry_value = self
+            .builder
+            .emit(Type::of_item(value), Op::Get(values, counter));
+        let pair = self.boxed(layout, false, &[entry_key, entry_value])?;
+        let grown = self.builder.emit(ty, Op::Push(pairs, pair));
+        self.builder.push(Some(pairs), Op::Copy(grown));
+        let next = self
+            .builder
+            .emit(Type::Int, Op::Arith(Arith::Add, Item::Int, counter, one));
+        self.builder.push(Some(counter), Op::Copy(next));
+        self.builder.terminate(Terminator::Jump(header));
+        self.builder.switch_to(exit);
+        Ok(pairs)
+    }
+
     /// The key of a lookup in `dict` as the dictionary holds keys.
     unsafe fn dict_key(&mut self, dict: Local, key: Local) -> Result<Local, Refusal> {
         let Type::Dict { key: item, .. } = self.builder.ty(dict) else {
@@ -3928,16 +4097,7 @@ impl Lowering<'_> {
             return Err(Refusal::new("a `paste` of nothing"));
         }
         let separator = self.string(&separator);
-        let pasted = if vectors {
-            let mut vector_parts = SmallVec::new();
-            for part in parts {
-                vector_parts.push(self.as_vector(part)?);
-            }
-            self.builder.emit(
-                Type::vector(Item::Str),
-                Op::PasteVectors(vector_parts, separator),
-            )
-        } else if collapse.is_some() {
+        let pasted = if vectors || collapse.is_some() {
             let mut vector_parts = SmallVec::new();
             for part in parts {
                 vector_parts.push(self.as_vector(part)?);
@@ -4592,9 +4752,13 @@ impl Lowering<'_> {
             (self.operand(a, item)?, self.operand(b, item)?)
         };
         if vectors {
-            Ok(self
-                .builder
-                .emit(Type::vector(Item::Lgl), Op::VectorCompare(op, item, a, b)))
+            // A comparison with a ry list is a ry list.
+            let list = |ty: Type| matches!(ty, Type::Vector { array: true, .. });
+            let result = Type::Vector {
+                item: Item::Lgl,
+                array: list(ta) || list(tb),
+            };
+            Ok(self.builder.emit(result, Op::VectorCompare(op, item, a, b)))
         } else {
             Ok(self.builder.emit(Type::Lgl, Op::Compare(op, item, a, b)))
         }

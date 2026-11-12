@@ -419,7 +419,7 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
     }
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     let page = usize::try_from(page).map_err(|_| Error("the page size is unknown"))?;
-    if page == 0 || TABLE_ALIGNMENT % page != 0 {
+    if page == 0 || !TABLE_ALIGNMENT.is_multiple_of(page) {
         return Err(Error("the page size does not divide the table's alignment"));
     }
     let table_start = code.len().div_ceil(TABLE_ALIGNMENT) * TABLE_ALIGNMENT;
@@ -445,7 +445,7 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
         Error(message)
     };
     let code_bytes = code.len().div_ceil(page) * page;
-    let mapped = file_offset % page as u64 == 0
+    let mapped = file_offset.is_multiple_of(page as u64)
         && std::fs::File::open(path).is_ok_and(|file| {
             // A shorter file would fault on the first read past its end.
             if file.metadata().map_or(true, |metadata| {

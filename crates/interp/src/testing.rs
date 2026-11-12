@@ -328,6 +328,94 @@ pub fn check_fused_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// Generates nested calls that pass variables and code as arguments, and checks that the compiled
+/// closure, whose calls hand their callees pooled argument references, agrees with the AST
+/// evaluator, whose calls make ordinary promises. The callees force their arguments late or not at
+/// all, write the caller's variable through `parent.frame` before forcing, keep an argument in a
+/// closure that outlives the call, and pass `...` on whole or as `..1` and `..2`, which a slot
+/// frame cannot express as references, so building the call's arguments gives up part way. Each
+/// call's references go back to the pool when it returns, so later calls reuse references that
+/// earlier ones forced, and the runs before and after the frame gets its environment check
+/// references made both ways.
+pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
+    syntax::testing::enable_invariants();
+    const OPERANDS: &[&str] = &["3L", "-2L", "0L", "7L", "NA_integer_"];
+    let mut statements = vec!["x <- a".to_owned(), "y <- b".to_owned()];
+    for _ in 0..1 + entropy.below(5) {
+        let target = ["x", "y"][entropy.below(2)];
+        let statement = match entropy.below(4) {
+            0 => format!(
+                "kept <- keep({}); {target} <- {target} + 1L; {target} <- kept()",
+                reference_argument(entropy, 1)
+            ),
+            1 => format!(
+                "{target} <- {}({}, {})",
+                ["dots", "forward"][entropy.below(2)],
+                reference_argument(entropy, 1),
+                reference_argument(entropy, 1)
+            ),
+            _ => format!("{target} <- {}", reference_call(entropy, 2)),
+        };
+        statements.push(statement);
+    }
+    statements.push("c(x, y)".to_owned());
+    let body = statements.join("\n");
+    let a = OPERANDS[entropy.below(OPERANDS.len())];
+    let b = OPERANDS[entropy.below(OPERANDS.len())];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        let (direct, compiled) = unsafe {
+            run("parent <- function(n) .Internal(parent.frame(n))");
+            run("late <- function(p, q) { q; p }");
+            run("lazy <- function(p, q) if (is.na(p) || p > 0L) p else q");
+            run("twice <- function(p) p + p");
+            run("writes <- function(p) { .Internal(assign(\"x\", 100L, parent(1L), FALSE)); p }");
+            run("keep <- function(p) function() p");
+            run("dots <- function(...) late(..2, ..1)");
+            run("forward <- function(...) late(...)");
+            run("x <- 0L; y <- 0L");
+            outcomes(&body, a, b)
+        };
+        for (call, outcome) in compiled.iter().enumerate() {
+            assert_eq!(
+                &direct,
+                outcome,
+                "call {}: `{body}` with a = {a}, b = {b}",
+                call + 1
+            );
+        }
+    });
+}
+
+/// A call of one of [`check_argument_reference_agreement`]'s callees.
+fn reference_call(entropy: &mut impl Entropy, depth: usize) -> String {
+    match entropy.below(4) {
+        0 => format!(
+            "late({}, {})",
+            reference_argument(entropy, depth),
+            reference_argument(entropy, depth)
+        ),
+        1 => format!(
+            "lazy({}, {})",
+            reference_argument(entropy, depth),
+            reference_argument(entropy, depth)
+        ),
+        2 => format!("twice({})", reference_argument(entropy, depth)),
+        _ => format!("writes({})", reference_argument(entropy, depth)),
+    }
+}
+
+/// An argument: a variable, which a slot frame passes as a slot reference, code, which it
+/// passes as a code reference, or a nested call.
+fn reference_argument(entropy: &mut impl Entropy, depth: usize) -> String {
+    match entropy.below(if depth == 0 { 3 } else { 4 }) {
+        0 => "x".to_owned(),
+        1 => "y".to_owned(),
+        2 => format!("{} + 1L", ["x", "y"][entropy.below(2)]),
+        _ => reference_call(entropy, depth - 1),
+    }
+}
+
 /// Generates a program that reads and writes attributes, names and elements and combines values
 /// with `c()`, and checks that the compiled closure, whose calls take the builtins' direct
 /// entries, agrees with the AST evaluator, whose calls take the full builtins.
@@ -729,7 +817,7 @@ fn code_image_round_trip(body: &str, a: &str, b: &str, mutations: &[(usize, u8)]
         // SAFETY: the interpreter is installed, and every object it reads is rooted by the
         // global environment or the handle scope.
         unsafe {
-            let (direct, _) = outcomes(&body, a, b);
+            let (direct, _) = outcomes(body, a, b);
             let mark = crate::heap().handle_mark();
             let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
             let global = values::global_env();

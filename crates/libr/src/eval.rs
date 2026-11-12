@@ -93,10 +93,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         compact_sequence_steps: |object| unsafe { crate::altrep::compact_sequence_steps(object) },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         altrep_int_elt: |object, index| unsafe {
-            Ok(crate::altrep::int_elt(object, index as crate::R_xlen_t)?)
+            crate::altrep::int_elt(object, index as crate::R_xlen_t)
         },
         altrep_real_elt: |object, index| unsafe {
-            Ok(crate::altrep::real_elt(object, index as crate::R_xlen_t)?)
+            crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
@@ -1438,7 +1438,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         return false;
     }
     if let Some((heap::GcStressStart::Script, stress)) = heap::gc_stress_requested() {
-        runtime().heap.update_policy(|policy| policy.stress = stress);
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = stress);
     }
     // As under `Rscript`, SIGINT interrupts the script's evaluation, which R code can catch,
     // instead of killing the process.

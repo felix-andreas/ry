@@ -425,6 +425,15 @@ pub enum Op {
         program: SmallVec<[u32; 8]>,
         inputs: SmallVec<[Local; 4]>,
     },
+    /// How many items of a logical ry list are true, as an `I64`, failing for an `NA` item.
+    /// With an empty `program` the list is input 0; otherwise the list is the last step of
+    /// `program`, which `values::ry_count_true` encodes: comparisons of numeric lists and
+    /// scalars, and `&`, `|` and `!` of their results, fused into one pass with borrowed inputs
+    /// and no list for any step ([`crate::fusion`] builds it).
+    CountTrue {
+        program: SmallVec<[u32; 8]>,
+        inputs: SmallVec<[Local; 4]>,
+    },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
     /// A call of an R function ([`crate::lower::RCall`]) with borrowed arguments, whose result,
@@ -462,6 +471,12 @@ pub enum Op {
     DictInsert(Local, Local, Local),
     /// The dictionary without the key.
     DictRemove(Local, Local),
+    /// How many entries the dictionary holds, as an `I64`.
+    DictLen(Local),
+    /// The dictionary's keys in insertion order, as a ry list.
+    DictKeys(Local),
+    /// The dictionary's values in insertion order, as a ry list.
+    DictValues(Local),
     /// The list with the item appended, which it then owns.
     Push(Local, Local),
     /// Fails when an interrupt is pending.
@@ -507,6 +522,9 @@ impl Op {
             | ByteCount(a)
             | ToUtf8(a)
             | FromUtf8Lossy(a)
+            | DictLen(a)
+            | DictKeys(a)
+            | DictValues(a)
             | Parse(a)
             | Parses(_, a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
@@ -547,6 +565,9 @@ impl Op {
             CallTyped(_, arguments)
             | CallR(_, arguments)
             | Construct(_, arguments)
+            | CountTrue {
+                inputs: arguments, ..
+            }
             | Elementwise {
                 inputs: arguments, ..
             } => arguments.clone(),
@@ -582,7 +603,7 @@ impl Op {
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
             | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
             | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
-            | Swap(..) | ToUtf8(_) => false,
+            | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_) | DictValues(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

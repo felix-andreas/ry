@@ -1054,7 +1054,7 @@ impl Assembler {
 
     /// A load or store `opcode` (unsigned-offset form) of `register` at `[base + offset]`.
     fn a64_memory(&mut self, opcode: u32, scale: u32, register: u32, base: u32, offset: u32) {
-        if offset % scale == 0 && offset / scale < 4096 {
+        if offset.is_multiple_of(scale) && offset / scale < 4096 {
             self.word(opcode | ((offset / scale) << 10) | (base << 5) | register);
         } else {
             self.a64_address(17, base, offset);

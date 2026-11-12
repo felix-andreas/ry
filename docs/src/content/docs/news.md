@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Faster formatC
+
+A scalar `formatC()` call takes about 40% fewer instructions: its native path calls the formatting code directly instead of building R arguments for it, and reads `options(OutDec)` without calling `getOption()` when `decimal.mark` is left out. The report benchmark, which formats 20,000 account numbers with `formatC()`, takes 12% fewer instructions.
+
 ### Faster sprintf
 
 `sprintf()` formats numbers with the same native code as `format()` and `paste()`, and it parses its formats once per call instead of once per element. A scalar `sprintf("%.2f", x)` takes half the instructions it did, and the report benchmark, which builds 20,000 lines with `sprintf`, takes 8% fewer instructions overall. The output matches GNU R byte for byte, including glibc's edge cases: a negative `*` precision, `%#g` when rounding carries to the next power of ten, and `%#o`.
