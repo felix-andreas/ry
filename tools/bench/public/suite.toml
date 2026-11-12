@@ -34,6 +34,8 @@ group = "awfy"
 display = "Bouncing balls, named fields"
 summary = "Moves 3,000 balls for 50 steps with lapply, reading and writing each ball's fields by name (ball['xVel'])"
 source = "tools/bench/public/awfy/bounce.R"
+# Typed: records, with the random seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/awfy/bounce.typed.R"
 
 [[programs]]
 id = "bounce_nonames"
@@ -55,6 +57,7 @@ group = "awfy"
 display = "Mandelbrot set, scalar loops"
 summary = "Computes a 450 x 450 Mandelbrot bitmap checksum with nested scalar while loops, double arithmetic and bitwShiftL/bitwXor"
 source = "tools/bench/public/awfy/mandelbrot.R"
+typed_source = "tools/bench/public/awfy/mandelbrot.typed.R"
 
 [[programs]]
 id = "storage"
@@ -71,6 +74,8 @@ group = "shootout"
 display = "Binary trees"
 summary = "Allocates and walks recursive list trees up to depth 12, with integer arithmetic and sapply over the iterations"
 source = "tools/bench/public/shootout/binarytrees.R"
+# Typed: a recursive tag union instead of nested lists, and List.map instead of sapply.
+typed_source = "tools/bench/public/shootout/binarytrees.typed.R"
 
 [[programs]]
 id = "binarytrees_2"
@@ -92,6 +97,8 @@ group = "shootout"
 display = "Fannkuch-redux"
 summary = "Counts pancake flips over all permutations of 9 elements, reversing prefixes with vectorized rev and slice assignment"
 source = "tools/bench/public/shootout/fannkuchredux.R"
+# Typed: element swaps instead of vectorized rev() and slice assignment.
+typed_source = "tools/bench/public/shootout/fannkuchredux.typed.R"
 
 [[programs]]
 id = "fannkuchredux_naive"
@@ -106,6 +113,8 @@ group = "shootout"
 display = "Fasta"
 summary = "Generates DNA sequences with an integer LCG, picking each line's codes at once with outer() and colSums"
 source = "tools/bench/public/shootout/fasta.R"
+# Typed: a per-character count over the cumulative probabilities instead of outer() and colSums().
+typed_source = "tools/bench/public/shootout/fasta.typed.R"
 
 [[programs]]
 id = "fasta_2"
@@ -155,6 +164,8 @@ group = "shootout"
 display = "K-nucleotide, hashed environment"
 summary = "Reads a FASTA file and counts k-mer frequencies in a hashed environment with exists, get and assign"
 source = "tools/bench/public/shootout/knucleotide.R"
+# Typed: a Dict instead of a hashed environment; R reads the input file.
+typed_source = "tools/bench/public/shootout/knucleotide.typed.R"
 
 [[programs]]
 id = "knucleotide_brute"
@@ -183,6 +194,8 @@ group = "shootout"
 display = "Mandelbrot, vectorized rows"
 summary = "Iterates complex vectors one 1,300-point row at a time, packs the bits into raw bytes and prints them"
 source = "tools/bench/public/shootout/mandelbrot_ascii.R"
+# Typed: F64 pairs instead of complex vectors, since typed ry has no complex numbers.
+typed_source = "tools/bench/public/shootout/mandelbrot_ascii.typed.R"
 
 [[programs]]
 id = "mandelbrot_naive_ascii"
@@ -211,6 +224,8 @@ group = "shootout"
 display = "N-body"
 summary = "Simulates five planets with one coordinate vector per axis, using outer() and %*% at each of 40,000 steps"
 source = "tools/bench/public/shootout/nbody.R"
+# Typed: a List of records and scalar loops instead of outer() and %*%.
+typed_source = "tools/bench/public/shootout/nbody.typed.R"
 
 [[programs]]
 id = "nbody_2"
@@ -225,6 +240,8 @@ group = "shootout"
 display = "Pi digits"
 summary = "Prints 55 digits of pi with a spigot over a hand-written bignum on base-10,000 integer vectors"
 source = "tools/bench/public/shootout/pidigits.R"
+# Typed: the same big-integer algorithm on Lists of limbs and records.
+typed_source = "tools/bench/public/shootout/pidigits.typed.R"
 
 [[programs]]
 id = "regexdna"
@@ -239,6 +256,8 @@ group = "shootout"
 display = "Reverse complement"
 summary = "Reads a FASTA file line by line and maps each line's characters through a named vector in one vectorized lookup"
 source = "tools/bench/public/shootout/reversecomplement.R"
+# Typed: a Dict lookup per byte instead of indexing a named vector; R reads the input file.
+typed_source = "tools/bench/public/shootout/reversecomplement.typed.R"
 
 [[programs]]
 id = "reversecomplement_2"
@@ -260,6 +279,8 @@ group = "shootout"
 display = "Spectral norm"
 summary = "Multiplies by an 800 x 800 matrix once, filling each row with scalar closure calls and taking a %*% dot product"
 source = "tools/bench/public/shootout/spectralnorm.R"
+# Typed: List.map and List.sum instead of %*%.
+typed_source = "tools/bench/public/shootout/spectralnorm.typed.R"
 
 [[programs]]
 id = "spectralnorm_alt"
@@ -304,6 +325,7 @@ group = "rcp"
 display = "Many local assignments"
 summary = "A while loop that assigns the counter to 24 local variables per iteration, 500,000 times"
 source = "tools/bench/public/rcp/bytecodes.R"
+typed_source = "tools/bench/public/rcp/bytecodes.typed.R"
 
 [[programs]]
 id = "convolution"
@@ -311,6 +333,7 @@ group = "rcp"
 display = "Convolution, scalar loops"
 summary = "Convolves two 1,000-element vectors 10 times with nested for loops and [ indexing, as in Writing R Extensions"
 source = "tools/bench/public/rcp/convolution.R"
+typed_source = "tools/bench/public/rcp/convolution.typed.R"
 
 [[programs]]
 id = "convolution_slow"
@@ -332,6 +355,7 @@ group = "rcp"
 display = "Empty for loop"
 summary = "Runs a for loop with an empty body over 1:1e8, measuring pure loop overhead"
 source = "tools/bench/public/rcp/empty-for.R"
+typed_source = "tools/bench/public/rcp/empty-for.typed.R"
 
 [[programs]]
 id = "empty-while"
@@ -339,6 +363,7 @@ group = "rcp"
 display = "Counting while loop"
 summary = "Increments a double scalar in a while loop up to 2e7"
 source = "tools/bench/public/rcp/empty-while.R"
+typed_source = "tools/bench/public/rcp/empty-while.typed.R"
 
 [[programs]]
 id = "lapply"
@@ -346,6 +371,8 @@ group = "rcp"
 display = "lapply with a closure"
 summary = "Calls a one-argument closure through lapply over 1e6 integers"
 source = "tools/bench/public/rcp/lapply.R"
+# Typed: List.map over a List.
+typed_source = "tools/bench/public/rcp/lapply.typed.R"
 
 [[programs]]
 id = "lapply-dots"
@@ -353,6 +380,8 @@ group = "rcp"
 display = "lapply with an extra argument"
 summary = "Calls a two-argument closure through lapply over 1e6 integers, passing the second argument through ..."
 source = "tools/bench/public/rcp/lapply-dots.R"
+# Typed: List.map with a closure, since typed ry has no `...`.
+typed_source = "tools/bench/public/rcp/lapply-dots.typed.R"
 
 [[programs]]
 id = "list-for"
@@ -374,6 +403,8 @@ group = "rcp"
 display = "Matrix element assignment"
 summary = "Assigns every element of a 3,000 x 3,000 matrix with [[i, j]]<- in nested for loops"
 source = "tools/bench/public/rcp/matrix-for.R"
+# Typed: a flat List indexed by row and column, since typed ry has no matrices.
+typed_source = "tools/bench/public/rcp/matrix-for.typed.R"
 
 [[programs]]
 id = "scalar-for"
@@ -381,6 +412,7 @@ group = "rcp"
 display = "Scalar assignment, for loop"
 summary = "Assigns the loop variable to a local in a for loop over 1:5e7"
 source = "tools/bench/public/rcp/scalar-for.R"
+typed_source = "tools/bench/public/rcp/scalar-for.typed.R"
 
 [[programs]]
 id = "scalar-while"
@@ -388,6 +420,7 @@ group = "rcp"
 display = "Scalar assignment, while loop"
 summary = "Assigns and increments two double scalars in a while loop, 2.5e7 times"
 source = "tools/bench/public/rcp/scalar-while.R"
+typed_source = "tools/bench/public/rcp/scalar-while.typed.R"
 
 [[programs]]
 id = "super-while"
@@ -395,6 +428,8 @@ group = "rcp"
 display = "Superassignment loop"
 summary = "A closure increments a variable of its enclosing function with <<- in a while loop, 6e6 times"
 source = "tools/bench/public/rcp/super-while.R"
+# Typed: a local variable, since typed ry has no <<-.
+typed_source = "tools/bench/public/rcp/super-while.typed.R"
 
 [[programs]]
 id = "vector-for"
@@ -402,6 +437,7 @@ group = "rcp"
 display = "Vector element assignment, for loop"
 summary = "Fills a 3e7-element vector by [[<- in a for loop, the first write coercing it from logical to integer"
 source = "tools/bench/public/rcp/vector-for.R"
+typed_source = "tools/bench/public/rcp/vector-for.typed.R"
 
 [[programs]]
 id = "vector-while"
@@ -409,3 +445,4 @@ group = "rcp"
 display = "Vector element assignment, while loop"
 summary = "Fills a 2e7-element integer vector by [[<- in a while loop with an integer counter, then sums it"
 source = "tools/bench/public/rcp/vector-while.R"
+typed_source = "tools/bench/public/rcp/vector-while.typed.R"
