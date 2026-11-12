@@ -33,6 +33,7 @@ use {
     crate::{
         arrays,
         builtins::Arg,
+        bytecode,
         eval::{self, Args},
         interp, records, standard_library,
         unwind::R,
@@ -61,11 +62,39 @@ pub fn tracking() -> bool {
     !interp().moves.moves.is_empty()
 }
 
+/// Where the caller's variable lives: what the move clears, and what ending or failing writes
+/// the original back to.
+#[derive(Clone, Copy)]
+pub enum Binding {
+    /// A binding cell of the caller's environment.
+    Cell(Sexp),
+    /// Slot `position` of the slot frame whose header register is `header`. The frame may get
+    /// its environment while the move lasts, and the variable's binding cell there takes over.
+    Slot { header: usize, position: usize },
+}
+
+/// Where the checks resolve the names the caller's code calls: an environment, or the live slot
+/// frame at the given index, whose slots come before its enclosure.
+#[derive(Clone, Copy)]
+pub enum Heads {
+    Env(Sexp),
+    Frame(usize),
+}
+
+/// The caller of a move: where its variable lives, where its code finds functions, and the
+/// `sys_parent` of the call (`NULL` for a slot frame, which the callee finds as the frame below
+/// its own).
+pub struct Caller {
+    pub binding: Binding,
+    pub heads: Heads,
+    pub sys_parent: Sexp,
+}
+
 struct Move {
     /// The dictionary, set or list the callee's parameter holds.
     value: Sexp,
-    /// The caller's binding cell, which holds `NULL` until the move ends.
-    cell: Sexp,
+    /// The caller's binding, which holds `NULL` until the move ends.
+    binding: Binding,
     target: Sexp,
     /// The callee's frame, whose own promises (its defaults) the checks covered. `NULL` until
     /// the callee is entered.
@@ -98,8 +127,11 @@ impl State {
             // SAFETY: the collector runs on the interpreter's thread, and the move keeps these
             // objects alive until it ends.
             unsafe {
-                for object in [entry.value, entry.cell, entry.target, entry.callee] {
+                for object in [entry.value, entry.target, entry.callee] {
                     marker.mark(object);
+                }
+                if let Binding::Cell(cell) = entry.binding {
+                    marker.mark(cell);
                 }
                 for &object in entry
                     .promises
@@ -121,52 +153,75 @@ impl State {
 }
 
 /// Calls the closure `function` for `call`, `target <- call` with `target` as its first
-/// argument, moving the caller's value into the parameter when that is invisible. `None` means
-/// the call is not one the move handles, and the caller makes the ordinary call.
+/// argument, from the environment `env`, moving the caller's value into the parameter when that
+/// is invisible. `None` means the call is not one the move handles, and the caller makes the
+/// ordinary call.
 pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Option<Sexp>> {
-    let heap = crate::heap();
-    let Some(cell) = heap.frame_cell(env, target) else {
+    let Some(cell) = crate::heap().frame_cell(env, target) else {
         return Ok(None);
     };
     let value = cell.cdr();
-    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
-        || extent(value).is_none()
-        || !eval::reuse_permitted(env, value)
-    {
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) || !eval::reuse_permitted(env, value) {
         return Ok(None);
     }
-    let Some(literals) = movable(call, function, target, env) else {
+    let caller = Caller {
+        binding: Binding::Cell(cell),
+        heads: Heads::Env(env),
+        sys_parent: env,
+    };
+    call_moving_from(call, function, target, value, caller, |args| {
+        let mut rest = call.cdr().cdr();
+        while rest.kind() == SexpType::Pairlist {
+            let expression = rest.car();
+            let value = if expression == missing_arg() {
+                expression
+            } else {
+                eval::make_promise(expression, env)?
+            };
+            args.push(Arg { tag: nil(), value });
+            rest = rest.cdr();
+        }
+        Ok(true)
+    })
+}
+
+/// [`call_moving`] for any caller: `value` is what the caller's variable holds, and no reference
+/// the heap does not count holds it too. `others` appends the call's other arguments, or answers
+/// `false`, having appended nothing, when it cannot make them for this caller.
+pub unsafe fn call_moving_from(
+    call: Sexp,
+    function: Sexp,
+    target: Sexp,
+    value: Sexp,
+    caller: Caller,
+    others: impl FnOnce(&mut Args) -> R<bool>,
+) -> R<Option<Sexp>> {
+    let Some(entries) = extent(value) else {
+        return Ok(None);
+    };
+    let Some(literals) = movable(call, function, target, caller.heads) else {
         return Ok(None);
     };
     let mut args = Args::new();
     args.push(Arg { tag: nil(), value });
-    let mut promises = Vec::new();
-    let mut rest = call.cdr().cdr();
-    while rest.kind() == SexpType::Pairlist {
-        let expression = rest.car();
-        let promise = if expression == missing_arg() {
-            expression
-        } else {
-            let promise = eval::make_promise(expression, env)?;
-            promises.push(promise);
-            promise
-        };
-        args.push(Arg {
-            tag: nil(),
-            value: promise,
-        });
-        rest = rest.cdr();
+    if !others(&mut args)? {
+        return Ok(None);
     }
+    let promises = args[1..]
+        .iter()
+        .map(|arg| arg.value)
+        .filter(|value| value.kind() == SexpType::Promise)
+        .collect();
     // A shared value cannot move, but the call still runs tracked, so that the finished frame
     // can be released and the result, which no one else holds, moves on the next call. The
     // previous top-level value, `.Last.value`, shares a loop's first value this way.
     let shared = value.refcount() != 1;
     if !shared {
-        heap.set_binding_value(cell, nil())?;
+        rebind(caller.binding, target, nil())?;
     }
     interp().moves.moves.push(Move {
         value,
-        cell,
+        binding: caller.binding,
         target,
         callee: nil(),
         entering: true,
@@ -174,12 +229,12 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         literals,
         closures: Vec::new(),
         frames: Vec::new(),
-        entries: extent(value).unwrap_or(0),
+        entries,
         replaced: Vec::new(),
         ended: false,
         shared,
     });
-    let result = eval::apply_closure_moved(call, function, &args, env);
+    let result = eval::apply_closure_moved(call, function, &args, caller.sys_parent);
     // The original is rebuilt while the record still lies on the traced stack, because
     // rebuilding allocates and the record holds the only references to the replaced values.
     let restored = match interp().moves.moves.last() {
@@ -191,7 +246,7 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         panic!("a moved argument's record disappeared during the call");
     };
     if let Some(original) = restored {
-        heap.set_binding_value(finished.cell, original)?;
+        rebind(finished.binding, finished.target, original)?;
     }
     if let Ok(value) = result
         && !finished.ended
@@ -200,6 +255,31 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         release_parameter(&finished, function, value)?;
     }
     result.map(Some)
+}
+
+/// Binds the caller's variable `target` to `value`, in its slot while the frame keeps its
+/// slots, and in its binding cell once the frame has an environment.
+unsafe fn rebind(binding: Binding, target: Sexp, value: Sexp) -> R<()> {
+    let heap = crate::heap();
+    let cell = match binding {
+        Binding::Cell(cell) => cell,
+        Binding::Slot { header, position } => {
+            let env = *bytecode::register_address(header);
+            if env == nil() {
+                heap.store_slot(
+                    &mut *bytecode::register_address(header + 1 + position),
+                    value,
+                );
+                return Ok(());
+            }
+            let Some(cell) = heap.frame_cell(env, target) else {
+                panic!("a slot frame's environment lacks the binding of a moved variable");
+            };
+            cell
+        }
+    };
+    heap.set_binding_value(cell, value)?;
+    Ok(())
 }
 
 /// Whether the innermost move is into the frame `env` and still lasts, which shows that no code
@@ -335,7 +415,6 @@ pub unsafe fn modifying(object: Sexp) -> R<()> {
 
 /// Ends every move: each caller's binding gets back the value it held before its call.
 unsafe fn end_all() -> R<()> {
-    let heap = crate::heap();
     let count = interp().moves.moves.len();
     for index in 0..count {
         let Some(entry) = interp().moves.moves.get(index) else {
@@ -351,7 +430,7 @@ unsafe fn end_all() -> R<()> {
             continue;
         }
         let original = original(entry)?;
-        heap.set_binding_value(entry.cell, original)?;
+        rebind(entry.binding, entry.target, original)?;
         if let Some(entry) = interp().moves.moves.get_mut(index) {
             entry.ended = true;
             entry.replaced.clear();
@@ -462,7 +541,7 @@ unsafe fn closures_dead(finished: &Move, result: Sexp) -> bool {
 
 /// Whether moving into `function` for `call` is invisible, as far as the code can tell before
 /// it runs (see the module documentation), with the bodies of the checked literals when it is.
-unsafe fn movable(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> Option<Vec<Sexp>> {
+unsafe fn movable(call: Sexp, function: Sexp, target: Sexp, heads: Heads) -> Option<Vec<Sexp>> {
     let arguments = call.cdr();
     let formals = function.car();
     if formals.kind() != SexpType::Pairlist || formals.tag() == symbols().dots {
@@ -499,7 +578,7 @@ unsafe fn movable(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> Option
     forbidden.push(target);
     let mut literals = Vec::new();
     let caller = Scope {
-        heads: env,
+        heads,
         locals: Vec::new(),
         closure_locals: Vec::new(),
         forbidden,
@@ -515,7 +594,7 @@ unsafe fn movable(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> Option
     let callee = Scope::of_function(
         None,
         &caller.forbidden,
-        function.tag(),
+        Heads::Env(function.tag()),
         formals,
         function_body(function),
     )?;
@@ -537,7 +616,7 @@ unsafe fn function_body(function: Sexp) -> Sexp {
 /// it binds itself, and the moved variables it must not read. A function literal's body runs in
 /// a scope of its own, whose parent is the scope the literal appears in.
 struct Scope<'a> {
-    heads: Sexp,
+    heads: Heads,
     /// The formals, then the other variables the code assigns.
     locals: Vec<Sexp>,
     /// The locals, not formals, that every assignment binds to a function literal, so that a
@@ -556,7 +635,7 @@ impl<'a> Scope<'a> {
     unsafe fn of_function(
         parent: Option<&'a Scope<'a>>,
         forbidden: &[Sexp],
-        heads: Sexp,
+        heads: Heads,
         formals: Sexp,
         body: Sexp,
     ) -> Option<Scope<'a>> {
@@ -814,49 +893,63 @@ unsafe fn assigned_symbols(expression: Sexp, found: &mut Vec<Sexp>) -> bool {
     true
 }
 
-/// The function a call of `symbol` from `env` finds now, without forcing a promise or calling an
-/// active binding. `None` when finding it would do either.
-unsafe fn resolve_function(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
+/// The function a call of `symbol` from `heads` finds now, without forcing a promise, calling an
+/// active binding or giving a slot frame its environment. `None` when finding it would do any of
+/// those.
+unsafe fn resolve_function(symbol: Sexp, heads: Heads) -> Option<Sexp> {
     let heap = crate::heap();
     let known = heap.known();
+    let mut env = match heads {
+        Heads::Env(env) => env,
+        Heads::Frame(owner) => {
+            if let Some(value) = eval::frame_slot(owner, symbol)
+                && let Some(found) = function_of(value)
+            {
+                return found;
+            }
+            interp().frames[owner].function.tag()
+        }
+    };
     while env != known.empty_env {
         if env == known.global_env {
             let (cell, _) = heap.global_cell(symbol)?;
-            return function_in(cell);
-        }
-        if let Some(cell) = heap.frame_cell(env, symbol) {
             if cell.has_gp(gp::ACTIVE_BINDING) {
                 return None;
             }
-            let mut value = cell.cdr();
-            if value.kind() == SexpType::Promise {
-                if value.car() == values::unbound() {
-                    return None;
-                }
-                value = value.car();
+            return function_of(cell.cdr()).flatten();
+        }
+        let value = if env.has_gp(gp::PENDING_FRAME) {
+            eval::pending_slot(env, symbol)
+        } else {
+            match heap.frame_cell(env, symbol) {
+                Some(cell) if cell.has_gp(gp::ACTIVE_BINDING) => return None,
+                Some(cell) => Some(cell.cdr()),
+                None => None,
             }
-            if values::is_function(value) {
-                return Some(value);
-            }
+        };
+        if let Some(value) = value
+            && let Some(found) = function_of(value)
+        {
+            return found;
         }
         env = env.enclosure();
     }
     None
 }
 
-/// The function a search-path binding holds, when it holds one without forcing anything.
-unsafe fn function_in(cell: Sexp) -> Option<Sexp> {
-    if cell.has_gp(gp::ACTIVE_BINDING) {
-        return None;
-    }
-    let mut value = cell.cdr();
-    if value.kind() == SexpType::Promise {
+/// What a binding to `value` gives a function lookup: `Some(Some(function))` when it holds a
+/// function, directly or as a forced promise's value, `Some(None)` when it holds an unforced
+/// promise, which the lookup would force, and `None` when the lookup passes it by.
+unsafe fn function_of(value: Sexp) -> Option<Option<Sexp>> {
+    let value = if value.kind() == SexpType::Promise {
         if value.car() == values::unbound() {
-            return None;
+            return Some(None);
         }
-        value = value.car();
-    }
-    values::is_function(value).then_some(value)
+        value.car()
+    } else {
+        value
+    };
+    values::is_function(value).then_some(Some(value))
 }
 
 /// The base builtins that read no frame and run no R code of their own: whatever R code they
