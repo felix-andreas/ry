@@ -325,11 +325,21 @@ pub(crate) unsafe fn make(
 }
 
 pub(crate) unsafe fn alloc(layout: Layout, slots: &[Sexp]) -> Result<Sexp, heap::HeapError> {
+    let id = crate::heap().layouts.intern(layout);
+    allocate(id, slots)
+}
+
+/// A value of the interned layout `id` with these slots. A dictionary or set counts its holders,
+/// so the standard library can grow one in place when its only holder is the binding being
+/// reassigned (`standard_library::reusable`), and so does a plain record, so that
+/// `r <- (..r, f = g(r$f, ...))` can update `r`'s field in place (`eval::rebind_update`). A
+/// tuple or tag never changes once built.
+unsafe fn allocate(id: u32, slots: &[Sexp]) -> Result<Sexp, heap::HeapError> {
     let heap = crate::heap();
-    // A dictionary or set counts its holders, so the standard library can grow one in place when
-    // its only holder is the binding being reassigned (`standard_library::reusable`).
-    let counted = matches!(layout.fields, Fields::Dict | Fields::Set);
-    let id = heap.layouts.intern(layout);
+    let counted = heap.layouts.get(id).is_some_and(|layout| {
+        matches!(layout.fields, Fields::Dict | Fields::Set)
+            || (layout.tag.is_none() && matches!(layout.fields, Fields::Named(_)))
+    });
     let object = if counted {
         heap.alloc_counted_record(id, slots)?
     } else {
@@ -342,22 +352,38 @@ pub(crate) unsafe fn alloc(layout: Layout, slots: &[Sexp]) -> Result<Sexp, heap:
 /// A copy of `object` with slot `index` replaced by `value`. The layout stays the same, so an
 /// update can never add a field.
 unsafe fn with_slot(object: Sexp, index: usize, value: Sexp) -> R<Sexp> {
+    with_slots(object, &[(index, value)])
+}
+
+/// A copy of `object` with the given slots replaced, a later replacement of the same slot
+/// winning.
+pub unsafe fn with_slots(object: Sexp, changes: &[(usize, Sexp)]) -> R<Sexp> {
     let count = object.record_slot_count();
     let mut slots = Vec::with_capacity(count);
     for position in 0..count {
-        slots.push(if position == index {
-            value
-        } else {
-            slot_value(object, position)?
-        });
+        slots.push(
+            match changes.iter().rev().find(|&&(index, _)| index == position) {
+                Some(&(_, value)) => value,
+                None => slot_value(object, position)?,
+            },
+        );
     }
-    let heap = crate::heap();
-    let result = heap.alloc_record(object.record_layout(), &slots)?;
-    heap.root(result);
-    Ok(result)
+    Ok(allocate(object.record_layout(), &slots)?)
 }
 
 // Access and update.
+
+/// The slot of field `name`, a symbol, of `object` when it is a plain record that has the field.
+pub unsafe fn plain_field(object: Sexp, name: Sexp) -> Option<usize> {
+    if object.kind() != SexpType::Record || object.is_object() {
+        return None;
+    }
+    let layout = crate::heap().layouts.get(object.record_layout())?;
+    if layout.kind() != NativeKind::Record {
+        return None;
+    }
+    layout.names().iter().position(|&field| field == name)
+}
 
 /// `object$name`: the exact field, never a partial match.
 pub unsafe fn dollar(object: Sexp, name: &[u8], call: Sexp) -> R<Sexp> {
@@ -544,7 +570,7 @@ pub unsafe fn constructor_layout(
 
 /// A value of `layout` with these slots (`bytecode::Op::Construct`).
 pub unsafe fn construct(layout: u32, slots: &[Sexp]) -> R<Sexp> {
-    Ok(crate::heap().alloc_record(layout, slots)?)
+    Ok(allocate(layout, slots)?)
 }
 
 /// The error a `match` raises when no arm matches `value`.

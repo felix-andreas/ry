@@ -29,3 +29,27 @@ expect stdout "[1] 4"
 expect stderr "typed: `double_it` runs in the interpreter: argument 1 is `Num.from_r(sqrt(y))`, which R code wrote"
 expect stderr "typed: `shout` runs in the interpreter: no code for [Str]: it uses the value of R's `casefold` directly"
 expect stderr lacks "recorded no reason"
+
+# A tag from R converts with its payloads, ry lists included. A bare `[]` does not record what
+# its items are, so a tag holding one runs in the interpreter, and the reason says so.
+file tags.R
+| alias Bag =
+|   | :Many(List<I64>)
+|   | :One(I64)
+| size <- function(t: Bag) -> I64 {
+|   match (t) {
+|     :Many(xs) => List.sum(xs)
+|     :One(x) => x
+|   }
+| }
+| full <- :Many([1i64, 2i64, 39i64])
+| print(size(full))
+| empty <- :Many([])
+| print(size(empty))
+
+run ry run --runtime ry tags.R
+expect exit 0
+expect stdout "42i64"
+expect stdout "0i64"
+expect stderr "typed: compiled for [Tag"
+expect stderr "typed: `size` runs in the interpreter: argument 1 does not convert: it holds an empty list whose item type is unknown"

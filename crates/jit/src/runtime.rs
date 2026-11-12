@@ -1656,7 +1656,8 @@ pub unsafe extern "C" fn jit_literal_matches(value: *mut Header, pattern: *mut H
     }
 }
 
-/// `Dict.len()` or `Set.len()`: the entry count, or -1 when tier 0 must run the call.
+/// The entry count behind `Dict.is_empty()` or `Set.is_empty()`, or -1 when tier 0 must run the
+/// call.
 pub unsafe extern "C" fn jit_collection_count(value: *mut Header, set: i32) -> i64 {
     unsafe {
         Sexp::from_raw(value)

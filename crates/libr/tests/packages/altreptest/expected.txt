@@ -22,6 +22,7 @@ pointer, length 5
   sorted: 1, no_na: 1
   sum 12.5, min 0.5, max 4.5
   after SET_REAL_ELT: 9
+  sum 12.5, min 0.5, max 4.5
   REAL_GET_REGION(3, 3): 2 [3.5,4.5]
   altrep: no
   copy: [0.5,9,2.5,3.5,4.5]

@@ -615,10 +615,10 @@ pub enum Intrinsic {
     Modulo(Numeric),
     /// `%/%`
     IntegerDivide(Numeric),
-    /// `Dict.len()` or `Set.len()` (when `set`), or their `is_empty` (when `empty`).
-    CollectionCount {
+    /// `Dict.is_empty()` or `Set.is_empty()` (when `set`). Their `len` has no intrinsic because it
+    /// returns a ry `I64`, which no register type holds.
+    CollectionEmpty {
         set: bool,
-        empty: bool,
     },
     /// `Dict.contains()` or `Set.contains()`.
     CollectionContains {
@@ -4177,17 +4177,9 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
     let boxed = |ty: &Ty| *ty == Ty::Boxed;
     let key = |ty: &Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Boxed);
     Some(match (name, types) {
-        ("Dict.len" | "Set.len", [collection]) if boxed(collection) => (
-            Intrinsic::CollectionCount {
-                set: name == "Set.len",
-                empty: false,
-            },
-            Ty::Int,
-        ),
         ("Dict.is_empty" | "Set.is_empty", [collection]) if boxed(collection) => (
-            Intrinsic::CollectionCount {
+            Intrinsic::CollectionEmpty {
                 set: name == "Set.is_empty",
-                empty: true,
             },
             Ty::Lgl,
         ),
@@ -4294,9 +4286,7 @@ fn integer_sequence() -> Ty {
 fn has_intrinsic(name: &str) -> bool {
     matches!(
         name,
-        "Dict.len"
-            | "Set.len"
-            | "Dict.is_empty"
+        "Dict.is_empty"
             | "Set.is_empty"
             | "Dict.contains"
             | "Set.contains"

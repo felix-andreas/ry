@@ -94,7 +94,13 @@ fn r_cmd_config_reports_ry_s_toolchain() {
     let include = rcmd::config(home(), "R_INCLUDE_DIR").expect("R_INCLUDE_DIR");
     assert_eq!(include, home().join("include").display().to_string());
     let blas = rcmd::config(home(), "BLAS_LIBS").expect("BLAS_LIBS");
-    assert_eq!(blas, "-lblas");
+    // On Linux the home links the versioned file, which needs no BLAS development package.
+    let versioned = if cfg!(target_os = "linux") {
+        "-l:libblas.so.3"
+    } else {
+        "-lblas"
+    };
+    assert_eq!(blas, versioned);
 }
 
 /// `R CMD SHLIB` reads the user's Makevars last, so it overrides the toolchain, as pkgbuild's

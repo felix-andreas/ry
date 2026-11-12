@@ -243,10 +243,12 @@ fn check_wrappers() {
         *(ok(altrep::dataptr(wrapped, true)) as *mut i32) = 9;
         assert_eq!(ok(altrep::is_sorted(wrapped)), altrep::UNKNOWN_SORTEDNESS);
         assert_eq!(ints(wrapped), vec![9, 2, 4]);
+        // GNU R 4.6 wraps a list too, and the wrapper reads its elements.
         let list = keep(ok(R::memory::alloc_vector(SexpType::List, 1)));
-        let wrapped_list = ok(altrep::wrap(list, 1, 1));
-        assert!(wrapped_list.is_altrep());
-        assert_eq!(ok(R::vectors::xlength(wrapped_list)), 1);
+        let wrapped = keep(ok(altrep::wrap(list, altrep::UNKNOWN_SORTEDNESS, 0)));
+        assert!(wrapped.is_altrep());
+        assert_eq!(ok(altrep::length(wrapped)), 1);
+        assert_eq!(ok(altrep::sexp_elt(wrapped, 0)), list.element(0));
     }
 }
 
