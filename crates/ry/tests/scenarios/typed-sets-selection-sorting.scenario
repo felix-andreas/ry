@@ -1,0 +1,35 @@
+# Sets, logical selection and sorting of ry's lists run on native code in a strict typed
+# function, with the results the standard library gives in the interpreter.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+| strict = true
+
+file lists.R
+| distinct_sorted <- function(xs: List<I64>, keep: List<Bool>) -> List<I64> {
+|   List.sort_desc(Set.to_list(Set.from_list(xs[keep])))
+| }
+| words <- function(xs: List<Str>) -> I64 Set.len(Set.from_list(xs))
+| in_range <- function(xs: List<I64>, low: I64, high: I64) -> List<Bool> xs >= low & xs <= high
+| ordered <- function(xs: List<F64>) -> List<F64> List.sort_asc(xs)
+| xs <- [5i64, 3i64, 5i64, 9i64, 1i64, 3i64]
+| keep <- in_range(xs, 2i64, 8i64)
+| picked <- distinct_sorted(xs, keep)
+| print(picked)
+| names <- ["a", "b", "a", "c"]
+| count <- words(names)
+| print(count)
+| numbers <- [2.5, -1.0, 0.0]
+| sorted <- ordered(numbers)
+| print(sorted)
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry lists.R
+expect exit 0
+expect stdout "[5i64, 3i64]"
+expect stdout "3i64"
+expect stdout "[-1, 0, 2.5]"
+expect stderr lacks "runs in the interpreter"

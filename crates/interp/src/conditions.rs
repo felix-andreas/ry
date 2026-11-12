@@ -6,6 +6,7 @@
 
 use {
     crate::{
+        Interp,
         builtins::{BuiltinDef, Call, internal},
         deparse, eval, interp,
         unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
@@ -66,8 +67,19 @@ pub fn new_handler(handler: Handler) -> Rc<Handler> {
 
 /// Makes `saved` the handler stack again, as a frame exit does, and keeps the entries above it
 /// that nothing else holds for [`new_handler`] to reuse.
+#[inline(always)]
 pub fn restore_handlers(saved: HandlerStack) {
     let state = interp();
+    // Most calls establish no handler, so the stack to restore is the one in place, and every
+    // closure call returns through here.
+    if ptr_eq(&state.handlers, &saved) {
+        return;
+    }
+    replace_handlers(state, saved);
+}
+
+#[inline(never)]
+fn replace_handlers(state: &mut Interp, saved: HandlerStack) {
     let mut released = std::mem::replace(&mut state.handlers, saved);
     while let Some(mut entry) = released
         && state.handler_pool.len() < HANDLER_POOL_SIZE
@@ -78,6 +90,14 @@ pub fn restore_handlers(saved: HandlerStack) {
         };
         released = handler.next.take();
         state.handler_pool.push(entry);
+    }
+}
+
+fn ptr_eq(left: &HandlerStack, right: &HandlerStack) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
     }
 }
 

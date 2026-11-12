@@ -145,7 +145,9 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
         arguments.release();
         return None;
     };
-    if matches!(compiled.result, Type::Dict { .. }) {
+    // A set or a dictionary result has no R value to cross back as, so the interpreter makes
+    // the call.
+    if storage(compiled.result).is_none() {
         arguments.release();
         return None;
     }
@@ -370,7 +372,7 @@ fn storage(ty: Type) -> Option<(SexpType, bool)> {
         Type::Vector { item, array } => (item_storage(item), array),
         Type::List(_) => (SexpType::List, false),
         Type::Record(_) | Type::Tag(_) => (SexpType::Record, false),
-        Type::Dict { .. } => return None,
+        Type::Set(_) | Type::Dict { .. } => return None,
     })
 }
 
@@ -577,7 +579,9 @@ impl Arguments {
                 self.lists.push(boxed as *mut List);
                 self.words.push(boxed);
             }
-            Type::Bool | Type::Null | Type::Dict { .. } | Type::Record(_) => return false,
+            Type::Bool | Type::Null | Type::Set(_) | Type::Dict { .. } | Type::Record(_) => {
+                return false;
+            }
         }
         true
     }
@@ -835,8 +839,8 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
             }
             Ok(vector)
         }
-        Type::Dict { .. } => Err(interp::unwind::error(
-            "a typed function returned a dictionary",
+        Type::Set(_) | Type::Dict { .. } => Err(interp::unwind::error(
+            "a typed function returned a set or a dictionary",
         )),
     }
 }
