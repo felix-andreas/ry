@@ -22,15 +22,15 @@ use {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryPackageFastPaths", 2, do_package_fast_paths).invisible(),
-    internal("ryTraceBack", 0, do_trace_back),
-    internal("ryWithrListCombine", 0, do_withr_list_combine),
-    internal("ryWithrAsEnvvars", 0, do_withr_as_envvars),
-    internal("ryWithrGetEnvvar", 0, do_withr_get_envvar),
-    internal("ryWithrSetEnvvar", 0, do_withr_set_envvar),
-    internal("ryWithrGetOptions", 0, do_withr_get_options),
-    internal("ryWithrSetOptions", 0, do_withr_set_options),
-    internal("ryWithrResetOptions", 0, do_withr_reset_options),
-    internal("ryWithrResetGettextCache", 0, do_withr_reset_gettext_cache),
+    internal("ryTraceBack", 0, do_trace_back).prologue(),
+    internal("ryWithrListCombine", 0, do_withr_list_combine).prologue(),
+    internal("ryWithrAsEnvvars", 0, do_withr_as_envvars).prologue(),
+    internal("ryWithrGetEnvvar", 0, do_withr_get_envvar).prologue(),
+    internal("ryWithrSetEnvvar", 0, do_withr_set_envvar).prologue(),
+    internal("ryWithrGetOptions", 0, do_withr_get_options).prologue(),
+    internal("ryWithrSetOptions", 0, do_withr_set_options).prologue(),
+    internal("ryWithrResetOptions", 0, do_withr_reset_options).prologue(),
+    internal("ryWithrResetGettextCache", 0, do_withr_reset_gettext_cache).prologue(),
 ];
 
 /// The package functions that get a fast path: package, the one release whose code the native
