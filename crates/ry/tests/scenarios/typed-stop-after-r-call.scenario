@@ -1,0 +1,29 @@
+# `stop()` in typed code that has already called R raises the user's message with the typed
+# function's call, as the interpreter does. Compiled code cannot give the call back to the
+# interpreter once R has seen it, so R raises the error from a frame for that call.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+| strict = true
+
+file check.R
+| check <- function(n: I64) -> F64 {
+|   cat("checking\n")
+|   if (n < 0) stop("n must not be negative, got ", Num.to_r(n))
+|   Num.to_f64(n)
+| }
+| print(check(2))
+| caught <- tryCatch(check(-1), error = function(e) e)
+| print(conditionMessage(caught))
+| print(conditionCall(caught))
+| check(-4)
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry check.R
+expect exit 1
+expect stdout "checking\n[1] 2\nchecking\n[1] \"n must not be negative, got -1\"\ncheck(-1i64)\nchecking"
+expect stderr "typed: compiled for [I64] -> Dbl"
+expect stderr "Error in check(-4i64) : n must not be negative, got -4"

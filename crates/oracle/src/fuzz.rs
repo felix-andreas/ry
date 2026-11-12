@@ -309,6 +309,37 @@ impl Generator {
                 self.rng.below(9)
             ));
         }
+        if self.rng.chance(1, 2) {
+            // Methods change between calls of one site, in the order a package and a user
+            // session change them: a global mask and its removal, a registration, a frame-local
+            // method, and a global mask over the registered method.
+            let target = ["circle", "square", "shape"][self.rng.below(3)];
+            let call = format!("area{k}(object{k})");
+            let mut steps = [
+                format!("area{k}.{target} <- function(s, ...) \"masked {target}\""),
+                format!("rm(area{k}.{target})"),
+                format!(
+                    "registerS3method(\"area{k}\", \"{target}\", function(s, ...) \"registered {target}\")"
+                ),
+                format!(
+                    "local{k} <- function(s) {{ area{k}.{target} <- function(s, ...) \"frame {target}\"; area{k}(s) }}\nprint(local{k}(object{k}))"
+                ),
+                format!("area{k}.{target} <- function(s, ...) \"global {target}\""),
+                format!("rm(area{k}.{target})"),
+            ];
+            if self.rng.chance(1, 2) {
+                steps[..3].rotate_right(1);
+            }
+            let line = self.guarded(&call);
+            text.push_str(&format!("for (i in 1:2) {line}\n"));
+            for step in steps {
+                text.push_str(&step);
+                text.push('\n');
+                let line = self.guarded(&call);
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
         text
     }
 
@@ -1035,7 +1066,8 @@ pub fn trace_back_program(seed: u64) -> String {
 
 const TRACE_PREAMBLE: &str = r#"if (!requireNamespace("rlang", quietly = TRUE)) {
     cat("rlang is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 body_only <- body(rlang:::trace_back)
 if (identical(body_only[[1]], as.name("{")) && length(body_only) == 3L &&
@@ -1262,7 +1294,8 @@ pub fn native_helpers_program(seed: u64) -> String {
 
 const NATIVE_HELPERS_PREAMBLE: &str = r#"if (!requireNamespace("withr", quietly = TRUE) || format(packageVersion("withr")) != "3.0.3") {
     cat("withr 3.0.3 is not installed\n")
-    quit(save = "no")
+    # An error ends the oracle driver's run with a report; quit() would end it without one.
+    stop("skipped", call. = FALSE)
 }
 r_body <- function(f) {
     code <- body(f)
@@ -1537,4 +1570,95 @@ fn hex_literal(value: f64) -> String {
         (1, biased - 1023)
     };
     format!("{sign}0x{lead}.{fraction:013x}p{exponent}")
+}
+
+/// An R program for `seed` that calls `sprintf` with random format strings on random arguments,
+/// printing each result (or its error, and any warning) on a line of its own. A format mixes
+/// literal text, `%%` and conversions with random flags, widths, precisions, `*` widths and
+/// precisions, and `n$` references; the arguments are doubles from [`fuzz_double`], integers,
+/// logicals and strings, with NA, of lengths that recycle and lengths that do not.
+pub fn sprintf_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed ^ 0x7370_7269_6e74_6600);
+    let mut text = format!(
+        "# sprintf fuzz program, seed {seed}\n\
+         show <- function(line, expr) {{\n\
+         \x20 warned <- NULL\n\
+         \x20 r <- withCallingHandlers(\n\
+         \x20   tryCatch(expr, error = function(e) paste(\"E:\", conditionMessage(e))),\n\
+         \x20   warning = function(w) {{ warned <<- conditionMessage(w); invokeRestart(\"muffleWarning\") }})\n\
+         \x20 cat(line, encodeString(r, quote = '\"'), if (!is.null(warned)) paste(\"W:\", warned), sep = \"|\"); cat(\"\\n\")\n\
+         }}\n"
+    );
+    for line in 0..300 {
+        let count = 1 + rng.below(3);
+        let kinds: Vec<usize> = (0..count).map(|_| rng.below(4)).collect();
+        let mut format = String::new();
+        let mut arguments = Vec::new();
+        let positional = rng.chance(1, 8);
+        for (position, &kind) in kinds.iter().enumerate() {
+            if rng.chance(1, 2) {
+                format.push_str(["x", "a b", "=", "%%", "[", "é"][rng.below(6)]);
+            }
+            format.push('%');
+            if positional {
+                format.push_str(&format!("{}$", position + 1));
+            }
+            for flag in ["-", "+", " ", "0", "#"] {
+                if rng.chance(1, 6) {
+                    format.push_str(flag);
+                }
+            }
+            let star_width = !positional && rng.chance(1, 10);
+            if star_width {
+                format.push('*');
+                arguments.push(format!("{}L", rng.below(25) as i64 - 8));
+            } else if rng.chance(1, 3) {
+                format.push_str(&rng.below(25).to_string());
+            }
+            if !positional && !star_width && rng.chance(1, 12) {
+                format.push_str(".*");
+                arguments.push(format!("{}L", rng.below(18) as i64 - 2));
+            } else if rng.chance(1, 2) {
+                format.push_str(&format!(".{}", rng.below(18)));
+            }
+            let letters: &[&str] = match kind {
+                0 => &["f", "e", "E", "g", "G", "s", "f", "g", "d"],
+                1 => &["d", "i", "x", "X", "o", "s", "d"],
+                2 => &["d", "i", "s"],
+                _ => &["s", "s", "d"],
+            };
+            format.push_str(letters[rng.below(letters.len())]);
+            let length = [1, 1, 1, 2, 3][rng.below(5)];
+            let values: Vec<String> = (0..length)
+                .map(|_| match kind {
+                    0 => fuzz_double(&mut rng),
+                    1 => match rng.below(6) {
+                        0 => "NA_integer_".to_owned(),
+                        1 => "-2147483647L".to_owned(),
+                        _ => format!("{}L", (rng.next_u64() % 2_000_001) as i64 - 1_000_000),
+                    },
+                    2 => ["TRUE", "FALSE", "NA"][rng.below(3)].to_owned(),
+                    _ => ["\"a\"", "\"\"", "NA_character_", "\"héllo\"", "\"ab cd\""][rng.below(5)]
+                        .to_owned(),
+                })
+                .collect();
+            arguments.push(format!("c({})", values.join(", ")));
+        }
+        if rng.chance(1, 2) {
+            format.push_str([";", " end", "%%", "\\t"][rng.below(4)]);
+        }
+        let format = if rng.chance(1, 10) {
+            format!("c(\"{format}\", \"<{format}>\")")
+        } else {
+            format!("\"{format}\"")
+        };
+        if rng.chance(1, 20) {
+            arguments.push("1".to_owned());
+        }
+        text.push_str(&format!(
+            "show({line}L, sprintf({format}, {}))\n",
+            arguments.join(", ")
+        ));
+    }
+    text
 }

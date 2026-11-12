@@ -1950,18 +1950,18 @@ unsafe fn set_method(call: &Call<'_>) -> R<Sexp> {
         None => {}
     }
     // `getGeneric()` caches a generic it finds that is also the global binding.
-    if let Some(global) = quiet_value(name_symbol, values::global_env())? {
-        if values::is_function(global) {
-            let cached = methods_value(".genericTable")?
-                .map(|table| quiet_value(name_symbol, table))
-                .transpose()?
-                .flatten();
-            if global != generic || cached != Some(generic) {
-                bail!(
-                    skip,
-                    "a different function of this name is bound in the global environment, or the generic is not cached"
-                );
-            }
+    if let Some(global) = quiet_value(name_symbol, values::global_env())?
+        && values::is_function(global)
+    {
+        let cached = methods_value(".genericTable")?
+            .map(|table| quiet_value(name_symbol, table))
+            .transpose()?
+            .flatten();
+        if global != generic || cached != Some(generic) {
+            bail!(
+                skip,
+                "a different function of this name is bound in the global environment, or the generic is not cached"
+            );
         }
     }
     let table_symbol = table_meta_symbol(
@@ -3367,7 +3367,6 @@ impl Pending {
             match crate::heap().frame_cell(env, symbol) {
                 Some(cell) if cell.has_gp(gp::BINDING_LOCKED) => {
                     cell.set_gp_bits(gp::BINDING_LOCKED, false);
-                    crate::code_image::invalidate_checks();
                     let written = crate::heap().set_binding_value(cell, definition);
                     cell.set_gp_bits(gp::BINDING_LOCKED, true);
                     written.map_err(|error| crate::unwind::error(error.to_string()))?;
@@ -3960,7 +3959,7 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
         .enumerate()
         .filter(|&(index, entry)| {
             !(generics[..index].iter().any(|earlier| earlier.0 == entry.0)
-                && packages[..index].iter().any(|earlier| *earlier == entry.1))
+                && packages[..index].contains(&entry.1))
         })
         .map(|(_, entry)| entry.0.clone())
         .collect();

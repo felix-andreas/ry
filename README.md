@@ -18,9 +18,9 @@ ry is a fast R runtime, built to run your existing R code unchanged, plus a type
 language features that make your code safer and faster.
 
 ```sh
-ry run script.R   # run a script on ry's runtime; without a file, open ry's console
-ry check          # find bugs in the R files under the current directory, without running them
-ry fmt            # format the R files under the current directory in place
+ry run script.R   # run a script (no file: open the console)
+ry check          # find bugs without running the code
+ry fmt            # format your R files
 ```
 
 ry is in beta. The checker, formatter, editor support and package loader are ready for daily use,
@@ -42,7 +42,7 @@ How much faster ry's runtime is than GNU R, for each benchmark suite:
 <!-- bench-summary -->
 - **Public R JIT benchmarks: 2.66x.** 54 standard programs from R compiler research (Ř, rcp).
 - **Package test suites: 1.91x.** 26 pinned CRAN packages, each running its own test suite.
-- **Numeric kernels: 4.75x, 14x in typed ry.** 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers.
+- **Numeric kernels: 4.81x, 15x in typed ry.** 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers.
 - **Application workloads: 1.95x, 21x in typed ry.** 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables.
 
 Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster), from 10 paired rounds on Linux. [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.
@@ -50,23 +50,28 @@ Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster)
 
 ### Type checker
 
-`ry check` finds bugs before the code runs. On plain R, with no configuration and no annotations,
-it reports names that do not resolve, syntax errors, values that are never read, and lints such as
-`x == NA` or `T` for `TRUE`, and `ry check --fix` applies the fixes that are safe.
-
-Set `typing = true` in `ry.toml`, and it also infers types from the same plain R and reports type
-errors:
+R reports a value of the wrong type only when the line that uses it runs, which can be an hour into
+a long job, or never in the tests that skip that branch. `ry check` finds these bugs without running
+the code. Set `typing = true` in `ry.toml`, and it infers types from your plain R, with no
+annotations:
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
 apply_discount(100, "0.2")
-# type-mismatch: expected a numeric value (`integer` or `double`), found `character`
 ```
 
-Where inference is not enough, you write a type yourself, either in a `#:` comment such as
-`#: fn(price: double, rate: double) -> double`, which keeps the file plain R, or inline, as in
-`function(price: double, rate: double) -> double`. Strict mode (`strict = true`) rejects every
-value whose type is not known, and `ry check --annotate` writes the inferred types into your files.
+<img src="docs/public/diagnostic-typing.svg" alt="ry check reports a type-mismatch error on &quot;0.2&quot;: expected a numeric value (integer or double), found character">
+
+To check more than inference can see:
+
+- **Annotations** state what a function takes and returns, in a `#:` comment that keeps the file
+  plain R (`#: fn(price: double, rate: double) -> double`) or inline
+  (`function(price: double, rate: double) -> double`).
+- **Strict mode** (`strict = true`) makes every value whose type is not known an error.
+- **`ry check --annotate`** writes the inferred types into your files.
+
+Even without `typing`, `ry check` reports syntax errors, names that do not resolve, unused values,
+and lints such as `x == NA`, and `ry check --fix` applies the safe fixes.
 [→ Adopting ry](https://ry-lang.org/guide#step-2-type-your-code)
 
 ### The ry language
@@ -78,7 +83,7 @@ keeps working. When you add a case to a tagged union, `ry check` points you at e
 does not handle it:
 
 ```r
-alias Payment =
+type Payment =
   | :Paid(amount: double)
   | :Refunded(amount: double)
   | :Pending
@@ -90,7 +95,7 @@ balance <- function(payment: Payment) -> double {
   }
 }
 
-balance(:Paid(amount = 10))
+balance(@Payment(:Paid(amount = 10)))
 ```
 
 <img src="docs/public/diagnostic.svg" alt="ry check reports a non-exhaustive-match error: this match does not handle :Pending">

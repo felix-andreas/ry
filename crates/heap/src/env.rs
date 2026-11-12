@@ -108,8 +108,8 @@ fn mark_bound_elsewhere(symbol: Sexp) {
     }
 }
 
-/// Where machine code finds a frame's fields: the baseline tier probes a lookup site's hinted
-/// slot inline (`crates/jit/src/baseline.rs`), so these offsets are part of its contract.
+/// Where machine code finds a frame's fields: tier 1 reads frame slots inline
+/// (`crates/jit/src/codegen.rs`), so these offsets are part of its contract.
 pub mod layout {
     use super::{Binding, Bindings, Frame};
     /// The `u64` symbol filter ([`super::filter_bit`]).

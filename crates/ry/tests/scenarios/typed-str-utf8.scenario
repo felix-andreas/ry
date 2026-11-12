@@ -1,0 +1,24 @@
+# Typed code converts strings to UTF-8 bytes and back natively. `Str.from_utf8_lossy` replaces
+# a byte that is not UTF-8, and a NUL, with U+FFFD; an item that is not a byte is an error the
+# interpreter reports.
+
+requires ry-runtime
+
+file utf8.R
+| bytes <- function(s: Str) -> List<I64> Str.to_utf8(s)
+| back <- function(s: Str) -> Str Str.from_utf8_lossy(List.drop_first(Str.to_utf8(s), 1))
+| lossy <- function(n: I64) -> Str Str.from_utf8_lossy([104, n, 105, 0])
+| count <- function(s: Str) -> I64 List.len(Str.to_utf8(s))
+| print(bytes("hé"))
+| print(back("xhé!"))
+| print(identical(lossy(255), Str.from_utf8_lossy([104, 255, 105, 0])))
+| print(count(""))
+| print(tryCatch(lossy(256), error = function(e) conditionMessage(e)))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry utf8.R
+expect exit 0
+expect stdout "[104i64, 195i64, 169i64]\n[1] \"hé!\"\n[1] TRUE\n0i64\n[1] \"`bytes` must hold numbers from 0 to 255, but item 2 is 256\""
+expect stderr "typed: compiled for [Str] -> Vector { item: I64, array: true }"
+expect stderr "typed: compiled for [Str] -> Str"
+expect stderr "typed: `lossy` runs in the interpreter: its native code stopped"

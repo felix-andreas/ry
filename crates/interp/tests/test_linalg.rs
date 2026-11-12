@@ -20,7 +20,9 @@
 //!
 //! The interpreter runs here without base R and without libR, so the cases build their inputs
 //! from primitives and call `.Internal` and `.Fortran` directly. That also checks that base's
-//! `.Fortran` routines work without the libR host.
+//! `.Fortran` routines work without the libR host. Base forces symbols, so `.Fortran` reaches
+//! them only through the `NativeSymbolInfo` objects base R's loader binds (`.F_dqrdc2` and the
+//! others), which the setup binds the same way.
 
 use {
     heap::{
@@ -40,8 +42,11 @@ use {
 /// first (so `dqrdc2` must recompute that column's norm) and whose fourth is the sum of two
 /// others (so it is pivoted to the end), a square `a`, a positive definite `s` (`crossprod(a)` plus
 /// the identity, written out so that it does not depend on a matrix product), and the operands
-/// of the error cases. None of it needs BLAS or LAPACK.
+/// of the error cases. None of it needs BLAS or LAPACK. It also binds base's `.Fortran` routines
+/// as `.F_dqrdc2` and so on, as base R's loader does, since base refuses lookups by name.
 const SETUP: &str = r#"
+for (routine in .Internal(getRegisteredRoutines(.Internal(getLoadedDLLs())[["base"]][["info"]]))[[".Fortran"]])
+  .Internal(assign(.Internal(paste0(list(".F_", routine$name), NULL, FALSE)), routine, globalenv(), FALSE))
 k <- 1:27
 x <- sin(k * 1.7) * 10 + cos(k * k * 0.3)
 dim(x) <- c(9L, 3L)
@@ -73,7 +78,7 @@ dim(zero_diagonal) <- c(2L, 2L)
 /// The decompositions the library cases start from: `dqrdc2`'s of `n` as `q`, `chol(s)` as `r`,
 /// and LAPACK's QR of `x` as `lq`.
 const DECOMPOSITIONS: &str = r#"
-q <- .Fortran("dqrdc2", qr = n, 9L, 9L, 5L, 1e-7, rank = 0L, qraux = rep(0, 5), pivot = 1:5, rep(0, 10), PACKAGE = "base")
+q <- .Fortran(.F_dqrdc2, qr = n, 9L, 9L, 5L, 1e-7, rank = 0L, qraux = rep(0, 5), pivot = 1:5, rep(0, 10))
 r <- .Internal(La_chol(s, FALSE, -1))
 lq <- .Internal(La_qr(x))
 "#;
@@ -279,7 +284,7 @@ const CASES: &[(&str, &str, &[u64])] = &[
     ),
     (
         "dqrcf",
-        r#".Fortran("dqrcf", q$qr, 9L, q$rank, q$qraux, y, 1L, coef = rep(0, q$rank), info = 0L, PACKAGE = "base")$coef"#,
+        r#".Fortran(.F_dqrcf, q$qr, 9L, q$rank, q$qraux, y, 1L, coef = rep(0, q$rank), info = 0L)$coef"#,
         &[
             0xc11bebb18da3b685,
             0x411bebb3dbc87505,
@@ -289,7 +294,7 @@ const CASES: &[(&str, &str, &[u64])] = &[
     ),
     (
         "dqrqty",
-        r#".Fortran("dqrqty", q$qr, 9L, q$rank, q$qraux, y, 1L, qty = y, PACKAGE = "base")$qty"#,
+        r#".Fortran(.F_dqrqty, q$qr, 9L, q$rank, q$qraux, y, 1L, qty = y)$qty"#,
         &[
             0xc009c8ce0fdec0d0,
             0xc025b9600a37bc5a,
@@ -304,7 +309,7 @@ const CASES: &[(&str, &str, &[u64])] = &[
     ),
     (
         "dqrqy",
-        r#".Fortran("dqrqy", q$qr, 9L, q$rank, q$qraux, y, 1L, qy = y, PACKAGE = "base")$qy"#,
+        r#".Fortran(.F_dqrqy, q$qr, 9L, q$rank, q$qraux, y, 1L, qy = y)$qy"#,
         &[
             0xc0234ca82659bbbc,
             0xc0004ef25afb30ac,
@@ -319,7 +324,7 @@ const CASES: &[(&str, &str, &[u64])] = &[
     ),
     (
         "dqrrsd",
-        r#".Fortran("dqrrsd", q$qr, 9L, q$rank, q$qraux, y, 1L, rsd = y, PACKAGE = "base")$rsd"#,
+        r#".Fortran(.F_dqrrsd, q$qr, 9L, q$rank, q$qraux, y, 1L, rsd = y)$rsd"#,
         &[
             0xc001e1331b5741be,
             0xbff887314ef16492,
@@ -334,7 +339,7 @@ const CASES: &[(&str, &str, &[u64])] = &[
     ),
     (
         "dqrxb",
-        r#".Fortran("dqrxb", q$qr, 9L, q$rank, q$qraux, y, 1L, xb = y, PACKAGE = "base")$xb"#,
+        r#".Fortran(.F_dqrxb, q$qr, 9L, q$rank, q$qraux, y, 1L, xb = y)$xb"#,
         &[
             0x40170999434f05be,
             0x40190b28ebcafcc1,
@@ -349,7 +354,7 @@ const CASES: &[(&str, &str, &[u64])] = &[
     ),
     (
         "dtrco",
-        r#".Fortran("dtrco", r, 3L, 3L, k = 0, rep(0, 3), 1L, PACKAGE = "base")$k"#,
+        r#".Fortran(.F_dtrco, r, 3L, 3L, k = 0, rep(0, 3), 1L)$k"#,
         &[0x3fa1b45908275139],
     ),
     (
@@ -620,12 +625,16 @@ const ERRORS: &[(&str, &str)] = &[
         "the leading minor of order 2 is not positive",
     ),
     (
-        r#".Fortran("dqrdc2", c(1, NA), 2L, 2L, 1L, 1e-7, 0L, 0, 1L, c(0, 0), PACKAGE = "base")"#,
+        r#".Fortran(.F_dqrdc2, c(1, NA), 2L, 2L, 1L, 1e-7, 0L, 0, 1L, c(0, 0))"#,
         "NA/NaN/Inf in foreign function call (arg 1)",
     ),
     (
-        r#".Fortran("dqrdc2", 1, PACKAGE = "base")"#,
+        r#".Fortran(.F_dqrdc2, 1)"#,
         "Incorrect number of arguments (1), expecting 9 for 'dqrdc2'",
+    ),
+    (
+        r#".Fortran("dqrdc2", n, 9L, 9L, 5L, 1e-7, 0L, rep(0, 5), 1:5, rep(0, 10), PACKAGE = "base")"#,
+        "\"dqrdc2\" not available for .Fortran() for package \"base\"",
     ),
     (
         r#".Internal(La_dgecon(a, "X"))"#,

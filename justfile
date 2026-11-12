@@ -122,12 +122,18 @@ perf:
     cargo test -p semantics --profile iterate --test test_perf -- --ignored --nocapture
     cargo test -p ry-lang --profile iterate --test test_perf -- --ignored --nocapture
 
-# Times one published benchmark suite (public, packages, kernels, applications, or all) on GNU R, ry and,
-# where a program has a typed version, ry typed in strict mode, in paired shuffled rounds with a checksum gate
-# against GNU R, e.g. `just bench kernels --rounds 3 --filter fib` or `just bench all --write` (10+ rounds,
+# Times one published benchmark suite (public, packages, kernels, applications, typed, or all). The first four
+# run on GNU R, ry and, where a program has a typed version, ry typed in strict mode; `typed` runs every typed
+# program against its Rust twin and needs rustc, not GNU R. Rounds are paired and shuffled, with a checksum
+# gate against the suite's baseline, e.g. `just bench kernels --rounds 3 --filter fib` on target/release,
+# `just bench typed --ry target/iterate/ry --any-build` for a look at another build, or
+# `just bench all --release ry-x86_64-unknown-linux-gnu.tar.gz --write` on a tagged release archive (10+ rounds,
 # stores each suite's results.json, which the READMEs and the benchmarks page render).
 bench suite *args:
-    cargo build --release -p ry-lang -p libr -p rcmd
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A release archive or a named binary brings its own build; anything else measures target/release.
+    case " {{ args }} " in *" --release "*|*" --ry "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
@@ -135,14 +141,14 @@ bench-check *args:
     cargo build --release -p ry-lang
     python3 -I tools/bench/tooling/check.py {{ args }}
 
-# Scores typed ry's hill climb: speed against Rust, friendliness cases, and seeded soundness fuzzing, e.g.
+# Scores typed ry's hill climb: speed against Rust (one round of the `typed` benchmark suite), friendliness cases, and seeded soundness fuzzing, e.g.
 # `just climb`, `just climb --only friendly`, or `just climb --log "adapt literal arithmetic"` to append a step to tools/climb/log.tsv.
 climb *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/climb/run.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
-# and docs/public/diagnostic.svg from a real `ry check` run on the README's Payment example.
+# and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.
 # `--check` only reports what differs.
 readme *args:
     #!/usr/bin/env bash

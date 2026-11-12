@@ -224,7 +224,8 @@ your code and no data. It lists:
   signalled, JIT compilations and deoptimizations, collections and the peak memory in use;
 - calls to closures of package namespaces other than base, and how many of them skipped the
   generic call protocol: the call ran natively or in a slot frame that never made its
-  environment, and no argument was a promise.
+  environment, and no argument was a promise;
+- slot frames turned into environments, by what asked for the environment.
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
@@ -309,12 +310,40 @@ output is testthat's own reporter's, and the command exits with `1` when a test 
   The pattern matches the name without a leading `test-` or `test_` and without the extension, so
   `--filter '^parse$'` selects `test-parse.R` and `test_parse.R`.
 - `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
+- `--jobs N` (or `-j N`) runs the test files in `N` worker processes, one file at a time in each,
+  and `--jobs 1` runs them in the `ry test` process. See [Parallel tests](#parallel-tests).
 - `--watch` keeps running: after every edit under `R/`, `src/`, `data/`, `inst/`, `tests/`,
   `DESCRIPTION` or `NAMESPACE` it reloads only what changed (rebuilding compiled code after a
   `src/` edit), runs first the test files the edit can affect, and then the rest. It learns of
   edits from the operating system's file notifications, so it costs nothing while you type. A file is affected
   when you edited it, or when it mentions a function whose definition reaches a changed one. An
   edit to a helper or setup file, or a reload that has to run top-level code, reruns everything.
+
+### Parallel tests
+
+Workers are testthat's own parallel runner, so a package set up for it needs no change:
+`Config/testthat/start-first` in `DESCRIPTION` orders the files, `testthat::is_parallel()` is
+`TRUE` in a worker, and each worker runs `tests/testthat/setup*.R` and the helpers once. Each
+worker is a separate R process, so test files must not depend on state another file leaves behind.
+
+| You write | Files run in |
+| --- | --- |
+| `ry test --jobs 4` | 4 workers |
+| `ry test --jobs 1` | the `ry test` process |
+| `ry test`, and `DESCRIPTION` has `Config/testthat/parallel: true` and `Config/testthat/edition: 3` | one worker per core |
+| `ry test` otherwise | the `ry test` process |
+
+A run never starts more workers than it has test files, and one test file runs without workers.
+Without `--jobs`, testthat's own switches apply as they do under `devtools::test()`: the
+`TESTTHAT_PARALLEL` environment variable overrides `DESCRIPTION`, and `TESTTHAT_CPUS` or
+`options(Ncpus =)` sets the worker count in place of the core count.
+
+A worker loads the package the way `ry test` itself does, lazily and under the project's
+`ry.toml`, so it needs neither pkgload nor every package in `Imports` installed. With
+`--runtime gnu-r`, workers load the package with `pkgload::load_all()`, as under testthat alone.
+
+`--profile-summary` measures one process, so it runs the files without workers, and combining it
+with more than one job is an error.
 
 ## document
 
@@ -351,7 +380,6 @@ ry build -o dist          # write it into dist/ instead
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
-ry install --explain      # also report what the install compiled to machine code
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -390,33 +418,6 @@ package in that library to reinstall:
 ry: another build of ry installed these packages in library, so their functions compile as they run, which is slower, until you reinstall them: one, two
 ``` The base packages (base, stats, utils, methods and the rest)
 carry images that ry's own build writes, holding their uncompressed records but no code.
-
-The image also holds machine code for the package's numeric functions, compiled at install for
-the argument types they are likely to get: the types their annotations or constant defaults
-declare, and otherwise double, integer and logical scalars and vectors. A call whose arguments
-have one of those types runs the machine code, without the JIT and without warming up; any other
-call runs in the interpreter. Calls between the package's functions are direct calls in the
-machine code. The functions it calls by name, such as `+` or a sibling, are checked when it first
-runs, and checked again after any binding is unlocked (`unlockBinding`, `assignInNamespace`), so a
-replaced function is always the one that runs. Machine code is written for x86-64 Linux, and
-other systems ignore it.
-
-`--explain` (`R CMD INSTALL --ry-explain`) prints what the install compiled. The functions left
-in the interpreter come first, largest first, each with what kept it there; then every
-specialization of a native function with its argument types, which it tests when called, and the
-names it looks up once (excerpt):
-
-```text
-machine code: 4 of 5 functions, by size (calls and operators in the body)
-  interpreter     1  label: an expression that is not a scalar computation
-  native          5  total(double[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
-  native          5  total(integer[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
-  ...
-  native          4  hypot(double, double) -> double: tests 2 arguments on entry; looks up sqrt, +, square, * once
-```
-
-An argument that is a call, such as `f(-1)` or `f(c(1, 2))`, reaches the function unevaluated, and
-such a call runs in the interpreter; an argument that is a constant or a variable does not.
 
 ## debug-adapter
 

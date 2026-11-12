@@ -25,6 +25,21 @@
 // what keeps its state in registers between instructions. The toolchain is a pinned nightly.
 #![feature(explicit_tail_calls)]
 #![allow(incomplete_features)]
+// Numeric ports (loess, splines, fft, linpack) keep the reference algorithms' index-based loops and
+// literal constants so they stay comparable line by line with the C and Fortran originals, and the
+// byte-level readers keep explicit chunk sizes.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::excessive_precision,
+    clippy::explicit_counter_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::assign_op_pattern,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::type_complexity
+)]
 
 pub mod annotations;
 pub mod apply_results;
@@ -275,6 +290,12 @@ impl FrameStack {
     }
 }
 
+impl Default for FrameStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Drops what a popped frame owns, leaving only plain values in its slot.
 #[inline(always)]
 fn release(frame: &mut Frame) {
@@ -363,15 +384,19 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if depth == 0 {
-        state.references_used = 0;
-    }
     if !state.pending_closures.is_empty() {
         state
             .pending_closures
             .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
+    // An unwind to top level skips the releases of the calls it leaves, so their argument
+    // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 && state.references_used != 0 {
+        // SAFETY: `state` is the interpreter's own state, which `release_references` reads
+        // through `interp()`, and it is not used after this call.
+        unsafe { eval::release_references(0) };
+    }
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,
@@ -404,6 +429,9 @@ pub struct Hooks {
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
     pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
+    /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
+    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -439,6 +467,14 @@ pub struct Hooks {
 /// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
 pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
+/// The summaries an ALTREP class may answer for its vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AltrepSummary {
+    Sum,
+    Min,
+    Max,
+}
+
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,6 +489,13 @@ pub struct Interp {
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// How many times an active binding's function has run to read its value. Compiled code
+    /// compares it around a variable load to learn that the load called a binding, which it
+    /// must then call again at every later read rather than reuse the value.
+    pub active_binding_reads: u64,
+    /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
+    /// which [`crate::base_fast_paths::finish`] answers by clearing it.
+    pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
     /// The dispatch variables of every method slot frame, back to back in frame order (see
@@ -594,6 +637,12 @@ pub struct Interp {
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
+    /// The unwinds running native frames hold for tier 0 to raise: each running JIT
+    /// activation's pending unwind, pushed when compiled code is entered and popped when it
+    /// returns. A frame between the failure and the raise allocates (a deoptimization boxes
+    /// registers and flushes slots), and an exiting handler's result rides in the unwind as the
+    /// value of a `return`, reachable from nothing else.
+    pub held_unwinds: Vec<*const Option<Unwind>>,
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
@@ -680,6 +729,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     state.interp = Some(Interp {
         frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        active_binding_reads: 0,
+        prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),
@@ -735,6 +786,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         object_systems: true,
         prelude: true,
         parked_unwind: None,
+        held_unwinds: Vec::new(),
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
         calls_ever: 0,
         #[cfg(unix)]
@@ -766,6 +818,7 @@ pub fn default_hooks() -> Hooks {
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_summary: |_, _, _| Ok(None),
         defer_strings: |_| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
@@ -896,6 +949,11 @@ impl RootSource for InterpRoots {
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
             }
+            for &held in &interp.held_unwinds {
+                if let Some(unwind) = &*held {
+                    crate::unwind::trace_unwind(unwind, marker);
+                }
+            }
             for value in interp.returned_values.iter().flatten() {
                 marker.mark(*value);
             }
@@ -923,8 +981,7 @@ impl RootSource for InterpRoots {
         // SAFETY: as for `trace`.
         unsafe {
             let state = interp();
-            state.bytecode.call_plans.clear_dead(liveness);
-            state.method_cache.clear_dead(liveness);
+            state.bytecode.clear_dead(liveness);
         }
     }
 }

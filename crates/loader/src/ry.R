@@ -14,6 +14,10 @@
 
 .ry_sources <- function(state, plan) invisible()
 
+# The call that attaches this loader from a profile. A session sources its profiles before it
+# attaches the loader, and a test runner's worker process loads the package from its profile.
+.ry_attach_call <- quote(.Internal(ryLoaderAttach()))
+
 # Compiled code builds with ry's toolchain against ry's R home, so it links ry's libR.
 .ry_compile <- function(root) .Internal(ryLoaderCompile(root, .libPaths()))
 

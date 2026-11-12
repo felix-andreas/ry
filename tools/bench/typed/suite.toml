@@ -1,0 +1,138 @@
+id = "typed"
+name = "Typed ry against Rust"
+summary = "typed kernels and applications, each timed beside the same program written in Rust"
+description = """
+The typed version of every numeric kernel and application workload, timed against the same program
+written in Rust. The Rust twin of `<name>.typed.R` is `tools/bench/typed/<name>.rs`: the same
+algorithm on the same sizes, in the data model a Rust programmer would pick (a `Vec<f64>` for a
+`List<F64>`, a struct for a record, an enum for a tagged union), and where a twin's data model
+differs further, its header comment says how. Rust is the baseline here, so a ratio is typed ry's
+time over Rust's: 1x is Rust's speed, and lower is faster.
+
+Each Rust program is one file compiled with `rustc -O --edition 2024`. `-O` is optimization level
+3, the level of cargo's release profile, and no flag names a target CPU, so the twin is built the
+way a released Rust program is. Both harnesses, `tools/bench/harness.typed.R` and
+`tools/bench/typed/harness.rs`, run the program once cold and five times warm inside one process
+and report the median warm time, and a Rust program passes its inputs through `black_box`, which
+keeps the compiler from computing the result ahead of the run. The two engines must print the same
+checksum.
+"""
+
+[[programs]]
+id = "array_dot"
+display = "Dot product"
+summary = "The dot product of two lists of a million doubles, five times: indexed reads and arithmetic in a loop."
+typed_source = "tools/bench/kernels/array_dot.typed.R"
+rust_source = "tools/bench/typed/array_dot.rs"
+
+[[programs]]
+id = "array_filter"
+display = "Counting filter"
+summary = "Counts the items above one half in a list of a million doubles, five times: one comparison counted over the whole list."
+typed_source = "tools/bench/kernels/array_filter.typed.R"
+rust_source = "tools/bench/typed/array_filter.rs"
+
+[[programs]]
+id = "array_map"
+display = "Element map"
+summary = "Maps a million doubles to `x * 2 + 1` and sums the result, five times: building a list in a loop."
+typed_source = "tools/bench/kernels/array_map.typed.R"
+rust_source = "tools/bench/typed/array_map.rs"
+
+[[programs]]
+id = "array_sum"
+display = "Element sum"
+summary = "Sums a list of a million doubles, twenty times: the cheapest indexed loop."
+typed_source = "tools/bench/kernels/array_sum.typed.R"
+rust_source = "tools/bench/typed/array_sum.rs"
+
+[[programs]]
+id = "closures"
+display = "Closures and lapply"
+summary = "Small closures called in a loop, then two maps over a range: closure calls."
+typed_source = "tools/bench/kernels/closures.typed.R"
+rust_source = "tools/bench/typed/closures.rs"
+
+[[programs]]
+id = "drawdown"
+display = "Drawdown and volatility"
+summary = "Maximum drawdown and EWMA volatility in one pass over two million returns: scalar state carried through a loop."
+typed_source = "tools/bench/kernels/drawdown.typed.R"
+rust_source = "tools/bench/typed/drawdown.rs"
+
+[[programs]]
+id = "fib"
+display = "Recursive Fibonacci"
+summary = "fib(30), about 2.7 million calls of a small recursive function: call overhead."
+typed_source = "tools/bench/kernels/fib.typed.R"
+rust_source = "tools/bench/typed/fib.rs"
+
+[[programs]]
+id = "log_rank"
+display = "Log-rank statistic"
+summary = "The log-rank test statistic over 16,000 subjects, a loop over event times that counts the subjects at risk and the deaths."
+typed_source = "tools/bench/kernels/log_rank.typed.R"
+rust_source = "tools/bench/typed/log_rank.rs"
+
+[[programs]]
+id = "loop_sum"
+display = "Counted loop sum"
+summary = "A scalar double accumulator in a counted loop of ten million steps: the bare loop."
+typed_source = "tools/bench/kernels/loop_sum.typed.R"
+rust_source = "tools/bench/typed/loop_sum.rs"
+
+[[programs]]
+id = "vasicek"
+display = "Vasicek rate paths"
+summary = "Vasicek interest-rate paths, 200 paths stepped 20,000 times: arithmetic over a short list in a long loop."
+typed_source = "tools/bench/kernels/vasicek.typed.R"
+rust_source = "tools/bench/typed/vasicek.rs"
+
+[[programs]]
+id = "vector_arith"
+display = "Vector arithmetic"
+summary = "`x * 2 + x / 3 - 1` over a million doubles, summed, twenty times: whole-list arithmetic."
+typed_source = "tools/bench/kernels/vector_arith.typed.R"
+rust_source = "tools/bench/typed/vector_arith.rs"
+
+[[programs]]
+id = "bond_book"
+display = "Bond book pricing"
+summary = "Prices 200,000 bonds, each a short fold over its discounted cash flows: many small calls."
+typed_source = "tools/bench/applications/bond_book.typed.R"
+rust_source = "tools/bench/typed/bond_book.rs"
+
+[[programs]]
+id = "expr_tree"
+display = "Expression tree"
+summary = "Builds and evaluates a tree of sums, maxima and negations: recursion over a tagged union."
+typed_source = "tools/bench/applications/expr_tree.typed.R"
+rust_source = "tools/bench/typed/expr_tree.rs"
+
+[[programs]]
+id = "orders"
+display = "Order invoicing"
+summary = "Prices 200,000 order lines with a loyalty discount and a regional tax, then totals them: records and branches."
+typed_source = "tools/bench/applications/orders.typed.R"
+rust_source = "tools/bench/typed/orders.rs"
+
+[[programs]]
+id = "report"
+display = "Report formatting"
+summary = "Formats one line per account, then joins and measures the report: string building."
+typed_source = "tools/bench/applications/report.typed.R"
+rust_source = "tools/bench/typed/report.rs"
+
+[[programs]]
+id = "sales"
+display = "Sales table pipeline"
+summary = "Filters a million sales rows, computes each row's revenue and totals it per region: column lists and a Dict keyed by a string."
+typed_source = "tools/bench/applications/sales.typed.R"
+rust_source = "tools/bench/typed/sales.rs"
+
+[[programs]]
+id = "team_scores"
+display = "Row validation"
+summary = "Parses 60,000 comma-separated rows, rejects the invalid ones and totals scores per team: parsing, failures as values and a dictionary."
+typed_source = "tools/bench/applications/team_scores.typed.R"
+rust_source = "tools/bench/typed/team_scores.rs"

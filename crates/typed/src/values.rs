@@ -31,13 +31,16 @@ use {
         format::format_real_alone,
         long_double::{LongDouble, add_all},
         rmath::fround,
+        sort::collate,
     },
     smallvec::SmallVec,
     std::{
         alloc::{self, Layout},
         cell::Cell,
+        cmp,
         fmt::{self, Write},
         hash::{BuildHasher, Hasher},
+        mem::MaybeUninit,
         ptr::{self, null_mut},
         slice,
         sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -103,6 +106,8 @@ pub const BOX_FIELDS: usize = size_of::<Boxed>();
 pub const BOX_SHAPE: usize = std::mem::offset_of!(Boxed, shape);
 /// The most words a box holds, one bit each in its masks.
 pub const MAX_BOX_WORDS: u32 = 32;
+/// Where a dict's values column pointer sits.
+pub const DICT_VALUES: i32 = std::mem::offset_of!(Dict, values) as i32;
 
 /// The list's items belong to someone else (an R vector the compiler borrows).
 pub const VIEW: u8 = 1;
@@ -214,8 +219,7 @@ pub unsafe extern "C" fn ry_list_free(list: *mut List) {
 /// Frees a heap string buffer whose count reached zero.
 pub unsafe extern "C" fn ry_str_free(buffer: *mut u8) {
     let capacity = (*(buffer as *mut StrBuffer)).capacity as usize;
-    block_free(buffer, STR_HEADER + capacity);
-    live_add(-1);
+    object_free(buffer, STR_HEADER + capacity);
 }
 
 pub unsafe extern "C" fn ry_list_dup(list: *mut List) {
@@ -249,7 +253,7 @@ pub unsafe extern "C" fn ry_str_drop(lo: u64, hi: u64) {
 
 /// The number of counted lists, dicts and heap string buffers alive on this thread.
 pub unsafe extern "C" fn ry_live_objects() -> i64 {
-    LIVE_OBJECTS.with(Cell::get)
+    POOLS.with(|pools| pools.live.get())
 }
 
 // Construction.
@@ -257,7 +261,7 @@ pub unsafe extern "C" fn ry_live_objects() -> i64 {
 /// A box of `shape` with count one and `words` uninitialized field words, which the caller fills
 /// before anything can read or free it.
 pub unsafe extern "C" fn ry_box_new(shape: u32, objects: u32, strings: u32, words: u32) -> *mut u8 {
-    let boxed = block_alloc(BOX_FIELDS + 8 * words as usize) as *mut Boxed;
+    let boxed = object_alloc(BOX_FIELDS + 8 * words as usize) as *mut Boxed;
     boxed.write(Boxed {
         count: 1,
         kind: BOX,
@@ -267,7 +271,6 @@ pub unsafe extern "C" fn ry_box_new(shape: u32, objects: u32, strings: u32, word
         strings,
         words,
     });
-    live_add(1);
     boxed as *mut u8
 }
 
@@ -302,6 +305,14 @@ pub unsafe extern "C" fn ry_list_new(kind: u32, length: u64) -> *mut List {
         ptr::write_bytes((*list).data, 0, length * item_size(kind));
     }
     list
+}
+
+/// An empty list of `kind` items with room for `capacity` of them.
+pub unsafe extern "C" fn ry_list_with_capacity(kind: u32, capacity: u64) -> *mut List {
+    let Some(kind) = list_kind(kind) else {
+        return null_mut();
+    };
+    list_alloc(kind, 0, capacity as usize)
 }
 
 /// `from:to` as R counts it: up by one, or down by one when `to < from`.
@@ -359,13 +370,10 @@ pub unsafe extern "C" fn ry_list_range_i64(from: i64, to: i64) -> *mut List {
 /// The longest list `List.range` builds, as the standard library limits it.
 const MAX_RANGE: u128 = i32::MAX as u128;
 
-/// `List.sum` of an `I64` list. Status 0 with the total, and 2 for an empty list (whose sum
-/// the standard library gives as an R integer) or an overflow, where it raises an error.
+/// `List.sum` of an `I64` list. Status 0 with the total, which is 0 for an empty list, and 2 for
+/// an overflow, where the standard library raises an error.
 pub unsafe extern "C" fn ry_sum_i64(a: *mut List, out: *mut i64) -> u32 {
     let data = items::<i64>(a);
-    if data.is_empty() {
-        return 2;
-    }
     let mut total: i64 = 0;
     for &item in data {
         match total.checked_add(item) {
@@ -470,12 +478,51 @@ pub unsafe extern "C" fn ry_list_push(
     let target = if owned != 0 && is_unique(list) {
         list_reserve(list, length + 1)
     } else {
-        let copy = list_copy(list, grown_capacity(length + 1, (*list).capacity as usize));
+        // The copy's room grows from the length, not the shared list's capacity, so a loop of
+        // pushes that each copy does not double the capacity on every step.
+        let copy = list_copy(list, grown_capacity(length + 1, length));
         consume(list, owned);
         copy
     };
     write_item((*target).data, (*target).kind, length, word0, word1);
     (*target).length = length as u64 + 1;
+    target
+}
+
+/// `List.swap`: the items at 1-based positions `first` and `second` exchanged, in place when the
+/// list is owned and unique. An out-of-range position leaves the list unchanged, as in the
+/// library.
+pub unsafe extern "C" fn ry_list_swap(
+    list: *mut List,
+    owned: u32,
+    first: i64,
+    second: i64,
+) -> *mut List {
+    let length = (*list).length as usize;
+    let position = |index: i64| {
+        usize::try_from(index)
+            .ok()
+            .filter(|index| (1..=length).contains(index))
+            .map(|index| index - 1)
+    };
+    let (Some(left), Some(right)) = (position(first), position(second)) else {
+        return pass_through(list, owned);
+    };
+    let target = if owned != 0 && is_unique(list) {
+        list
+    } else {
+        let copy = list_copy(list, length);
+        consume(list, owned);
+        copy
+    };
+    if left != right {
+        let width = item_size((*target).kind);
+        ptr::swap_nonoverlapping(
+            (*target).data.add(left * width),
+            (*target).data.add(right * width),
+            width,
+        );
+    }
     target
 }
 
@@ -654,9 +701,10 @@ pub unsafe extern "C" fn ry_elementwise(
             return 1;
         }
     }
-    // An empty result's type is one only the interpreter knows, except for a sum of doubles.
+    // An empty list's type is one only the interpreter knows, except that a sum of it is 0 of
+    // the program's kind, as the standard library sums an empty list of either kind.
     let length = match length {
-        Some(length) if length > 0 || (sum != 0 && kind == DBL) => length as usize,
+        Some(length) if length > 0 || sum != 0 => length as usize,
         _ => return 1,
     };
     let sum = sum != 0;
@@ -682,13 +730,56 @@ pub unsafe extern "C" fn ry_elementwise(
     0
 }
 
+/// Chunks on the stack, one per row, of which a kernel reads only the rows it has filled.
+/// Declaring them as zeroed arrays would clear every row on every call, which costs more than a
+/// short list's whole program.
+struct Rows<T, const N: usize>(MaybeUninit<[[T; CHUNK]; N]>);
+
+impl<T: Copy, const N: usize> Rows<T, N> {
+    fn new() -> Rows<T, N> {
+        Rows(MaybeUninit::uninit())
+    }
+
+    /// Fills row `row` with copies of `value`.
+    fn fill(&mut self, row: usize, value: T) {
+        assert!(row < N);
+        // SAFETY: the row is inside the array, and writing does not read what was there.
+        unsafe {
+            (self.0.as_mut_ptr() as *mut [T; CHUNK])
+                .add(row)
+                .write([value; CHUNK]);
+        }
+    }
+
+    /// Row `row`, which must be filled.
+    unsafe fn row(&self, row: usize) -> &[T; CHUNK] {
+        debug_assert!(row < N);
+        &*(self.0.as_ptr() as *const [T; CHUNK]).add(row)
+    }
+
+    /// Row `row`, which must be filled, to write.
+    unsafe fn row_mut(&mut self, row: usize) -> &mut [T; CHUNK] {
+        debug_assert!(row < N);
+        &mut *(self.0.as_mut_ptr() as *mut [T; CHUNK]).add(row)
+    }
+
+    /// The first `rows` rows, cleared to zero bytes, which must be a value of `T`.
+    unsafe fn cleared(&mut self, rows: usize) -> &mut [[T; CHUNK]] {
+        assert!(rows <= N);
+        let first = self.0.as_mut_ptr() as *mut [T; CHUNK];
+        ptr::write_bytes(first, 0, rows);
+        slice::from_raw_parts_mut(first, rows)
+    }
+}
+
 /// The operand slice of item chunk `start..start + chunk`: an input list's items, a scalar's
 /// copies, or an earlier step's chunk.
+#[inline(always)]
 unsafe fn operand<'a, T: Copy>(
     index: usize,
     inputs: &[u64],
     lists: u32,
-    scalars: &'a [[T; CHUNK]],
+    scalars: &'a Rows<T, ELEMENTWISE_INPUTS>,
     done: &'a [[T; CHUNK]],
     start: usize,
     chunk: usize,
@@ -699,9 +790,13 @@ unsafe fn operand<'a, T: Copy>(
         let list = inputs[index] as *const List;
         raw_slice(((*list).data as *const T).add(start), chunk)
     } else {
-        &scalars[index][..chunk]
+        &scalars.row(index)[..chunk]
     }
 }
+
+/// One step of a fused program over a chunk: `target[i] = left[i] op right[i]`. False when the
+/// step fails, which hands the call to the interpreter.
+type Step<T> = unsafe fn(u32, &mut [T], &[T], &[T]) -> bool;
 
 unsafe fn elementwise_dbl(
     program: &[u32],
@@ -711,13 +806,19 @@ unsafe fn elementwise_dbl(
     result: *mut List,
     out: *mut u64,
 ) -> u32 {
-    let mut scalars = [[0.0f64; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut step_chunk: Step<f64> = step_dbl_baseline;
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        step_chunk = step_dbl_avx2;
+    }
+    let mut scalars = Rows::<f64, ELEMENTWISE_INPUTS>::new();
     for (index, &word) in inputs.iter().enumerate() {
         if lists & (1 << index) == 0 {
-            scalars[index] = [f64::from_bits(word); CHUNK];
+            scalars.fill(index, f64::from_bits(word));
         }
     }
-    let mut buffers = [[0.0f64; CHUNK]; ELEMENTWISE_STEPS];
+    let mut buffers = Rows::<f64, ELEMENTWISE_STEPS>::new();
+    let buffers = buffers.cleared(program.len());
     let mut total = LongDouble::ZERO;
     let last = program.len() - 1;
     let mut start = 0;
@@ -725,7 +826,12 @@ unsafe fn elementwise_dbl(
         let chunk = CHUNK.min(length - start);
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
-            let target = &mut rest[0][..chunk];
+            // The last step of a program that gives a list writes the list's items.
+            let target = if step == last && !result.is_null() {
+                slice::from_raw_parts_mut(((*result).data as *mut f64).add(start), chunk)
+            } else {
+                &mut rest[0][..chunk]
+            };
             let left = operand(
                 encoded as usize >> 8 & 0xFF,
                 inputs,
@@ -744,38 +850,12 @@ unsafe fn elementwise_dbl(
                 start,
                 chunk,
             );
-            let pairs = target.iter_mut().zip(left.iter().zip(right));
-            let mut lost = false;
-            match encoded & 0xFF {
-                ADD => pairs.for_each(|(slot, (&x, &y))| *slot = x + y),
-                SUB => pairs.for_each(|(slot, (&x, &y))| *slot = x - y),
-                MUL => pairs.for_each(|(slot, (&x, &y))| *slot = x * y),
-                DIV => pairs.for_each(|(slot, (&x, &y))| *slot = x / y),
-                POW => pairs.for_each(|(slot, (&x, &y))| *slot = power(x, y)),
-                MOD => pairs.for_each(|(slot, (&x, &y))| {
-                    // A quotient too large for the remainder to mean anything makes R warn.
-                    lost |= modulus_loses_accuracy(x, y);
-                    *slot = real_modulo(x, y);
-                }),
-                IDIV => pairs.for_each(|(slot, (&x, &y))| *slot = real_integer_divide(x, y)),
-                _ => return 1,
-            }
-            let undefined = target
-                .iter()
-                .fold(false, |found, &value| found | value.is_nan());
-            if lost || undefined {
+            if !step_chunk(encoded & 0xFF, target, left, right) {
                 return 1;
             }
         }
-        let items = &buffers[last][..chunk];
         if result.is_null() {
-            total = add_all(total, items);
-        } else {
-            ptr::copy_nonoverlapping(
-                items.as_ptr(),
-                ((*result).data as *mut f64).add(start),
-                chunk,
-            );
+            total = add_all(total, &buffers[last][..chunk]);
         }
         start += chunk;
     }
@@ -783,6 +863,58 @@ unsafe fn elementwise_dbl(
         *out = (0.0 + total.to_f64()).to_bits();
     }
     0
+}
+
+/// [`step_dbl`] for the instruction set every x86-64 machine has.
+unsafe fn step_dbl_baseline(op: u32, target: &mut [f64], left: &[f64], right: &[f64]) -> bool {
+    step_dbl(op, target, left, right)
+}
+
+/// [`step_dbl`] compiled for AVX2, which works on four doubles at a time where the baseline
+/// instruction set works on two.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn step_dbl_avx2(op: u32, target: &mut [f64], left: &[f64], right: &[f64]) -> bool {
+    step_dbl(op, target, left, right)
+}
+
+/// A step over doubles, which fails on a `NaN` result, an unknown `op`, or a modulus whose
+/// quotient is too large for the remainder to mean anything (R warns there). The slices are
+/// parameters, so the compiler knows they do not overlap and each arm's loop becomes vector
+/// code.
+#[inline(always)]
+fn step_dbl(op: u32, target: &mut [f64], left: &[f64], right: &[f64]) -> bool {
+    #[inline(always)]
+    fn fill(
+        target: &mut [f64],
+        left: &[f64],
+        right: &[f64],
+        combine: impl Fn(f64, f64) -> f64,
+    ) -> bool {
+        let mut undefined = false;
+        for (slot, (&x, &y)) in target.iter_mut().zip(left.iter().zip(right)) {
+            let value = combine(x, y);
+            undefined |= value.is_nan();
+            *slot = value;
+        }
+        !undefined
+    }
+    match op {
+        ADD => fill(target, left, right, |x, y| x + y),
+        SUB => fill(target, left, right, |x, y| x - y),
+        MUL => fill(target, left, right, |x, y| x * y),
+        DIV => fill(target, left, right, |x, y| x / y),
+        POW => fill(target, left, right, power),
+        MOD => {
+            let lost = left
+                .iter()
+                .zip(right)
+                .any(|(&x, &y)| modulus_loses_accuracy(x, y));
+            !lost && fill(target, left, right, real_modulo)
+        }
+        IDIV => fill(target, left, right, real_integer_divide),
+        _ => false,
+    }
 }
 
 unsafe fn elementwise_i64(
@@ -793,13 +925,19 @@ unsafe fn elementwise_i64(
     result: *mut List,
     out: *mut u64,
 ) -> u32 {
-    let mut scalars = [[0i64; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut step_chunk: Step<i64> = step_i64_baseline;
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        step_chunk = step_i64_avx2;
+    }
+    let mut scalars = Rows::<i64, ELEMENTWISE_INPUTS>::new();
     for (index, &word) in inputs.iter().enumerate() {
         if lists & (1 << index) == 0 {
-            scalars[index] = [word as i64; CHUNK];
+            scalars.fill(index, word as i64);
         }
     }
-    let mut buffers = [[0i64; CHUNK]; ELEMENTWISE_STEPS];
+    let mut buffers = Rows::<i64, ELEMENTWISE_STEPS>::new();
+    let buffers = buffers.cleared(program.len());
     let mut total: i64 = 0;
     let last = program.len() - 1;
     let mut start = 0;
@@ -807,7 +945,11 @@ unsafe fn elementwise_i64(
         let chunk = CHUNK.min(length - start);
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
-            let target = &mut rest[0][..chunk];
+            let target = if step == last && !result.is_null() {
+                slice::from_raw_parts_mut(((*result).data as *mut i64).add(start), chunk)
+            } else {
+                &mut rest[0][..chunk]
+            };
             let left = operand(
                 encoded as usize >> 8 & 0xFF,
                 inputs,
@@ -826,39 +968,17 @@ unsafe fn elementwise_i64(
                 start,
                 chunk,
             );
-            let pairs = target.iter_mut().zip(left.iter().zip(right));
-            let mut overflow = false;
-            let apply = |combine: fn(i64, i64) -> (i64, bool)| {
-                for (slot, (&x, &y)) in pairs {
-                    let (value, overflowed) = combine(x, y);
-                    overflow |= overflowed;
-                    *slot = value;
-                }
-            };
-            match encoded & 0xFF {
-                ADD => apply(i64::overflowing_add),
-                SUB => apply(i64::overflowing_sub),
-                MUL => apply(i64::overflowing_mul),
-                _ => return 1,
-            }
-            if overflow {
+            if !step_chunk(encoded & 0xFF, target, left, right) {
                 return 1;
             }
         }
-        let items = &buffers[last][..chunk];
         if result.is_null() {
-            for &item in items {
+            for &item in &buffers[last][..chunk] {
                 let Some(next) = total.checked_add(item) else {
                     return 1;
                 };
                 total = next;
             }
-        } else {
-            ptr::copy_nonoverlapping(
-                items.as_ptr(),
-                ((*result).data as *mut i64).add(start),
-                chunk,
-            );
         }
         start += chunk;
     }
@@ -868,8 +988,380 @@ unsafe fn elementwise_i64(
     0
 }
 
+/// [`step_i64`] for the instruction set every x86-64 machine has.
+unsafe fn step_i64_baseline(op: u32, target: &mut [i64], left: &[i64], right: &[i64]) -> bool {
+    step_i64(op, target, left, right)
+}
+
+/// [`step_i64`] compiled for AVX2, whose 64-bit integer compares the overflow tests of `+`
+/// and `-` need to run as vector code.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn step_i64_avx2(op: u32, target: &mut [i64], left: &[i64], right: &[i64]) -> bool {
+    step_i64(op, target, left, right)
+}
+
+/// A step over `I64` items, which fails on overflow or an unknown `op`.
+#[inline(always)]
+fn step_i64(op: u32, target: &mut [i64], left: &[i64], right: &[i64]) -> bool {
+    #[inline(always)]
+    fn fill(
+        target: &mut [i64],
+        left: &[i64],
+        right: &[i64],
+        combine: impl Fn(i64, i64) -> (i64, bool),
+    ) -> bool {
+        let mut overflow = false;
+        for (slot, (&x, &y)) in target.iter_mut().zip(left.iter().zip(right)) {
+            let (value, overflowed) = combine(x, y);
+            overflow |= overflowed;
+            *slot = value;
+        }
+        !overflow
+    }
+    match op {
+        ADD => fill(target, left, right, i64::overflowing_add),
+        SUB => fill(target, left, right, i64::overflowing_sub),
+        MUL => fill(target, left, right, i64::overflowing_mul),
+        _ => false,
+    }
+}
+
+/// A step of a [`ry_count_true`] program: `MASK_I64 + op` and `MASK_DBL + op` compare two
+/// numeric inputs with comparison `op` (`EQ` to `GE`); the others combine logical operands.
+pub const MASK_I64: u32 = 0;
+pub const MASK_DBL: u32 = 8;
+pub const MASK_AND: u32 = 16;
+pub const MASK_OR: u32 = 17;
+pub const MASK_NOT: u32 = 18;
+
+/// A logical item as a lane of a [`ry_count_true`] chunk. `NA` sits between false and true, so
+/// `&` is the minimum, `|` the maximum and `!` the reflection, as R's three-valued logic has it.
+const LANE_FALSE: u8 = 0;
+const LANE_NA: u8 = 1;
+const LANE_TRUE: u8 = 2;
+
+/// How [`ry_count_true`] reads an input, which the steps that use it decide.
+#[derive(Clone, Copy, PartialEq)]
+enum MaskRole {
+    Unused,
+    I64,
+    Dbl,
+    Logical,
+}
+
+/// Counts the true items of a logical ry list in one pass, a chunk at a time, with no list for
+/// any intermediate result. With no steps, input 0 is the list. Otherwise `program` has `steps`
+/// steps, each `code | left << 8 | right << 16` over operands numbered inputs first and earlier
+/// steps after them (`MASK_NOT` ignores `right`), and the last step is the list. A comparison
+/// reads two inputs, a list or a scalar of its type; a logical step reads logical inputs or
+/// steps. `inputs` holds each input's word: a list pointer where bit `k` of `lists` is set, else
+/// a scalar's bits. The lists must have one length, as ry lists never recycle.
+///
+/// Status 0 leaves the count in `out`. Status 1 gives up, for the interpreter to raise the
+/// error an `NA` item is, or to handle the case.
+pub unsafe extern "C" fn ry_count_true(
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    out: *mut i64,
+) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        return count_true_avx2(program, steps, inputs, input_count, lists, out);
+    }
+    count_true(program, steps, inputs, input_count, lists, out)
+}
+
+/// [`count_true`] compiled for AVX2, whose 256-bit integer compares and byte operations the
+/// chunk loops vectorize with. The baseline x86-64 instruction set has no 64-bit integer
+/// compare, so there the loops over `I64` items stay scalar.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn count_true_avx2(
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    out: *mut i64,
+) -> u32 {
+    count_true(program, steps, inputs, input_count, lists, out)
+}
+
+/// The body of [`ry_count_true`], inlined into one copy per instruction set.
+#[inline(always)]
+unsafe fn count_true(
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    out: *mut i64,
+) -> u32 {
+    let (steps, input_count) = (steps as usize, input_count as usize);
+    if steps > ELEMENTWISE_STEPS || input_count == 0 || input_count > ELEMENTWISE_INPUTS {
+        return 1;
+    }
+    let program = raw_slice(program, steps);
+    let inputs = raw_slice(inputs, input_count);
+    let mut roles = [MaskRole::Unused; ELEMENTWISE_INPUTS];
+    if steps == 0 {
+        roles[0] = MaskRole::Logical;
+    }
+    for (step, &encoded) in program.iter().enumerate() {
+        let code = encoded & 0xFF;
+        let reach = input_count + step;
+        let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
+        let (role, operands) = match code {
+            _ if code <= MASK_I64 + GE => (MaskRole::I64, [Some(left), Some(right)]),
+            _ if (MASK_DBL..=MASK_DBL + GE).contains(&code) => {
+                (MaskRole::Dbl, [Some(left), Some(right)])
+            }
+            MASK_AND | MASK_OR => (MaskRole::Logical, [Some(left), Some(right)]),
+            MASK_NOT => (MaskRole::Logical, [Some(left), None]),
+            _ => return 1,
+        };
+        for operand in operands.into_iter().flatten() {
+            if operand >= reach {
+                return 1;
+            }
+            if operand >= input_count {
+                // Only a logical step reads an earlier step, whose items are lanes.
+                if role != MaskRole::Logical {
+                    return 1;
+                }
+                continue;
+            }
+            match roles[operand] {
+                MaskRole::Unused => roles[operand] = role,
+                found if found == role => {}
+                _ => return 1,
+            }
+        }
+    }
+    let mut length = None;
+    for (index, &word) in inputs.iter().enumerate() {
+        if lists & (1 << index) == 0 {
+            continue;
+        }
+        let list = word as *const List;
+        let kind = match roles[index] {
+            MaskRole::I64 => I64,
+            MaskRole::Dbl => DBL,
+            MaskRole::Logical => LGL,
+            MaskRole::Unused => return 1,
+        };
+        if (*list).kind != kind || length.is_some_and(|length| length != (*list).length) {
+            return 1;
+        }
+        length = Some((*list).length);
+    }
+    let Some(length) = length else {
+        return 1;
+    };
+    let length = length as usize;
+    // Without a branch, so the loop over a logical list's items vectorizes.
+    let lane = |item: i32| {
+        let defined = if item != 0 { LANE_TRUE } else { LANE_FALSE };
+        if item == NA_LOGICAL { LANE_NA } else { defined }
+    };
+    let mut wholes = Rows::<i64, ELEMENTWISE_INPUTS>::new();
+    let mut doubles = Rows::<f64, ELEMENTWISE_INPUTS>::new();
+    // A logical input's row holds a scalar's lane, or the lanes of a list's current chunk.
+    let mut lanes = Rows::<u8, ELEMENTWISE_INPUTS>::new();
+    for (index, &word) in inputs.iter().enumerate() {
+        let scalar = lists & (1 << index) == 0;
+        match roles[index] {
+            MaskRole::I64 if scalar => wholes.fill(index, word as i64),
+            MaskRole::Dbl if scalar => doubles.fill(index, f64::from_bits(word)),
+            MaskRole::Logical if scalar => lanes.fill(index, lane(word as i32)),
+            MaskRole::Logical => lanes.fill(index, LANE_FALSE),
+            _ => {}
+        }
+    }
+    let mut buffers = Rows::<u8, ELEMENTWISE_STEPS>::new();
+    let buffers = buffers.cleared(program.len());
+    let mut count: i64 = 0;
+    let mut start = 0;
+    while start < length {
+        let chunk = CHUNK.min(length - start);
+        for (index, &word) in inputs.iter().enumerate() {
+            if lists & (1 << index) != 0 && roles[index] == MaskRole::Logical {
+                let items = raw_slice(
+                    ((*(word as *const List)).data as *const i32).add(start),
+                    chunk,
+                );
+                for (slot, &item) in lanes.row_mut(index).iter_mut().zip(items) {
+                    *slot = lane(item);
+                }
+            }
+        }
+        // A count of one comparison, the common case, is tallied as the items are compared,
+        // which vectorizes to a compare and a subtraction with no lane written per item.
+        if let [encoded] = *program
+            && encoded & 0xFF <= MASK_DBL + GE
+        {
+            let code = encoded & 0xFF;
+            let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
+            let (trues, missing) = if code >= MASK_DBL {
+                let x = operand(left, inputs, lists, &doubles, &[], start, chunk);
+                let y = operand(right, inputs, lists, &doubles, &[], start, chunk);
+                tally_compared(code - MASK_DBL, x, y, f64::is_nan)
+            } else {
+                let x = operand(left, inputs, lists, &wholes, &[], start, chunk);
+                let y = operand(right, inputs, lists, &wholes, &[], start, chunk);
+                tally_compared(code, x, y, |_| false)
+            };
+            if missing {
+                return 1;
+            }
+            count += trues;
+            start += chunk;
+            continue;
+        }
+        for (step, &encoded) in program.iter().enumerate() {
+            let (done, rest) = buffers.split_at_mut(step);
+            let target = &mut rest[0][..chunk];
+            let code = encoded & 0xFF;
+            let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
+            let logical = |index: usize| -> &[u8] {
+                if index >= input_count {
+                    &done[index - input_count][..chunk]
+                } else {
+                    &lanes.row(index)[..chunk]
+                }
+            };
+            match code {
+                MASK_AND | MASK_OR => {
+                    let pairs = target
+                        .iter_mut()
+                        .zip(logical(left).iter().zip(logical(right)));
+                    if code == MASK_AND {
+                        pairs.for_each(|(slot, (&x, &y))| *slot = x.min(y));
+                    } else {
+                        pairs.for_each(|(slot, (&x, &y))| *slot = x.max(y));
+                    }
+                }
+                MASK_NOT => {
+                    for (slot, &x) in target.iter_mut().zip(logical(left)) {
+                        *slot = LANE_TRUE - x;
+                    }
+                }
+                _ if code >= MASK_DBL => {
+                    let x = operand(left, inputs, lists, &doubles, &[], start, chunk);
+                    let y = operand(right, inputs, lists, &doubles, &[], start, chunk);
+                    compare_lanes(code - MASK_DBL, x, y, target, f64::is_nan);
+                }
+                _ => {
+                    let x = operand(left, inputs, lists, &wholes, &[], start, chunk);
+                    let y = operand(right, inputs, lists, &wholes, &[], start, chunk);
+                    // An `I64` has no `NA`.
+                    compare_lanes(code, x, y, target, |_| false);
+                }
+            }
+        }
+        let result = match program.len() {
+            0 => &lanes.row(0)[..chunk],
+            steps => &buffers[steps - 1][..chunk],
+        };
+        // A chunk's lanes are tallied in a byte, which a chunk cannot overflow, so the loop
+        // adds whole vectors of lanes where a 64-bit tally widens every lane first.
+        const { assert!(CHUNK <= u8::MAX as usize && LANE_TRUE == 2 && LANE_NA == 1) };
+        let mut trues: u8 = 0;
+        let mut missing: u8 = 0;
+        for &item in result {
+            trues += item >> 1;
+            missing |= item & 1;
+        }
+        if missing != 0 {
+            return 1;
+        }
+        count += i64::from(trues);
+        start += chunk;
+    }
+    *out = count;
+    0
+}
+
+/// How many pairs of two chunks comparison `op` holds for, and whether any item is
+/// `undefined`, which makes its pair `NA`. The match on `op` sits outside the loops so that
+/// each loop compiles to vector code.
+#[inline(always)]
+fn tally_compared<T: PartialOrd + Copy>(
+    op: u32,
+    x: &[T],
+    y: &[T],
+    undefined: impl Fn(T) -> bool + Copy,
+) -> (i64, bool) {
+    #[inline(always)]
+    fn tally<T: Copy>(
+        x: &[T],
+        y: &[T],
+        undefined: impl Fn(T) -> bool,
+        test: impl Fn(&T, &T) -> bool,
+    ) -> (i64, bool) {
+        let mut trues = 0;
+        let mut missing = false;
+        for (x, y) in x.iter().zip(y) {
+            trues += i64::from(test(x, y));
+            missing |= undefined(*x) | undefined(*y);
+        }
+        (trues, missing)
+    }
+    match op {
+        EQ => tally(x, y, undefined, T::eq),
+        NE => tally(x, y, undefined, T::ne),
+        LT => tally(x, y, undefined, T::lt),
+        LE => tally(x, y, undefined, T::le),
+        GT => tally(x, y, undefined, T::gt),
+        _ => tally(x, y, undefined, T::ge),
+    }
+}
+
+/// Comparison `op` of two chunks as lanes, `NA` where either item is `undefined`. The match on
+/// `op` sits outside the loops so that each loop compiles to vector code.
+#[inline(always)]
+fn compare_lanes<T: PartialOrd + Copy>(
+    op: u32,
+    x: &[T],
+    y: &[T],
+    target: &mut [u8],
+    undefined: impl Fn(T) -> bool + Copy,
+) {
+    // Generic over the test, not a function pointer, so each comparison gets its own loop
+    // that the compiler can vectorize.
+    #[inline(always)]
+    fn fill<T: Copy>(
+        x: &[T],
+        y: &[T],
+        target: &mut [u8],
+        undefined: impl Fn(T) -> bool,
+        test: impl Fn(&T, &T) -> bool,
+    ) {
+        for (slot, (x, y)) in target.iter_mut().zip(x.iter().zip(y)) {
+            let defined = !(undefined(*x) | undefined(*y));
+            *slot = if defined {
+                test(x, y) as u8 * LANE_TRUE
+            } else {
+                LANE_NA
+            };
+        }
+    }
+    match op {
+        EQ => fill(x, y, target, undefined, T::eq),
+        NE => fill(x, y, target, undefined, T::ne),
+        LT => fill(x, y, target, undefined, T::lt),
+        LE => fill(x, y, target, undefined, T::le),
+        GT => fill(x, y, target, undefined, T::gt),
+        _ => fill(x, y, target, undefined, T::ge),
+    }
+}
+
 /// `a op b` elementwise as a logical list; `NA` or `NaN` on either side gives `NA`. Strings
-/// support only `==` and `!=`.
+/// order as [`str_order`] gives.
 pub unsafe extern "C" fn ry_compare(
     op: u32,
     kind: u32,
@@ -1376,11 +1868,20 @@ pub unsafe extern "C" fn ry_str_equal(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64
     str_equal(&Str { lo: a_lo, hi: a_hi }, &Str { lo: b_lo, hi: b_hi }) as i32
 }
 
-/// Bytewise order, -1, 0 or 1: the C locale's collation.
+/// The order of two strings, -1, 0 or 1, as [`str_order`] gives it.
 pub unsafe extern "C" fn ry_str_compare(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64) -> i32 {
-    let a = Str { lo: a_lo, hi: a_hi };
-    let b = Str { lo: b_lo, hi: b_hi };
-    a.bytes().cmp(b.bytes()) as i32
+    str_order(&Str { lo: a_lo, hi: a_hi }, &Str { lo: b_lo, hi: b_hi }) as i32
+}
+
+/// The order of two strings as R's `<` gives it in the session's locale, so a typed comparison
+/// agrees with the interpreter that reruns the same code: code point order in the `C` locale, the
+/// root collation otherwise.
+unsafe fn str_order(a: &Str, b: &Str) -> cmp::Ordering {
+    match (str::from_utf8(a.bytes()), str::from_utf8(b.bytes())) {
+        (Ok(a), Ok(b)) => collate(a, b),
+        // Typed strings are UTF-8, which the boundary and every string operation keep.
+        _ => panic!("a typed string that is not UTF-8"),
+    }
 }
 
 /// `substr(x, start, stop)` counted in characters, from 1: a start below 1 reads as 1, a stop
@@ -1522,6 +2023,36 @@ pub unsafe extern "C" fn ry_str_split(
         slice_mut::<Str>((*list).data, 1)[0] = string;
         return list;
     }
+    // A one-byte separator is ASCII, so it never falls inside a character, and the pieces can
+    // be cut from the bytes directly, without the general substring search. The text is read
+    // eight bytes at a time, once to count the pieces and once to cut them.
+    if let [byte] = *separator.as_bytes() {
+        let text = string.bytes();
+        let pattern = u64::from(byte) * 0x0101_0101_0101_0101;
+        let mut length = 1;
+        let mut index = 0;
+        while index < text.len() {
+            length += separators_in_word(text, index, pattern).count_ones() as usize;
+            index += 8;
+        }
+        let list = list_alloc(STR, length, length);
+        let mut slot = (*list).data as *mut Str;
+        let mut start = 0;
+        index = 0;
+        while index < text.len() {
+            let mut found = separators_in_word(text, index, pattern);
+            while found != 0 {
+                let at = index + (found.trailing_zeros() / 8) as usize;
+                slot.write(str_from_bytes(text.get_unchecked(start..at)));
+                slot = slot.add(1);
+                start = at + 1;
+                found &= found - 1;
+            }
+            index += 8;
+        }
+        slot.write(str_from_bytes(text.get_unchecked(start..)));
+        return list;
+    }
     let text = string.as_str();
     let length = text.split(separator).count();
     let list = list_alloc(STR, length, length);
@@ -1532,6 +2063,60 @@ pub unsafe extern "C" fn ry_str_split(
         *slot = str_from_bytes(piece.as_bytes());
     }
     list
+}
+
+/// The top bit of every byte, among the eight of `text` from `index` on, that equals the byte
+/// `pattern` repeats. Bytes past the end of the text never match.
+#[inline]
+unsafe fn separators_in_word(text: &[u8], index: usize, pattern: u64) -> u64 {
+    const LOW_BITS: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    let remaining = text.len() - index;
+    let (word, inside) = if remaining >= 8 {
+        let word = (text.as_ptr().add(index) as *const u64).read_unaligned();
+        (word, u64::MAX)
+    } else {
+        // An inline string of up to eight bytes holds them in its first word, zero-padded.
+        let word = str_from_bytes(text.get_unchecked(index..)).lo;
+        (word, (1 << (8 * remaining)) - 1)
+    };
+    // A matching byte is zero after the exclusive or, and the sum sets the top bit of every
+    // byte that has a low bit set without carrying into the next byte.
+    let differing = word ^ pattern;
+    !(((differing & LOW_BITS) + LOW_BITS) | differing | LOW_BITS) & inside
+}
+
+/// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
+pub unsafe extern "C" fn ry_str_to_utf8(lo: u64, hi: u64) -> *mut List {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let list = list_alloc(I64, bytes.len(), bytes.len());
+    for (slot, &byte) in slice_mut::<i64>((*list).data, bytes.len())
+        .iter_mut()
+        .zip(bytes)
+    {
+        *slot = i64::from(byte);
+    }
+    list
+}
+
+/// `Str.from_utf8_lossy` of a borrowed list of `I64`s, written to `out`: 1, or 0 when an item is
+/// not a byte, which the interpreter reports. R strings hold no NUL byte, so it is replaced like
+/// a byte that is not UTF-8.
+pub unsafe extern "C" fn ry_list_from_utf8_lossy(list: *mut List, out: *mut Str) -> u32 {
+    let mut bytes = Vec::with_capacity((*list).length as usize);
+    for &item in items::<i64>(list) {
+        match u8::try_from(item) {
+            Ok(byte) => bytes.push(byte),
+            Err(_) => return 0,
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    *out = if text.contains('\0') {
+        str_from_bytes(text.replace('\0', "\u{FFFD}").as_bytes())
+    } else {
+        str_from_bytes(text.as_bytes())
+    };
+    1
 }
 
 // Lists.
@@ -1879,31 +2464,37 @@ pub unsafe extern "C" fn ry_dict_insert(
     dict as *mut u8
 }
 
-/// 1 when `key` is present, with the value's words in `out[0]` and `out[1]` (a string value
-/// counted for the caller); 0 otherwise.
-pub unsafe extern "C" fn ry_dict_get(dict: *mut u8, key0: u64, key1: u64, out: *mut u64) -> u32 {
-    let dict = dict as *mut Dict;
-    let Some(position) = dict_find(dict, key0, key1) else {
-        return 0;
-    };
-    let value = value_slot(dict, position);
-    match (*dict).value_kind {
-        DBL | I64 => {
-            *out = *(value as *const u64);
-            *out.add(1) = 0;
-        }
-        STR => {
-            let item = *(value as *const Str);
-            str_dup(item);
-            *out = item.lo;
-            *out.add(1) = item.hi;
-        }
-        _ => {
-            *out = *(value as *const i32) as u32 as u64;
-            *out.add(1) = 0;
-        }
+/// The dict with `key` mapped to the value, as [`ry_dict_insert`] gives it, for a caller that
+/// holds the `position` [`ry_dict_find`] gave for `key` in this dict. A key that is present in
+/// a dict that is owned and unshared is written at its position, with no hashing.
+pub unsafe extern "C" fn ry_dict_put(
+    dict: *mut u8,
+    owned: u32,
+    position: i64,
+    key0: u64,
+    key1: u64,
+    value0: u64,
+    value1: u64,
+) -> *mut u8 {
+    let held = dict as *mut Dict;
+    if position < 0 || owned == 0 || (*held).count != 1 {
+        return ry_dict_insert(dict, owned, key0, key1, value0, value1);
     }
-    1
+    let value = value_slot(held, position as usize);
+    if (*held).value_kind == STR {
+        str_drop(*(value as *const Str));
+    }
+    write_item(value, (*held).value_kind, 0, value0, value1);
+    dict
+}
+
+/// The column position of `key`'s entry, where the values column holds its value, or -1 when
+/// the dict lacks the key.
+pub unsafe extern "C" fn ry_dict_find(dict: *mut u8, key0: u64, key1: u64) -> i64 {
+    match dict_find(dict as *mut Dict, key0, key1) {
+        Some(position) => position as i64,
+        None => -1,
+    }
 }
 
 /// The dict without `key`. The removed entry keeps its column position until half the entries
@@ -2055,85 +2646,119 @@ const UNIQUE_SEED: u64 = 0x2d35_8dcc_aa6c_78a5;
 static HASH_SEED: AtomicU64 = AtomicU64::new(0);
 static HASH_SEEDED: AtomicBool = AtomicBool::new(false);
 
-thread_local! {
-    static FREE_STACKS: [Cell<*mut FreeBlock>; CLASS_COUNT] =
-        const { [const { Cell::new(null_mut()) }; CLASS_COUNT] };
-    static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
+/// A thread's allocator state. It is one thread-local value because a thread-local read in a
+/// shared library is a call, and an allocation or a free that touched the free stacks and the
+/// live count as separate thread-locals paid that call twice.
+struct Pools {
+    free: [Cell<*mut FreeBlock>; CLASS_COUNT],
+    live: Cell<i64>,
     /// Freed blocks above 64 KiB by power-of-two class, kept so a loop that makes a large list
     /// every iteration reuses memory whose pages are already mapped.
-    static LARGE_STACKS: [Cell<*mut FreeBlock>; LARGE_CLASS_COUNT] =
-        const { [const { Cell::new(null_mut()) }; LARGE_CLASS_COUNT] };
-    static LARGE_KEPT: [Cell<u8>; LARGE_CLASS_COUNT] =
-        const { [const { Cell::new(0) }; LARGE_CLASS_COUNT] };
+    large: [Cell<*mut FreeBlock>; LARGE_CLASS_COUNT],
+    large_kept: [Cell<u8>; LARGE_CLASS_COUNT],
+}
+
+thread_local! {
+    static POOLS: Pools = const {
+        Pools {
+            free: [const { Cell::new(null_mut()) }; CLASS_COUNT],
+            live: Cell::new(0),
+            large: [const { Cell::new(null_mut()) }; LARGE_CLASS_COUNT],
+            large_kept: [const { Cell::new(0) }; LARGE_CLASS_COUNT],
+        }
+    };
 }
 
 // Allocation.
 
 /// A block of at least `size` bytes, 16-byte aligned: a pooled power of two up to 64 KiB, else
 /// a larger power of two that a freed block of its class provides when there is one.
+#[inline]
 unsafe fn block_alloc(size: usize) -> *mut u8 {
-    if size > MAX_BLOCK {
-        let class = large_class(size);
-        let kept = LARGE_STACKS.with(|stacks| {
-            let top = stacks[class].get();
-            if !top.is_null() {
-                stacks[class].set((*top).next);
-                LARGE_KEPT.with(|kept| kept[class].set(kept[class].get() - 1));
-            }
-            top
-        });
-        if !kept.is_null() {
-            return kept as *mut u8;
-        }
-        let layout = large_layout(size);
-        let block = alloc::alloc(layout);
-        if block.is_null() {
-            alloc::handle_alloc_error(layout);
-        }
-        return block;
-    }
-    let class = size_class(size);
-    FREE_STACKS.with(|stacks| {
-        let stack = &stacks[class];
-        let mut top = stack.get();
-        if top.is_null() {
-            top = refill(class);
-        }
-        stack.set((*top).next);
-        top as *mut u8
+    POOLS.with(|pools| block_alloc_in(pools, size))
+}
+
+/// A block for a counted object (a list, a dict, a box or a string buffer), which joins the
+/// thread's live count.
+#[inline]
+unsafe fn object_alloc(size: usize) -> *mut u8 {
+    POOLS.with(|pools| {
+        pools.live.set(pools.live.get() + 1);
+        block_alloc_in(pools, size)
     })
 }
 
-/// Returns a block from `block_alloc(size)`; `size` must be the size it was allocated with.
-unsafe fn block_free(block: *mut u8, size: usize) {
+/// Returns the block of a counted object, which leaves the thread's live count.
+#[inline]
+unsafe fn object_free(block: *mut u8, size: usize) {
+    POOLS.with(|pools| {
+        pools.live.set(pools.live.get() - 1);
+        block_free_in(pools, block, size)
+    })
+}
+
+/// [`block_alloc`] for a caller that already holds the thread's pools.
+#[inline]
+unsafe fn block_alloc_in(pools: &Pools, size: usize) -> *mut u8 {
     if size > MAX_BLOCK {
-        let class = large_class(size);
-        let keep = LARGE_KEPT.with(|kept| {
-            let count = kept[class].get();
-            let keep = count < LARGE_KEEP && size <= LARGE_KEEP_LIMIT;
-            if keep {
-                kept[class].set(count + 1);
-            }
-            keep
-        });
-        if keep {
-            let block = block as *mut FreeBlock;
-            LARGE_STACKS.with(|stacks| {
-                (*block).next = stacks[class].get();
-                stacks[class].set(block);
-            });
-        } else {
-            alloc::dealloc(block, large_layout(size));
-        }
-        return;
+        return large_alloc(pools, size);
     }
-    let class = size_class(size);
+    let stack = &pools.free[size_class(size)];
+    let mut top = stack.get();
+    if top.is_null() {
+        top = refill(size_class(size));
+    }
+    stack.set((*top).next);
+    top as *mut u8
+}
+
+#[cold]
+unsafe fn large_alloc(pools: &Pools, size: usize) -> *mut u8 {
+    let class = large_class(size);
+    let kept = pools.large[class].get();
+    if !kept.is_null() {
+        pools.large[class].set((*kept).next);
+        pools.large_kept[class].set(pools.large_kept[class].get() - 1);
+        return kept as *mut u8;
+    }
+    let layout = large_layout(size);
+    let block = alloc::alloc(layout);
+    if block.is_null() {
+        alloc::handle_alloc_error(layout);
+    }
+    block
+}
+
+/// Returns a block from `block_alloc(size)`; `size` must be the size it was allocated with.
+#[inline]
+unsafe fn block_free(block: *mut u8, size: usize) {
+    POOLS.with(|pools| block_free_in(pools, block, size))
+}
+
+/// [`block_free`] for a caller that already holds the thread's pools.
+#[inline]
+unsafe fn block_free_in(pools: &Pools, block: *mut u8, size: usize) {
+    if size > MAX_BLOCK {
+        return large_free(pools, block, size);
+    }
+    let stack = &pools.free[size_class(size)];
     let block = block as *mut FreeBlock;
-    FREE_STACKS.with(|stacks| {
-        let stack = &stacks[class];
-        (*block).next = stack.get();
-        stack.set(block);
-    });
+    (*block).next = stack.get();
+    stack.set(block);
+}
+
+#[cold]
+unsafe fn large_free(pools: &Pools, block: *mut u8, size: usize) {
+    let class = large_class(size);
+    let count = pools.large_kept[class].get();
+    if count < LARGE_KEEP && size <= LARGE_KEEP_LIMIT {
+        pools.large_kept[class].set(count + 1);
+        let block = block as *mut FreeBlock;
+        (*block).next = pools.large[class].get();
+        pools.large[class].set(block);
+    } else {
+        alloc::dealloc(block, large_layout(size));
+    }
 }
 
 /// Moves a block to a new size, keeping the first `min(old, new)` bytes.
@@ -2217,7 +2842,7 @@ fn system_layout(size: usize) -> Layout {
 }
 
 fn live_add(delta: i64) {
-    LIVE_OBJECTS.with(|live| live.set(live.get() + delta));
+    POOLS.with(|pools| pools.live.set(pools.live.get() + delta));
 }
 
 /// Adds `amount` to a count, saturating at the static count: a value whose count would
@@ -2241,14 +2866,14 @@ unsafe fn list_alloc(kind: u8, length: usize, capacity: usize) -> *mut List {
         .and_then(|bytes| bytes.checked_add(HEADER_BYTES))
         .unwrap_or_else(|| panic!("typed list of {capacity} items overflows memory"));
     let (list, data, capacity) = if bytes <= MAX_BLOCK {
-        let block = block_alloc(bytes);
+        let block = object_alloc(bytes);
         (
             block as *mut List,
             block.add(HEADER_BYTES),
             (pooled_size(bytes) - HEADER_BYTES) / width,
         )
     } else {
-        let header = block_alloc(HEADER_BYTES);
+        let header = object_alloc(HEADER_BYTES);
         (header as *mut List, block_alloc(capacity * width), capacity)
     };
     list.write(List {
@@ -2260,7 +2885,6 @@ unsafe fn list_alloc(kind: u8, length: usize, capacity: usize) -> *mut List {
         capacity: capacity as u64,
         data,
     });
-    live_add(1);
     list
 }
 
@@ -2270,12 +2894,11 @@ unsafe fn list_release_storage(list: *mut List) {
     let capacity = (*list).capacity as usize;
     let header = list as *mut u8;
     if (*list).data == header.add(HEADER_BYTES) {
-        block_free(header, HEADER_BYTES + capacity * width);
+        object_free(header, HEADER_BYTES + capacity * width);
     } else {
         block_free((*list).data, capacity * width);
-        block_free(header, HEADER_BYTES);
+        object_free(header, HEADER_BYTES);
     }
-    live_add(-1);
 }
 
 /// A copy of `list` with count one and room for `capacity` items, its strings counted again.
@@ -2406,44 +3029,50 @@ unsafe fn drop_items(kind: u8, data: *mut u8, length: usize) {
 }
 
 /// Frees a box whose count reached zero, and every box that held only through it, with a
-/// worklist rather than recursion, so a long chain of tags cannot overflow the stack.
+/// worklist rather than recursion, so a long chain of tags cannot overflow the stack. Only the
+/// marked words are visited, so a box of plain numbers is freed without a look at its fields.
 unsafe fn box_free(first: *mut Boxed) {
     let mut pending: SmallVec<[*mut Boxed; 16]> = SmallVec::new();
-    pending.push(first);
-    while let Some(boxed) = pending.pop() {
+    let mut boxed = first;
+    loop {
         let Boxed {
-            objects,
-            strings,
+            mut objects,
+            mut strings,
             words,
             ..
         } = *boxed;
         let fields = (boxed as *mut u8).add(BOX_FIELDS) as *const u64;
-        for word in 0..words as usize {
-            if objects & (1 << word) != 0 {
-                let child = *fields.add(word) as *mut List;
-                if child.is_null() {
-                    continue;
-                }
-                let count = (*child).count;
-                if count == STATIC_COUNT {
-                    continue;
-                }
-                if count > 1 {
-                    (*child).count = count - 1;
-                } else if (*child).kind == BOX {
-                    pending.push(child as *mut Boxed);
-                } else {
-                    ry_list_free(child);
-                }
-            } else if strings & (1 << word) != 0 {
-                str_drop(Str {
-                    lo: *fields.add(word),
-                    hi: *fields.add(word + 1),
-                });
+        while objects != 0 {
+            let child = *fields.add(objects.trailing_zeros() as usize) as *mut List;
+            objects &= objects - 1;
+            if child.is_null() {
+                continue;
+            }
+            let count = (*child).count;
+            if count == STATIC_COUNT {
+                continue;
+            }
+            if count > 1 {
+                (*child).count = count - 1;
+            } else if (*child).kind == BOX {
+                pending.push(child as *mut Boxed);
+            } else {
+                ry_list_free(child);
             }
         }
-        block_free(boxed as *mut u8, BOX_FIELDS + 8 * words as usize);
-        live_add(-1);
+        while strings != 0 {
+            let word = strings.trailing_zeros() as usize;
+            strings &= strings - 1;
+            str_drop(Str {
+                lo: *fields.add(word),
+                hi: *fields.add(word + 1),
+            });
+        }
+        object_free(boxed as *mut u8, BOX_FIELDS + 8 * words as usize);
+        match pending.pop() {
+            Some(next) => boxed = next,
+            None => break,
+        }
     }
 }
 
@@ -2454,7 +3083,8 @@ fn list_kind(kind: u32) -> Option<u8> {
     }
 }
 
-fn item_size(kind: u8) -> usize {
+/// The bytes one item of a list of `kind` takes.
+pub fn item_size(kind: u8) -> usize {
     match kind {
         DBL | I64 | OBJECT => 8,
         STR => 16,
@@ -2798,7 +3428,7 @@ unsafe fn compare(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
         release(b);
         return null_mut();
     };
-    if !side_has(a, kind) || !side_has(b, kind) || op > GE || (kind == STR && op > NE) {
+    if !side_has(a, kind) || !side_has(b, kind) || op > GE {
         release(a);
         release(b);
         return null_mut();
@@ -2811,12 +3441,15 @@ unsafe fn compare(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
                 holds(op, x, y) as i32
             }
         }),
-        STR => {
+        STR if op <= NE => {
             let equal = op == EQ;
             binary::<Str, i32>(a, b, LGL, length, |x, y| {
                 (str_equal(&x, &y) == equal) as i32
             })
         }
+        STR => binary::<Str, i32>(a, b, LGL, length, |x, y| {
+            holds(op, str_order(&x, &y), cmp::Ordering::Equal) as i32
+        }),
         // An `I64` has no `NA`.
         I64 => binary::<i64, i32>(a, b, LGL, length, |x, y| holds(op, x, y) as i32),
         _ => binary::<i32, i32>(a, b, LGL, length, |x, y| {
@@ -3004,13 +3637,55 @@ unsafe fn str_buffer_alloc(length: usize) -> *mut u8 {
     let Ok(capacity) = u32::try_from(capacity) else {
         panic!("typed string of {length} bytes is longer than a string buffer holds");
     };
-    let buffer = block_alloc(size);
+    let buffer = object_alloc(size);
     (buffer as *mut StrBuffer).write(StrBuffer { count: 1, capacity });
-    live_add(1);
     buffer
 }
 
+#[inline]
 unsafe fn str_from_bytes(bytes: &[u8]) -> Str {
+    let length = bytes.len();
+    if length > INLINE_CAPACITY {
+        return str_from_long_bytes(bytes);
+    }
+    // An inline string is assembled from a few fixed-size reads that overlap where the length
+    // is between two sizes, which costs a handful of instructions where a copy of `length`
+    // bytes is a call. Short strings are the common case wherever text is split or converted.
+    let start = bytes.as_ptr();
+    let (lo, hi) = if length >= 8 {
+        let first = (start as *const u64).read_unaligned();
+        let last = (start.add(length - 8) as *const u64).read_unaligned();
+        let rest = if length == 8 {
+            0
+        } else {
+            last >> (8 * (16 - length))
+        };
+        (first, rest)
+    } else if length >= 4 {
+        let first = u64::from((start as *const u32).read_unaligned());
+        let last = u64::from((start.add(length - 4) as *const u32).read_unaligned());
+        (first | last << (8 * (length - 4)), 0)
+    } else if length > 0 {
+        let first = u64::from(*start);
+        let middle = u64::from(*start.add(length / 2));
+        let last = u64::from(*start.add(length - 1));
+        (
+            first | middle << (8 * (length / 2)) | last << (8 * (length - 1)),
+            0,
+        )
+    } else {
+        (0, 0)
+    };
+    Str {
+        lo,
+        hi: hi | (0x80 | length as u64) << 56,
+    }
+}
+
+/// The heap string of more than `INLINE_CAPACITY` bytes. It is its own function so that
+/// `str_from_bytes` stays a few instructions with no frame where it is inlined.
+#[inline(never)]
+unsafe fn str_from_long_bytes(bytes: &[u8]) -> Str {
     str_build(bytes.len(), |cursor| cursor.push(bytes))
 }
 
@@ -3375,7 +4050,7 @@ fn dict_seed() -> u64 {
 }
 
 unsafe fn dict_alloc(key_kind: u8, value_kind: u8, seed: u64) -> *mut Dict {
-    let dict = block_alloc(size_of::<Dict>()) as *mut Dict;
+    let dict = object_alloc(size_of::<Dict>()) as *mut Dict;
     dict.write(Dict {
         count: 1,
         kind: DICT,
@@ -3392,7 +4067,6 @@ unsafe fn dict_alloc(key_kind: u8, value_kind: u8, seed: u64) -> *mut Dict {
         index: null_mut(),
         removed_bits: null_mut(),
     });
-    live_add(1);
     dict
 }
 
@@ -3410,8 +4084,7 @@ unsafe fn dict_free(dict: *mut Dict) {
         }
     }
     dict_free_columns(dict);
-    block_free(dict as *mut u8, size_of::<Dict>());
-    live_add(-1);
+    object_free(dict as *mut u8, size_of::<Dict>());
 }
 
 /// Gives `dict` empty columns with room for `capacity` entries.
@@ -3574,7 +4247,16 @@ unsafe fn value_slot(dict: *const Dict, position: usize) -> *mut u8 {
 unsafe fn key_hash(dict: *const Dict, key: *const u8) -> u64 {
     let seed = (*dict).seed;
     match (*dict).key_kind {
-        STR => hash_bytes(seed, (*(key as *const Str)).bytes()),
+        STR => {
+            let string = *(key as *const Str);
+            // The bytes past an inline string's end are zero, so equal inline strings are
+            // equal words and the two words are hashed as they are.
+            if string.is_inline() {
+                fold_multiply(hash_word(seed, string.lo) ^ string.hi, HASH_K0 ^ seed)
+            } else {
+                hash_bytes(seed, string.bytes())
+            }
+        }
         DBL => hash_word(seed, double_key(*(key as *const f64))),
         _ => hash_word(seed, *(key as *const i32) as u32 as u64),
     }

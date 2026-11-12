@@ -191,6 +191,7 @@ fn declared_ty(declared: Declared) -> Ty {
 
 /// The type tier 0's feedback bits speculate on.
 pub fn from_feedback(bits: u16) -> Ty {
+    let bits = bits & !feedback::ACTIVE_BINDING;
     let within = |mask: u16| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
@@ -511,7 +512,7 @@ impl Live<'_> {
     }
 }
 
-fn bit(words: &[u64], index: usize) -> bool {
+pub(crate) fn bit(words: &[u64], index: usize) -> bool {
     words
         .get(index / 64)
         .is_some_and(|word| word & (1 << (index % 64)) != 0)
@@ -547,11 +548,25 @@ pub enum Effect {
     /// Reads and writes only its registers, and never signals a condition.
     Pure,
     /// Runs no R code unless one of these registers holds an object or an ALTREP vector (whose
-    /// methods a package may write in R), or a calling handler is established, since a warning
-    /// runs the handler; in each case it is opaque.
+    /// methods a package may write in R) or an environment (whose promises and active bindings
+    /// a read may run), or a calling handler is established, since a warning runs the handler;
+    /// in each case it is opaque.
     PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
+}
+
+/// Whether a [`Action::Step`] first offers its instruction to tier 0's fast handler for it
+/// (`bytecode::fast_step`), which runs an element read or store without the step's write-back,
+/// validation and reload when its shape applies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fast {
+    No,
+    /// A read of `[`, `[[` or `$`, which writes only its destination register.
+    Read,
+    /// A store into this slot's vector, which the handler finds in the frame and changes in
+    /// place.
+    Store(usize),
 }
 
 /// Scalar arithmetic the JIT does inline.
@@ -584,10 +599,10 @@ pub enum Intrinsic {
     Modulo(Numeric),
     /// `%/%`
     IntegerDivide(Numeric),
-    /// `Dict.len()` or `Set.len()` (when `set`), or their `is_empty` (when `empty`).
-    CollectionCount {
+    /// `Dict.is_empty()` or `Set.is_empty()` (when `set`). Their `len` has no intrinsic because it
+    /// returns a ry `I64`, which no register type holds.
+    CollectionEmpty {
         set: bool,
-        empty: bool,
     },
     /// `Dict.contains()` or `Set.contains()`.
     CollectionContains {
@@ -783,11 +798,14 @@ pub enum Action<'a> {
     },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
     /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
+    /// `volatile` marks a variable whose reads have called an active binding: the load leaves
+    /// the slot unloaded, so the next read calls the binding again.
     GetVar {
         dst: usize,
         slot: usize,
         load: Option<Ty>,
         forcing: bool,
+        volatile: bool,
     },
     SetVar {
         slot: usize,
@@ -888,11 +906,17 @@ pub enum Action<'a> {
         args: &'a [Argument],
         dst: usize,
     },
+    /// Runs a fast-path prologue in tier 0 as an opaque step, returning its value from compiled
+    /// code when it finishes the call.
+    Prologue {
+        dst: usize,
+    },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
         effect: Effect,
         objects: &'a [usize],
         dst: Option<(usize, Ty)>,
+        fast: Fast,
     },
     /// Runs an [`Op::Fused`] pass in tier 0, reading the call operands it evaluated ahead from
     /// `reads`. When the pass computes the expression, `dst` holds its value, checked to be of
@@ -910,7 +934,7 @@ pub enum Action<'a> {
     BranchUnlessBuiltin {
         function: usize,
     },
-    BranchUnlessPrimitive {
+    BranchUnlessSame {
         function: usize,
         expected: Sexp,
     },
@@ -1047,6 +1071,9 @@ pub struct Plan<'a> {
     pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
     pub loop_headers: List<'a, usize>,
+    /// By slot, a bitset of the variables loaded at every read because a read called an
+    /// active binding.
+    pub volatile: List<'a, u64>,
 }
 
 /// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
@@ -1259,7 +1286,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SetVar
             | Op::GetFun
             | Op::BranchUnlessBuiltin
-            | Op::BranchUnlessPrimitive
+            | Op::BranchUnlessSame
             | Op::BranchIfObject
             | Op::Ast
             | Op::Guard
@@ -1287,7 +1314,8 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SetSrcref
             | Op::Resume
             | Op::Fused
-            | Op::Unfused => false,
+            | Op::Unfused
+            | Op::Prologue => false,
         };
         native += usize::from(counts);
         pc += 1 + count;
@@ -1346,22 +1374,48 @@ fn native(action: &Action<'_>) -> bool {
     )
 }
 
-/// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
-/// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
-/// has never run, because code compiled without that type runs the instruction in tier 0 for
-/// as long as it lives.
+/// The frame a body runs in, which decides where the plan keeps its variables.
+#[derive(Clone, Copy)]
+pub enum Frame {
+    /// A closure's frame, which binds `formals` and the symbols the body assigns, each in a
+    /// slot. Names it does not bind are looked up from `enclosure`, the enclosure of the
+    /// closure's environment.
+    Closure { formals: Sexp, enclosure: Sexp },
+    /// The global environment `env`, where a top-level loop runs. It has no locals, so the plan
+    /// has no slots: every variable read and write is a tier-0 step on `env`'s bindings, which
+    /// code the loop calls must see at once. Function lookups start at `env` itself, because any
+    /// of its bindings may shadow the search path, and a later binding of a speculated symbol
+    /// invalidates the code like any other redefinition.
+    #[expect(
+        dead_code,
+        reason = "the tier's entry is not wired to top-level loops, which run with the tier off"
+    )]
+    Global { env: Sexp },
+}
+
+/// Builds the plan for `code`, a body that runs in `frame`, in `arena`. A `patient` plan
+/// refuses as [`COLD`] when an instruction whose result type matters has never run, because
+/// code compiled without that type runs the instruction in tier 0 for as long as it lives. A
+/// `shared` plan speculates only on lookups that every enclosure resolves the same way (see
+/// `runtime::SHARED`).
 pub unsafe fn plan<'a>(
     arena: Arena<'a>,
     code: Sexp,
-    formals: Sexp,
-    enclosure: Sexp,
+    frame: Frame,
     patient: bool,
+    shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
-    // A body that reflects on its frame can bind any symbol, which slots cannot model.
-    let Some(locals) = bytecode::local_symbols(source, formals) else {
-        return Err(Refusal("the body reflects on its frame"));
+    let (formals, enclosure, locals, global) = match frame {
+        Frame::Closure { formals, enclosure } => {
+            // A body that reflects on its frame can bind any symbol, which slots cannot model.
+            let Some(locals) = bytecode::local_symbols(source, formals) else {
+                return Err(Refusal("the body reflects on its frame"));
+            };
+            (formals, enclosure, locals, false)
+        }
+        Frame::Global { env } => (values::nil(), env, FxHashSet::default(), true),
     };
     let insts = decode(arena, code)?;
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
@@ -1370,6 +1424,7 @@ pub unsafe fn plan<'a>(
         arena,
         code,
         enclosure,
+        shared,
         feedback: values::ints(constants.element(FEEDBACK)),
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
@@ -1378,6 +1433,7 @@ pub unsafe fn plan<'a>(
         speculations: List::new_in(arena),
         registers,
         defaulted: defaulted_formals(formals, arena),
+        volatile: List::new_in(arena),
         locals,
         hints: List::new_in(arena),
         declared: List::new_in(arena),
@@ -1386,6 +1442,7 @@ pub unsafe fn plan<'a>(
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
         patient,
+        global,
     };
     builder.collect_slots(formals);
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
@@ -1444,6 +1501,7 @@ pub unsafe fn plan<'a>(
         edges,
         states: builder.states,
         loop_headers,
+        volatile: builder.volatile,
     })
 }
 
@@ -1603,6 +1661,7 @@ struct Builder<'a> {
     arena: Arena<'a>,
     code: Sexp,
     enclosure: Sexp,
+    shared: bool,
     feedback: &'a [i32],
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
@@ -1614,6 +1673,10 @@ struct Builder<'a> {
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
     defaulted: Map<'a, Sexp, ()>,
+    /// By slot, whether a read of the variable has called an active binding. Such a variable is
+    /// loaded at every read, since each read must call the binding again, and the load runs R
+    /// code that may read and assign the body's variables.
+    volatile: List<'a, u64>,
     /// The formals and every symbol the body binds. A call through one of them may find a local
     /// function first, so its head cannot be speculated from the enclosure.
     locals: FxHashSet<Sexp>,
@@ -1632,6 +1695,8 @@ struct Builder<'a> {
     states: States<'a>,
     /// The edges leaving the instruction [`Builder::transfer`] last ran, by target pc.
     edges: List<'a, (usize, StateId)>,
+    /// Whether the body runs in the global frame ([`Frame::Global`]), which has no slots.
+    global: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -1640,6 +1705,9 @@ impl<'a> Builder<'a> {
     }
 
     unsafe fn collect_slots(&mut self, formals: Sexp) {
+        if self.global {
+            return;
+        }
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
@@ -1661,6 +1729,13 @@ impl<'a> Builder<'a> {
                 if inst.op == Op::GetVar && bits != 0 {
                     let slot = self.slot_of[&symbol];
                     self.hints[slot] = self.hints[slot].join(from_feedback(bits));
+                    if bits & feedback::ACTIVE_BINDING != 0 {
+                        let words = (slot + 1).div_ceil(64);
+                        if self.volatile.len() < words {
+                            self.volatile.resize(words, 0);
+                        }
+                        set_bit(&mut self.volatile, slot, true);
+                    }
                 }
             }
         }
@@ -1748,7 +1823,7 @@ impl<'a> Builder<'a> {
         // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
         // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
         // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16) & !feedback::ACTIVE_BINDING;
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
@@ -1968,6 +2043,24 @@ impl<'a> Builder<'a> {
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
         let action = match inst.op {
+            // The global frame's variables are its environment's bindings, which an active
+            // binding or code the loop calls may read or rebind.
+            Op::GetVar if self.global => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            Op::SetVar | Op::SubAssign | Op::SubAssignMatrix if self.global => {
+                let dst = (inst.op != Op::SetVar).then(|| (operand(0), Ty::Boxed));
+                let action = self.opaque_step(state, dst, &[], Effect::Opaque);
+                state.visible = Some(false);
+                action
+            }
+            // Compiled `for` steps keep the loop variable in a slot.
+            Op::ForStep if self.global => {
+                return Err(Refusal("a loop variable in the global environment"));
+            }
             Op::Constant => {
                 let value = self.constant(operand(1));
                 let ty = constant_type(value);
@@ -1982,7 +2075,10 @@ impl<'a> Builder<'a> {
             Op::GetVar => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
-                let load = if current.may_be(status::NOT_LOADED) {
+                let volatile = bit(&self.volatile, slot);
+                let load = if volatile && current.may_be(status::NOT_LOADED) {
+                    Some(Ty::Boxed)
+                } else if current.may_be(status::NOT_LOADED) {
                     let ty = if current.may_be(status::LOADED) {
                         current.ty
                     } else if self.never_ran(inst.pc) && current.ty != Ty::Bottom {
@@ -1998,13 +2094,23 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                let forcing = load.is_some() && self.defaulted.contains_key(&self.slots[slot]);
+                let forcing = load.is_some()
+                    && (volatile || self.defaulted.contains_key(&self.slots[slot]));
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
-                    let loaded = Slot {
-                        status: status_bits,
-                        ty,
+                    // A binding's value is not kept: the next read calls it again. Code
+                    // generation leaves the runtime status unloaded to match.
+                    let loaded = if volatile {
+                        Slot {
+                            status: (current.status & status::LOADED) | status::NOT_LOADED,
+                            ty: current.ty.join(Ty::Boxed),
+                        }
+                    } else {
+                        Slot {
+                            status: status_bits,
+                            ty,
+                        }
                     };
                     // Code generation writes the variables back before the load and forgets them
                     // after it, but only when the load reaches the runtime: a load the inline
@@ -2027,6 +2133,7 @@ impl<'a> Builder<'a> {
                     slot,
                     load,
                     forcing,
+                    volatile,
                 }
             }
             Op::SetVar => {
@@ -2099,7 +2206,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             },
-            Op::BranchUnlessPrimitive => {
+            Op::BranchUnlessSame => {
                 let expected = self.constant(operand(1));
                 match state.registers[operand(0)] {
                     Ty::Fun(function) if function == expected => Action::FallThrough,
@@ -2109,7 +2216,7 @@ impl<'a> Builder<'a> {
                     }
                     _ => {
                         self.push_edge(operand(2), state);
-                        Action::BranchUnlessPrimitive {
+                        Action::BranchUnlessSame {
                             function: operand(0),
                             expected,
                         }
@@ -2140,7 +2247,22 @@ impl<'a> Builder<'a> {
                         state.visible = Some(true);
                         self.slot_read(state, operand(0), operand(1), layout, index, feedback)
                     }
-                    _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
+                    // `$` runs R code only through a method of an object or an environment's
+                    // promise or active binding, which the observed check sends the opaque way.
+                    _ => {
+                        let subject = self.slice(
+                            [operand(1)]
+                                .into_iter()
+                                .filter(|&register| !state.registers[register].is_plain()),
+                        );
+                        self.fast_step(
+                            state,
+                            Some((operand(0), feedback)),
+                            subject,
+                            Effect::PureUnlessObserved,
+                            Fast::Read,
+                        )
+                    }
                 }
             }
             Op::Item => {
@@ -2265,6 +2387,10 @@ impl<'a> Builder<'a> {
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
+            Op::Prologue => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque);
+                Action::Prologue { dst: operand(0) }
+            }
             // Only tier 0 decides whether the binding owns the value it updates in place.
             Op::CallBuiltinRebinding => self.opaque_step(
                 state,
@@ -2549,6 +2675,7 @@ impl<'a> Builder<'a> {
                 effect: Effect::Pure,
                 objects: &[],
                 dst: None,
+                fast: Fast::No,
             },
             // Compiled code keeps boxed values in the same register window as tier 0, so it
             // clears the finished statement's registers too, or they would keep its temporaries
@@ -2584,6 +2711,7 @@ impl<'a> Builder<'a> {
                     effect: Effect::Pure,
                     objects: &[],
                     dst: Some((operand(0), ty)),
+                    fast: Fast::No,
                 }
             }
             Op::SubAssign => {
@@ -2632,8 +2760,13 @@ impl<'a> Builder<'a> {
                         Ty::Bottom => Ty::Boxed,
                         ty => ty,
                     };
-                    let action =
-                        self.opaque_step(state, Some((operand(0), refine)), &[], Effect::Opaque);
+                    let action = self.fast_step(
+                        state,
+                        Some((operand(0), refine)),
+                        &[],
+                        Effect::Opaque,
+                        Fast::Store(slot),
+                    );
                     state.visible = Some(false);
                     action
                 }
@@ -2831,7 +2964,8 @@ impl<'a> Builder<'a> {
                 if symbol.kind() != SexpType::Symbol || self.locals.contains(&symbol) {
                     return None;
                 }
-                let found = resolve_variable(symbol, self.enclosure)?;
+                let found = resolve_variable(symbol, self.enclosure)
+                    .filter(|found| self.portable(found))?;
                 let function = found.function;
                 expected = Some((callback, function));
                 speculation = Some(found);
@@ -3316,6 +3450,7 @@ impl<'a> Builder<'a> {
                         slot,
                         load: None,
                         forcing: false,
+                        volatile: false,
                     },
                 );
                 lowering.state.registers[dst] = ty;
@@ -3578,7 +3713,8 @@ impl<'a> Builder<'a> {
             None => self.speculate(symbol),
             Some(env) if env == self.enclosure => self.speculate(symbol),
             Some(env) => {
-                let speculation = resolve_function(symbol, env)?;
+                let speculation =
+                    resolve_function(symbol, env).filter(|found| self.portable(found))?;
                 let function = speculation.function;
                 self.speculations.push(speculation);
                 Some(function)
@@ -3616,6 +3752,48 @@ impl<'a> Builder<'a> {
             effect,
             objects,
             dst,
+            fast: Fast::No,
+        }
+    }
+
+    /// [`Self::opaque_step`] for an instruction tier 0's fast handler may run instead. That path
+    /// leaves every variable as it was, except that a store's own variable is reloaded, since the
+    /// handler changed its vector in the frame; the state after is the join of both paths.
+    fn fast_step(
+        &mut self,
+        state: &mut State<'a>,
+        dst: Option<(usize, Ty)>,
+        objects: &'a [usize],
+        effect: Effect,
+        fast: Fast,
+    ) -> Action<'a> {
+        let mut kept = List::new_in(self.arena);
+        kept.extend(state.slots.iter().copied());
+        // The handler stores into the frame's object in place, so only an unboxed copy of the
+        // variable goes stale.
+        if let Fast::Store(slot) = fast
+            && let Some(kept) = kept.get_mut(slot)
+            && kept.ty.in_variables()
+        {
+            kept.status |= status::NOT_LOADED;
+        }
+        let action = self.opaque_step(state, dst, objects, effect);
+        for (slot, kept) in state.slots.iter_mut().zip(kept.iter()) {
+            *slot = slot.join(*kept);
+        }
+        match action {
+            Action::Step {
+                effect,
+                objects,
+                dst,
+                ..
+            } => Action::Step {
+                effect,
+                objects,
+                dst,
+                fast,
+            },
+            action => action,
         }
     }
 
@@ -3807,20 +3985,40 @@ impl<'a> Builder<'a> {
                 Effect::PureUnlessObserved,
             ));
         }
+        // Tier 0's fast handler takes only a scalar index, which feedback types as a scalar, so
+        // an index typed as a vector has not been one at this site and would only pay for the
+        // handler's decline.
+        let fast = if count == 2
+            && matches!(name, "[" | "[[")
+            && !matches!(
+                types[1],
+                Ty::IntVec
+                    | Ty::DblVec
+                    | Ty::LglVec
+                    | Ty::IntArr
+                    | Ty::DblArr
+                    | Ty::LglArr
+                    | Ty::List
+            ) {
+            Fast::Read
+        } else {
+            Fast::No
+        };
         if PURE_BUILTINS.contains(&name) {
             let objects = self.slice(
                 args.iter()
                     .copied()
                     .filter(|&register| !state.registers[register].is_plain()),
             );
-            return Ok(self.opaque_step(
+            return Ok(self.fast_step(
                 state,
                 Some((dst, feedback)),
                 objects,
                 Effect::PureUnlessObserved,
+                fast,
             ));
         }
-        Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque))
+        Ok(self.fast_step(state, Some((dst, feedback)), &[], Effect::Opaque, fast))
     }
 
     /// Whether `function` is effect-free (see `interp::effects`), so a direct call may bind its
@@ -3832,14 +4030,23 @@ impl<'a> Builder<'a> {
             return safe;
         }
         let safe = match effects::effect_free_lookups(function) {
-            Ok(Some(lookups)) => {
+            Ok(Some(lookups)) if lookups.iter().all(|lookup| self.portable(lookup)) => {
                 self.speculations.extend(lookups);
                 true
             }
-            Ok(None) | Err(_) => false,
+            Ok(_) | Err(_) => false,
         };
         self.frame_safe.insert(function, safe);
         safe
+    }
+
+    /// Whether a shared plan may keep `speculation`: the lookup starts from the enclosure or a
+    /// long-lived environment and ends in a long-lived one, so it resolves the same way from
+    /// every enclosure that shares the code. A plan that is not shared keeps every speculation.
+    unsafe fn portable(&self, speculation: &Speculation) -> bool {
+        !self.shared
+            || ((speculation.env == self.enclosure || crate::long_lived(speculation.env))
+                && crate::owner(speculation).is_some_and(|env| crate::long_lived(env)))
     }
 
     /// Whether the activation's own frame may bind `symbol`.
@@ -3853,7 +4060,8 @@ impl<'a> Builder<'a> {
         if let Some(found) = self.speculated.get(&symbol) {
             return *found;
         }
-        let found = resolve_function(symbol, self.enclosure);
+        let found = resolve_function(symbol, self.enclosure)
+            .filter(|speculation| self.portable(speculation));
         let function = found.as_ref().map(|speculation| speculation.function);
         if let Some(speculation) = found {
             self.speculations.push(speculation);
@@ -3926,17 +4134,9 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
     let boxed = |ty: &Ty| *ty == Ty::Boxed;
     let key = |ty: &Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Boxed);
     Some(match (name, types) {
-        ("Dict.len" | "Set.len", [collection]) if boxed(collection) => (
-            Intrinsic::CollectionCount {
-                set: name == "Set.len",
-                empty: false,
-            },
-            Ty::Int,
-        ),
         ("Dict.is_empty" | "Set.is_empty", [collection]) if boxed(collection) => (
-            Intrinsic::CollectionCount {
+            Intrinsic::CollectionEmpty {
                 set: name == "Set.is_empty",
-                empty: true,
             },
             Ty::Lgl,
         ),
@@ -4024,9 +4224,7 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
 fn has_intrinsic(name: &str) -> bool {
     matches!(
         name,
-        "Dict.len"
-            | "Set.len"
-            | "Dict.is_empty"
+        "Dict.is_empty"
             | "Set.is_empty"
             | "Dict.contains"
             | "Set.contains"
@@ -4166,7 +4364,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::Move => smallvec![operand(1)],
         Op::BoundEval | Op::Internal => (operand(3)..operand(3) + operand(4)).collect(),
         Op::MatchCondition | Op::SwitchArm => smallvec![operand(1)],
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+        Op::BranchUnlessBuiltin | Op::BranchUnlessSame | Op::BranchIfObject => {
             smallvec![operand(0)]
         }
         Op::DispatchSubject => smallvec![operand(1), operand(3)],
@@ -4189,7 +4387,7 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
         Op::Item => Some(inst.operand(4)),
-        Op::BranchUnlessPrimitive => Some(inst.operand(2)),
+        Op::BranchUnlessSame => Some(inst.operand(2)),
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
         Op::Guard => Some(inst.operand(4)),
@@ -4205,7 +4403,7 @@ fn ends_block(op: Op) -> bool {
             | Op::Resume
             | Op::JumpUnless
             | Op::BranchUnlessBuiltin
-            | Op::BranchUnlessPrimitive
+            | Op::BranchUnlessSame
             | Op::BranchIfObject
             | Op::MatchShape
             | Op::MatchTag
@@ -4235,7 +4433,8 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         | Op::Ast
         | Op::Closure
         | Op::Missing
-        | Op::Namespace => kill(operand(0), live),
+        | Op::Namespace
+        | Op::Prologue => kill(operand(0), live),
         Op::Internal => {
             kill(operand(0), live);
             for register in operand(3)..operand(3) + operand(4) {
@@ -4243,7 +4442,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             }
         }
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+        Op::BranchUnlessBuiltin | Op::BranchUnlessSame | Op::BranchIfObject => {
             gen_(operand(0), live)
         }
         Op::DispatchSubject => {

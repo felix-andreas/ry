@@ -43,6 +43,18 @@ fn strings_switch_to_heap_past_fifteen_bytes() {
     let inline = str_of("abc");
     assert_eq!(inline.lo, u64::from_le_bytes(*b"abc\0\0\0\0\0"));
     assert_eq!(inline.hi, 0x83 << 56);
+    // Every inline length holds its bytes in order with zeros after them, read from the end of
+    // a buffer so that a read past the string's last byte would show under a memory checker.
+    let source = "abcdefghijklmno";
+    for length in 0..=source.len() {
+        let text = source[..length].to_owned().into_boxed_str();
+        let string = str_of(&text);
+        let mut expected = [0u8; 16];
+        expected[..length].copy_from_slice(text.as_bytes());
+        expected[15] = 0x80 | length as u8;
+        let words = [string.lo.to_le_bytes(), string.hi.to_le_bytes()].concat();
+        assert_eq!(words, expected, "{text:?}");
+    }
     assert_eq!(live(), before, "strings leaked");
 }
 
@@ -414,11 +426,443 @@ fn comparisons_and_logic_follow_r() {
         let key = str_of("a long string past the inline limit");
         let equal = ry_compare_vs(EQ, STR as u32, strings, 0, key.lo, key.hi);
         assert_eq!(read(equal), Model::Lgl(vec![0, 1]));
-        assert!(ry_compare_vs(LT, STR as u32, strings, 0, key.lo, key.hi).is_null());
-        for list in [both, either, negated, equal, strings, b] {
+        // A space orders before a letter, so "apple" is not before "a long ...".
+        let less = ry_compare_vs(LT, STR as u32, strings, 0, key.lo, key.hi);
+        assert_eq!(read(less), Model::Lgl(vec![0, 0]));
+        let at_most = ry_compare_vs(LE, STR as u32, strings, 0, key.lo, key.hi);
+        assert_eq!(read(at_most), Model::Lgl(vec![0, 1]));
+        for list in [both, either, negated, equal, less, at_most, strings, b] {
             ry_list_drop(list);
         }
         ry_str_drop(key.lo, key.hi);
+    }
+    assert_eq!(live(), before);
+}
+
+/// Fused arithmetic against the same steps run one item at a time: random programs of `+`, `-`,
+/// `*` and `/` over `F64` or `I64` lists and scalars, as a list and as a sum, over lists that
+/// cross chunk boundaries. A `NaN` result, an `I64` overflow, a length mismatch and an empty
+/// list result give up.
+#[test]
+fn fused_arithmetic_agrees_with_one_item_at_a_time() {
+    let mut rng = Rng::from_env();
+    let before = live();
+    for _ in 0..iterations(400) {
+        let doubles = rng.below(2) == 0;
+        let sum = rng.below(2) == 0;
+        let length = [0, 1, 7, 127, 128, 129, 300][rng.below(7)];
+        // An item as its word: a double's bits or an `I64`. Doubles are halves, so a sum of
+        // products is exact and does not depend on the order or width of the additions.
+        let item = |rng: &mut Rng| -> u64 {
+            match rng.below(60) {
+                0 if doubles => f64::NAN.to_bits(),
+                0 => (i64::MAX - 1) as u64,
+                _ if doubles => (rng.below(11) as f64 / 2.0 - 2.5).to_bits(),
+                _ => (rng.below(7) as i64 - 3) as u64,
+            }
+        };
+        // Each input is a list of its items, or one item for a scalar.
+        let mut inputs: Vec<Vec<u64>> = Vec::new();
+        let mut lists = 0u32;
+        for index in 0..1 + rng.below(4) {
+            if index == 0 || rng.below(3) != 0 {
+                // The first input is a list of the usual length, so a longer one is a mismatch.
+                let size = if index > 0 && rng.below(30) == 0 {
+                    length + 1
+                } else {
+                    length
+                };
+                inputs.push((0..size).map(|_| item(&mut rng)).collect());
+                lists |= 1 << index;
+            } else {
+                inputs.push(vec![item(&mut rng)]);
+            }
+        }
+        let fits =
+            (0..inputs.len()).all(|index| lists & 1 << index == 0 || inputs[index].len() == length);
+        let mut program: Vec<u32> = Vec::new();
+        // Each step's items, or `None` once a step fails.
+        let mut done: Option<Vec<Vec<u64>>> = fits.then(Vec::new);
+        for step in 0..1 + rng.below(5) {
+            let reach = inputs.len() + step;
+            let (left, right) = (rng.below(reach), rng.below(reach));
+            // A sum of quotients would depend on how wide the additions are.
+            let op = rng.below(if doubles && !sum { 4 } else { 3 }) as u32;
+            program.push(op | (left as u32) << 8 | (right as u32) << 16);
+            let Some(steps) = &mut done else { continue };
+            let read = |operand: usize, at: usize| match inputs.get(operand) {
+                Some(items) if lists & 1 << operand != 0 => items[at],
+                Some(items) => items[0],
+                None => steps[operand - inputs.len()][at],
+            };
+            let items: Option<Vec<u64>> = (0..length)
+                .map(|at| {
+                    let (x, y) = (read(left, at), read(right, at));
+                    if doubles {
+                        let (x, y) = (f64::from_bits(x), f64::from_bits(y));
+                        let value = match op {
+                            ADD => x + y,
+                            SUB => x - y,
+                            MUL => x * y,
+                            _ => x / y,
+                        };
+                        (!value.is_nan()).then_some(value.to_bits())
+                    } else {
+                        let (x, y) = (x as i64, y as i64);
+                        match op {
+                            ADD => x.checked_add(y),
+                            SUB => x.checked_sub(y),
+                            _ => x.checked_mul(y),
+                        }
+                        .map(|value| value as u64)
+                    }
+                })
+                .collect();
+            match items {
+                Some(items) => steps.push(items),
+                None => done = None,
+            }
+        }
+        let expected: Option<Vec<u64>> = match done.as_ref().and_then(|steps| steps.last()) {
+            Some(items) if sum && doubles => {
+                let total = items
+                    .iter()
+                    .fold(0.0, |total, &item| total + f64::from_bits(item));
+                Some(vec![total.to_bits()])
+            }
+            Some(items) if sum => items
+                .iter()
+                .try_fold(0i64, |total, &item| total.checked_add(item as i64))
+                .map(|total| vec![total as u64]),
+            Some(items) if length > 0 => Some(items.clone()),
+            _ => None,
+        };
+        unsafe {
+            let kind = if doubles { DBL } else { I64 };
+            let words: Vec<u64> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, items)| {
+                    if lists & 1 << index == 0 {
+                        return items[0];
+                    }
+                    items
+                        .iter()
+                        .fold(ry_list_new(kind as u32, 0), |list, &item| {
+                            ry_list_push(list, 1, item, 0)
+                        }) as u64
+                })
+                .collect();
+            let mut out = 0u64;
+            let status = ry_elementwise(
+                kind as u32,
+                program.as_ptr(),
+                program.len() as u32,
+                words.as_ptr(),
+                words.len() as u32,
+                lists,
+                sum as u32,
+                &mut out,
+            );
+            let found: Option<Vec<u64>> = (status == 0).then(|| {
+                if sum {
+                    return vec![out];
+                }
+                let list = out as *mut List;
+                let length = (*list).length as usize;
+                let items = std::slice::from_raw_parts((*list).data as *const u64, length).to_vec();
+                ry_list_drop(list);
+                items
+            });
+            assert_eq!(
+                found.as_ref().map(|items| &items[..items.len().min(8)]),
+                expected.as_ref().map(|items| &items[..items.len().min(8)]),
+                "the first items of program {program:?} over {} inputs of length {length}, \
+                 lists {lists:#b}, sum {sum}, doubles {doubles}",
+                inputs.len()
+            );
+            assert!(found == expected, "program {program:?}, length {length}");
+            for (index, &word) in words.iter().enumerate() {
+                if lists & 1 << index != 0 {
+                    ry_list_drop(word as *mut List);
+                }
+            }
+        }
+    }
+    assert_eq!(live(), before);
+}
+
+/// A fused count against R's three-valued logic item by item: random comparisons of `I64` and
+/// double lists and scalars, combined with `&`, `|` and `!`, over lists that cross chunk
+/// boundaries, with `NA`, `NaN` and a length mismatch, which give up.
+#[test]
+fn fused_counts_follow_three_valued_logic() {
+    #[derive(Clone)]
+    enum Input {
+        Wholes(Vec<i64>),
+        Doubles(Vec<f64>),
+        Logicals(Vec<i32>),
+        Whole(i64),
+        Double(f64),
+        Logical(i32),
+    }
+    let mut rng = Rng::from_env();
+    let before = live();
+    for _ in 0..iterations(300) {
+        let length = [0, 1, 7, 128, 129, 300][rng.below(6)];
+        let mut inputs: Vec<Input> = Vec::new();
+        for _ in 0..2 + rng.below(5) {
+            let size = if rng.below(30) == 0 {
+                length + 1
+            } else {
+                length
+            };
+            inputs.push(match rng.below(6) {
+                0 => Input::Wholes((0..size).map(|_| rng.below(5) as i64 - 2).collect()),
+                1 => Input::Doubles(
+                    (0..size)
+                        .map(|_| match rng.below(40) {
+                            0 => f64::NAN,
+                            _ => rng.below(5) as f64 - 2.0,
+                        })
+                        .collect(),
+                ),
+                2 => Input::Logicals(
+                    (0..size)
+                        .map(|_| match rng.below(40) {
+                            0 => NA,
+                            _ => rng.below(2) as i32,
+                        })
+                        .collect(),
+                ),
+                3 => Input::Whole(rng.below(5) as i64 - 2),
+                4 => Input::Double(rng.below(5) as f64 - 2.0),
+                _ => Input::Logical([0, 1, 1, NA][rng.below(4)]),
+            });
+        }
+        let numbered = |want: fn(&Input) -> bool, rng: &mut Rng| {
+            let found: Vec<usize> = (0..inputs.len()).filter(|&i| want(&inputs[i])).collect();
+            (!found.is_empty()).then(|| found[rng.below(found.len())])
+        };
+        // Each step's lanes as `Option<bool>`, `None` for `NA`.
+        let mut program: Vec<u32> = Vec::new();
+        let mut lanes: Vec<Vec<Option<bool>>> = Vec::new();
+        let logical_lanes = |index: usize, lanes: &[Vec<Option<bool>>]| -> Vec<Option<bool>> {
+            if index >= inputs.len() {
+                return lanes[index - inputs.len()].clone();
+            }
+            let lane = |item: i32| (item != NA).then_some(item != 0);
+            match &inputs[index] {
+                Input::Logicals(items) => {
+                    items.iter().take(length).map(|&item| lane(item)).collect()
+                }
+                Input::Logical(item) => vec![lane(*item); length],
+                _ => unreachable!(),
+            }
+        };
+        for _ in 0..1 + rng.below(6) {
+            let logical_operand = |rng: &mut Rng, steps: usize| {
+                let input = numbered(
+                    |input| matches!(input, Input::Logicals(_) | Input::Logical(_)),
+                    rng,
+                );
+                match (input, steps) {
+                    (Some(input), 0) => Some(input),
+                    (Some(input), _) if rng.below(3) == 0 => Some(input),
+                    (_, 0) => None,
+                    _ => Some(inputs.len() + rng.below(steps)),
+                }
+            };
+            let choice = rng.below(4);
+            let op = rng.below(6) as u32;
+            // A program may open with a logical step over logical inputs alone.
+            let logical_inputs = inputs
+                .iter()
+                .any(|input| matches!(input, Input::Logicals(_) | Input::Logical(_)));
+            if choice == 0 || (lanes.is_empty() && !logical_inputs) {
+                let wholes = rng.below(2) == 0;
+                let want: fn(&Input) -> bool = if wholes {
+                    |input| matches!(input, Input::Wholes(_) | Input::Whole(_))
+                } else {
+                    |input| matches!(input, Input::Doubles(_) | Input::Double(_))
+                };
+                let (Some(left), Some(right)) =
+                    (numbered(want, &mut rng), numbered(want, &mut rng))
+                else {
+                    continue;
+                };
+                let value = |index: usize, at: usize| match &inputs[index] {
+                    Input::Wholes(items) => items[at] as f64,
+                    Input::Whole(item) => *item as f64,
+                    Input::Doubles(items) => items[at],
+                    Input::Double(item) => *item,
+                    _ => unreachable!(),
+                };
+                let lists_fit = [left, right].iter().all(|&index| match &inputs[index] {
+                    Input::Wholes(items) => items.len() >= length,
+                    Input::Doubles(items) => items.len() >= length,
+                    _ => true,
+                });
+                if !lists_fit {
+                    continue;
+                }
+                let result = (0..length)
+                    .map(|at| {
+                        let (x, y) = (value(left, at), value(right, at));
+                        (!x.is_nan() && !y.is_nan()).then_some(match op {
+                            EQ => x == y,
+                            NE => x != y,
+                            LT => x < y,
+                            LE => x <= y,
+                            GT => x > y,
+                            _ => x >= y,
+                        })
+                    })
+                    .collect();
+                let base = if wholes { MASK_I64 } else { MASK_DBL };
+                program.push((base + op) | (left as u32) << 8 | (right as u32) << 16);
+                lanes.push(result);
+                continue;
+            }
+            let (Some(left), Some(right)) = (
+                logical_operand(&mut rng, lanes.len()),
+                logical_operand(&mut rng, lanes.len()),
+            ) else {
+                continue;
+            };
+            let fits = |index: usize| match inputs.get(index) {
+                Some(Input::Logicals(items)) => items.len() >= length,
+                _ => true,
+            };
+            if !fits(left) || !fits(right) {
+                continue;
+            }
+            let (x, y) = (logical_lanes(left, &lanes), logical_lanes(right, &lanes));
+            let (code, result) = match choice {
+                1 => (
+                    MASK_AND,
+                    x.iter()
+                        .zip(&y)
+                        .map(|(&a, &b)| match (a, b) {
+                            (Some(false), _) | (_, Some(false)) => Some(false),
+                            (Some(true), Some(true)) => Some(true),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                2 => (
+                    MASK_OR,
+                    x.iter()
+                        .zip(&y)
+                        .map(|(&a, &b)| match (a, b) {
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            (Some(false), Some(false)) => Some(false),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => (MASK_NOT, x.iter().map(|&a| a.map(|a| !a)).collect()),
+            };
+            program.push(code | (left as u32) << 8 | (right as u32) << 16);
+            lanes.push(result);
+        }
+        if program.is_empty() {
+            continue;
+        }
+        // The runtime rejects an input no step reads, as the pass never builds one, so keep only
+        // the inputs the program reads and renumber its operands.
+        let operands = |step: u32| {
+            let mut found = vec![(step >> 8 & 0xFF) as usize];
+            if step & 0xFF != MASK_NOT {
+                found.push((step >> 16 & 0xFF) as usize);
+            }
+            found
+        };
+        let kept: Vec<usize> = (0..inputs.len())
+            .filter(|&index| program.iter().any(|&step| operands(step).contains(&index)))
+            .collect();
+        let renumber = |operand: usize| match kept.iter().position(|&index| index == operand) {
+            Some(position) => position as u32,
+            None => (kept.len() + operand - inputs.len()) as u32,
+        };
+        let program: Vec<u32> = program
+            .iter()
+            .map(|&step| {
+                let found = operands(step);
+                let right = found.get(1).map_or(0, |&operand| renumber(operand));
+                step & 0xFF | renumber(found[0]) << 8 | right << 16
+            })
+            .collect();
+        let inputs: Vec<Input> = kept.iter().map(|&index| inputs[index].clone()).collect();
+        // Lists that all have the odd length agree with each other, and the model's lanes have
+        // the usual length, so the case says nothing.
+        let odd = inputs.iter().all(|input| match input {
+            Input::Wholes(items) => items.len() != length,
+            Input::Doubles(items) => items.len() != length,
+            Input::Logicals(items) => items.len() != length,
+            _ => true,
+        });
+        if odd {
+            continue;
+        }
+        unsafe {
+            let words: Vec<u64> = inputs
+                .iter()
+                .map(|input| match input {
+                    Input::Wholes(items) => items
+                        .iter()
+                        .fold(ry_list_new(I64 as u32, 0), |list, &item| {
+                            ry_list_push(list, 1, item as u64, 0)
+                        }) as u64,
+                    Input::Doubles(items) => build(&Model::Dbl(items.clone())) as u64,
+                    Input::Logicals(items) => build(&Model::Lgl(items.clone())) as u64,
+                    Input::Whole(item) => *item as u64,
+                    Input::Double(item) => item.to_bits(),
+                    Input::Logical(item) => *item as u32 as u64,
+                })
+                .collect();
+            let lists = inputs
+                .iter()
+                .enumerate()
+                .fold(0u32, |lists, (index, input)| match input {
+                    Input::Wholes(_) | Input::Doubles(_) | Input::Logicals(_) => lists | 1 << index,
+                    _ => lists,
+                });
+            let lengths: Vec<usize> = inputs
+                .iter()
+                .filter_map(|input| match input {
+                    Input::Wholes(items) => Some(items.len()),
+                    Input::Doubles(items) => Some(items.len()),
+                    Input::Logicals(items) => Some(items.len()),
+                    _ => None,
+                })
+                .collect();
+            let last = &lanes[lanes.len() - 1];
+            let expected = if lengths.is_empty()
+                || lengths.iter().any(|&found| found != length)
+                || last.contains(&None)
+            {
+                None
+            } else {
+                Some(last.iter().filter(|&&lane| lane == Some(true)).count() as i64)
+            };
+            let mut out = -1i64;
+            let status = ry_count_true(
+                program.as_ptr(),
+                program.len() as u32,
+                words.as_ptr(),
+                words.len() as u32,
+                lists,
+                &mut out,
+            );
+            let found = (status == 0).then_some(out);
+            assert_eq!(found, expected, "program {program:x?}, seed {}", rng.seed);
+            for (index, &word) in words.iter().enumerate() {
+                if lists & (1 << index) != 0 {
+                    ry_list_drop(word as *mut List);
+                }
+            }
+        }
     }
     assert_eq!(live(), before);
 }
@@ -666,6 +1110,44 @@ fn string_functions_follow_r_and_the_standard_library() {
             read(edge_pieces),
             Model::Str(vec!["".into(), "a".into(), "".into(), "".into()])
         );
+        let nothing = ry_str_split(empty.lo, empty.hi, separator.lo, separator.hi);
+        assert_eq!(read(nothing), Model::Str(vec!["".into()]));
+        let wide = str_of("--");
+        let wide_pieces = ry_str_split(edges.lo, edges.hi, wide.lo, wide.hi);
+        assert_eq!(read(wide_pieces), Model::Str(vec!["-a".into(), "".into()]));
+        let accented = str_of("é,a part long enough for the heap,");
+        let comma = str_of(",");
+        let accented_pieces = ry_str_split(accented.lo, accented.hi, comma.lo, comma.hi);
+        assert_eq!(
+            read(accented_pieces),
+            Model::Str(vec![
+                "é".into(),
+                "a part long enough for the heap".into(),
+                "".into()
+            ])
+        );
+        ry_str_drop(accented.lo, accented.hi);
+        // Separators at every offset of an eight-byte word, alone and in runs, in texts whose
+        // length covers the word-at-a-time part and the tail.
+        for length in 0..40usize {
+            for stride in [1, 2, 3, 5, 7, 8, 9, 41] {
+                let text: String = (0..length)
+                    .map(|index| {
+                        if index % stride == stride - 1 {
+                            ','
+                        } else {
+                            'x'
+                        }
+                    })
+                    .collect();
+                let subject = str_of(&text);
+                let split = ry_str_split(subject.lo, subject.hi, comma.lo, comma.hi);
+                let expected = text.split(',').map(String::from).collect();
+                assert_eq!(read(split), Model::Str(expected), "splitting {text:?}");
+                ry_list_drop(split);
+                ry_str_drop(subject.lo, subject.hi);
+            }
+        }
         let back = ry_list_join(pieces, separator.lo, separator.hi);
         assert_eq!(text_of(back), text_of(joined));
 
@@ -769,6 +1251,9 @@ fn string_functions_follow_r_and_the_standard_library() {
             pieces,
             whole,
             edge_pieces,
+            nothing,
+            wide_pieces,
+            accented_pieces,
             left,
             middle,
             none,
@@ -857,7 +1342,20 @@ fn dicts_follow_their_models() {
                         snapshots.push((dict, entries(&model, &order)));
                     }
                     dict = unsafe {
-                        ry_dict_insert(dict, owned as u32, key.lo, key.hi, value.lo, value.hi)
+                        if rng.below(2) == 0 {
+                            ry_dict_insert(dict, owned as u32, key.lo, key.hi, value.lo, value.hi)
+                        } else {
+                            let position = ry_dict_find(dict, key.lo, key.hi);
+                            ry_dict_put(
+                                dict,
+                                owned as u32,
+                                position,
+                                key.lo,
+                                key.hi,
+                                value.lo,
+                                value.hi,
+                            )
+                        }
                     };
                     if model.insert(key_text.clone(), value_text).is_none() {
                         order.push(key_text.clone());
@@ -874,18 +1372,12 @@ fn dicts_follow_their_models() {
                     }
                 }
                 _ => {
-                    let mut out = [0u64; 2];
-                    let found = unsafe { ry_dict_get(dict, key.lo, key.hi, out.as_mut_ptr()) };
-                    assert_eq!(found == 1, model.contains_key(&key_text), "get {key_text}");
-                    assert_eq!(unsafe { ry_dict_contains(dict, key.lo, key.hi) }, found);
-                    if found == 1 {
-                        let value = Str {
-                            lo: out[0],
-                            hi: out[1],
-                        };
-                        assert_eq!(Some(&text_of(value)), model.get(&key_text));
-                        unsafe { ry_str_drop(value.lo, value.hi) };
-                    }
+                    let found = unsafe { ry_dict_find(dict, key.lo, key.hi) } >= 0;
+                    assert_eq!(found, model.contains_key(&key_text), "find {key_text}");
+                    assert_eq!(
+                        unsafe { ry_dict_contains(dict, key.lo, key.hi) } == 1,
+                        found
+                    );
                 }
             }
             if string_keys {

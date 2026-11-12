@@ -212,7 +212,9 @@ pub struct RuntimeFlags {
 }
 
 impl RuntimeFlags {
-    fn bits(self) -> std::ffi::c_int {
+    /// The flags as `ry_run` takes them, which is also how a process hands them to the R
+    /// processes it starts (`rcmd::front_end::PROJECT_FLAGS_VARIABLE`).
+    pub fn bits(self) -> std::ffi::c_int {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
             | (std::ffi::c_int::from(self.strict) << 2)
@@ -561,12 +563,12 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
     if let Err(error) = written {
         // A partial tree, say from a full disk, would otherwise stay in the cache for good.
         let mut message = failed(&staging, error).0;
-        if staging.exists() {
-            if let Err(cleanup) = fs::remove_dir_all(&staging) {
-                message.push_str(&format!(
-                    ", and removing the partial copy failed: {cleanup}"
-                ));
-            }
+        if staging.exists()
+            && let Err(cleanup) = fs::remove_dir_all(&staging)
+        {
+            message.push_str(&format!(
+                ", and removing the partial copy failed: {cleanup}"
+            ));
         }
         return Err(ReplError(message));
     }
