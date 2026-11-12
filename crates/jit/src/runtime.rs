@@ -421,14 +421,9 @@ unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     value
 }
 
-/// Holds `unwind` until compiled code hands the activation back. The collector does not trace
-/// the activation, and the exits that run before the unwind is raised allocate (they box
-/// registers and flush slots), so the unwind's objects are rooted here: an exiting handler's
-/// result travels as the value of a `return` to its `tryCatch` and is reachable from nothing
-/// else. The handles live until the activation's tier 0 frame releases them, after it raised
-/// the unwind.
+/// Holds `unwind` until compiled code hands the activation back. The collector traces it there
+/// through [`interp::Interp::held_unwinds`].
 fn park(activation: &mut Activation, unwind: Unwind) {
-    unwind.root();
     activation.pending = Some(unwind);
 }
 

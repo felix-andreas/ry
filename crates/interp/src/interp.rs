@@ -478,6 +478,12 @@ pub struct Interp {
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
+    /// The unwinds running native frames hold for tier 0 to raise: each running JIT
+    /// activation's pending unwind, pushed when compiled code is entered and popped when it
+    /// returns. A frame between the failure and the raise allocates (a deoptimization boxes
+    /// registers and flushes slots), and an exiting handler's result rides in the unwind as the
+    /// value of a `return`, reachable from nothing else.
+    pub held_unwinds: Vec<*const Option<Unwind>>,
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
@@ -619,6 +625,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         object_systems: true,
         prelude: true,
         parked_unwind: None,
+        held_unwinds: Vec::new(),
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
         calls_ever: 0,
         #[cfg(unix)]
@@ -779,6 +786,11 @@ impl RootSource for InterpRoots {
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
+            }
+            for &held in &interp.held_unwinds {
+                if let Some(unwind) = &*held {
+                    crate::unwind::trace_unwind(unwind, marker);
+                }
             }
             for value in interp.returned_values.iter().flatten() {
                 marker.mark(*value);
