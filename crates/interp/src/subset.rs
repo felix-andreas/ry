@@ -3552,7 +3552,7 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     {
         return Err(error("'x' must be a list or atomic vector"));
     }
-    let count = dispatch_length(object, call.env)?;
+    let count = dispatch_length(object, call.env()?)?;
     let result = alloc(SexpType::Integer, count)?;
     crate::heap().root(result);
     // As in GNU R, a classed object's elements come from its `[[` method, because its `length`
@@ -3573,7 +3573,7 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
                     &eval::value_args(&[object, position]),
                     call.env()?,
                 )?;
-                dispatch_length(element, call.env)
+                dispatch_length(element, call.env()?)
             })?,
             // A classed element answers with its own `length` method, S4 ones included
             // (Matrix's sparse vectors).
