@@ -28,7 +28,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{self, Arith, Op, baseline_layout},
+        bytecode::{self, Arith, Op, interp_layout},
         values,
     },
     rustc_hash::FxHashMap,
@@ -453,7 +453,7 @@ impl<'p> Translator<'p> {
             }
             Action::Srcref(srcref) => {
                 let srcref = self.builder.ins().iconst(I64, srcref.as_ptr() as i64);
-                let at = baseline_layout::SRCREF as i32 - baseline_layout::VISIBLE as i32;
+                let at = interp_layout::SRCREF as i32 - interp_layout::VISIBLE as i32;
                 self.builder.ins().store(flags(), srcref, self.visible, at);
             }
             Action::Constant { dst, value, ty } => {
@@ -730,7 +730,7 @@ impl<'p> Translator<'p> {
                 self.fill_edges()?;
                 return Ok(true);
             }
-            Action::BranchUnlessPrimitive { function, expected } => {
+            Action::BranchUnlessSame { function, expected } => {
                 let value = self.load_register(function);
                 let same =
                     self.builder
