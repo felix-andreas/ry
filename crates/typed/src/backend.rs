@@ -26,8 +26,9 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC, MemFlagsData, SigRef,
-        Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine, Value, Variable,
+        AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC,
+        MemFlagsData, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine,
+        Value, Variable,
         types::{F64, I32, I64},
     },
     std::sync::atomic::AtomicBool,
@@ -94,7 +95,7 @@ pub fn compile(
     callees: &[Callee],
     r_calls: &[usize],
 ) -> Result<Code, Refusal> {
-    ssa::with_module(|module| -> Result<Code, Refusal> {
+    ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
         let id = module.declare(&own_signature)?;
@@ -1004,6 +1005,52 @@ impl Emitter<'_> {
                 };
                 SmallVec::from_slice(&[result])
             }
+            Op::CountTrue { program, inputs } => {
+                let words = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8 * inputs.len().max(1) as u32,
+                    3,
+                ));
+                let mut lists = 0i64;
+                for (index, &input) in inputs.iter().enumerate() {
+                    let word = if ty(input).items().is_some() {
+                        lists |= 1 << index;
+                        self.one(input)?
+                    } else {
+                        self.item_words(input)?.0
+                    };
+                    self.builder
+                        .ins()
+                        .stack_store(I64, word, words, 8 * index as i32);
+                }
+                let steps = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    4 * program.len().max(1) as u32,
+                    2,
+                ));
+                for (index, &step) in program.iter().enumerate() {
+                    let step = self.builder.ins().iconst(I32, i64::from(step));
+                    self.builder
+                        .ins()
+                        .stack_store(I64, step, steps, 4 * index as i32);
+                }
+                let out = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let arguments = [
+                    self.builder.ins().stack_addr(I64, steps, 0),
+                    self.iconst(program.len() as i64),
+                    self.builder.ins().stack_addr(I64, words, 0),
+                    self.iconst(inputs.len() as i64),
+                    self.iconst(lists),
+                    self.builder.ins().stack_addr(I64, out, 0),
+                ];
+                let status = self.call_words(address!(values::ry_count_true), I32, &arguments);
+                self.fail_if(status, &inst.fail_drops)?;
+                SmallVec::from_slice(&[self.builder.ins().stack_load(I64, I64, out, 0)])
+            }
             Op::VectorCompare(op, item, a, b) => {
                 let operation = self.iconst(*op as i64);
                 let kind = self.iconst(kind(*item));
@@ -1333,6 +1380,44 @@ impl Emitter<'_> {
                 let short = self.builder.ins().band_imm_u(shifted, 0x7F);
                 SmallVec::from_slice(&[self.builder.ins().select(inline, short, x[1])])
             }
+            Op::DictLen(dict) => {
+                let pointer = self.one(*dict)?;
+                let length = self.call_words(address!(values::ry_dict_len), I64, &[pointer]);
+                SmallVec::from_slice(&[length])
+            }
+            Op::DictKeys(dict) | Op::DictValues(dict) => {
+                let pointer = self.one(*dict)?;
+                let function = if matches!(inst.op, Op::DictKeys(_)) {
+                    address!(values::ry_dict_keys)
+                } else {
+                    address!(values::ry_dict_values)
+                };
+                let list = self.call_words(function, I64, &[pointer]);
+                SmallVec::from_slice(&[list])
+            }
+            Op::ToUtf8(a) => {
+                let x = self.get(*a)?;
+                let list = self.call_words(address!(values::ry_str_to_utf8), I64, &[x[0], x[1]]);
+                SmallVec::from_slice(&[list])
+            }
+            Op::FromUtf8Lossy(a) => {
+                let list = self.one(*a)?;
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let decoded = self.call(
+                    address!(values::ry_list_from_utf8_lossy),
+                    &[I64; 2],
+                    &[I32],
+                    &[list, out],
+                )[0];
+                let bad = self.builder.ins().icmp_imm_s(IntCC::Equal, decoded, 0);
+                self.fail_if(bad, &inst.fail_drops)?;
+                self.load_item(out, Item::Str)
+            }
             Op::RepeatStr(a, count) => {
                 let x = self.get(*a)?;
                 let count = self.one(*count)?;
@@ -1465,6 +1550,40 @@ impl Emitter<'_> {
                     I64,
                     &[pointer, owned, w0, w1],
                 );
+                SmallVec::from_slice(&[list])
+            }
+            Op::Swap(list, first, second) => {
+                let pointer = self.one(*list)?;
+                let owned = self.owned(inst, 0);
+                let (first, second) = (self.one(*first)?, self.one(*second)?);
+                let list = self.call_words(
+                    address!(values::ry_list_swap),
+                    I64,
+                    &[pointer, owned, first, second],
+                );
+                SmallVec::from_slice(&[list])
+            }
+            Op::Extend(first, second) => {
+                let (a, b) = (self.one(*first)?, self.one(*second)?);
+                let (a_owned, b_owned) = (self.owned(inst, 0), self.owned(inst, 1));
+                let list = self.call_words(
+                    address!(values::ry_list_concat),
+                    I64,
+                    &[a, a_owned, b, b_owned],
+                );
+                self.fail_if_null(list, inst)?;
+                SmallVec::from_slice(&[list])
+            }
+            Op::Slice(list, start, count) => {
+                let pointer = self.one(*list)?;
+                let owned = self.owned(inst, 0);
+                let (start, count) = (self.one(*start)?, self.one(*count)?);
+                let list = self.call_words(
+                    address!(values::ry_list_slice),
+                    I64,
+                    &[pointer, owned, start, count],
+                );
+                self.fail_if_null(list, inst)?;
                 SmallVec::from_slice(&[list])
             }
             Op::Poll => {

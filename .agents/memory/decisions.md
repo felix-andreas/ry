@@ -7213,6 +7213,30 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** The `vapply` case runs at tier 0's speed under `RY_JIT=force` (about 15 µs per
   call of ten elements), and base R's `pmin`, whose body makes such a closure, is no slower with
   the JIT on than off.
+- **Code lives with the body, not in a table.** A closure's body slot holds its compiled code
+  once compiled, and a closure copy (`duplicate`, `environment<-`) takes that code as its body
+  (`body_to_copy`), so copies share compiled code without a body-to-code hash table. `compile` returns `R<Sexp>`: the only
+  by-design refusal is a body that is not a call (`Uncompilable::NotACall`), and anything else is a
+  typed error, never a silent fallback. Closures that the AST evaluator makes from one `function`
+  expression share their body object, and find its code through the entry the call counter
+  already keeps per body (see "Tier 1 compile throughput" below).
+
+## Fast-path prologues return through an op, not an unwind
+
+- **Previous shape.** A native prologue (`.Internal(ryX())` as a body's first statement) finished
+  the call by raising `Jump::Return`. On a slot frame that materialised a pending environment for
+  the unwind target, and in tier 1 it was a failed step and a deopt: about 11.5k deopts per two
+  repeats of the testthat workload.
+- **Target shape.** The compiler emits `Op::Prologue dst function call` for a zero-argument
+  builtin marked `BuiltinDef::prologue` (not inside promise code). The op sets
+  `interp().prologue` to the running frame (`ClosureFrame::running`), calls the builtin, and
+  `base_fast_paths::finish` returns the value instead of jumping when the frame matches, clearing
+  the marker. The op then returns `Flow::Done`, `step_one` reports `Some(value)` and tier 1 sees
+  `outcome::RETURNED` and returns `dst`. The outer marker is saved and restored, so a prologue
+  inside a prologue's argument works. Prologue builtins use `Visibility::Keep`, because `finish`
+  sets visibility itself.
+- **Impact.** Deopts on the testthat workload fall from about 11.5k to about 2.6k per two repeats;
+  the rest are real condition unwinds (`invokeRestart`, `signalCondition`, `doTryCatch`).
 
 ## Bodies that would mostly hand back to tier 0 compile only for loops
 
@@ -8523,6 +8547,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **NaN payloads.** On x86-64 an SSE operation on two NaNs returns the first operand's payload, quieted, and LLVM may swap the operands of `+` and `*`, so the kernels pick the payload explicitly (`first_nan`). GNU R's own compiled loops swap them in some variants: for two double operands (logicals are coerced to double first), `x + y` and `x * y` take `y`'s payload where `x` is a scalar beside a longer `y` and where both recycle, and `x`'s otherwise; with an integer operand they always take `x`'s. `kernels::payload_from_right` encodes this and the callers swap the operands, which changes nothing else. `-`, `/` and `%/%` (which divides first) take `x`'s. Probed against GNU R 4.3.3 in `crates/oracle/cases/kernels__elementwise.R`.
 - **Reuse rule.** A result is written into an operand's buffer when both hold: the bytecode compiler marked the operand's register as a temporary that only this instruction reads and that an arithmetic or fused instruction wrote (operand 6 of `Op::Arithmetic`, a bit per side), and at run time the operand's count is zero, it is mutable and not ALTREP, and it has the result's type and length. The count alone is not enough because registers and the JIT's unwritten slot values hold uncounted references, so a zero count does not prove that nothing reads the value later. A builtin called from the AST evaluator never reuses. This is GNU R's `R_allocOrReuseVector` rule restricted to what the compiler can prove.
 - **Destinations that alias an operand.** `kernels::binary(call, operator, left, right, destination)` and `kernels::unary(call, function, operand, destination)` take an optional destination, which may be one of the operands, so `x <- x * y` and `x <- sqrt(x)` write into `x`'s own buffer. The slice kernels take each operand as an `Option`, where `None` means the operand lives in the output buffer, so an aliased operand is read and written through one `&mut` slice with no copy and no `unsafe` aliasing; recycling stays exact because only an operand of the result's full length can be the destination. `kernels::fits` admits a destination only when its length is above one, it is plain and it has the result's type and length. The length rule exists because the shared scalar constants (`values::scalar_logical`'s `TRUE`, `FALSE` and `NA`) can be held by a single binding with a count of one, so a one-element destination is never provably private. Two sources offer a destination: `Op::Arithmetic`'s reuse bits (`bytecode::arithmetic_destination`, a temporary only this instruction reads) and `Call.reusable`, which the evaluator sets for `x <- f(x, ...)` when `x`'s binding holds the only reference and `f` is a builtin marked `reusing_first_argument` (the arithmetic, comparison and logic operators, `!`, and the one-argument math functions). For an `Ops` group member the reuse path dispatches first, so an object's method sees its operands untouched.
+- **The evaluator offers fresh operator temporaries too** (`eval::temporary_argument`). A builtin marked `reusing_first_argument` called from AST code gets as its destination an argument whose expression is a two-argument call to a base operator builtin and whose value no counted reference holds (count 0 after `evaluate_args` uncounts the argument list). This is the AST twin of the compiler's reuse bits, so `x * 2 + 1` at top level or in an uncompiled body peaks at one result, as in GNU R (153 MB over the inputs at 2e7 doubles, against 305 before). The operator must be the base builtin because a closure bound to `*` may return a value something uncounted holds, and unary `+` is excluded because it returns its operand, which may be a vector embedded in a constructed call. Reference-counted registers were the alternative; they are unnecessary while every reuse source is a statically known fresh temporary, and they would cost a count update on every register write.
 - **Reductions are kernels too.** `sum` on integers (`sum_integers`, an `i64` total that is NA on the first NA unless `na.rm`), `any`/`all` (`any_all`, where a nonzero integer is `TRUE`), and `min`/`max`/`range` (`integer_extremes`, `real_extremes`, which make one pass and report NA and NaN separately) run as SIMD slice kernels; `range` computes both bounds in that one pass. GNU R's `min` and `max` keep the first of equal values, which matters only for `0` and `-0`, so `real_extremes` runs eight lane-wise extremes and then lets the first zero decide a zero bound's sign. `prod` keeps its scalar loop because GNU R accumulates it in x87 long double, which no SIMD lane reproduces bit for bit; the double `sum` uses the long double kernels in `long_double.rs` for the same reason.
 - **Call operands are fused by evaluating them ahead, with the operator guards checked first.** A call the pass cannot compute (`mean(x)` in `sum(x - mean(x) > 0)`) becomes a leaf when no operator of the tree has produced a result before it in evaluation order. The ordinary code after the pass reaches each operator through a guard whose cold fallback evaluates the whole call's AST, which would run the call a second time, so `Compiler::fused_call` emits, in order: guards for every operator head before the last call leaf, sharing one cold fallback that evaluates the whole expression; the variable reads and calls before that point, into registers (leaf kind 2 in the fused program); `Op::Fused`; and the ordinary code, in which those operands compile to `Op::Move` from their registers (`Compiler::hoisted`, consumed occurrence by occurrence, so a later read of the same variable reads afresh) and the pre-checked heads have no guard (`Compiler::preguarded`; `general_call` loads the checked function as a constant instead of `GetFun`). That matches R, which looks an operator up before evaluating its arguments. Variables read before a call are hoisted with it so that a call that rebinds them (`gx <<- ...`) leaves the earlier reads seeing the old value. A call that `may_modify_in_place` is never a leaf, because registers do not count as references.
 - **Fusion representation.** `Op::Fused dst program target` is an optional superinstruction that the compiler emits in front of the ordinary code of an element-wise tree: arithmetic, comparisons, `&`, `|`, `!`, unary minus and one-argument math functions, optionally under `sum`, `any` or `all`, whose leaves are all constants and variables. The program constant (layout in `bytecode::fusion`) lists the operators' guards, the leaves with their lookup cache slots, and the nodes in post-order, each with the position of the ordinary instruction it replaces. The compiler emits the ordinary code exactly as without fusion and matches the plan's steps against the instructions it emitted, leaving the program `NULL` when they differ. At run time the instruction reads the leaves in the ordinary code's order, forcing a frame argument's promise as `GetVar` would (with the values read before it referenced and rooted, as registers are), then checks each operator through its guard's cache. It declines, falling through to the ordinary code, when every leaf is a scalar or the vectors are shorter than 64 elements (`kernels::SHORTEST_FUSED`: below that the ordinary instructions are cheaper, because fusion saves too little allocation to pay for reading the program), on an active binding, a missing or unbound variable, an attribute, an object, ALTREP, recycling other than a scalar against vectors of one length, integer overflow, or a NaN a math function produced; after 16 declines in a row it rewrites its opcode to `Op::Unfused` (a no-op in tier 0, no code in baseline code) and drops its program from the constant pool. A site that never fuses then costs one dispatch and holds no heap, and the compiler emits `Op::Unfused` directly when the plan does not match the ordinary code. Otherwise it evaluates scalar nodes once, then the vector nodes in 512-element chunks in per-thread scratch buffers, writes the root straight into the result, records the type feedback the replaced instructions would have recorded, and jumps past the ordinary code.
@@ -8819,7 +8844,19 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Rejected: a nursery sized by survival.** Doubling the nursery (up to 64 MB) while a minor collection promotes more than a fifth of its bytes saved only another 0.6% of `records`' instructions on top of the prediction, and raised its peak RSS from 111 to 141 MB; the rule is no peak RSS regression per worker, and four parallel workers would pay it four times. Bounding the growth by the live set buys nothing, because the small-object trigger is already `max(young_limit, old_small_bytes / 2)`.
 - **Dense precious set.** `Roots.precious` was an `FxHashMap<Sexp, u32>`, probed on every frame release to ask whether the environment was preserved. It is `Precious { objects, counts }`, two parallel vectors, plus `flag_bits::PRECIOUS` in the header, so the hot question is a flag test. The index is not stored in the header because every gc bit is taken and flag bit 7 was the only spare one; `R_ReleaseObject` scans from the newest entry, as GNU R's precious list does, and the packages that preserve many objects (Rcpp, cpp11) keep their own linked lists and preserve only the list head.
 - **Measured** (callgrind, `RY_BENCH_REPEAT=2`, against main): `records` 7,028M to 6,366M instructions (-9.4%), `maybe_collect` 964M to 632M, `escalate_if_full` 720M to 391M; per process at `RY_BENCH_REPEAT=4`, intermediate collections 5 to 2 (26 minor and 5 major on both). Peak RSS on `records` 111 to 97 MB (not profiled; it comes with the skipped intermediate collections); the testthat workload 73.7 MB on both (copies made the same way). The testthat workload 2,813.4M to 2,802.7M instructions with the JIT on and 2,812.2M to 2,802.1M off (the precious-set probe; its 9 minor collections are unchanged).
-- **What is left toward a tenth of the collection time.** The minor collections on `records` (26 per process at `RY_BENCH_REPEAT=4`) trace old objects again from the remembered set; a slot-precise remembered set is the next step, then the per-object tracing cost (about 150 to 200 instructions per traced object in `trace`).
+- **Minor-collection cost by source: nothing in marking is worth building.** A measurement-only probe split each minor collection by where marking starts, with phase times that sum to the collector total (per-build R home, single process, `RY_BENCH_REPEAT=2`, collection counts unchanged by the probe).
+
+  | phase | testthat_full (9 minor, 15.9 ms, 2.2% of the run) | package load of 11 packages (2 minor, 5.3 ms) |
+  |---|---|---|
+  | root marking (`InterpRoots::trace`, root stacks, sources) | 1.41 ms, 8.9% | 0.21 ms, 3.9% |
+  | tracing from roots | 1.74 ms, 10.9%, 47.9k objects | 2.13 ms, 39.9%, 68.2k objects |
+  | remembered carded vectors | 0.07 ms, 0.4% | 0.12 ms, 2.3% |
+  | remembered environments | 0.27 ms, 1.7% | 0.34 ms, 6.4% |
+  | other remembered objects, traced whole | 1.96 ms, 12.3%, 7.7k old parents | 1.25 ms, 23.4%, 11.2k old parents |
+  | escaped set | 0 (no escaped object reaches a minor collection) | 0 |
+  | after marking (weak references, returned frames, sweep) | 10.44 ms, 65.7% | 1.28 ms, 24.0% |
+
+  The bar for a structural change is 2% of testthat_full. The whole remembered set is about 0.3% of it and the escaped set is empty, so neither a slot-precise remembered set nor a more precise escaped set is built; the old objects a package load traces in its minor collections come from the remembered set (closures, strings, pairlists, calls, lists) and from roots, not from escaped objects. Roots are about 0.45% and `InterpRoots::trace` alone about 0.2%. The largest piece is the work after marking, about 1.45% of testthat_full, which caps any one of its sub-steps below the bar, so it was not split further (`backlog.md`, "Open: collector throughput").
 
 ## Parse data as dense columns
 
@@ -8863,6 +8900,73 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** `docs/src/lib/benchmarks.ts` (site) and `tools/bench/readme.py` (READMEs) render every number, with the same rules: one too-short floor (GNU R under 0.1 s, left out of every geometric mean), only `kind == "workload"` rows count as application workloads, and every chart, table, summary and README block carries the metadata line (date, ry commit, GNU R version, machine, rounds). `just bench-readme --check` in `just gate` catches drift. The suites are named "Numeric kernels" and "Application workloads", both marked "(ours)", and typed is a column, not a suite.
 - **Why GNU R's time.** It measures how much work a program does. A short ry time is the speed-up being measured, so flagging it would drop `fib` and every typed loop for being fast.
 - **Impact.** Prose names categories rather than figures, so a fresh `--write` cannot leave the text contradicting the charts.
+
+## Tier 1 compile throughput: linear SSA construction and one compile per body
+
+- **Measured on the testthat workload** (`RY_JIT=force`, two warm repeats): 799 compiles and
+  about 4.0 s of codegen before, 709 compiles and 3.1 s after. Bodies under 250 words cost about
+  10 µs per word, almost all of it Cranelift's fixed cost per function; bodies over 3,000 words
+  cost about 17 µs per word and are 12 compiles taking 1.8 s.
+- **SSA construction was superlinear.** `ssa::Builder` resolves variables only when
+  `seal_all_blocks` runs, and every block between a use and its definition got a parameter that
+  trivial-parameter removal then deleted. For `[<-.data.frame` (14,819 words, 10k blocks) that
+  was 420k parameters created for 3.9k kept. `read_variable` now walks single-predecessor chains
+  once the predecessors are known, which creates 99k and keeps the same 3.9k; translation went
+  from 95 to 54 ms.
+- **The rest was quadratic in merges times slots, and in register allocation.** With the
+  steps below, testthat's forced codegen fell from 3.1 to 1.4 s, and the 12 bodies over 3,000
+  words went from 17 to 7.1 µs per word (5.3 for bodies under 250 words), so cost is linear in
+  body size and no size cap or hotness threshold is needed. For `[<-.data.frame` (14,819 words)
+  one compile went from about 300 to about 125 ms.
+  - Each slot's run-time status was an SSA variable live across the whole body, so every merge
+    got a parameter per slot: 47k parameters over 8k blocks, and a `PureUnlessObserved` step
+    redefined all of them. Statuses now live in a stack array of 4-byte cells
+    (`Translator::statuses`): 8.6k parameters, and seal time fell from 24 to 5 ms. A reset
+    touches only the slots the state may have loaded, behind a cold branch.
+  - A tier 1 body without a loop compiles with Cranelift's single-pass register allocator
+    (`ssa::Allocator`), and one with a loop with the backtracking allocator. Measured after the
+    status change, on testthat's forced codegen and the untyped `bench-why` kernels (best warm
+    time, `TMPX` override, not committed):
+
+    | Policy | testthat codegen | Loop kernels vs backtracking |
+    |---|---|---|
+    | Single-pass everywhere | 1.14 s | 1.5 to 2.4x slower (`loop_sum` 2.4, `array_filter` 2.0) |
+    | Backtracking everywhere | 1.67 s | 1.0 |
+    | By loop (chosen) | 1.44 s | 1.0 |
+
+    Call-heavy kernels (`report`, `validate`, `orders`) ran the same under both. Both allocators
+    are linear in body size after the status change (7.0 and 7.5 µs per word for small and big
+    bodies under backtracking). Cranelift fixes the allocator per module, so each has its own
+    pool. If big cold bodies with loops turn out to matter, the next step is compiling them
+    single-pass and recompiling with backtracking once their loops get hot, not a size cap.
+  - A deopt exit writes only the loops around its pc, since tier 0 reads a loop's words only
+    inside that loop. Writing every loop made each exit grow with the body's loop count and kept
+    every loop variable live everywhere.
+  - A variable load inlines only the slot-frame hit; frame walks and the environment probe run
+    in `runtime::jit_probe`, whose result tags the enclosing status in its low bit.
+  - Trivial-parameter removal is a worklist over each parameter's users rather than repeated
+    sweeps.
+- **Why one body compiled up to four times**, each fixed at its source:
+  - A failed speculation on an instruction compiled code steps through tier 0 was never recorded
+    as feedback, so each recompile made the same bet. `interpret::<SINGLE>` records always.
+  - `long_lived` counted any environment whose parent is the base namespace, which includes every
+    call frame of a base function, so code speculating on `tryCatch`'s local functions was
+    portable and failed its proof in every other frame. It now needs the `name` attribute an
+    imports environment has.
+  - The slot check of a closure a slot frame made compared the closure's environment with the
+    frame's, which is nil until the frame reifies; the closure holds the frame's pending
+    environment (`eval::pending_env_of`).
+  - Code that speculates on a function local to its enclosure dies with that enclosure. The
+    first time a body's code meets a second enclosure, the tier state gets `runtime::SHARED`, and
+    its compiles keep only speculations that every enclosure resolves the same way, so one
+    portable compile serves every call of `tryCatch` and friends. A body that only one long call
+    runs keeps its per-enclosure speculations.
+  - Closures the AST evaluator makes from one `function` expression share the body object, and
+    `bytecode::State::bodies` (the per-body call counter) holds that body's code once compiled,
+    through a weak reference keyed on the body, so the code lives exactly as long as its source.
+    Formals and srcref must match too, since compiling reads them. Residual: rlang's argument
+    capture (`expect_equal(f(vapply(..., function(r) ...)))`) hands back a copied expression, so
+    such a lambda still compiles once per test block (73 small compiles, about 40 ms).
 
 ## Benchmark suites are directories the renderers only display
 - **Previous shape.** The renderers knew two suites by path (`why/`, `real/`) and their own row shapes, judged too-short programs by GNU R's time and computed every geometric mean. Program names lived in the page and the renderer code.
@@ -8929,6 +9033,21 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Gates and flags.** A crash or a checksum that differs from GNU R's fails the run and writes nothing; numeric checksums may differ by a relative 1e-10, because a typed program may sum in another order. Package suites gate on neither, since a package's own test suite is the program and its result on ry is the measured gap: differing outcomes are a `tests_differ` flag, and a suite that crashes or does not finish on an engine is a failure recorded in the package's row, which leaves it out of the geometric mean. A test script (a package without testthat or tinytest) that exits with status 1 ended in an R error, which is how such a script reports failing tests (`test.data.table()` raises its summary after running every test), so it counts as one failed test and the remaining scripts still run; any other non-zero status, a signal or the suite timeout is a failure. The cost is that a script stopped early by a ry bug also counts as finished, with a shorter time, but its `tests_differ` flag shows it. A package that also fails on GNU R shows a `gnu_r` failure, so a broken pin is told apart from a ry gap. `too_short` flags an engine's median under 0.1 s, but only a GNU R time under 0.1 s leaves a program out of the geometric means (GNU R's time measures the work). `typed_refused` records what `RY_TYPED_LOG` reports for the typed program beyond the harness alone.
 - **Kernels against applications.** A program is a kernel when its time goes into arithmetic on numbers and numeric vectors, and an application workload when it goes into lists, attributes, dispatch, strings and tables. `simulation` moved to kernels and the untyped `lapply` duplicate of `closures` was dropped.
 - **Impact.** One schema means one renderer (`docs/src/lib/benchmarks.ts`, `tools/bench/readme.py`) for every chart and README block, and `just bench-readme --check` keeps them in sync with the results. The numbers become reproducible within their intervals, which lets a PR claim a speed-up only when the intervals separate.
+
+## A compiled element op costs no more than tier 0's handler
+
+- Rule: a JIT-compiled element operation never costs more instructions per iteration than tier 0's handler for the same shape. Pinned by `element_ops_cost_no_more_than_tier_zero` in `crates/jit/tests/test_tiers.rs`, which runs each shape in a child of the test binary under cachegrind (no hardware counters in the cloud VMs) with the JIT off and forced; without valgrind it passes with a note.
+- Previous shape: an element op the code generator did not inline (`x[[i]]` and `x[2L]` on named lists, `x$b`, `x[["b"]]`, every `SubAssign` it did not specialize) ran as an opaque step: write back every variable, run `step_one` with no fast paths, forget every variable and reload them on the next iteration. That cost 1.2 to 2.7 times tier 0's instructions.
+- Chosen shape: such a step first calls `bytecode::fast_step` (through `runtime::jit_fast_step`), which runs tier 0's own fast handler (`call_builtin_fast`, `sub_assign_fast`, `field_fast`) and skips the write-back and reload when it applies. `Action::Step` carries `Fast::{No, Read, Store(slot)}`; a store writes back only its own variable first. One handler serves both tiers, so the two cannot drift.
+- A fast store changes the frame's object in place, so a variable compiled code holds as that object stays loaded; only an unboxed copy is forgotten.
+- Boxing an unboxed register for tier 0 reuses an object tier 0 already has instead of allocating: the constant pool's object for a constant, and the variable's frame cell for a clean variable copy (`Translator::box_for_tier0`). A dirty variable is written back once at its first boxing, so later iterations reuse it.
+- Tier 0 gained `field_fast` for `x$name` on a plain named list, which also cuts tier 0's own cost of that shape by about a third.
+- Where the fast handler declines, `bytecode::quiet_step` (through `runtime::jit_quiet_step`) runs the generic handler without any write-back when it cannot run R code: no calling handler is established (a warning would run one) and no operand is an object, an ALTREP vector, an environment or a promise. Only otherwise does the step write back every variable. This is what keeps a range subscript (`v[k:4L]`), an append that converts the vector (`w[[3L]] <- k`) and a partial `$` match under tier 0's cost.
+- The two calls stay separate and out of line. Running the generic handler from `fast_step` hands it the fast handlers' activation, which then escapes, and every fast hit pays about 90 instructions of stores for fields it never reads; one combined helper behind a panic guard costs the hit path a stack frame.
+- The fast handler is skipped where it can only decline: a `[` or `[[` read whose index is typed as a vector, and a store into a vector of known atomic type that the compiled store declined (the handler takes only what that store takes).
+- `$` steps as pure unless observed, like `[[`: the observed check sends an object, an ALTREP vector or an environment (whose promises and active bindings run R code) the opaque way.
+- Writing a variable back into a slot frame uses the slot's position in the code's slot table, fixed at compile time (`Compiled::frame`), not a search of the table's names, and a boxed value is stored the way `SetVar`'s fast handler stores it.
+- **Code shared between bodies is found by the body's address, and the collector drops dead bodies' entries** (`bytecode::State::clear_dead`). A body is any language object, with no spare field for a dense index, so the table is keyed by address; it extends the call-count map that already existed rather than adding one, and only an uncompiled body reaches it, because a compiled closure's body slot is its code. `clear_dead` used to keep an entry while its weak pair's key was live, but the collector clears that key to `NULL` before `clear_dead` runs and `NULL` counts as live, so no dead entry was ever dropped. A new body the allocator placed at a dead body's address then ran the dead body's code (wrong results, or `NULL`; `fuzz_argument_expressions` failed only in some test orders). `clear_dead` now keeps an entry only while its key, the body itself, survives; it runs before anything is freed, so no address is reused while a stale entry exists. `a_body_at_a_dead_bodys_address_runs_its_own_code` pins it.
 
 ## Interpreter hot paths make no Rust allocations
 
@@ -9112,6 +9231,18 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why refuse instead of failing at the end.** The missing packages are known before any case runs, and a full pass takes up to 80 minutes, so a run that would be rejected anyway should stop in seconds.
 - **Not changed.** `cargo test -p oracle` still drops cases whose packages are missing, because CI runs it in environments without the corpus; the merge gate is `oracle compare`.
 
+## Marking a traced object costs a few table loads
+
+- **Previous shape.** Every marked object paid for decisions recomputed from its kind: `element_size` and `shape` were `match` ladders, `locate` divided by a slot size looked up through a branch on the page class, `age` was an out-of-line call, the leaf check walked the kind ladder again, and `mark_child` wrote a `younger_child` field on the heap that `trace` read back. `vector_cells` computed each small vector's exact cell count from its length. On `records` the collector was 757M of 5.55G instructions, about 1,600 instructions per kept record.
+- **Target shape.**
+  - Kind facts are two 32-entry tables in `crates/heap/src/object.rs`: `KIND_TRAITS` packs the element width with a `LEAF` bit (no references besides attributes), and `SHAPES` gives the shape. `element_size`, `holds_no_references` and `shape` are one load each.
+  - `SLOT_INDEX_MULTIPLIERS` in `space.rs` has 256 entries (zero for bytes that are no size class), so `locate` is a page-class load, a multiply and a shift with no bounds branch.
+  - `Space::age` is inlined into `mark` and `mark_beside_tenured`, and returns whether the object is tenured so the caller sets the tenured bit.
+  - `mark_child` returns whether the child is younger than the parent instead of storing it in a heap field, and `trace_children` folds those results into the decision to remember the parent. It skips `NULL` before touching the bitmap, because `mark_roots` marks `NULL` first and it is tenured from the first collection; roots go through `Heap::mark`, which never takes that skip.
+  - A small vector counts the vector cells of its size class (`SLOT_VECTOR_CELLS`), as GNU R counts a small vector's `Vcells` by its size class; a large vector counts its exact length. The count only feeds `gc()`, `gcinfo` and `max_vector_cells`.
+- **Impact.** The collector on `records` went from 619M to 457M instructions (-26%), the whole program from 5,153M to 4,987M (-3.2%); `report` -0.2% and `testthat` -0.5%, where the collector is a small share. A heap-only benchmark that keeps 100,000 named five-element lists through major collections went from 873M to 595M in `collect_keeping` (-32%). No trigger, root or barrier changed: `RY_GC_LOG` is byte-identical to main on all three workloads apart from times, and peak RSS is within 0.3 MB.
+- **The floor for this design.** About 50 instructions per traced object remain, spread evenly over `locate`, the mark-bit test, `age` and the stack push and pop; on `records` the drain is 306M of the program's 4,987M. The structural options were weighed against a bar of another 2% of `records` and rejected without a prototype, because neither can reach it: prefetching the next object hides cache misses but adds instructions, and `locate` (`space.rs`, the page-class load, multiply and shifts) is about 60M of the drain, so even a bitmap layout that removed it entirely would save at most 1.2%. Reopen this only with a wall-clock target, where prefetching can pay.
+- **Measuring.** The start-up image and the `.ryc` code images in an R home load only into the build that wrote them, so two builds sharing `target/base-r` compare one fast start against one slow start (7 MB of RSS and up to 17% of instructions on `report`). Give each build its own copy of the R home and run `ry-rcmd start-image <home> --libr <libR.so>` for each.
 ## Closure frames live in fixed slots that are never moved
 
 - **Previous shape.** `Interp::frames` was a `Vec<Frame>`. A closure call built its 144-byte `Frame` on the native stack and pushed it, which copied it with a `memcpy` call because LLVM inlines copies only up to 128 bytes; the return moved it off with `pop` and a second `memcpy`, then dropped it through out-of-line drop glue. The two copies spent about 60 instructions per call in `memcpy`.
@@ -9155,6 +9286,15 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why.** An R list is untyped and mutable, so accepting one as a record makes the boundary implicit: the field types, lengths and `NA`s are checked deep inside a call instead of where the caller converted them, and a second conversion route sits beside `List.from_r()` and `Num.from_r()`. Spreading the fields also gave the typed core a second kind of binding (a record known only field by field) with its own refusals, such as a record used whole or assigned.
 - **Target shape.** R values enter typed code only through the per-parameter boundary, as plain vectors and scalars checked at entry. Records, tuples and tags are built inside typed code. A plain R list where a record is expected is a `type-mismatch` (`reference/type-system.mdx`, "Records from R"); a record from `as.record()` passes the check but runs in the interpreter, which `RY_TYPED_LOG` names. The typed log-rank benchmark (`tools/bench/kernels/log_rank.typed.R`) takes its columns as `List` parameters.
 - **Gap.** A record built inside typed code cannot yet hold a `List` field (`shapes::intern` stores only scalars, strings and boxes), so a typed function cannot bundle its vector parameters into a record natively (`backlog.md`).
+## The fixed cost of an argument reference
+
+- **Previous shape.** `slot_promises_into` walked a call's arguments twice, once to check that every argument fits and once to build them. `release_references` walked the pool slice through checked `get` and `zip`.
+- **Target shape.** `slot_promises_into` builds the argument list in one pass. When an argument does not fit, which is rare, the pass undoes what it built: it restores the owner frame's `unforced` count from a snapshot and releases the references it took. `release_references` indexes the pool directly, since the pool keeps `references_used` within both vectors. Each field is written only when it differs from its reset value. A forced reference's tag is nil whatever its kind, because `settle_promise` clears it, so the attribute must always be compared with the stored target. Skipping that comparison when the tag is nil lets a reused environment reference run a forced code reference's stale code, which breaks base R's start-up (`rm -> match.call`).
+- **Guard.** `fuzz_argument_references_agree_with_the_ast_evaluator` (`testing::check_argument_reference_agreement`) compares compiled calls through forwarded, delayed, dotted and kept references with the AST evaluator. It fails on the release shortcut above. The oracle case `environments__argument_reference_reuse` pins reuse across writes, recursion, `...`, `sys.function`, `substitute`, `match.call` and a reified caller.
+- **Measured.** Instructions in one warm iteration (callgrind, `RY_BENCH_REPEAT=2` minus `1`), plain release builds against main: testthat_full 615.8M to 613.8M (-0.32%), validation -0.19%, objects -0.18%, functional -0.17%. Anonymous and start-image peak RSS are flat on all four workloads.
+- **Rejected: a slot-reference fast path in `force_promise`.** Settling a slot reference straight from a plain value or an already forced promise in its slot, and computing its target once, saved 1.0M instructions (0.16%) on testthat_full's warm iteration. It cost about 30 lines and a new guarded-forcing helper beside the existing path, which the gain does not pay for.
+- **Rejected: a side table indexed by reference.** Keeping each reference's reset state in a dense table instead of in its fields needs an index on the reference, and a pooled promise has no free field to hold one. The target write is already a raw store, and the barriered resets of car, tag and attribute stay either way. Revisit if references gain an index field.
+- **Rejected: lazy defaults.** Keeping a missing argument's compiled default in its slot and making a promise only when something other than the frame's own read sees the slot would save at most about 0.6% of testthat_full: `default_promises`, `alloc_compiled_promise` and `compiled_promise` together are 1.1% of its instructions, and only part of that goes away. The unmaterialized default would be a new kind of slot value that every slot reader must handle, including tier 1, which reads registers directly.
 
 
 ## S3 methods are found through one row per method symbol
@@ -9206,3 +9346,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Empty lists of records or tags.** The preflight names only their storage (`"list"`), and typed values take their types from the flow of values, not from the checker. So such a `[]` starts as a list of any tag and is *pending*: the first `List.append` or assignment that meets a concrete list settles it, retyping every local that holds it and the allocation in place (`Lowering::settle`). Settling refuses when anything but a copy or a length read the placeholder, since such an operation chose its code by the placeholder type, and reading the items of a pending list refuses up front. One never settled stays an empty list of any tag, which is a sound type for a list that holds nothing.
 - **Why not carry the checker's type.** Passing a full type through the preflight would need a type printer and a parser for records, tuples and tag unions in the runtime, a second description of the same type. Every case in the ports appends before reading, so flow typing settles them all.
 - **Pinned by** `typed-list-literals.scenario`.
+
+## A count of a logical list fuses with the comparisons that built it, after lowering
+
+- **Previous shape.** `List.count_if(time >= t & event, \(b) b)` built a `List<Bool>` per comparison and per `&` only to count the last one. Typed `log_rank` builds four 16,000-item lists for each of its 1,000 event times, which kept it at untyped ry's time.
+- **Target shape.** `count_if` with the identity predicate over a `List<Bool>` lowers to `Op::CountTrue` over that one list. A pass over the IR (`crates/typed/src/fusion.rs`), run before ownership insertion, follows the list back through `VectorCompare` on `I64` or `F64`, `VectorLogic`, `VectorNot` and same-typed `Copy`, and turns the count into one program over the comparisons' list and scalar inputs. `values::ry_count_true` runs it in chunks of 128 items with lanes 0, 1, 2 for `FALSE`, `NA`, `TRUE`, so `&` is `min`, `|` is `max` and `!` is `2 - x`. It fails, and the interpreter reruns the call, on `NA` in the result, a length mismatch or an invalid program, as the unfused code would. Absorbed instructions whose results nothing else reads are removed.
+- **Why after lowering, not during it.** At lowering time an operand is a local that may be reassigned, read in a branch, or also returned, so fusing there means deferring bindings across all of that. The IR pass sees the finished code and only fuses within a straight-line run that ends at the count (the count's block and the chain of single-predecessor blocks that jump into it), where every instruction runs once before the count. It checks that no input is reassigned between the comparison that read it and the count.
+- **Comparisons and `!` on ry lists give ry lists.** A comparison with a ry list on either side, of any item type, and `!` on a `List<Bool>` give a `List<Bool>`, not an R logical vector, so `&` and `|` with another ry list accept them (`compare` and the `!` case in `lower.rs`).
+- **Impact.** Typed `log_rank` drops from 0.213 s to 0.112 s median on a plain release build (untyped ry 0.227 s), with the same checksum.
+- **Pinned by** `typed-mask-counts.scenario` and `fused_counts_follow_three_valued_logic` in `crates/typed/tests/test_values.rs`, a seeded model of R's three-valued logic.
+

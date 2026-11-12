@@ -1641,7 +1641,7 @@ unsafe fn run(text: &str) -> String {
             Err(Unwind::Error(error)) => format!("error: {}", error.message),
             // An error no handler caught ran the default handler, which recorded the message
             // after a head that names the call.
-            Err(Unwind::Jump(jump)) if matches!(jump, Jump::TopLevel) => {
+            Err(Unwind::Jump(Jump::TopLevel)) => {
                 let text = &interp::interp().error_message;
                 // The head breaks the line when the call is long, so the break moves with the
                 // closure's name and is normalized away.
@@ -3355,6 +3355,47 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
     });
 }
 
+/// The element operations compiled code hands to tier 0's handlers, each the body of a loop
+/// over `i` with `x <- list(a = 1, b = 2)`, `p <- list(a = 1, bbb = 2)`, `v <- c(1, 2, 3, 4, 5,
+/// 6)` and `k <- 2L` in scope. The last three take tier 0's generic handlers: a range subscript,
+/// an append that converts the vector, and a partial match.
+const ELEMENT_OPS: &[&str] = &[
+    "y <- x[[k]]",
+    "y <- x[2L]",
+    "x[[k]] <- 5",
+    "x[k] <- list(5)",
+    "x$b <- k",
+    "y <- x$b",
+    "y <- x[[\"b\"]]",
+    "y <- v[k:4L]",
+    "w <- c(1, 2); w[[3L]] <- k",
+    "y <- p$bb",
+];
+
+#[test]
+fn a_body_at_a_dead_bodys_address_runs_its_own_code() {
+    // Compiled code is found through the body it was compiled from, by the body's address. Once
+    // a body dies, the allocator places new bodies at its address, and each must run its own
+    // code rather than the dead one's.
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            for i in 1..=300 {
+                run(&format!(
+                    "g <- function() {{ s <- 0; for (k in 1:3) s <- s + {i}; s }}"
+                ));
+                let outcome = run("g()");
+                run("rm(g)");
+                if i % 10 == 0 {
+                    interp::heap().collect(heap::Collection::Major);
+                }
+                assert_eq!(outcome, (3 * i).to_string(), "{mode:?}, body {i}");
+            }
+            jit::install_mode(Mode::Off);
+        }
+    });
+}
+
 #[test]
 fn a_parked_return_value_survives_its_exit() {
     // Forcing `x` runs `return(...)` for `h`, which compiled `g` parks in its activation until
@@ -3374,4 +3415,96 @@ fn a_parked_return_value_survives_its_exit() {
         jit::install_mode(Mode::Off);
         assert_eq!(outcome, "list(5L, 10L)");
     });
+}
+
+/// A compiled element operation must never cost more instructions than tier 0's handler for the
+/// same shape. The machine has no hardware counters to read, so each shape runs in a child of
+/// this test binary under cachegrind, which counts instructions exactly; the cost of one
+/// iteration is the difference between two loop lengths, which cancels startup. Without
+/// valgrind the test has nothing to measure with and passes with a note.
+#[test]
+fn element_ops_cost_no_more_than_tier_zero() {
+    const NAME: &str = "element_ops_cost_no_more_than_tier_zero";
+    if let (Ok(shape), Ok(mode), Ok(iterations)) = (
+        std::env::var("RY_ELEMENT_SHAPE"),
+        std::env::var("RY_ELEMENT_MODE"),
+        std::env::var("RY_ELEMENT_ITERATIONS"),
+    ) {
+        let body = ELEMENT_OPS[shape.parse::<usize>().expect("a shape index")];
+        with_interpreter(|| unsafe {
+            jit::install_mode(if mode == "force" {
+                Mode::Force
+            } else {
+                Mode::Off
+            });
+            run(&format!(
+                "f <- function(n) {{ x <- list(a = 1, b = 2); p <- list(a = 1, bbb = 2); v <- c(1, 2, 3, 4, 5, 6); k <- 2L; for (i in 1:n) {{ {body} }}; 0 }}"
+            ));
+            for _ in 0..3 {
+                run("f(10L)");
+            }
+            assert_eq!(run(&format!("f({iterations}L)")), "0");
+            jit::install_mode(Mode::Off);
+        });
+        return;
+    }
+    if std::process::Command::new("valgrind")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("{NAME}: valgrind is not installed, so nothing was measured");
+        return;
+    }
+    let executable = std::env::current_exe().expect("the test binary's path");
+    let instructions = |shape: usize, mode: &str, iterations: u64| -> u64 {
+        let output = std::process::Command::new("valgrind")
+            .args([
+                "--tool=cachegrind",
+                "--cache-sim=no",
+                "--smc-check=all-non-file",
+                "--cachegrind-out-file=/dev/null",
+            ])
+            .arg(&executable)
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env("RY_ELEMENT_SHAPE", shape.to_string())
+            .env("RY_ELEMENT_MODE", mode)
+            .env("RY_ELEMENT_ITERATIONS", iterations.to_string())
+            .output()
+            .expect("valgrind runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "the child failed:\n{stderr}");
+        stderr
+            .lines()
+            .find_map(|line| line.split_once("I refs:"))
+            .and_then(|(_, count)| count.trim().replace(',', "").parse().ok())
+            .unwrap_or_else(|| panic!("no instruction count in:\n{stderr}"))
+    };
+    let (short, long) = (2_000, 4_000);
+    let per_iteration = |shape: usize, mode: &str| {
+        (instructions(shape, mode, long) - instructions(shape, mode, short)) / (long - short)
+    };
+    let measured: Vec<(u64, u64)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..ELEMENT_OPS.len())
+            .map(|shape| {
+                scope.spawn(move || (per_iteration(shape, "off"), per_iteration(shape, "force")))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a measuring thread"))
+            .collect()
+    });
+    let report: Vec<String> = ELEMENT_OPS
+        .iter()
+        .zip(&measured)
+        .map(|(body, (off, force))| format!("{body}: tier 0 {off}, compiled {force}"))
+        .collect();
+    eprintln!("{}", report.join("\n"));
+    for (body, (off, force)) in ELEMENT_OPS.iter().zip(&measured) {
+        assert!(
+            force <= off,
+            "`{body}` costs {force} instructions per iteration compiled but {off} in tier 0"
+        );
+    }
 }

@@ -479,6 +479,43 @@ pub unsafe extern "C" fn ry_list_push(
     target
 }
 
+/// `List.swap`: the items at 1-based positions `first` and `second` exchanged, in place when the
+/// list is owned and unique. An out-of-range position leaves the list unchanged, as in the
+/// library.
+pub unsafe extern "C" fn ry_list_swap(
+    list: *mut List,
+    owned: u32,
+    first: i64,
+    second: i64,
+) -> *mut List {
+    let length = (*list).length as usize;
+    let position = |index: i64| {
+        usize::try_from(index)
+            .ok()
+            .filter(|index| (1..=length).contains(index))
+            .map(|index| index - 1)
+    };
+    let (Some(left), Some(right)) = (position(first), position(second)) else {
+        return pass_through(list, owned);
+    };
+    let target = if owned != 0 && is_unique(list) {
+        list
+    } else {
+        let copy = list_copy(list, length);
+        consume(list, owned);
+        copy
+    };
+    if left != right {
+        let width = item_size((*target).kind);
+        ptr::swap_nonoverlapping(
+            (*target).data.add(left * width),
+            (*target).data.add(right * width),
+            width,
+        );
+    }
+    target
+}
+
 /// `as.double`, `as.integer` of a logical, or `as.character` of a number or logical. Null for
 /// any other pair, and for `as.character` of an `NA`, since `Str` has no `NA`.
 pub unsafe extern "C" fn ry_list_coerce(list: *mut List, owned: u32, kind: u32) -> *mut List {
@@ -866,6 +903,232 @@ unsafe fn elementwise_i64(
         *out = total as u64;
     }
     0
+}
+
+/// A step of a [`ry_count_true`] program: `MASK_I64 + op` and `MASK_DBL + op` compare two
+/// numeric inputs with comparison `op` (`EQ` to `GE`); the others combine logical operands.
+pub const MASK_I64: u32 = 0;
+pub const MASK_DBL: u32 = 8;
+pub const MASK_AND: u32 = 16;
+pub const MASK_OR: u32 = 17;
+pub const MASK_NOT: u32 = 18;
+
+/// A logical item as a lane of a [`ry_count_true`] chunk. `NA` sits between false and true, so
+/// `&` is the minimum, `|` the maximum and `!` the reflection, as R's three-valued logic has it.
+const LANE_FALSE: u8 = 0;
+const LANE_NA: u8 = 1;
+const LANE_TRUE: u8 = 2;
+
+/// How [`ry_count_true`] reads an input, which the steps that use it decide.
+#[derive(Clone, Copy, PartialEq)]
+enum MaskRole {
+    Unused,
+    I64,
+    Dbl,
+    Logical,
+}
+
+/// Counts the true items of a logical ry list in one pass, a chunk at a time, with no list for
+/// any intermediate result. With no steps, input 0 is the list. Otherwise `program` has `steps`
+/// steps, each `code | left << 8 | right << 16` over operands numbered inputs first and earlier
+/// steps after them (`MASK_NOT` ignores `right`), and the last step is the list. A comparison
+/// reads two inputs, a list or a scalar of its type; a logical step reads logical inputs or
+/// steps. `inputs` holds each input's word: a list pointer where bit `k` of `lists` is set, else
+/// a scalar's bits. The lists must have one length, as ry lists never recycle.
+///
+/// Status 0 leaves the count in `out`. Status 1 gives up, for the interpreter to raise the
+/// error an `NA` item is, or to handle the case.
+pub unsafe extern "C" fn ry_count_true(
+    program: *const u32,
+    steps: u32,
+    inputs: *const u64,
+    input_count: u32,
+    lists: u32,
+    out: *mut i64,
+) -> u32 {
+    let (steps, input_count) = (steps as usize, input_count as usize);
+    if steps > ELEMENTWISE_STEPS || input_count == 0 || input_count > ELEMENTWISE_INPUTS {
+        return 1;
+    }
+    let program = raw_slice(program, steps);
+    let inputs = raw_slice(inputs, input_count);
+    let mut roles = [MaskRole::Unused; ELEMENTWISE_INPUTS];
+    if steps == 0 {
+        roles[0] = MaskRole::Logical;
+    }
+    for (step, &encoded) in program.iter().enumerate() {
+        let code = encoded & 0xFF;
+        let reach = input_count + step;
+        let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
+        let (role, operands) = match code {
+            _ if code <= MASK_I64 + GE => (MaskRole::I64, [Some(left), Some(right)]),
+            _ if (MASK_DBL..=MASK_DBL + GE).contains(&code) => {
+                (MaskRole::Dbl, [Some(left), Some(right)])
+            }
+            MASK_AND | MASK_OR => (MaskRole::Logical, [Some(left), Some(right)]),
+            MASK_NOT => (MaskRole::Logical, [Some(left), None]),
+            _ => return 1,
+        };
+        for operand in operands.into_iter().flatten() {
+            if operand >= reach {
+                return 1;
+            }
+            if operand >= input_count {
+                // Only a logical step reads an earlier step, whose items are lanes.
+                if role != MaskRole::Logical {
+                    return 1;
+                }
+                continue;
+            }
+            match roles[operand] {
+                MaskRole::Unused => roles[operand] = role,
+                found if found == role => {}
+                _ => return 1,
+            }
+        }
+    }
+    let mut length = None;
+    for (index, &word) in inputs.iter().enumerate() {
+        if lists & (1 << index) == 0 {
+            continue;
+        }
+        let list = word as *const List;
+        let kind = match roles[index] {
+            MaskRole::I64 => I64,
+            MaskRole::Dbl => DBL,
+            MaskRole::Logical => LGL,
+            MaskRole::Unused => return 1,
+        };
+        if (*list).kind != kind || length.is_some_and(|length| length != (*list).length) {
+            return 1;
+        }
+        length = Some((*list).length);
+    }
+    let Some(length) = length else {
+        return 1;
+    };
+    let length = length as usize;
+    let lane = |item: i32| match item {
+        NA_LOGICAL => LANE_NA,
+        0 => LANE_FALSE,
+        _ => LANE_TRUE,
+    };
+    let mut wholes = [[0i64; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut doubles = [[0.0f64; CHUNK]; ELEMENTWISE_INPUTS];
+    let mut lanes = [[0u8; CHUNK]; ELEMENTWISE_INPUTS];
+    for (index, &word) in inputs.iter().enumerate() {
+        if lists & (1 << index) == 0 {
+            match roles[index] {
+                MaskRole::I64 => wholes[index] = [word as i64; CHUNK],
+                MaskRole::Dbl => doubles[index] = [f64::from_bits(word); CHUNK],
+                MaskRole::Logical => lanes[index] = [lane(word as i32); CHUNK],
+                MaskRole::Unused => {}
+            }
+        }
+    }
+    let mut buffers = [[0u8; CHUNK]; ELEMENTWISE_STEPS];
+    let mut count: i64 = 0;
+    let mut start = 0;
+    while start < length {
+        let chunk = CHUNK.min(length - start);
+        for (index, &word) in inputs.iter().enumerate() {
+            if lists & (1 << index) != 0 && roles[index] == MaskRole::Logical {
+                let items = raw_slice(
+                    ((*(word as *const List)).data as *const i32).add(start),
+                    chunk,
+                );
+                for (slot, &item) in lanes[index].iter_mut().zip(items) {
+                    *slot = lane(item);
+                }
+            }
+        }
+        for (step, &encoded) in program.iter().enumerate() {
+            let (done, rest) = buffers.split_at_mut(step);
+            let target = &mut rest[0][..chunk];
+            let code = encoded & 0xFF;
+            let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
+            let logical = |index: usize| -> &[u8] {
+                if index >= input_count {
+                    &done[index - input_count][..chunk]
+                } else {
+                    &lanes[index][..chunk]
+                }
+            };
+            match code {
+                MASK_AND | MASK_OR => {
+                    let pairs = target
+                        .iter_mut()
+                        .zip(logical(left).iter().zip(logical(right)));
+                    if code == MASK_AND {
+                        pairs.for_each(|(slot, (&x, &y))| *slot = x.min(y));
+                    } else {
+                        pairs.for_each(|(slot, (&x, &y))| *slot = x.max(y));
+                    }
+                }
+                MASK_NOT => {
+                    for (slot, &x) in target.iter_mut().zip(logical(left)) {
+                        *slot = LANE_TRUE - x;
+                    }
+                }
+                _ if code >= MASK_DBL => {
+                    let x = operand(left, inputs, lists, &doubles, &[], start, chunk);
+                    let y = operand(right, inputs, lists, &doubles, &[], start, chunk);
+                    compare_lanes(code - MASK_DBL, x, y, target, f64::is_nan);
+                }
+                _ => {
+                    let x = operand(left, inputs, lists, &wholes, &[], start, chunk);
+                    let y = operand(right, inputs, lists, &wholes, &[], start, chunk);
+                    // An `I64` has no `NA`.
+                    compare_lanes(code, x, y, target, |_| false);
+                }
+            }
+        }
+        let result = match program.len() {
+            0 => &lanes[0][..chunk],
+            steps => &buffers[steps - 1][..chunk],
+        };
+        let mut trues = 0;
+        let mut missing = false;
+        for &item in result {
+            trues += i64::from(item == LANE_TRUE);
+            missing |= item == LANE_NA;
+        }
+        if missing {
+            return 1;
+        }
+        count += trues;
+        start += chunk;
+    }
+    *out = count;
+    0
+}
+
+/// Comparison `op` of two chunks as lanes, `NA` where either item is `undefined`. The match on
+/// `op` sits outside the loops so that each loop compiles to vector code.
+fn compare_lanes<T: PartialOrd + Copy>(
+    op: u32,
+    x: &[T],
+    y: &[T],
+    target: &mut [u8],
+    undefined: impl Fn(T) -> bool + Copy,
+) {
+    let mut fill = |test: fn(&T, &T) -> bool| {
+        for (slot, (x, y)) in target.iter_mut().zip(x.iter().zip(y)) {
+            *slot = if undefined(*x) || undefined(*y) {
+                LANE_NA
+            } else {
+                test(x, y) as u8 * LANE_TRUE
+            };
+        }
+    };
+    match op {
+        EQ => fill(T::eq),
+        NE => fill(T::ne),
+        LT => fill(T::lt),
+        LE => fill(T::le),
+        GT => fill(T::gt),
+        _ => fill(T::ge),
+    }
 }
 
 /// `a op b` elementwise as a logical list; `NA` or `NaN` on either side gives `NA`. Strings
@@ -1532,6 +1795,40 @@ pub unsafe extern "C" fn ry_str_split(
         *slot = str_from_bytes(piece.as_bytes());
     }
     list
+}
+
+/// `Str.to_utf8`: the bytes of a borrowed string, as a list of `I64`s.
+pub unsafe extern "C" fn ry_str_to_utf8(lo: u64, hi: u64) -> *mut List {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let list = list_alloc(I64, bytes.len(), bytes.len());
+    for (slot, &byte) in slice_mut::<i64>((*list).data, bytes.len())
+        .iter_mut()
+        .zip(bytes)
+    {
+        *slot = i64::from(byte);
+    }
+    list
+}
+
+/// `Str.from_utf8_lossy` of a borrowed list of `I64`s, written to `out`: 1, or 0 when an item is
+/// not a byte, which the interpreter reports. R strings hold no NUL byte, so it is replaced like
+/// a byte that is not UTF-8.
+pub unsafe extern "C" fn ry_list_from_utf8_lossy(list: *mut List, out: *mut Str) -> u32 {
+    let mut bytes = Vec::with_capacity((*list).length as usize);
+    for &item in items::<i64>(list) {
+        match u8::try_from(item) {
+            Ok(byte) => bytes.push(byte),
+            Err(_) => return 0,
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    *out = if text.contains('\0') {
+        str_from_bytes(text.replace('\0', "\u{FFFD}").as_bytes())
+    } else {
+        str_from_bytes(text.as_bytes())
+    };
+    1
 }
 
 // Lists.

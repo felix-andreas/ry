@@ -836,7 +836,8 @@ unsafe fn whole(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
 
 unsafe fn count(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usize> {
     let number = whole(call, parameter, value)?;
-    usize::try_from(number).map_err(|_| wrong(call, parameter, "zero or more", value))
+    usize::try_from(number)
+        .map_err(|_| call.error(format!("`{parameter}` must be zero or more, not {number}")))
 }
 
 /// A length-one string that is not `NA`.
@@ -2579,17 +2580,15 @@ unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
 /// The bytes of a list of numbers from 0 to 255.
 unsafe fn utf8_bytes(call: &Call<'_>, bytes: Sexp) -> R<Vec<u8>> {
     let mut decoded = Vec::new();
-    for item in list_elements(call, "bytes", bytes)? {
+    for (position, item) in list_elements(call, "bytes", bytes)?.into_iter().enumerate() {
         let byte = whole(call, "bytes", item)?;
         match u8::try_from(byte) {
             Ok(byte) => decoded.push(byte),
             Err(_) => {
-                return Err(wrong(
-                    call,
-                    "bytes",
-                    "a list of numbers from 0 to 255",
-                    item,
-                ));
+                return Err(call.error(format!(
+                    "`bytes` must hold numbers from 0 to 255, but item {} is {byte}",
+                    position + 1
+                )));
             }
         }
     }
@@ -2686,16 +2685,15 @@ unsafe fn str_from_utf16_lossy(call: &Call<'_>) -> R<Sexp> {
 /// The code units of a list of numbers from 0 to 65535.
 unsafe fn utf16_units(call: &Call<'_>, units: Sexp) -> R<Vec<u16>> {
     let mut decoded = Vec::new();
-    for item in list_elements(call, "units", units)? {
-        match u16::try_from(whole(call, "units", item)?) {
+    for (position, item) in list_elements(call, "units", units)?.into_iter().enumerate() {
+        let unit = whole(call, "units", item)?;
+        match u16::try_from(unit) {
             Ok(unit) => decoded.push(unit),
             Err(_) => {
-                return Err(wrong(
-                    call,
-                    "units",
-                    "a list of numbers from 0 to 65535",
-                    item,
-                ));
+                return Err(call.error(format!(
+                    "`units` must hold numbers from 0 to 65535, but item {} is {unit}",
+                    position + 1
+                )));
             }
         }
     }

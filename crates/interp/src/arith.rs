@@ -1874,7 +1874,7 @@ fn infinite_product(mut a: f64, mut b: f64, mut c: f64, mut d: f64) -> Option<Rc
         (a, b, c, d) = (zeroed(a), zeroed(b), zeroed(c), zeroed(d));
         recalculate = true;
     }
-    recalculate.then(|| Rcomplex {
+    recalculate.then_some(Rcomplex {
         r: f64::INFINITY * (a * c - b * d),
         i: f64::INFINITY * (a * d + b * c),
     })

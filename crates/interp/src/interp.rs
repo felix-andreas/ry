@@ -25,6 +25,21 @@
 // what keeps its state in registers between instructions. The toolchain is a pinned nightly.
 #![feature(explicit_tail_calls)]
 #![allow(incomplete_features)]
+// Numeric ports (loess, splines, fft, linpack) keep the reference algorithms' index-based loops and
+// literal constants so they stay comparable line by line with the C and Fortran originals, and the
+// byte-level readers keep explicit chunk sizes.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::excessive_precision,
+    clippy::explicit_counter_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::int_plus_one,
+    clippy::manual_range_contains,
+    clippy::assign_op_pattern,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::type_complexity
+)]
 
 pub mod annotations;
 pub mod apply_results;
@@ -275,6 +290,12 @@ impl FrameStack {
     }
 }
 
+impl Default for FrameStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Drops what a popped frame owns, leaving only plain values in its slot.
 #[inline(always)]
 fn release(frame: &mut Frame) {
@@ -471,6 +492,9 @@ pub struct Interp {
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
+    /// which [`crate::base_fast_paths::finish`] answers by clearing it.
+    pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
     /// The dispatch variables of every method slot frame, back to back in frame order (see
@@ -722,6 +746,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     state.interp = Some(Interp {
         frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),
@@ -976,7 +1001,7 @@ impl RootSource for InterpRoots {
         // SAFETY: as for `trace`.
         unsafe {
             let state = interp();
-            state.bytecode.call_plans.clear_dead(liveness);
+            state.bytecode.clear_dead(liveness);
         }
     }
 }

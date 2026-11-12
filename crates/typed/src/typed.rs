@@ -11,8 +11,20 @@
 //! done something visible, so once it has, giving up is an error instead of a second run.
 
 #![allow(unsafe_op_in_unsafe_fn)]
+// Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
+#![allow(clippy::missing_safety_doc)]
+// The lowering's `to_*` helpers take `&mut self` because they emit code, and its builder callbacks
+// have long closure types.
+#![allow(
+    clippy::wrong_self_convention,
+    clippy::type_complexity,
+    clippy::explicit_counter_loop,
+    clippy::needless_borrow,
+    clippy::unnecessary_cast
+)]
 
 pub mod backend;
+pub mod fusion;
 pub mod ir;
 pub mod lower;
 pub mod ownership;
@@ -413,6 +425,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
     if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
         return Err(Refusal::new("the types fail the closure's annotations"));
     }
+    fusion::fuse(&mut ir);
     ownership::insert(&mut ir);
     let sites: Vec<usize> = lowered
         .r_calls

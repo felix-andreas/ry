@@ -732,20 +732,17 @@ pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
     let unbound = unbound();
-    let live = mark as usize..state.references_used as usize;
-    for (&reference, &target) in state
-        .references
-        .get(live.clone())
-        .unwrap_or(&[])
-        .iter()
-        .zip(state.reference_targets.get(live).unwrap_or(&[]))
-    {
+    for index in mark as usize..state.references_used as usize {
+        let reference = state.references[index];
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
         }
+        // Only an environment or code reference changes the other fields, and forcing one
+        // clears its tag again, so the attribute is compared with the target on its own.
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
         }
+        let target = state.reference_targets[index];
         if reference.attrib() != target {
             heap.set_attrib(reference, target);
         }
@@ -1180,7 +1177,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             {
                 return Ok(value);
             }
-            call_builtin(definition, call, function, &args, env)
+            let reusable = if definition.reuses_first_argument {
+                temporary_argument(arguments, &args, env)?
+            } else {
+                None
+            };
+            call_builtin_reusing(definition, call, function, &args, env, reusable)
         }
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
@@ -1216,6 +1218,57 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
+}
+
+/// The argument of a builtin call that only the call holds, which the builtin may then write
+/// its result into, as compiled code does with `Op::Arithmetic`'s reuse bits: the fresh result
+/// of a binary element-wise operator call (in `x * 2 + 1`, the value of `x * 2`) that no
+/// counted reference holds. The operator must be the base builtin, since a closure bound to
+/// `*` may return a value something uncounted holds, and it must take two arguments, since
+/// unary `+` returns its operand. Of two candidates the wider type wins, as the result's type
+/// is the wider operand's.
+unsafe fn temporary_argument(arguments: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    let width = |value: Sexp| match value.kind() {
+        SexpType::Complex => 2,
+        SexpType::Real => 1,
+        _ => 0,
+    };
+    let mut best: Option<Sexp> = None;
+    let mut list = arguments;
+    for arg in args {
+        if list.kind() != SexpType::Pairlist {
+            return Ok(None);
+        }
+        let expression = list.car();
+        list = list.cdr();
+        if expression == symbols().dots {
+            return Ok(None);
+        }
+        let value = arg.value;
+        if value.refcount() != 0
+            || !matches!(
+                value.kind(),
+                SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+            )
+            || value.length() <= 1
+            || expression.kind() != SexpType::Language
+            || expression.car().kind() != SexpType::Symbol
+            || expression.cdr().kind() != SexpType::Pairlist
+            || expression.cdr().cdr().kind() != SexpType::Pairlist
+            || expression.cdr().cdr().cdr() != nil()
+            || best.is_some_and(|best| width(best) >= width(value))
+        {
+            continue;
+        }
+        let operator = find_fun(expression.car(), env)?;
+        if operator.kind() == SexpType::Builtin && builtin_def(operator)?.reuses_first_argument {
+            best = Some(value);
+        }
+    }
+    if list != nil() || args.iter().filter(|arg| Some(arg.value) == best).count() > 1 {
+        return Ok(None);
+    }
+    Ok(best)
 }
 
 /// A pairlist's items as arguments, unevaluated, as a special receives them.
@@ -1925,10 +1978,10 @@ pub unsafe fn apply_closure(
     {
         return Ok(value);
     }
-    if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
-            return value;
-        }
+    if crate::annotations::is_typed(function)
+        && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
+    {
+        return value;
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -2036,10 +2089,10 @@ pub unsafe fn apply_closure_owning(
     {
         return Ok(value);
     }
-    if crate::annotations::is_typed(function) {
-        if let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)? {
-            return value;
-        }
+    if crate::annotations::is_typed(function)
+        && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
+    {
+        return value;
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -2623,6 +2676,16 @@ pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
         panic!("a slot frame's activation outlived its frame");
     };
     frame_env(index, cause)
+}
+
+/// The environment that stands for the slot frame whose header register is `header` while it
+/// has none: the pending one its closures hold, or `nil` when it made none.
+pub unsafe fn pending_env_of(header: usize) -> Sexp {
+    let frames = &interp().frames;
+    frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+        .map_or(nil(), |index| frames[index].pending)
 }
 
 /// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
@@ -3653,7 +3716,9 @@ unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> 
 /// error that `try()` can catch, reported against the closure's call as in GNU R.
 fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
     match result {
-        Err(Unwind::Jump(jump)) if matches!(jump, Jump::Break { env: target } | Jump::Next { env: target } if target == env) => {
+        Err(Unwind::Jump(Jump::Break { env: target } | Jump::Next { env: target }))
+            if target == env =>
+        {
             Err(error_in(
                 call,
                 "no loop for break/next, jumping to top level",
