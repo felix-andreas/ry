@@ -882,7 +882,7 @@ pub unsafe extern "C" fn LEVELS(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SETLEVELS(object: Sexp, value: c_int) -> c_int {
-    interp::code_image::set_flags_from_c(object, value as u16);
+    object.set_gp(value as u16);
     value
 }
 

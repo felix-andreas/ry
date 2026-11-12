@@ -2718,7 +2718,9 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
             Reify::Builtin(op) => builtin_def(op)?.name,
             Reify::Site(name) => name,
         };
-        interp().frames[index].reified_by = activity::label(name);
+        let reason = activity::label(name);
+        activity::count_reification(reason);
+        interp().frames[index].reified_by = reason;
     }
     materialize_references(index)?;
     let frame = &interp().frames[index];
@@ -4175,9 +4177,10 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
         None => (symbol, None),
     };
     let Some(cell) = heap.frame_cell(env, symbol) else {
-        return Err(error(
-            "'missing' can only be used for arguments".to_string(),
-        ));
+        return Err(error(format!(
+            "'missing({})' did not find an argument",
+            symbol_name(symbol)
+        )));
     };
     if let Some(index) = index {
         let dots = cell.cdr();
@@ -4595,9 +4598,17 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     if values::inherits(sequence, "factor") {
         sequence = crate::coerce::factor_as_character(sequence)?;
     }
-    // A compact sequence is stepped through by its first element and increment, as compiled
-    // loops do; expanding a top-level `1:n` would allocate all n elements before the first
-    // iteration.
+    let kind = sequence.kind();
+    if kind.is_vector()
+        && kind != SexpType::I64
+        && values::length(sequence) >= bytecode::LOOP_COMPILE_ITERATIONS
+        && let Some(value) = bytecode::run_loop(call.call, Some(sequence), env)?
+    {
+        return Ok(value);
+    }
+    // A loop that stays in the tree walker steps through a compact sequence by its first element
+    // and increment, as compiled loops do; expanding `1:n` would allocate all n elements before
+    // the first iteration.
     let steps = if sequence.is_altrep() {
         (interp().hooks.compact_sequence_steps)(sequence)
     } else {
@@ -4675,7 +4686,16 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
     let env = call.env()?;
+    let mut iterations = 0;
     loop {
+        // All of the loop's state is in `env`, so the compiled loop starts over at the condition
+        // exactly where the tree walker stands between two iterations.
+        if iterations == bytecode::LOOP_COMPILE_ITERATIONS
+            && let Some(value) = bytecode::run_loop(call.call, None, env)?
+        {
+            return Ok(value);
+        }
+        iterations += 1;
         let condition = scope(|| eval(call.arg(0), env))?;
         if !as_condition(condition, call.call)? {
             break;
@@ -4688,7 +4708,16 @@ unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
-    while loop_body(call.arg(0), call.env()?)? {}
+    let env = call.env()?;
+    let mut iterations = 0;
+    while loop_body(call.arg(0), env)? {
+        iterations += 1;
+        if iterations == bytecode::LOOP_COMPILE_ITERATIONS
+            && let Some(value) = bytecode::run_loop(call.call, None, env)?
+        {
+            return Ok(value);
+        }
+    }
     Ok(nil())
 }
 
@@ -4801,8 +4830,10 @@ unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
 /// GNU R raises a `break` or `next` without a loop for its environment as an error at once, so
 /// `try(eval(quote(break)))` catches it. A loop of the tree-walking interpreter in `env` is
 /// reachable from its own body, and from another call only when it has a context
-/// (`skips_loop_context`). Compiled loops run only in closure bodies and push no context, so a
-/// jump in a closure frame is reachable when it is written directly in the body, or when the
+/// (`skips_loop_context`). A compiled loop pushes no context of its own: one in the global
+/// environment runs inside the tree walker's `for`, `while` or `repeat`, whose context stays
+/// pushed, and one in a closure body relies on the frame, so a jump in a closure frame is
+/// reachable when it is written directly in the body, or when the
 /// body has a loop with a context. A jump that then leaves the closure frame without meeting a
 /// loop is an error (`stray_loop_jump`).
 unsafe fn reachable_loop(env: Sexp) -> R<()> {
@@ -5030,7 +5061,7 @@ pub(crate) unsafe fn switch_alternative(
         ));
     }
     for (position, arg) in alternatives.iter().enumerate() {
-        if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
+        if arg.tag.kind() == SexpType::Symbol && switch_name_matches(arg.tag.car(), text) {
             // Fall through empty alternatives to the next non-empty one, and to an invisible
             // NULL when every later one is empty.
             return Ok(alternatives[position..]
@@ -5094,6 +5125,16 @@ pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSele
     };
     warnings.report()?;
     Ok(SwitchSelector::Position(position))
+}
+
+/// Whether the alternative named `name` is the one the string selector `text` picks. GNU R
+/// compares the texts as `pmatch` does, translated to UTF-8 and with `NA` spelled "NA", so a
+/// latin1 selector picks its UTF-8 name and `NA_character_` picks an alternative named `NA`.
+pub(crate) unsafe fn switch_name_matches(name: Sexp, text: Sexp) -> bool {
+    if text == values::na_string() {
+        return name.bytes() == b"NA";
+    }
+    values::same_string(name, text)
 }
 
 unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {

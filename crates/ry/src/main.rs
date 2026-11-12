@@ -266,17 +266,10 @@ fn main() -> ExitCode {
         path,
         library,
         train,
-        explain,
         runtime,
     } = &cli.command
     {
-        return run_install(
-            path,
-            library.as_deref(),
-            train.as_deref(),
-            *explain,
-            *runtime,
-        );
+        return run_install(path, library.as_deref(), train.as_deref(), *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -724,7 +717,6 @@ fn run_install(
     path: &Path,
     library: Option<&Path>,
     train: Option<&str>,
-    explain: bool,
     runtime: Option<Runtime>,
 ) -> ExitCode {
     let installed = load::package_root(path)
@@ -751,9 +743,6 @@ fn run_install(
                             .to_string(),
                     };
                     command.arg(format!("--ry-train={workload}"));
-                }
-                if explain {
-                    command.arg("--ry-explain");
                 }
                 let status = command
                     .arg(&tarball)

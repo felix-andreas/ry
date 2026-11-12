@@ -98,6 +98,13 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         altrep_real_elt: |object, index| unsafe {
             crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
+        altrep_summary: |object, which, remove_na| unsafe {
+            match which {
+                interp::AltrepSummary::Sum => crate::altrep::sum(object, remove_na),
+                interp::AltrepSummary::Min => crate::altrep::min(object, remove_na),
+                interp::AltrepSummary::Max => crate::altrep::max(object, remove_na),
+            }
+        },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {

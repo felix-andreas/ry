@@ -3,11 +3,38 @@
 #include <R_ext/Altrep.h>
 #include <R_ext/GraphicsEngine.h>
 #include <R_ext/Rdynload.h>
-#include <R_ext/PrtUtil.h>
 #include <R_ext/RS.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+
+/* GNU R stops installing R_ext/PrtUtil.h in 4.6 but still exports its functions, so a package
+   built against those headers declares the ones it calls. */
+#if __has_include(<R_ext/PrtUtil.h>)
+#include <R_ext/PrtUtil.h>
+#else
+void Rf_formatReal(const double *x, R_xlen_t n, int *w, int *d, int *e, int nsmall);
+const char *Rf_EncodeReal0(double x, int w, int d, int e, const char *dec);
+const char *Rf_EncodeInteger(int x, int w);
+const char *Rf_EncodeLogical(int x, int w);
+#define formatReal Rf_formatReal
+#define EncodeReal0 Rf_EncodeReal0
+#define EncodeInteger Rf_EncodeInteger
+#define EncodeLogical Rf_EncodeLogical
+#endif
+
+/* Non-API entry points that GNU R 4.6 exports, or hides, without declaring them. Packages
+   written for older R call them and declare them themselves, and their binaries must run in ry;
+   the parentheses keep a function-like macro of the same name out of the declaration. */
+SEXP (ATTRIB)(SEXP x);
+SEXP (CLOENV)(SEXP x);
+SEXP (ENCLOS)(SEXP x);
+SEXP (FRAME)(SEXP x);
+int (OBJECT)(SEXP x);
+void *(DATAPTR)(SEXP x);
+SEXP *(STRING_PTR)(SEXP x);
+SEXP Rf_findVar(SEXP symbol, SEXP rho);
+SEXP Rf_findVarInFrame(SEXP rho, SEXP symbol);
 
 /* Values and vectors. */
 
@@ -620,7 +647,7 @@ static R_hashtab_type maphash_table;
 static int maphash_visits;
 static int maphash_corrupt;
 
-static void maphash_visit(SEXP key, SEXP value, void *data)
+static SEXP maphash_visit(SEXP key, SEXP value, void *data)
 {
     (void) data;
     if (maphash_visits++ == 0) {
@@ -631,11 +658,12 @@ static void maphash_visit(SEXP key, SEXP value, void *data)
         R_gc();
         for (int i = 0; i < 2000; i++)
             INTEGER(allocVector(INTSXP, 4))[0] = -777;
-        return;
+        return NULL;
     }
     if (TYPEOF(key) != INTSXP || TYPEOF(value) != STRSXP ||
         strncmp(CHAR(STRING_ELT(value, 0)), "v", 1) != 0)
         maphash_corrupt++;
+    return NULL;
 }
 
 /* The table is filled in one call and walked in another, because everything a call allocates

@@ -360,7 +360,10 @@ against values read from data.table, `test_lazy.rs` there checks the Polars-styl
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
-without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
+without R. The optimizer cases `test_numerics.rs` holds bit for bit are skipped, with a message,
+where they cannot match: against a fresh GNU R that does not call the reference BLAS, and, for the
+trust-region case, where the C library's `hypot` rounds differently from the recording's (its
+`hypot` case fingerprints it). `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
 extreme arguments. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
@@ -823,6 +826,17 @@ sessions under a seeded schedule, checked at random points against a server star
 disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user journeys in
 `crates/ry/tests/scenarios/`. [Robustness](/development/robustness/) documents both, including the
 scenario format and the replay variables.
+
+`native_diagnostics_agree_with_the_typed_core` in the same file holds the strict-mode
+[native function](/reference/type-system#native-functions) findings to what the native compiler
+does. It checks each program of a corpus in strict mode, runs it with `RY_TYPED_LOG=1`, and fails
+when a function without a `native` or `interpreted` finding runs in the interpreter. The corpus is
+the typed benchmark programs, the friendly climb programs, and `crates/ry/tests/native/*.R`, where a
+program's header states what it shows: `# blocked: f, g` names the functions that must get a
+finding, and `# boundary: h` the ones with an R type in their signature. Add a program there for a
+construct the compiler gains or the checker starts to report. The test also fails when no natively
+running function of the corpus calls a standard library function that
+`semantics::native::COMPILED_STD` lists as compiled.
 
 ## Incrementality
 
