@@ -1,0 +1,38 @@
+[stdout]
+| [1] "default"
+| [1] "global"
+| [1] "global"
+| [1] "registered"
+| [1] "global again"
+| [1] "registered"
+| [1] "outer frame" "outer frame"
+| [1] "registered"
+| [1] "ns frame"   "registered"
+| [1] "ns frame"   "registered"
+| [1] "registered" "registered"
+| [1] "no method"
+| [1] "global gen"
+| [1] "registered widget"
+| [1] "leaf > registered widget"
+| [1] "leaf > global widget"
+| [1] "registered widget"
+| [1] "registered widget"
+| [1] "now a function"
+| [1] 0
+| [1] 99
+| [1] "formatted stamp"
+| [1] 0
+| [1] 1
+| [1] "field a"
+| [1] "field b"
+| [1] 20
+| [1] 20
+| handler saw: plain
+| handler saw: custom message
+| [1] "plain\n"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "plain\n"
