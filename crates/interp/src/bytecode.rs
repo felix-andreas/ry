@@ -409,7 +409,11 @@ fn grow_registers(length: usize) -> R<()> {
         // Every call grows the file past the registers the last call released, so this runs
         // once per call: `fill` stores the `NULL`s as wide writes, where `resize` cloned them
         // one at a time. Clearing is what lets a collection inside the new window free what a
-        // returned call left in these words, as GNU R does.
+        // returned call left in these words, as GNU R does. The collector marks the whole file
+        // up to its length, not each window up to the registers it wrote, so a word left
+        // uncleared would keep a returned call's temporary alive until the new window writes
+        // it, and a finalizer GNU R runs in that collection would run late
+        // (`gc__register_window_frees_returned_temporaries`).
         // SAFETY: the capacity covers `length`, and `Sexp` is a plain pointer the next line
         // initializes before anything reads it.
         unsafe { registers.set_len(length) };

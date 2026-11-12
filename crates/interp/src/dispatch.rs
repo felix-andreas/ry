@@ -20,7 +20,6 @@ use {
         activity::{self, Activity, Counter},
         object::{Sexp, SexpType, gp},
     },
-    rustc_hash::FxHashMap,
     smallvec::SmallVec,
     thin_vec::ThinVec,
 };
@@ -211,14 +210,15 @@ unsafe fn is_top_env(env: Sexp) -> bool {
         || (env.attrib() != nil() && crate::envir::is_package_env(env))
 }
 
-/// What S3 dispatch keeps between calls: the method name each generic and class make, and the
-/// table of method rows that lookups by name read and write.
+/// What S3 dispatch keeps between calls: the table of method rows that lookups by name read and
+/// write.
 ///
 /// A row belongs to one symbol, which names it ([`heap::Heap::method_row`]), so a lookup reaches
 /// its row without hashing. The row holds the symbol's name as a shared one-string vector, which
 /// is `.Generic` or `.Group` when the symbol names a generic and `.Method` when it names a
-/// method, and the binding the last lookup of the name found from a top environment onward. That
-/// binding is the answer again while
+/// method, the chain of method names built with the symbol as their prefix, and the binding the
+/// last lookup of the name found from a top environment onward. That binding is the answer again
+/// while
 ///
 /// - the lookup starts from the same top environment and reads the same methods table, which the
 ///   lookup compares, because the frames below the top environment and the table binding are
@@ -238,10 +238,6 @@ unsafe fn is_top_env(env: Sexp) -> bool {
 /// the last collection ([`MethodCache::written`]).
 #[derive(Default)]
 pub struct MethodCache {
-    /// The method name symbol `prefix.class` by the symbol `prefix` and the interned string
-    /// `class`. Building and interning the name was a third of a dispatch. Symbols are never
-    /// freed and the table keeps its strings alive, so it needs no invalidation.
-    names: FxHashMap<(Sexp, Sexp), Sexp>,
     rows: MethodRows,
     pub s4: crate::methods::S4Cache,
     /// The `.Group` NextMethod defines when there is no group: `""`, shared and not mutable.
@@ -265,7 +261,6 @@ const WRITTEN_LIMIT: usize = 1 << 16;
 #[derive(Clone, Copy)]
 pub(crate) enum Written {
     Row(u32),
-    Name((Sexp, Sexp)),
     S4Site(Sexp),
 }
 
@@ -299,7 +294,19 @@ struct MethodRows {
     stamps: Vec<u64>,
     /// The binding that lookup found, or `NULL` for none.
     cells: Vec<Sexp>,
+    /// For the row of a method name `prefix.class` that [`method_name`] built, the interned
+    /// string `class`, which the row keeps alive so that its address keeps meaning that text;
+    /// `NULL` for any other row. Building and interning the name was a third of a dispatch.
+    classes: Vec<Sexp>,
+    /// The first row of the names [`method_name`] built with this row's symbol as the prefix,
+    /// or [`NO_ROW`].
+    first_names: Vec<u32>,
+    /// The next row of the names built with the same prefix as this row's name, or [`NO_ROW`].
+    next_names: Vec<u32>,
 }
+
+/// The end of a chain of method name rows.
+const NO_ROW: u32 = u32::MAX;
 
 pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Marker<'_>) {
     if marker.is_minor() && !cache.overflowed {
@@ -309,11 +316,6 @@ pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Mar
         for &key in &cache.written {
             match key {
                 Written::Row(row) => mark_row(&cache.rows, row as usize, marker),
-                Written::Name(key) => {
-                    if cache.names.contains_key(&key) {
-                        marker.mark(key.1);
-                    }
-                }
                 Written::S4Site(generic) => {
                     crate::methods::trace_s4_site(&cache.s4, generic, marker)
                 }
@@ -333,11 +335,8 @@ unsafe fn trace_every_entry(cache: &MethodCache, marker: &mut heap::Marker<'_>) 
     if let Some(blank) = cache.blank_group {
         marker.mark(blank);
     }
-    for &(_, class) in cache.names.keys() {
-        marker.mark(class);
-    }
     let rows = &cache.rows;
-    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells] {
+    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells, &rows.classes] {
         for &object in column {
             marker.mark(object);
         }
@@ -345,7 +344,7 @@ unsafe fn trace_every_entry(cache: &MethodCache, marker: &mut heap::Marker<'_>) 
 }
 
 unsafe fn mark_row(rows: &MethodRows, row: usize, marker: &mut heap::Marker<'_>) {
-    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells] {
+    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells, &rows.classes] {
         if let Some(&object) = column.get(row) {
             marker.mark(object);
         }
@@ -371,6 +370,9 @@ unsafe fn method_row(symbol: Sexp) -> R<usize> {
     rows.tables.push(nil());
     rows.stamps.push(0);
     rows.cells.push(nil());
+    rows.classes.push(nil());
+    rows.first_names.push(NO_ROW);
+    rows.next_names.push(NO_ROW);
     heap.set_method_row(symbol, row as u32);
     cache.note_written(Written::Row(row as u32));
     Ok(row)
@@ -660,18 +662,31 @@ unsafe fn method_name(prefix: Sexp, class: Sexp) -> R<Sexp> {
     if class == values::na_string() || class.length() == 0 || !class.has_gp(gp::CACHED) {
         return method_symbol(&symbol_name(prefix), &char_str(class));
     }
-    let key = (prefix, class);
-    if let Some(&name) = interp().method_cache.names.get(&key) {
-        return Ok(name);
+    let prefix_row = method_row(prefix)?;
+    let rows = &interp().method_cache.rows;
+    let mut row = rows.first_names[prefix_row];
+    while let Some(&built) = rows.classes.get(row as usize) {
+        if built == class {
+            return Ok(rows.symbols[row as usize]);
+        }
+        row = rows.next_names[row as usize];
     }
     let mut name: SmallVec<[u8; 64]> = SmallVec::new();
     name.extend_from_slice(prefix.car().bytes());
     name.push(b'.');
     name.extend_from_slice(class.bytes());
     let name = values::install_bytes(&name)?;
+    let row = method_row(name)?;
     let cache = &mut interp().method_cache;
-    cache.note_written(Written::Name(key));
-    cache.names.insert(key, name);
+    let rows = &mut cache.rows;
+    // A name that two splits make, such as `print.data.frame` from `print` and `data.frame` or
+    // from `print.data` and `frame`, joins the chain of the first; the other builds it each time.
+    if rows.classes[row] == nil() {
+        rows.classes[row] = class;
+        rows.next_names[row] = rows.first_names[prefix_row];
+        rows.first_names[prefix_row] = row as u32;
+        cache.note_written(Written::Row(row as u32));
+    }
     Ok(name)
 }
 
