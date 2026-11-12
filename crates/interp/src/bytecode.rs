@@ -4776,7 +4776,16 @@ impl Compiler {
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
         // argument that modifies a variable in place would change an earlier argument's value.
-        let simple = args.iter().all(|(_, value)| *value != symbols().dots)
+        // A record update that gives a field a call on the field's own value must not evaluate
+        // that call before `eval::rebind_update` has taken the value out of the record.
+        let updates_field = rebinding.is_some()
+            && symbol_name(head).as_ref() == ".ry_update"
+            && args
+                .iter()
+                .skip(1)
+                .any(|&(name, value)| eval::updates_own_field(value, name, call.cdr().car()));
+        let simple = !updates_field
+            && args.iter().all(|(_, value)| *value != symbols().dots)
             && !args
                 .iter()
                 .skip(1)
@@ -7496,21 +7505,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let value = if function.kind() == SexpType::Closure {
-        let mut compiled = state.constants.element(instruction.operand(2) + 1);
-        if compiled == unbound() {
-            compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
-            // Promise code forced in a frame that has an environment runs for no function, so
-            // it has no slot table to compile against; the site stays undecided until it runs on
-            // a slot frame.
-            if state.machine.function != nil() {
-                (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
-            }
-        }
-        let arguments = if compiled == nil() {
-            call.cdr()
-        } else {
-            compiled
-        };
+        let arguments = closure_arguments(state, instruction, call)?;
         if function.has_gp(gp::NATIVE_ENTRY)
             && let Some(value) = if state.in_slots() {
                 crate::base_fast_paths::native_entry_by_value(
@@ -7618,6 +7613,30 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// The arguments of the closure call `call` at `instruction`, each compiled to run as a promise
+/// on the frame's slots where the compiler can, which the site compiles on its first call.
+unsafe fn closure_arguments(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+) -> R<Sexp> {
+    let mut compiled = state.constants.element(instruction.operand(2) + 1);
+    if compiled == unbound() {
+        compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
+        // Promise code forced in a frame that has an environment runs for no function, so it
+        // has no slot table to compile against; the site stays undecided until it runs on a
+        // slot frame.
+        if state.machine.function != nil() {
+            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+        }
+    }
+    Ok(if compiled == nil() {
+        call.cdr()
+    } else {
+        compiled
+    })
 }
 
 /// How many times a call site may fail to plan, by meeting a closure with other formals or
@@ -9254,6 +9273,18 @@ unsafe fn rebinding_reusable(
     if !bound {
         return Ok(None);
     }
+    Ok((!expression_registers_hold(state, subject, arguments, dst)).then_some(subject))
+}
+
+/// Whether a register of the activation's expressions holds `subject` uncounted, besides its
+/// `arguments` registers and its result register `dst`, which a previous run of the same
+/// assignment may have left holding it.
+unsafe fn expression_registers_hold(
+    state: &Activation<'_, '_>,
+    subject: Sexp,
+    arguments: Range<usize>,
+    dst: usize,
+) -> bool {
     let registers = &interp().bytecode.registers;
     let start = state.header.offset_from(registers.as_ptr()) as usize
         + 1
@@ -9264,15 +9295,14 @@ unsafe fn rebinding_reusable(
     // cached copy of the subject is never read again.
     let end = base + values::ints(state.constants.element(REGISTERS))[0] as usize;
     let arguments = base + arguments.start..base + arguments.end;
-    let held = registers
+    registers
         .get(start..end.min(registers.len()))
         .unwrap_or_default()
         .iter()
         .zip(start..)
         .any(|(&value, index)| {
             value == subject && !arguments.contains(&index) && index != base + dst
-        });
-    Ok((!held).then_some(subject))
+        })
 }
 
 #[inline(always)]
@@ -9281,13 +9311,16 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
     let call = state.constant(instruction, 2);
     let target = state.constant(instruction, 3);
     // A slot frame keeps its slots: a builtin may update the slot's value in place, and a
-    // closure is called as any other (moving the value needs the binding's cell).
+    // closure may take the slot's value as a move ([`moves::call_moving_from`]).
     if state.in_slots()
         && let Some(slot) = slot_named(state, target)
     {
-        if function.kind() == SexpType::Builtin
-            && let Some(value) = slot_builtin_call(state, call, function, Some(slot))?
-        {
+        let value = match function.kind() {
+            SexpType::Builtin => slot_builtin_call(state, call, function, Some(slot))?,
+            SexpType::Closure => slot_call_moving(state, instruction, function, target, slot)?,
+            _ => None,
+        };
+        if let Some(value) = value {
             state.record(instruction.at, value);
             instruction.output(0, value);
             return Ok(Flow::Next);
@@ -9305,6 +9338,42 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// `target <- function(target, ...)` for the closure `function` from a slot frame, whose `slot`
+/// binds `target`, moving the slot's value into the closure's parameter as a call from an
+/// environment would. `None` when the move does not apply, and the caller makes the ordinary
+/// call.
+unsafe fn slot_call_moving(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    function: Sexp,
+    target: Sexp,
+    slot: *mut Sexp,
+) -> R<Option<Sexp>> {
+    let call = state.constant(instruction, 2);
+    let value = *slot;
+    if expression_registers_hold(state, value, 0..0, instruction.operand(0)) {
+        return Ok(None);
+    }
+    let registers = interp().bytecode.registers.as_ptr();
+    let caller = moves::Caller {
+        binding: moves::Binding::Slot {
+            header: state.header.offset_from(registers) as usize,
+            position: slot.offset_from(state.header) as usize - 1,
+        },
+        heads: moves::Heads::Frame((*state.interp).slot_owner as usize),
+        sys_parent: nil(),
+    };
+    moves::call_moving_from(call, function, target, value, caller, |args| {
+        let arguments = closure_arguments(state, instruction, call)?;
+        let mut others = eval::Args::new();
+        if !slot_promises_into(state, arguments.cdr(), false, false, &mut others)? {
+            return Ok(false);
+        }
+        args.extend(others);
+        Ok(true)
+    })
 }
 
 #[inline(always)]

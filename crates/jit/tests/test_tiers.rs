@@ -3046,6 +3046,24 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             "function(n: I64) -> I64 List.sum(List.drop_last([n], 1)) + List.sum(List.repeat(n, 0i64) * 2i64)",
             &["{ k <- 3i64; FUNCTION(k) }"],
         ),
+        // A merge sort with the comparator inlined: stable, so equal keys keep their order, and
+        // the strings it compares order as R's `<` does.
+        (
+            "function(n: I64) -> List<Tuple{Str, I64}> { xs <- List.map(List.range(1, n), \\(i) \
+             (if (i %% 2i64 == 0i64) \"b\" else \"a\", i %% 3i64))\n \
+             List.sort_with(xs, \\(a, b) match (Num.compare(b[[2]], a[[2]])) { \
+             :EQ => if (a[[1]] < b[[1]]) :LT else if (a[[1]] > b[[1]]) :GT else :EQ\n \
+             order => order }) }",
+            &[
+                "{ k <- 9i64; FUNCTION(k) }",
+                "{ k <- 1i64; FUNCTION(k) }",
+                "{ k <- 0i64; FUNCTION(k) }",
+            ],
+        ),
+        (
+            "function(xs: List<Str>, s: Str) -> List<Bool> xs <= s",
+            &["{ a <- List.from_r(c(\"B\", \"a\", \"b\", \"\")); b <- \"b\"; FUNCTION(a, b) }"],
+        ),
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.

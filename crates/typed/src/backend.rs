@@ -618,16 +618,33 @@ impl Emitter<'_> {
                 let value = match item {
                     Item::Str => {
                         let (a, b) = (self.get(*a)?, self.get(*b)?);
-                        let equal = self.call(
-                            address!(values::ry_str_equal),
-                            &[I64; 4],
-                            &[I32],
-                            &[a[0], a[1], b[0], b[1]],
-                        )[0];
+                        let words = [a[0], a[1], b[0], b[1]];
                         match op {
-                            Compare::Eq => equal,
-                            Compare::Ne => self.builder.ins().bxor_imm_s(equal, 1),
-                            _ => return Err(Refusal::new("an ordering comparison of strings")),
+                            Compare::Eq | Compare::Ne => {
+                                let equal = self.call(
+                                    address!(values::ry_str_equal),
+                                    &[I64; 4],
+                                    &[I32],
+                                    &words,
+                                )[0];
+                                match op {
+                                    Compare::Eq => equal,
+                                    _ => self.builder.ins().bxor_imm_s(equal, 1),
+                                }
+                            }
+                            _ => {
+                                let order = self.call(
+                                    address!(values::ry_str_compare),
+                                    &[I64; 4],
+                                    &[I32],
+                                    &words,
+                                )[0];
+                                let compared =
+                                    self.builder
+                                        .ins()
+                                        .icmp_imm_s(integer_condition(*op), order, 0);
+                                self.logical(compared)
+                            }
                         }
                     }
                     Item::Dbl => {

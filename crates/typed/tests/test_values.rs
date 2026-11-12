@@ -414,8 +414,12 @@ fn comparisons_and_logic_follow_r() {
         let key = str_of("a long string past the inline limit");
         let equal = ry_compare_vs(EQ, STR as u32, strings, 0, key.lo, key.hi);
         assert_eq!(read(equal), Model::Lgl(vec![0, 1]));
-        assert!(ry_compare_vs(LT, STR as u32, strings, 0, key.lo, key.hi).is_null());
-        for list in [both, either, negated, equal, strings, b] {
+        // A space orders before a letter, so "apple" is not before "a long ...".
+        let less = ry_compare_vs(LT, STR as u32, strings, 0, key.lo, key.hi);
+        assert_eq!(read(less), Model::Lgl(vec![0, 0]));
+        let at_most = ry_compare_vs(LE, STR as u32, strings, 0, key.lo, key.hi);
+        assert_eq!(read(at_most), Model::Lgl(vec![0, 1]));
+        for list in [both, either, negated, equal, less, at_most, strings, b] {
             ry_list_drop(list);
         }
         ry_str_drop(key.lo, key.hi);

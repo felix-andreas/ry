@@ -1487,6 +1487,8 @@ fn standard_library_at_runtime() {
             }
         }
         failures.extend(move_undo_failures());
+        failures.extend(slot_move_undo_failures());
+        failures.extend(in_place_growth_failures());
         failures.extend(named_argument_failures());
         failures.extend(collection_model_failures());
         assert!(
@@ -1574,6 +1576,97 @@ unsafe fn move_undo_failures() -> Vec<String> {
             failures.push(format!(
                 "`{check}` after `{failing}`\n  printed  {printed:?}\n  expected {expected:?}"
             ));
+        }
+    }
+    failures
+}
+
+/// The cases of [`move_undo_failures`] from a frame that keeps its slots: nothing calls
+/// `environment()`, so the move takes the value out of the caller's slot. `on.exit` reads the
+/// slot once the failure has unwound the helper.
+unsafe fn slot_move_undo_failures() -> Vec<String> {
+    let cases = [
+        (
+            "{ bad <- function(m, k) { m <- Dict.insert(m, k, 1); m <- Dict.insert(m, 1L, 1) }; f <- function() { m <- Dict.single(\"z\", 0); on.exit(saved <<- m); m <- bad(m, \"a\") }; f() }",
+            "Dict.from_list([(\"z\", 0)])\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs <- List.set(xs, 1L, v); xs <- List.append(xs, v); xs <- List.swap(xs, 1L, 2L); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { xs <- [1.5, 2.5]; on.exit(saved <<- xs); xs <- bad(xs, 5) }; f() }",
+            "[1.5, 2.5]\n",
+        ),
+        (
+            "{ bad <- function(s, k) { s <- Set.insert(s, k); s <- Set.insert(s, \"x\") }; f <- function() { s <- Set.from_list(list(1L, 2L)); on.exit(saved <<- s); s <- bad(s, 3L) }; f() }",
+            "Set.from_list([1L, 2L])\n",
+        ),
+        (
+            "{ f <- function() { r <- (n = 1, values = [1i64]); on.exit(saved <<- r); r <- (..r, values = List.append(r$values, \"x\")) }; f() }",
+            "(n = 1, values = [1i64])\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (failing, expected) in cases {
+        // SAFETY: the interpreter is installed.
+        let reported = unsafe { printed(failing) };
+        if !reported.contains("one type") {
+            failures.push(format!(
+                "`{failing}`\n  reported {reported:?}\n  expected a type error"
+            ));
+        }
+        // SAFETY: as above.
+        let printed = unsafe { printed("saved") };
+        if printed != expected {
+            failures.push(format!(
+                "`saved` after `{failing}`\n  printed  {printed:?}\n  expected {expected:?}"
+            ));
+        }
+    }
+    failures
+}
+
+/// A loop inside a function that grows a collection through a helper, or a record's `List`
+/// field through an update, does constant work per step: the helper takes the caller's value as
+/// a move and updates it in place, and the update reuses the field's list. The heap's count of
+/// allocated bytes measures the work deterministically. Doubling the steps must about double it,
+/// which a copy per step would quadruple, and 2e6 steps must stay within a fixed budget per step.
+unsafe fn in_place_growth_failures() -> Vec<String> {
+    let setup = "{
+        add_item <- function(xs, i) List.append(xs, i)
+        add_key <- function(d, i) Dict.insert(d, i, i)
+        add_element <- function(s, i) { s <- Set.insert(s, i); s }
+        grow_list <- function(n) { xs <- list(); for (i in seq_len(n)) xs <- add_item(xs, i); List.len(xs) }
+        grow_dict <- function(n) { d <- Dict.empty(); for (i in seq_len(n)) d <- add_key(d, i); Dict.len(d) }
+        grow_set <- function(n) { s <- Set.empty(); for (i in seq_len(n)) s <- add_element(s, i); Set.len(s) }
+        grow_field <- function(n) { r <- (name = \"a\", values = [0i64]); for (i in seq_len(n)) r <- (..r, values = List.append(r$values, 1i64)); List.len(r$values) - 1i64 }
+    }";
+    let mut failures = Vec::new();
+    // SAFETY: the interpreter is installed.
+    if let Err(failure) = unsafe { evaluate(setup) } {
+        return vec![format!("the growth setup failed: {failure}")];
+    }
+    let allocated = |code: &str| -> Result<u64, String> {
+        let before = interp::heap().allocated_ever();
+        // SAFETY: the interpreter is installed.
+        unsafe { evaluate(code) }?;
+        Ok(interp::heap().allocated_ever() - before)
+    };
+    for grow in ["grow_list", "grow_dict", "grow_set", "grow_field"] {
+        let measured = (|| -> Result<(), String> {
+            let small = allocated(&format!("{grow}(20000L)"))?;
+            let large = allocated(&format!("{grow}(40000L)"))?;
+            if large as f64 > 2.6 * small as f64 {
+                return Err(format!(
+                    "allocated {small} bytes for 20000 steps and {large} for 40000"
+                ));
+            }
+            let steps = 2_000_000u64;
+            let total = allocated(&format!("{grow}(2000000L)"))?;
+            if total > 1024 * steps {
+                return Err(format!("allocated {total} bytes for {steps} steps"));
+            }
+            Ok(())
+        })();
+        if let Err(failure) = measured {
+            failures.push(format!("`{grow}` is not linear: {failure}"));
         }
     }
     failures
