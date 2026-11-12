@@ -767,6 +767,11 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
     for program in programs:
         name = program["id"]
         row = {"id": name, "display": program["display"], "seconds": {}, "ratio": {}, "peak_mib": {}, "flags": []}
+        if suite == RUST_SUITE:
+            # A child's peak resident set as `wait4` reports it is never below the runner's own,
+            # because the child starts as a copy of the runner. A Rust program needs less than
+            # that, so its peak cannot be read this way, and the suite stores none.
+            del row["peak_mib"]
         if suite == "packages":
             row["version"] = program["version"]
             row["runner"] = program["runner"]
@@ -798,7 +803,8 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                                      "reason": f"checksum {checksums[0]}, {baseline.label} printed {reference}"})
             median = statistics.median(run["seconds"] for run in runs)
             row["seconds"][engine.key] = round(median, 6)
-            row["peak_mib"][engine.key] = max(run["peak_mib"] for run in runs)
+            if "peak_mib" in row:
+                row["peak_mib"][engine.key] = max(run["peak_mib"] for run in runs)
             if median < floor:
                 row["flags"].append({"kind": "too_short", "engine": engine.key})
         if failures:

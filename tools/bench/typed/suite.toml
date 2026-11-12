@@ -1,7 +1,6 @@
 id = "typed"
 name = "Typed ry against Rust"
-harness = "tools/bench/harness.typed.R"
-summary = "every typed kernel and application beside the same program written in Rust"
+summary = "typed kernels and applications, each timed beside the same program written in Rust"
 description = """
 The typed version of every numeric kernel and application workload, timed against the same program
 written in Rust. The Rust twin of `<name>.typed.R` is `tools/bench/typed/<name>.rs`: the same

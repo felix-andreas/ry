@@ -156,6 +156,7 @@ class TypedSuite(unittest.TestCase):
         self.assertEqual(results["geomean"]["ry_typed"], {"median": 1.0, "low": 1.0, "high": 1.0, "programs": 2})
         self.assertEqual(results["programs"][0]["seconds"], {"rust": 0.011, "ry_typed": 0.022})
         self.assertEqual(bench.ratio_label(results, "ry_typed"), "ry typed / Rust")
+        self.assertNotIn("peak_mib", results["programs"][0])
 
     def test_a_program_rust_finishes_too_fast_to_time_stays_out_of_the_mean(self):
         floor = bench.RUST_SHORT
