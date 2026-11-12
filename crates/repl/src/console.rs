@@ -182,7 +182,12 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
     }
     let mut filter = options.filter;
     if let Some(script) = script {
-        let script = normalize_line_endings(&script);
+        let mut script = normalize_line_endings(&script);
+        // A `#:` block on a file's last line annotates nothing, and at a prompt it would wait
+        // for its statement. The line break tells the filter that nothing follows it.
+        if !script.ends_with('\n') {
+            script.push('\n');
+        }
         // A script whose filter refuses it does not run at all, and an unfinished one is R's
         // to report, so the filter forgets it rather than prepend it to the first command.
         let script = match filter

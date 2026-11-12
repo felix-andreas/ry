@@ -8,7 +8,7 @@
 //! also lowers code no checker has seen, takes their storage checks and their text.
 
 use crate::{
-    NodeOrToken, SyntaxKind, SyntaxNode, TextSize,
+    NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize,
     ast::{self, is_expression_kind},
 };
 
@@ -36,6 +36,10 @@ impl Signature {
 /// statement declares for it: the binding's own function type in `name: fn(...) <- function(...)`,
 /// which replaces a `#:` block as a whole, and otherwise the `#:` block attached to the statement
 /// that is or assigns the literal. With `inline` off, only the `#:` block counts.
+///
+/// A coercion on the statement (`@trust`, `@if-unknown`, `@new`) governs the value wherever it
+/// is written, and it says how the value gets its type instead of declaring one to check, so
+/// such a function has no signature at all, whatever its literal writes.
 pub fn signature(function: &SyntaxNode, inline: bool) -> Signature {
     let block = attached_annotation(&statement_of(function));
     signature_from(function, block.as_ref(), inline)
@@ -54,6 +58,14 @@ pub fn signature_from(
         .children()
         .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION)
         .filter(|_| inline && statement != *function);
+    let coerced = binding_type.as_ref().is_some_and(has_coercion)
+        || block.is_some_and(|block| block_refusal(block).is_none() && has_coercion(block));
+    if coerced {
+        return Signature {
+            formals: formals.iter().map(|_| None).collect(),
+            ret: None,
+        };
+    }
     let declaration = match binding_type {
         Some(ascription) => ascription
             .first_child()
@@ -199,18 +211,19 @@ pub fn expanded_declaration(annotation: &SyntaxNode) -> Declaration {
 }
 
 /// The function signature a `#:` block declares for a function literal to be checked against,
-/// or `None` for a block that declares none: a refused block, a coercion (`@trust`,
-/// `@if-unknown`, `@new`), which says how the value gets its type instead, or a type that is not
-/// written as a function type.
+/// or `None` for a block that declares none: a refused block, a block whose directives are out
+/// of order, a coercion, or a type that is not written as a function type.
 pub fn block_declaration(annotation: &SyntaxNode) -> Option<Declaration> {
-    if block_refusal(annotation).is_some() {
+    if block_refusal(annotation).is_some()
+        || has_coercion(annotation)
+        || !misplaced_directives(annotation).is_empty()
+    {
         return None;
     }
     let mut expanded = false;
     for child in annotation.children() {
         match child.kind() {
             SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
-                "trust" | "if-unknown" | "new" => return None,
                 "param" | "return" | "returns" => expanded = true,
                 _ => {}
             },
@@ -223,6 +236,58 @@ pub fn block_declaration(annotation: &SyntaxNode) -> Option<Declaration> {
         }
     }
     expanded.then(|| expanded_declaration(annotation))
+}
+
+/// Whether a `#:` block or a binding's type holds a coercion directive (`@trust`, `@if-unknown`,
+/// `@new`).
+fn has_coercion(node: &SyntaxNode) -> bool {
+    node.children().any(|child| {
+        child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
+            && matches!(
+                directive_name(&child).as_str(),
+                "trust" | "if-unknown" | "new"
+            )
+    })
+}
+
+/// The directives of the `#:` block `annotation` that break the order an expanded function
+/// annotation is written in (`@forall`, then every `@param`, then one `@return`), each with what
+/// is wrong with it. A block with one declares nothing.
+pub fn misplaced_directives(annotation: &SyntaxNode) -> Vec<(&'static str, TextRange)> {
+    let mut misplaced = Vec::new();
+    let mut saw_param = false;
+    let mut saw_return = false;
+    for directive in annotation
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+    {
+        match directive_name(&directive).as_str() {
+            "forall" if saw_param || saw_return => misplaced.push((
+                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.",
+                directive.text_range(),
+            )),
+            "param" => {
+                if saw_return {
+                    misplaced.push((
+                        "`@param` directives must appear before `@return` or `@returns` in the same `#:` block.",
+                        directive.text_range(),
+                    ));
+                }
+                saw_param = true;
+            }
+            "return" | "returns" => {
+                if saw_return {
+                    misplaced.push((
+                        "cannot use more than one `@return` or `@returns` directive in the same `#:` block.",
+                        directive.text_range(),
+                    ));
+                }
+                saw_return = true;
+            }
+            _ => {}
+        }
+    }
+    misplaced
 }
 
 /// The function type `written` spells out, looking through parentheses. A type alias names a

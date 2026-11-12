@@ -21,7 +21,8 @@ use {
         annotation::{
             BlockRefusal, Declaration, Paired, assigned_function, block_refusal,
             compact_declaration, directive_name, expanded_declaration, formals, has_token,
-            is_type_kind, name_text, pair_formals, signature_from, written_function_type,
+            is_type_kind, misplaced_directives, name_text, pair_formals, signature_from,
+            written_function_type,
         },
         ast, is_inline_annotation_kind, node_text,
     },
@@ -99,8 +100,11 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
     let mut params: Vec<(String, Ty<'db>, bool)> = Vec::new();
     let mut rest: Option<Ty<'db>> = None;
     let mut ret: Option<Ty<'db>> = None;
-    let mut saw_param = false;
-    let mut saw_return = false;
+    lowering.errors.extend(
+        misplaced_directives(node)
+            .into_iter()
+            .map(|(message, range)| (message.to_owned(), range)),
+    );
 
     for child in node.children() {
         match child.kind() {
@@ -116,22 +120,9 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         }
                     }
                     "forall" => {
-                        if saw_param || saw_return {
-                            lowering.errors.push((
-                                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
                         lowering.lower_binders(&child, &mut forall, "expanded function annotation");
                     }
                     "param" => {
-                        if saw_return {
-                            lowering.errors.push((
-                                "`@param` directives must appear before `@return` or `@returns` in the same `#:` block.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
-                        saw_param = true;
                         let optional = has_token(&child, SyntaxKind::L_BRACKET);
                         let ty = lowering
                             .lower_child_type(&child)
@@ -143,13 +134,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         }
                     }
                     "return" | "returns" => {
-                        if saw_return {
-                            lowering.errors.push((
-                                "cannot use more than one `@return` or `@returns` directive in the same `#:` block.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
-                        saw_return = true;
                         ret = lowering.lower_child_type(&child);
                     }
                     "strict" => annotation.strict = Some(!has_word(&child, "off")),

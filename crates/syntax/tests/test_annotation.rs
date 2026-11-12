@@ -55,6 +55,26 @@ fn a_signature_counts_the_same_wherever_it_is_written() {
             "f: fn(n: I64, m: F64) -> Str <-\n  function(n, m) n",
             "(I64, F64) -> Str",
         ),
+        (
+            "#: fn(n: I64, m: F64) -> Str\nfunction(n, m) n -> f",
+            "(I64, F64) -> Str",
+        ),
+        (
+            "#: fn(n: I64, m: F64) -> Str\nf <<- function(n, m) n",
+            "(I64, F64) -> Str",
+        ),
+        (
+            "#: <T> fn(n: T, m: F64) -> T\nf <- function(n, m) n",
+            "(T, F64) -> T",
+        ),
+        (
+            "#: @forall T\n#: @param n {T}\n#: @param m {F64}\n#: @return {T}\nf <- function(n, m) n",
+            "(T, F64) -> T",
+        ),
+        (
+            "#: @pure\n#: fn(n: I64, m: F64) -> Str\nf <- function(n, m) n",
+            "(I64, F64) -> Str",
+        ),
         // A parameter takes the declared type of its own name, in any order.
         (
             "#: fn(m: F64, n: I64) -> Str\nf <- function(n, m) n",
@@ -110,6 +130,16 @@ fn what_declares_nothing() {
         // A coercion says how the value gets its type, a definition declares another name, and
         // an alias names a function type without writing it.
         "#: @trust fn(n: I64, m: F64) -> Str\nf <- function(n, m) n",
+        // A coercion governs the value wherever it is written, so the types on the literal
+        // and on the name are not a signature either.
+        "#: @trust fn(n: I64, m: F64) -> Str\nf <- function(n: I64, m: F64) -> Str n",
+        "#: @trust fn(n: I64, m: F64) -> Str\nf: fn(n: I64, m: F64) -> Str <- function(n, m) n",
+        "f: @trust fn(n: I64, m: F64) -> Str <- function(n: I64, m: F64) -> Str n",
+        "#: @if-unknown fn(n: I64, m: F64) -> Str\nf <- function(n: I64, m: F64) -> Str n",
+        // Directives out of order are an error, and the block declares nothing.
+        "#: @return {Str}\n#: @param n {I64}\n#: @param m {F64}\nf <- function(n, m) n",
+        "#: @param n {I64}\n#: @param m {F64}\n#: @return {Str}\n#: @return {Str}\nf <- function(n, m) n",
+        "#: @param n {T}\n#: @param m {F64}\n#: @forall T\n#: @return {T}\nf <- function(n, m) n",
         "#: @alias Pick {fn(n: I64, m: F64) -> Str}\nf <- function(n, m) n",
         "#: Pick\nf <- function(n, m) n",
         "f: Pick <- function(n, m) n",

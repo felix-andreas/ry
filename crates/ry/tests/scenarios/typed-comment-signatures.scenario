@@ -75,6 +75,23 @@ expect exit 1
 expect stderr "interpreted"
 expect stderr "a function whose signature is a type alias"
 
+# A script that ends in a `#:` block is still checked before it runs: the block annotates
+# nothing, and only a console waits for the statement after one. `cat` writes the file without
+# a final line break.
+file ending.txt
+| print("ran unchecked")
+| #: fn(n: I64) -> I64
+file write-ending.R
+| lines <- readLines("ending.txt")
+| cat(lines, sep = "\n", file = "ending.R")
+
+run ry run --runtime ry write-ending.R
+expect exit 0
+run ry run --runtime ry ending.R
+expect exit 1
+expect stderr "A `#:` typing comment must be followed immediately by an expression"
+expect stdout lacks "ran unchecked"
+
 # A blank line detaches the block, so the function below it is plain R.
 file ry.toml
 | [check]
@@ -176,3 +193,25 @@ expect stdout "[1] \"a3\""
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
 expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
 expect stderr "typed: compiled for [Str, I64] -> Str"
+
+# A `#:` line that does not read as an annotation is a comment, in a package as in a script: the
+# check reports it, and the definition below it still loads, from the syntax tree on the first
+# load and from the file's text on the second.
+file notes/ry.toml
+| [check]
+| typing = true
+file notes/DESCRIPTION
+| Package: notes
+| Version: 1.0.0
+file notes/NAMESPACE
+| export(noted)
+file notes/R/noted.R
+| #: note: see the table below!
+| noted <- function(n) n + 1
+
+run ry load notes -e "print(noted(1))"
+expect exit 0
+expect stdout "[1] 2"
+run ry load notes -e "print(noted(1))"
+expect exit 0
+expect stdout "[1] 2"

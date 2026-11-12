@@ -27,7 +27,10 @@ use {
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
-    syntax::{TextRange, TextSize},
+    syntax::{
+        TextRange, TextSize,
+        annotation::{Paired, pair_formals},
+    },
     thin_vec::ThinVec,
 };
 
@@ -122,7 +125,7 @@ pub enum Uncompiled {
     EnclosingRead(Symbol),
     ComputedCall,
     Try,
-    UnwrittenSignature,
+    AliasedSignature,
     IfWithoutElse,
     RArgument(Symbol, Crossing),
     Construct(&'static str),
@@ -394,7 +397,7 @@ impl Uncompiled {
                 "`try` {YET}. Match the result instead, and return the error from its arm: \
                  `match (result) {{ :Ok(value) => ..., :Err(error) => :Err(error) }}`"
             ),
-            Uncompiled::UnwrittenSignature => format!(
+            Uncompiled::AliasedSignature => format!(
                 "a function whose signature is a type alias {YET}: the runtime reads the types \
                  where they are written, and an alias only names them. Write the function type \
                  out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the \
@@ -549,9 +552,9 @@ pub struct Judged<'a, 'db> {
     pub types: &'a dyn Fn(ExprId) -> Option<Ty<'db>>,
     /// The declared signature of each function literal that has one.
     pub signatures: &'a FxHashMap<ExprId, FunctionType<'db>>,
-    /// The function literals whose parameter types the runtime cannot read, because they are
-    /// not written out for it (see `Annotation::written_signature`).
-    pub unwritten: &'a FxHashSet<ExprId>,
+    /// The function literals whose signature only a type alias gives, so that no type is
+    /// written where the runtime reads one (see `Annotation::written_signature`).
+    pub aliased: &'a FxHashSet<ExprId>,
 }
 
 /// Every blocker in the native functions of one item, in source order.
@@ -847,7 +850,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.r_arguments = None;
         self.invisible = None;
         self.collect_locals(function);
-        if self.judged.unwritten.contains(&function) {
+        if self.judged.aliased.contains(&function) {
             let parameters = &module[parameters];
             let range = match (parameters.first(), parameters.last()) {
                 (Some(first), Some(last)) => first.range.cover(last.range),
@@ -855,27 +858,34 @@ impl<'a, 'db> Judge<'a, 'db> {
             };
             self.block_at(
                 range,
-                NativeBlockerKind::Uncompiled(Uncompiled::UnwrittenSignature),
+                NativeBlockerKind::Uncompiled(Uncompiled::AliasedSignature),
             );
         }
-        let mut position = 0;
-        for parameter in &module[parameters] {
-            if parameter.name == "..." {
-                self.block_at(
-                    parameter.range,
-                    NativeBlockerKind::Uncompiled(Uncompiled::Dots),
-                );
-                continue;
-            }
-            let declared = signature
-                .named
+        let named: Vec<&str> = signature
+            .named
+            .iter()
+            .map(|named| named.name.text(db))
+            .collect();
+        let paired = pair_formals(
+            module[parameters]
                 .iter()
-                .find(|named| parameter.name == named.name.text(db))
-                .map(|named| named.ty)
-                .or_else(|| {
-                    position += 1;
-                    signature.positional.get(position - 1).copied()
-                });
+                .map(|parameter| parameter.name.as_str()),
+            &named,
+            signature.positional.len(),
+        );
+        for (parameter, paired) in module[parameters].iter().zip(paired) {
+            let declared = match paired {
+                Paired::Rest => {
+                    self.block_at(
+                        parameter.range,
+                        NativeBlockerKind::Uncompiled(Uncompiled::Dots),
+                    );
+                    continue;
+                }
+                Paired::Named(index) => signature.named.get(index).map(|named| named.ty),
+                Paired::Positional(index) => signature.positional.get(index).copied(),
+                Paired::Undeclared => None,
+            };
             let mut slot = Slot::Parameter(declared);
             if let Some(declared) = declared {
                 if matches!(self.peel(declared).kind(db), TyKind::Function(_)) {

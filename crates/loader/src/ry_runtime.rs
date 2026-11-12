@@ -830,7 +830,11 @@ unsafe fn lower_code(source: &Source, position: Position, srcfile: Option<Sexp>)
         }
         Source::Text(text) => text,
     };
-    if statement > start || text.get(statement..end).is_none() {
+    if statement > start
+        || start > end
+        || !text.is_char_boundary(start)
+        || text.get(statement..end).is_none()
+    {
         return Err(missing());
     }
     let line_start = |offset: usize| text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
@@ -854,7 +858,9 @@ unsafe fn lower_code(source: &Source, position: Position, srcfile: Option<Sexp>)
         &text[statement..end]
     );
     let parse = syntax::parse(&parsed);
-    if !parse.errors().is_empty() {
+    // A `#:` line that does not read as an annotation is a comment to R, so it declares
+    // nothing and the code below it still runs.
+    if parse.errors().iter().any(|error| !error.in_annotation) {
         return Err(missing());
     }
     let node = node_spanning(&parse, (start - piece) as u32, (end - piece) as u32)?;

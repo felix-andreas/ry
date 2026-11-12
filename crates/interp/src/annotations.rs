@@ -897,7 +897,6 @@ unsafe fn describe(value: Sexp) -> String {
     }
 }
 
-/// The type node an ascription or a return type annotation holds.
 /// The storage types a type admits, or zero when storage alone cannot decide it.
 fn mask_of(node: &SyntaxNode) -> Mask {
     match node.kind() {

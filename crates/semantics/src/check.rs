@@ -1081,7 +1081,7 @@ fn check_item_in<'db>(
         // The declaration as written decides whether a function is judged, so a formal the
         // author left untyped keeps the function out.
         let mut signatures: FxHashMap<ExprId, FunctionType<'db>> = FxHashMap::default();
-        let mut unwritten: FxHashSet<ExprId> = FxHashSet::default();
+        let mut aliased_signatures: FxHashSet<ExprId> = FxHashSet::default();
         let declared_function = |annotation: &Annotation<'db>| {
             if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
                 return None;
@@ -1090,6 +1090,7 @@ fn check_item_in<'db>(
             // An alias of a function type declares the signature too, without writing it where
             // the runtime reads it.
             let mut body = declared.body;
+            let mut through_alias = false;
             for _ in 0..8 {
                 let TyKind::Named(name, arguments) = body.kind(db) else {
                     break;
@@ -1103,25 +1104,27 @@ fn check_item_in<'db>(
                     break;
                 };
                 body = alias.body;
+                through_alias = true;
             }
             match body.kind(db) {
-                TyKind::Function(function) if !has_r_bound(declared) => {
-                    Some((function.clone(), annotation.written_signature))
-                }
+                TyKind::Function(function) if !has_r_bound(declared) => Some((
+                    function.clone(),
+                    through_alias && !annotation.written_signature,
+                )),
                 _ => None,
             }
         };
         for id in module.expression_ids() {
             match *module.kind(id) {
                 ExpressionKind::Function { .. } => {
-                    if let Some((function, written)) = context
+                    if let Some((function, aliased)) = context
                         .expression_annotations
                         .get(&id)
                         .and_then(declared_function)
                     {
                         signatures.insert(id, function);
-                        if !written {
-                            unwritten.insert(id);
+                        if aliased {
+                            aliased_signatures.insert(id);
                         }
                     }
                 }
@@ -1134,15 +1137,15 @@ fn check_item_in<'db>(
                     } else {
                         None
                     };
-                    if let Some((function, written)) = context
+                    if let Some((function, aliased)) = context
                         .expression_annotations
                         .get(&id)
                         .or(item_annotation)
                         .and_then(declared_function)
                     {
                         signatures.insert(value, function);
-                        if !written {
-                            unwritten.insert(value);
+                        if aliased {
+                            aliased_signatures.insert(value);
                         }
                     }
                 }
@@ -1163,7 +1166,7 @@ fn check_item_in<'db>(
                     Some(context.table.resolve(db, ty))
                 },
                 signatures: &signatures,
-                unwritten: &unwritten,
+                aliased: &aliased_signatures,
             })
         }
     } else {

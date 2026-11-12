@@ -309,8 +309,8 @@ language server once per load, for as long as the setting stays off. A `#:` bloc
 statement then applies alone, and so does a paired `#:` definition. An inline type definition with
 no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
 `type` stays nominal, so a plain value is still not accepted where it is expected, but its
-representation is `Unknown`. The setting also governs running code: `ry run` and `ry R` still
-run annotated code, and ry's runtime takes a function's signature from its `#:` block alone.
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry R` run
+annotated code either way, and ry's runtime takes a function's signature from its `#:` block alone.
 
 ### Annotations at run time
 
@@ -350,10 +350,21 @@ Error in halve("a") :
   argument `value` must be `double`, not `character`
 ```
 
-GNU R reads a `#:` block as a comment, so the same file run by `Rscript` has no checks. One form
-does not reach the runtime: a signature that is only the name of a type alias, as in `#: Scaler`
-with `#: @alias Scaler {fn(values: double, by: double) -> double}`. The runtime reads the types
-where they are written, and resolving an alias takes the checker.
+GNU R reads a `#:` block as a comment, so a file annotated only in `#:` blocks runs under
+`Rscript` without checks.
+
+Three kinds of signature are not checked at run time:
+
+- **A coercion.** `@trust`, `@if-unknown` and `@new` say how the value gets its type instead of
+  declaring one to check, and a coercion governs the value wherever it is written. A function under
+  one has no run-time checks, whatever types its literal writes, and it is not compiled.
+- **The name of a type alias**, as in `#: Scaler` with
+  `#: @alias Scaler {fn(values: double, by: double) -> double}`. The runtime reads the types where
+  they are written, and resolving an alias takes the checker.
+- **A block the checker rejects.** A `#:` line that does not parse is a comment, and a block whose
+  directives are out of order declares nothing. A block with an error that only the checker can
+  see, such as an unknown type name, declares nothing to the checker, and the runtime checks the
+  types it recognizes in it.
 
 The console attaches a `#:` block the same way. A command that ends in a `#:` block is unfinished,
 so the console reads the next line into the same command, and a blank line ends the wait and leaves
