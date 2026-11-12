@@ -1,0 +1,31 @@
+[stdout]
+| [1] 0
+| ok     used  8 wrote  8: 63 61 66 c3 a9 20 6f 6b
+| ok     used  8 wrote  8: 63 61 66 c3 a9 20 6f 6b
+| ok     used  8 wrote  8: 63 61 66 c3 a9 20 6f 6b
+| EILSEQ used  2 wrote  2: 61 62
+| EILSEQ used  2 wrote  2: 61 62
+| EILSEQ used  2 wrote  2: 61 62
+| EINVAL used  2 wrote  2: 61 62
+| EINVAL used  2 wrote  2: 61 62
+| EINVAL used  2 wrote  2: 61 62
+| E2BIG  used  3 wrote  3: 63 61 66
+| E2BIG  used  5 wrote  5: 63 61 66 c3 a9
+| E2BIG  used  3 wrote  3: 63 61 66
+| E2BIG  used  0 wrote  0: 
+| EILSEQ used  2 wrote  2: 61 62
+| ok     used  7 wrote  7: 61 62 f4 90 80 80 7a
+| ok     used  8 wrote  8: 61 62 f8 88 80 80 80 7a
+| ok     used  6 wrote  6: ef bb bf 62 6f 6d
+| ok     used  0 wrote  0: 
+| ok     used  4 wrote  5: 63 61 66 c3 a9
+| ok     used  8 wrote  7: 63 61 66 e9 20 6f 6b
+| EILSEQ used  2 wrote  2: 61 62
+| ok     used  8 wrote 14: 63 00 61 00 66 00 e9 00 20 00 6f 00 6b 00
+| EILSEQ used  2 wrote  4: 61 00 62 00
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
