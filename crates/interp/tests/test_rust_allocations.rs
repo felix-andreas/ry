@@ -7,7 +7,7 @@
 //! The interpreter runs here without base R, so the closures call the internals directly.
 
 use {
-    heap::object::Sexp,
+    heap::{GcStress, object::Sexp},
     interp::{eval, lower, testing::with_interpreter, unwind::Unwind, values},
     std::{
         alloc::{GlobalAlloc, Layout, System},
@@ -100,6 +100,7 @@ via_do_call <- function(x) .Internal(do.call(identity_of, list(x), globalenv()))
 paired <- function(x) .Internal(mapply(function(a, b) a + b, list(x, 2:3), NULL))
 global_by_name <- function() as.environment('.GlobalEnv')
 same <- function(x, y) .Internal(identical(x, y, TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, FALSE))
+rebound <- function() { x <- c(1, 2); c(x, { x <- 5; 3 }) }
 ";
 
 /// Each shape's code, run once per iteration, and the most Rust allocations it may make.
@@ -204,6 +205,40 @@ fn hot_paths_survive_gc_stress() {
                 }
             }
             assert!(failed.is_empty(), "under GC stress:\n{}", failed.join("\n"));
+        }
+    });
+}
+
+/// Checks that must hold under young stress, where every allocation runs an intermediate
+/// collection that frees untenured survivors of earlier collections. Plain stress promotes an
+/// object at its first collection, after which only a rare major can free it, so a value held
+/// only by a Rust local survives there and dies here.
+const YOUNG_STRESSED: &[&str] = &[
+    // The second argument rebinds `x`, so the first argument's value is held by the evaluated
+    // argument list alone.
+    "same(rebound(), c(1, 2, 3))",
+];
+
+#[test]
+fn evaluator_survives_young_gc_stress() {
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and every handle comes from its heap.
+        unsafe {
+            evaluate(SETUP).unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
+            let heap = interp::heap();
+            let mut failed = Vec::new();
+            for &code in YOUNG_STRESSED {
+                let expression = parse(code);
+                heap.update_policy(|policy| policy.stress = GcStress::Young);
+                let result = eval::eval(expression, values::global_env());
+                heap.update_policy(|policy| policy.stress = GcStress::Off);
+                match result {
+                    Ok(value) if values::is_true(value) => {}
+                    Ok(_) => failed.push(format!("`{code}` was not TRUE")),
+                    Err(failure) => failed.push(format!("`{code}` failed: {}", message(failure))),
+                }
+            }
+            assert!(failed.is_empty(), "under young GC stress:\n{}", failed.join("\n"));
         }
     });
 }
