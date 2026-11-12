@@ -628,6 +628,8 @@ pub mod header_layout {
 pub const ENVIRONMENT_FRAME_OFFSET: usize = std::mem::offset_of!(EnvironmentObject, frame);
 /// Where an environment's enclosure pointer sits in the object.
 pub const ENVIRONMENT_ENCLOSURE_OFFSET: usize = std::mem::offset_of!(EnvironmentObject, enclosure);
+/// Where a symbol's binding epoch, a `u64`, sits in the object.
+pub const SYMBOL_EPOCH_OFFSET: usize = std::mem::offset_of!(SymbolObject, epoch);
 
 const _: () = assert!(size_of::<Header>() == 16);
 const _: () = assert!(VECTOR_DATA_OFFSET == 32);

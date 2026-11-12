@@ -102,6 +102,9 @@ pub const TRIPLE_BYTES: usize = size_of::<TripleObject>();
 /// allocated outside the heap and not counted.
 pub const ENVIRONMENT_BYTES: usize = size_of::<EnvironmentObject>();
 
+/// Where the enclosure epoch, the `u64` every lookup stamp adds, sits inside `Heap`.
+pub const HEAP_ENCLOSURE_EPOCH_OFFSET: usize = std::mem::offset_of!(Heap, enclosure_epoch);
+
 pub struct Heap {
     space: Space,
     /// The largest single allocation the heap attempts (`memory_ceiling`).

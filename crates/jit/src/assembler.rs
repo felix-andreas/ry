@@ -61,14 +61,15 @@ pub enum Condition {
     Unordered,
 }
 
-/// The registers the inline paths compute in. `Activation` and `Window` are the pinned
-/// registers of the table above; the temporaries and the accumulator are caller-saved, so a step
+/// The registers the inline paths compute in. `Activation`, `Window` and `Steps` (the step
+/// table) are the pinned registers of the table above, which inline code only reads; the temporaries and the accumulator are caller-saved, so a step
 /// call clobbers them, and they never hold anything across one. `T4` to `T6` carry the
 /// arguments of a shared stub, which may clobber every temporary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reg {
     Activation,
     Window,
+    Steps,
     Accumulator,
     T0,
     T1,
@@ -84,6 +85,7 @@ impl Reg {
         match self {
             Reg::Activation => 3,
             Reg::Window => 12,
+            Reg::Steps => 13,
             Reg::Accumulator => 0,
             Reg::T0 => 2,
             Reg::T1 => 6,
@@ -99,6 +101,7 @@ impl Reg {
         match self {
             Reg::Activation => 19,
             Reg::Window => 20,
+            Reg::Steps => 21,
             Reg::Accumulator => 0,
             Reg::T0 => 10,
             Reg::T1 => 11,
