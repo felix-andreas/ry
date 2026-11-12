@@ -101,6 +101,13 @@ fn routines_return_correct_values() {
         .expect("rytest_environment");
     assert_eq!(r.integers(environment), vec![7, 0, 8, 1, 1]);
 
+    let lookups = r.call("rytest_get_var", &[]).expect("rytest_get_var");
+    assert_eq!(r.integers(lookups), vec![1, 1, 1, 1, 7, 1, 7]);
+    let error = r
+        .call("rytest_get_var_unbound", &[])
+        .expect_err("an unbound name");
+    assert_eq!(error, "Error: object 'rytest.unbound' not found\n");
+
     let strings = r.call("rytest_strings", &[]).expect("rytest_strings");
     assert_eq!(
         r.strings(strings),

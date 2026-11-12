@@ -43,6 +43,18 @@ fn strings_switch_to_heap_past_fifteen_bytes() {
     let inline = str_of("abc");
     assert_eq!(inline.lo, u64::from_le_bytes(*b"abc\0\0\0\0\0"));
     assert_eq!(inline.hi, 0x83 << 56);
+    // Every inline length holds its bytes in order with zeros after them, read from the end of
+    // a buffer so that a read past the string's last byte would show under a memory checker.
+    let source = "abcdefghijklmno";
+    for length in 0..=source.len() {
+        let text = source[..length].to_owned().into_boxed_str();
+        let string = str_of(&text);
+        let mut expected = [0u8; 16];
+        expected[..length].copy_from_slice(text.as_bytes());
+        expected[15] = 0x80 | length as u8;
+        let words = [string.lo.to_le_bytes(), string.hi.to_le_bytes()].concat();
+        assert_eq!(words, expected, "{text:?}");
+    }
     assert_eq!(live(), before, "strings leaked");
 }
 
@@ -427,6 +439,159 @@ fn comparisons_and_logic_follow_r() {
     assert_eq!(live(), before);
 }
 
+/// Fused arithmetic against the same steps run one item at a time: random programs of `+`, `-`,
+/// `*` and `/` over `F64` or `I64` lists and scalars, as a list and as a sum, over lists that
+/// cross chunk boundaries. A `NaN` result, an `I64` overflow, a length mismatch and an empty
+/// list result give up.
+#[test]
+fn fused_arithmetic_agrees_with_one_item_at_a_time() {
+    let mut rng = Rng::from_env();
+    let before = live();
+    for _ in 0..iterations(400) {
+        let doubles = rng.below(2) == 0;
+        let sum = rng.below(2) == 0;
+        let length = [0, 1, 7, 127, 128, 129, 300][rng.below(7)];
+        // An item as its word: a double's bits or an `I64`. Doubles are halves, so a sum of
+        // products is exact and does not depend on the order or width of the additions.
+        let item = |rng: &mut Rng| -> u64 {
+            match rng.below(60) {
+                0 if doubles => f64::NAN.to_bits(),
+                0 => (i64::MAX - 1) as u64,
+                _ if doubles => (rng.below(11) as f64 / 2.0 - 2.5).to_bits(),
+                _ => (rng.below(7) as i64 - 3) as u64,
+            }
+        };
+        // Each input is a list of its items, or one item for a scalar.
+        let mut inputs: Vec<Vec<u64>> = Vec::new();
+        let mut lists = 0u32;
+        for index in 0..1 + rng.below(4) {
+            if index == 0 || rng.below(3) != 0 {
+                // The first input is a list of the usual length, so a longer one is a mismatch.
+                let size = if index > 0 && rng.below(30) == 0 {
+                    length + 1
+                } else {
+                    length
+                };
+                inputs.push((0..size).map(|_| item(&mut rng)).collect());
+                lists |= 1 << index;
+            } else {
+                inputs.push(vec![item(&mut rng)]);
+            }
+        }
+        let fits =
+            (0..inputs.len()).all(|index| lists & 1 << index == 0 || inputs[index].len() == length);
+        let mut program: Vec<u32> = Vec::new();
+        // Each step's items, or `None` once a step fails.
+        let mut done: Option<Vec<Vec<u64>>> = fits.then(Vec::new);
+        for step in 0..1 + rng.below(5) {
+            let reach = inputs.len() + step;
+            let (left, right) = (rng.below(reach), rng.below(reach));
+            // A sum of quotients would depend on how wide the additions are.
+            let op = rng.below(if doubles && !sum { 4 } else { 3 }) as u32;
+            program.push(op | (left as u32) << 8 | (right as u32) << 16);
+            let Some(steps) = &mut done else { continue };
+            let read = |operand: usize, at: usize| match inputs.get(operand) {
+                Some(items) if lists & 1 << operand != 0 => items[at],
+                Some(items) => items[0],
+                None => steps[operand - inputs.len()][at],
+            };
+            let items: Option<Vec<u64>> = (0..length)
+                .map(|at| {
+                    let (x, y) = (read(left, at), read(right, at));
+                    if doubles {
+                        let (x, y) = (f64::from_bits(x), f64::from_bits(y));
+                        let value = match op {
+                            ADD => x + y,
+                            SUB => x - y,
+                            MUL => x * y,
+                            _ => x / y,
+                        };
+                        (!value.is_nan()).then_some(value.to_bits())
+                    } else {
+                        let (x, y) = (x as i64, y as i64);
+                        match op {
+                            ADD => x.checked_add(y),
+                            SUB => x.checked_sub(y),
+                            _ => x.checked_mul(y),
+                        }
+                        .map(|value| value as u64)
+                    }
+                })
+                .collect();
+            match items {
+                Some(items) => steps.push(items),
+                None => done = None,
+            }
+        }
+        let expected: Option<Vec<u64>> = match done.as_ref().and_then(|steps| steps.last()) {
+            Some(items) if sum && doubles => {
+                let total = items
+                    .iter()
+                    .fold(0.0, |total, &item| total + f64::from_bits(item));
+                Some(vec![total.to_bits()])
+            }
+            Some(items) if sum => items
+                .iter()
+                .try_fold(0i64, |total, &item| total.checked_add(item as i64))
+                .map(|total| vec![total as u64]),
+            Some(items) if length > 0 => Some(items.clone()),
+            _ => None,
+        };
+        unsafe {
+            let kind = if doubles { DBL } else { I64 };
+            let words: Vec<u64> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, items)| {
+                    if lists & 1 << index == 0 {
+                        return items[0];
+                    }
+                    items
+                        .iter()
+                        .fold(ry_list_new(kind as u32, 0), |list, &item| {
+                            ry_list_push(list, 1, item, 0)
+                        }) as u64
+                })
+                .collect();
+            let mut out = 0u64;
+            let status = ry_elementwise(
+                kind as u32,
+                program.as_ptr(),
+                program.len() as u32,
+                words.as_ptr(),
+                words.len() as u32,
+                lists,
+                sum as u32,
+                &mut out,
+            );
+            let found: Option<Vec<u64>> = (status == 0).then(|| {
+                if sum {
+                    return vec![out];
+                }
+                let list = out as *mut List;
+                let length = (*list).length as usize;
+                let items = std::slice::from_raw_parts((*list).data as *const u64, length).to_vec();
+                ry_list_drop(list);
+                items
+            });
+            assert_eq!(
+                found.as_ref().map(|items| &items[..items.len().min(8)]),
+                expected.as_ref().map(|items| &items[..items.len().min(8)]),
+                "the first items of program {program:?} over {} inputs of length {length}, \
+                 lists {lists:#b}, sum {sum}, doubles {doubles}",
+                inputs.len()
+            );
+            assert!(found == expected, "program {program:?}, length {length}");
+            for (index, &word) in words.iter().enumerate() {
+                if lists & 1 << index != 0 {
+                    ry_list_drop(word as *mut List);
+                }
+            }
+        }
+    }
+    assert_eq!(live(), before);
+}
+
 /// A fused count against R's three-valued logic item by item: random comparisons of `I64` and
 /// double lists and scalars, combined with `&`, `|` and `!`, over lists that cross chunk
 /// boundaries, with `NA`, `NaN` and a length mismatch, which give up.
@@ -510,7 +675,11 @@ fn fused_counts_follow_three_valued_logic() {
             };
             let choice = rng.below(4);
             let op = rng.below(6) as u32;
-            if choice == 0 || lanes.is_empty() {
+            // A program may open with a logical step over logical inputs alone.
+            let logical_inputs = inputs
+                .iter()
+                .any(|input| matches!(input, Input::Logicals(_) | Input::Logical(_)));
+            if choice == 0 || (lanes.is_empty() && !logical_inputs) {
                 let wholes = rng.below(2) == 0;
                 let want: fn(&Input) -> bool = if wholes {
                     |input| matches!(input, Input::Wholes(_) | Input::Whole(_))
@@ -941,6 +1110,44 @@ fn string_functions_follow_r_and_the_standard_library() {
             read(edge_pieces),
             Model::Str(vec!["".into(), "a".into(), "".into(), "".into()])
         );
+        let nothing = ry_str_split(empty.lo, empty.hi, separator.lo, separator.hi);
+        assert_eq!(read(nothing), Model::Str(vec!["".into()]));
+        let wide = str_of("--");
+        let wide_pieces = ry_str_split(edges.lo, edges.hi, wide.lo, wide.hi);
+        assert_eq!(read(wide_pieces), Model::Str(vec!["-a".into(), "".into()]));
+        let accented = str_of("é,a part long enough for the heap,");
+        let comma = str_of(",");
+        let accented_pieces = ry_str_split(accented.lo, accented.hi, comma.lo, comma.hi);
+        assert_eq!(
+            read(accented_pieces),
+            Model::Str(vec![
+                "é".into(),
+                "a part long enough for the heap".into(),
+                "".into()
+            ])
+        );
+        ry_str_drop(accented.lo, accented.hi);
+        // Separators at every offset of an eight-byte word, alone and in runs, in texts whose
+        // length covers the word-at-a-time part and the tail.
+        for length in 0..40usize {
+            for stride in [1, 2, 3, 5, 7, 8, 9, 41] {
+                let text: String = (0..length)
+                    .map(|index| {
+                        if index % stride == stride - 1 {
+                            ','
+                        } else {
+                            'x'
+                        }
+                    })
+                    .collect();
+                let subject = str_of(&text);
+                let split = ry_str_split(subject.lo, subject.hi, comma.lo, comma.hi);
+                let expected = text.split(',').map(String::from).collect();
+                assert_eq!(read(split), Model::Str(expected), "splitting {text:?}");
+                ry_list_drop(split);
+                ry_str_drop(subject.lo, subject.hi);
+            }
+        }
         let back = ry_list_join(pieces, separator.lo, separator.hi);
         assert_eq!(text_of(back), text_of(joined));
 
@@ -1044,6 +1251,9 @@ fn string_functions_follow_r_and_the_standard_library() {
             pieces,
             whole,
             edge_pieces,
+            nothing,
+            wide_pieces,
+            accented_pieces,
             left,
             middle,
             none,
@@ -1132,7 +1342,20 @@ fn dicts_follow_their_models() {
                         snapshots.push((dict, entries(&model, &order)));
                     }
                     dict = unsafe {
-                        ry_dict_insert(dict, owned as u32, key.lo, key.hi, value.lo, value.hi)
+                        if rng.below(2) == 0 {
+                            ry_dict_insert(dict, owned as u32, key.lo, key.hi, value.lo, value.hi)
+                        } else {
+                            let position = ry_dict_find(dict, key.lo, key.hi);
+                            ry_dict_put(
+                                dict,
+                                owned as u32,
+                                position,
+                                key.lo,
+                                key.hi,
+                                value.lo,
+                                value.hi,
+                            )
+                        }
                     };
                     if model.insert(key_text.clone(), value_text).is_none() {
                         order.push(key_text.clone());
@@ -1149,18 +1372,12 @@ fn dicts_follow_their_models() {
                     }
                 }
                 _ => {
-                    let mut out = [0u64; 2];
-                    let found = unsafe { ry_dict_get(dict, key.lo, key.hi, out.as_mut_ptr()) };
-                    assert_eq!(found == 1, model.contains_key(&key_text), "get {key_text}");
-                    assert_eq!(unsafe { ry_dict_contains(dict, key.lo, key.hi) }, found);
-                    if found == 1 {
-                        let value = Str {
-                            lo: out[0],
-                            hi: out[1],
-                        };
-                        assert_eq!(Some(&text_of(value)), model.get(&key_text));
-                        unsafe { ry_str_drop(value.lo, value.hi) };
-                    }
+                    let found = unsafe { ry_dict_find(dict, key.lo, key.hi) } >= 0;
+                    assert_eq!(found, model.contains_key(&key_text), "find {key_text}");
+                    assert_eq!(
+                        unsafe { ry_dict_contains(dict, key.lo, key.hi) } == 1,
+                        found
+                    );
                 }
             }
             if string_keys {

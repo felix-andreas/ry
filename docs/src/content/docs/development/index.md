@@ -135,7 +135,8 @@ cargo's thin LTO inside each crate). After an edit to the interpreter it rebuild
 under 16 GB of memory. No inlining then crosses a crate boundary, so a single program can run
 a quarter faster or slower than under release: `ry --version` names the profile
 (`ry 0.4.3-beta (iterate build)`), and `tools/bench/bench.py` refuses any binary that is not a
-release build. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
+release build. Its `--any-build` flag lifts that refusal for a look at where a build stands, for
+example `just bench typed --ry target/iterate/ry --any-build`, and such a run cannot be stored. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
 release's inlining: the `.text` of `ry` and `libR.so` is within 0.2% of release's, and its link
 peaks near 11 GB.
 

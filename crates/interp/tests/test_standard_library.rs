@@ -834,6 +834,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("typeof(Num.pow_int(2L, 0L))", "[1] \"integer\"\n"),
     ("Num.sqrt(16L)", "[1] 4\n"),
     ("Num.log(1)", "[1] 0\n"),
+    ("c(Num.exp(0), Num.log(Num.exp(2)))", "[1] 1 2\n"),
     (
         "c(Num.asin(1) * 2, Num.acos(-1))",
         "[1] 3.141593 3.141593\n",

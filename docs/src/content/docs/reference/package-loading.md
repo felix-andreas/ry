@@ -8,7 +8,8 @@ package the same way. This page is the exact behavior.
 
 In RStudio or another R session, `source(pipe("ry load --r-entry"))` defines a `load_all()` that
 loads the same way; put the line in `~/.Rprofile`. It takes `path`, `export_all` (default `TRUE`),
-`attach`, `full` and `quiet`, and reloads only when you call it, as devtools' does. In a console,
+`attach`, `full`, `quiet` and `helpers` (default `TRUE`; `FALSE` leaves the testthat helpers
+unsourced, as in pkgload), and reloads only when you call it, as devtools' does. In a console,
 `load_all(full = TRUE)` rebuilds the namespace from scratch.
 
 ## A load

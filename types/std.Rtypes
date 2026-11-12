@@ -1554,6 +1554,14 @@ Num.sqrt : fn(number: F64) -> F64
 #' ```
 Num.log : fn(number: F64) -> F64
 
+#' The number e raised to `number`: the exponential function, which is the inverse of `Num.log`.
+#'
+#' ```r dput
+#' Num.exp(0)
+#' #> 1
+#' ```
+Num.exp : fn(number: F64) -> F64
+
 #' The arcsine in radians. A number outside -1 to 1 is an error.
 #'
 #' ```r dput

@@ -1,6 +1,8 @@
-use std::fmt::Display;
+// Prices 200,000 order lines, each a struct, with a loyalty discount and a regional tax.
+mod harness;
+
+use harness::measure;
 use std::hint::black_box;
-use std::time::Instant;
 
 #[derive(Clone, Copy)]
 enum Region {
@@ -73,21 +75,4 @@ fn price_orders(count: i64) -> f64 {
 
 fn main() {
     measure("orders", || price_orders(black_box(200_000)));
-}
-
-fn measure<T: PartialEq + Display>(name: &str, mut run: impl FnMut() -> T) {
-    let started = Instant::now();
-    let value = black_box(run());
-    let cold = started.elapsed().as_secs_f64();
-    let mut best = f64::INFINITY;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let again = black_box(run());
-        best = best.min(started.elapsed().as_secs_f64());
-        if again != value {
-            eprintln!("the benchmark is not deterministic");
-            std::process::exit(1);
-        }
-    }
-    println!("{name} {value} {best:.4} {cold:.4}");
 }
