@@ -2529,11 +2529,6 @@ tagging fences `r` for Zed if that proves distant.
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
   Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
-- **After 0.4.4 publishes, rewrite installation.md line ~25 to use `releases/latest`.** Every
-  release before 0.4.4 is a pre-release, so `releases/latest/` resolves to the old `0.1.1` tag and
-  the installation page names the tag in each URL. 0.4.4 is the first full release, and nightlies
-  are pre-releases with `--latest=false`, so from then on `releases/latest` is the newest full
-  release.
 - **The README's diagnostics are not checked.** `docs/` samples are tests (`test_docs`), but the
   two diagnostics in `README.md` and `editors/code/README.md` are pasted text that goes stale when
   a message or blame range changes; re-capture them after such a change.

@@ -3,80 +3,93 @@ title: News
 description: Release announcements and project news
 ---
 
-## Unreleased
+## ry 0.4.4, the first full release
 
-### Faster sprintf
+*Released in November 2026.*
 
-`sprintf()` formats numbers with the same native code as `format()` and `paste()`, and it parses its formats once per call instead of once per element. A scalar `sprintf("%.2f", x)` takes half the instructions it did, and the report benchmark, which builds 20,000 lines with `sprintf`, takes 8% fewer instructions overall. The output matches GNU R byte for byte, including glibc's edge cases: a negative `*` precision, `%#g` when rounding carries to the next power of ten, and `%#o`.
+Version 0.4.4 is ry's first full release; every earlier version was a pre-release. It makes
+closure calls, collections, package loading and start-up cheaper, runs more of base R and of
+popular packages natively, and lets typed code run on native values and call R directly. It ships
+archives for Linux x86_64, macOS on Apple silicon and Windows x86_64 ([Installation](/installation)).
 
-### Faster namespace loads
+Every figure below was reported by the change that introduced it (instructions are callgrind
+counts). None was re-measured for these notes.
 
-Loading a package's namespace does less work in R. `ls()` sorts names by a byte key per name, `methods::cacheMetaData()` handles packages whose old classes ask for the `Ops` group natively, the registered native routines are bound in one pass, and `readRDS()` of a path reads the file whole instead of through a connection. `loadNamespace("rlang")` in a fresh process takes 31 ms instead of 45 ms, and 30 load and unload cycles in one process take 0.54 s instead of 0.66 s.
+### Highlights
 
-### Package code is read without decompressing it
+- **Closure calls run in slot frames.** A call keeps its arguments and locals in fixed slots and
+  makes an environment only when something asks for one, which most calls never do. Frames are
+  written and popped in place, without being copied.
+- **The Linux release is built with profile-guided optimization, and BOLT lays out `libR`.**
+  Against a plain release build, the test phase of the testthat workload runs 10 to 13% faster,
+  `period.apply` runs 20% faster, held-out public benchmark programs run 9 to 25% faster, and
+  peak memory drops by about 6 MB.
+- **Start-up maps its image in place.** The start-up image holds the heap's pages as they sit in
+  memory, so a session maps them instead of decoding objects. Base R's closures are compiled into
+  the image, and the image is laid out in the order a session first touches it.
+- **Packages load faster.** A package's code image holds its lazy-loaded records uncompressed and
+  is read in place, so on the testthat workload no `.rdb` is opened and fetches take 33% fewer
+  instructions. `loadNamespace("rlang")` in a fresh process takes 31 ms instead of 45 ms.
+- **Collections do less.** A minor collection rescans only the parts of large lists that changed,
+  skips dead call frames and checks marked objects inline, and package code fetched from a lazy
+  load is allocated old. When a minor collection leaves the heap full, the collector goes straight
+  to a major collection if an intermediate one would free too little. On the `records` program of
+  the real-world benchmark, collection takes a third fewer instructions and peak memory drops from
+  111 MB to 97 MB.
+- **Package-specific fast paths.** A few package functions run natively when the installed
+  package is exactly the release the native code follows; any other release runs its own R code
+  unchanged.
 
-A package's code image holds each lazy-loaded record uncompressed, and ry maps the image and reads records from it in place instead of inflating them from the `.rdb`. The base packages get such images when the start image is built. On the testthat workload no `.rdb` is opened, fetches take 33% fewer instructions, the whole run takes 1.3% fewer, and four workers together hold 10 MB less private memory.
+  | Package | Function | Release | Effect |
+  | --- | --- | --- | --- |
+  | rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 31% fewer instructions |
+  | withr | the helpers behind `local_envvar()`, `with_envvar()`, `local_options()`, `with_options()` and `local_language()` | 3.0.3 | the testthat workload takes 23% fewer instructions, and every test skips creating and deleting a temporary directory |
 
-### Fewer futile collections
+- **Faster public benchmark suites.** `<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix
+  `m[[i, j]]`, vector growth, `attr<-`, `%*%` on small matrices and complex arithmetic run on
+  compiled or direct paths. With the JIT on, the geometric mean speed-up over GNU R rose from
+  1.58x to 1.90x on the awfy programs, from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on
+  shootout ([Benchmarks](/benchmarks)).
+- **Typed code runs natively.** Strict typed closures that build or match records, tuples and
+  tags, format text, unwrap a `Result`, use sets, select with a logical list or sort run on native
+  values, and a typed call to an R function compiles to a native call site. `RY_TYPED_LOG` names
+  the reason whenever a typed call falls back to the interpreter.
 
-When a minor collection leaves the heap full, the collector predicts from the last escalation how much an intermediate collection would free, and goes straight to a major one when that is too little. On the `records` program of the real-world benchmark, collection takes a third fewer instructions and the whole run 9% fewer, and peak memory drops from 111 MB to 97 MB. `R_PreserveObject` marks the object's header, so releasing a call frame no longer looks the environment up in a hash table.
+### Also in this release
 
-### Package code is allocated old
+- **More of base R runs natively:** `sprintf()` and `format()` on doubles (byte for byte with GNU
+  R), `tryCatch()`, `withRestarts()` and `invokeRestart()` (with the same frames and calls as
+  GNU R), `message()`, `warning()`, `signalCondition()`, `getOption()`, `formatC()`, `pmax()`,
+  `deparse()`'s defaults, `Sys.getenv()`, `Sys.setenv()`, `Sys.which()`, `pmatch()`, `charmatch()`
+  and `attr()`. The distribution functions run on shared vector kernels, `exp()` and `log()` run
+  four lanes wide, and UTF-8 to UTF-8 conversions are copied instead of re-encoded.
+- **The console checks each command on its own.** Each command is checked against what earlier
+  commands bound and declared, so pasting 5,000 typed lines takes 1.36 s, where 1,000 lines took
+  3.56 s before.
+- **data.table runs as a normal package.** ry no longer answers `[` on a data.table itself, so
+  every query runs data.table's own code, with its warnings and errors.
+- **Packages linked to GNU R's reference BLAS load.** A package built by a GNU R with its internal
+  BLAS, such as quadprog, finds ry's copies of `libRblas.so` and `libRlapack.so`.
+- **Old R homes are pruned.** Each process holds the R home it uses, and a home that no process
+  holds and whose inputs are gone is removed, so rebuilt binaries no longer pile up homes in
+  `~/.cache/ry/home`.
+- **Fixes that match GNU R:**
+  - A process started with SIGINT ignored, such as a background job of a non-interactive shell,
+    keeps ignoring it.
+  - `LC_ALL=C`, or `LC_COLLATE=C` with `LC_ALL` unset, sorts by code point, and the C API sorts
+    with the session's collation.
+  - `structure()` gives its result its own dimnames list.
+  - `cat()` rejects lists and calls.
+  - `unlink()` follows GNU R's rules.
+  - `+` and `*` keep the first operand's NaN payload.
+  - `gc()` runs queued finalizers.
+  - Attaching `package:ry` no longer masks other packages.
 
-A lazy-load fetch, which reads a package's functions and data when they are first used, allocates them directly in the old generation, so minor collections no longer trace them only to promote them. `library(testthat)` runs no collection and 6% fewer instructions, the collector's instructions over the testthat workload drop by 14%, and peak memory is unchanged.
+### Known limitations
 
-### Cheaper minor collections
-
-A minor collection checks an already marked object inline, without a function call or bounds checks, and handles a newly marked one out of line. Minor collections during `library(testthat)` take 29% fewer instructions, and the testthat workload takes 1.2% fewer in total.
-
-### Collections skip what did not change
-
-A minor collection no longer reads dead call frames that own no memory, and it marks only the method-cache entries stored since the last collection instead of the whole S3 and S4 cache. The garbage collection share of `--profile-summary` on the testthat workload halves, from 0.046 s to 0.021 s, and the collection pauses take 35% less time; part of that is the summary's own counting of freed objects, which the summary lists apart as "profile summary bookkeeping".
-
-### Package-specific fast paths
-
-ry runs a few package functions natively when the installed package is exactly the release the
-native code follows; any other release runs its own R code unchanged.
-
-| Package | Function | Release | Effect |
-| --- | --- | --- | --- |
-| rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 31% fewer instructions |
-| withr | the helpers behind `local_envvar()`, `with_envvar()`, `local_options()`, `with_options()` and `local_language()` | 3.0.3 | the testthat workload takes 23% fewer instructions, and every test skips creating and deleting a temporary directory, so its wall time halves together with the base fast paths below |
-
-### Faster environment variables
-
-`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases. A lookup rejects most variables after comparing one byte, as glibc does, and together these take 2.4% off the instructions the testthat workload runs.
-
-### Faster partial matching and name lookups
-
-`pmatch()` and `charmatch()` compare each input with the table in place, without copying the strings, and mark the table entries already used in a bitset. Native code that reads an argument or option by name uses a symbol installed at startup instead of interning the name on every call, and reading the text of a string the heap has already validated as UTF-8 is inlined at each call site. The testthat workload runs 1.2% fewer instructions, and 2.25% fewer together with the environment-variable lookups above.
-
-### Faster assignment forms and kernels in the public benchmark suites
-
-`<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
-`%*%` on small matrices and complex vector arithmetic run on compiled or direct paths. With the
-JIT on, the geometric mean speed-up over GNU R rises from 1.58x to 1.90x on the awfy programs,
-from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/bench.py
---public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
-such as `(Inf+1i) / 0` match GNU R.
-
-### Cheaper minor collections and package metadata reads
-
-Large lists and character vectors record stores in cards, so a minor collection rescans only the
-parts that changed, and growing a list with `[[<-` moves its elements instead of copying them.
-rcp's list-for drops from 1.54 s to 0.73 s and list-while from 1.20 s to 0.73 s, which takes both
-past GNU R (1.63x and 1.58x), and the rcp geometric mean rises from 2.64x to 2.80x.
-`unserialize()` and `readRDS()` on a connection read from its buffer, which takes a third off
-their cost during `library(testthat)`.
-
-### Faster `attr()` lookups, large matrix products and small vector allocation
-
-`attr(x, which)` finds a full or partial match in one pass over the attributes, which takes
-shootout's knucleotide_brute_2 from 1.38x to 2.08x of GNU R. `%*%` computes four result columns
-per pass over its left operand, with each entry summed in the same order as before, so results
-are unchanged and spectralnorm_math rises from 1.27x to 1.44x.
-Small vectors are allocated inline at the call site, which takes 2.2% off the instructions of
-the testthat workload.
+- **`ry R` still needs GNU R**, because it runs your code on GNU R itself.
+- **Linear algebra on Windows needs GNU R.** Windows has no system LAPACK, so `solve()` and its
+  relatives need `R_HOME` naming a GNU R installation.
 
 ## ry 0.4.3-beta, Linux only
 
