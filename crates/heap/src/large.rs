@@ -214,6 +214,37 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
     }
 }
 
+/// Keeps the pages inside `length` bytes at `address` small. [`Mapped`] asks for huge pages on
+/// its large blocks, which suits a buffer that is filled at once. A block that is reserved in
+/// full and touched only as far as it is used, such as a stack, would commit 2 MiB at its first
+/// touch and at every 2 MiB after, so its owner calls this before the first touch.
+///
+/// The call is advice and changes no contents, so it is safe for any range and its result is not
+/// checked.
+pub fn keep_small_pages(address: *mut u8, length: usize) {
+    #[cfg(target_os = "linux")]
+    {
+        let page = page_size();
+        let start = (address as usize).next_multiple_of(page);
+        let end = (address as usize).saturating_add(length) / page * page;
+        if end > start {
+            // SAFETY: `madvise` with `MADV_NOHUGEPAGE` reads and writes no memory; on a range
+            // that is not mapped it fails without effect.
+            unsafe {
+                libc::madvise(
+                    start as *mut libc::c_void,
+                    end - start,
+                    libc::MADV_NOHUGEPAGE,
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _unused = (address, length);
+    }
+}
+
 /// Whether a block of `layout` gets a mapping. A mapping is aligned to a page, so a block that
 /// needs more alignment than that comes from the inner allocator.
 /// Elsewhere every block comes from the inner allocator, because the fallback below allocates
@@ -286,6 +317,9 @@ const HUGE_PAGE_BYTES: usize = 2 << 20;
 /// Large vectors do not ask for huge pages. [`MappedPool`] resizes a kept mapping to each new
 /// vector's length, and with huge pages a loop of subsets of differing lengths spent several
 /// times the system time on zeroing and compaction.
+///
+/// A block that is reserved in full and touched only as it fills opts out with
+/// [`keep_small_pages`].
 ///
 /// The call is advice: a kernel without transparent huge pages refuses it and the block keeps
 /// small pages, so its result is not checked.
