@@ -1261,24 +1261,21 @@ impl Deparser {
 
     unsafe fn list(&mut self, list: Sexp, opener: &str) {
         let count = length(list);
-        let names = get_attr(list, symbols().names);
+        let names = values::names(list);
         let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(list, self.opts);
         self.print(opener);
         let mut broken = false;
         for index in 0..count {
-            // GNU R's vector deparse breaks a line that is past the cutoff before the next element
-            // (and before the closing parenthesis), without indenting the continuation.
-            if index > 0 && self.length > self.cutoff {
-                self.write_line();
+            if index > 0 {
+                self.print(", ");
             }
+            // GNU R's `vec2buff` checks the cutoff before every element, the first included, so
+            // `list(` past the cutoff ends its line and the elements continue indented.
+            self.line_break(&mut broken);
             if nice {
                 self.name_prefix(names, index);
             }
             self.deparse(list.element(index));
-            if index + 1 < count {
-                self.print(", ");
-                self.line_break(&mut broken);
-            }
         }
         if broken {
             self.indent -= 1;
@@ -1327,7 +1324,7 @@ impl Deparser {
             });
             return;
         }
-        let names = get_attr(vector, symbols().names);
+        let names = values::names(vector);
         let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector, self.opts);
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
@@ -1544,13 +1541,15 @@ pub unsafe fn source_lines(srcref: Sexp) -> Option<Vec<String>> {
     )
 }
 
-/// Whether names can be written inline (`c(a = 1)`) rather than as an attribute.
+/// Whether names can be written inline (`c(a = 1)`) rather than as an attribute. A
+/// one-dimensional array's names are its dimnames, so GNU R writes them inline as well and keeps
+/// the `dimnames` attribute beside them.
 unsafe fn nice_names_ok(object: Sexp, opts: u32) -> bool {
-    let names = get_attr(object, symbols().names);
-    if names.kind() != SexpType::String {
+    if !object.kind().is_vector() {
         return false;
     }
-    if !object.kind().is_vector() || length(names) != length(object) {
+    let names = values::names(object);
+    if names.kind() != SexpType::String || length(names) != length(object) {
         return false;
     }
     // All-empty names need the attribute form, and so does an `NA` name when attributes are
