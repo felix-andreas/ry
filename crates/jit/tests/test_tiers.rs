@@ -3011,6 +3011,41 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- \"b\"; FUNCTION(x) }",
             ],
         ),
+        // A record field holds a list. Each update copies the list the old record still holds,
+        // and the copy's capacity grows from its length, past the point where doubling a shared
+        // list's capacity on every copy used to ask for gigabytes.
+        (
+            "function(n: I64) -> I64 { column <- (name = \"a\", values = [0i64])\n \
+             original <- column\n i <- 0i64\n while (i < n) { column <- (..column, values = \
+             List.append(column$values, i))\n i <- i + 1i64 }\n \
+             List.sum(column$values) + List.len(original$values) }",
+            &["{ k <- 40i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> List<List<I64>> List.append([[n], [n, n]], List.repeat(0i64, 2))",
+            &["{ k <- 7i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- [[n], [n, n]]\n total <- 0i64\n \
+             for (row in rows) total <- total + List.sum(row)\n total + List.len(rows[[2]]) }",
+            &["{ k <- 7i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> Record{name: Str, values: List<I64>} (name = \"b\", values = [n, n + 1i64])",
+            &["{ k <- 1i64; FUNCTION(k) }"],
+        ),
+        // A `return` of a comparison and a later `Bool.false` join as a logical.
+        (
+            "function(x: I64, y: I64) -> Bool { if (x < y) return(Bool.true)\n Bool.false }",
+            &[
+                "{ a <- 1i64; b <- 2i64; FUNCTION(a, b) }",
+                "{ a <- 2i64; b <- 1i64; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> I64 List.sum(List.drop_last([n], 1)) + List.sum(List.repeat(n, 0i64) * 2i64)",
+            &["{ k <- 3i64; FUNCTION(k) }"],
+        ),
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
