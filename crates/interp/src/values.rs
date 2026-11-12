@@ -1460,7 +1460,7 @@ pub unsafe fn compact_sequence(object: Sexp) -> Option<(usize, f64, f64)> {
     if !object.is_altrep() {
         return None;
     }
-    let [integer, real] = interp::compact_sequence_classes()?;
+    let [integer, real] = crate::compact_sequence_classes()?;
     let class = object.tag();
     if class != integer && class != real {
         return None;

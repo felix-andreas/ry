@@ -1177,7 +1177,7 @@ pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u32 {
 /// The [`feedback`] bit for `value`.
 pub unsafe fn value_kind(value: Sexp) -> u32 {
     if value.is_altrep() {
-        let Some([integer, double]) = interp::compact_sequence_classes() else {
+        let Some([integer, double]) = crate::compact_sequence_classes() else {
             return feedback::OTHER;
         };
         let class = value.tag();
@@ -1215,7 +1215,6 @@ pub unsafe fn value_kind(value: Sexp) -> u32 {
     }
 }
 
-}
 
 // The compiler.
 
