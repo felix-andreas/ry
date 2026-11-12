@@ -65,7 +65,13 @@ illegal dependency unrepresentable.
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library.
+  `DataFrame` and the standard library. A `for`, `while` or `repeat` loop in the global
+  environment compiles to tier 0 only once it is known to run at least
+  `bytecode::LOOP_COMPILE_ITERATIONS` (16) iterations: a `for` over at least 16 elements compiles
+  before its first iteration, and a `while` or `repeat` compiles after its 16th. Compiling a small
+  loop costs about what 9 interpreted iterations would, so 16 pays it back with margin, and a
+  shorter top-level loop runs in the AST evaluator
+  ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -85,9 +91,12 @@ illegal dependency unrepresentable.
   of the code written in the call, and the conversion's result type comes from the type the
   interpreter saw it give, so the first call of such a function runs interpreted. Code that has
   called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
-  `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and each typed call that runs in the
-  interpreter with the reason the native path declined it, and
-  `RY_TYPED_DUMP=1` prints the Cranelift IR.
+  `interp`. `RY_TYPED_LOG=1` prints each compilation with the time it took
+  (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone), each refused
+  compilation with its time (`typed: refused [Str] after 85 us`), so the lines of a run add up to
+  its whole compile time, and each typed call that runs in the interpreter with the reason the
+  native path declined it. `RY_TYPED_DUMP=1` prints the Cranelift
+  IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
   data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`

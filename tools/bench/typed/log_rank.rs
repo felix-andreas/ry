@@ -1,6 +1,9 @@
-use std::fmt::Display;
+// The log-rank statistic over 16,000 subjects. Each event time takes one pass that counts the
+// subjects at risk and the deaths, where the typed program builds mask lists and counts them.
+mod harness;
+
+use harness::measure;
 use std::hint::black_box;
-use std::time::Instant;
 
 struct Trial {
     time: Vec<i64>,
@@ -44,28 +47,11 @@ fn log_rank(data: &Trial) -> f64 {
 }
 
 fn main() {
-    let subjects = 1..=4000i64;
+    let subjects = 1..=16_000i64;
     let data = Trial {
         time: subjects.clone().map(|i| (i * 7919) % 1000 + 1).collect(),
         event: subjects.clone().map(|i| i % 3 != 0).collect(),
         treated: subjects.map(|i| i % 2 == 0).collect(),
     };
     measure("log_rank", || log_rank(black_box(&data)));
-}
-
-fn measure<T: PartialEq + Display>(name: &str, mut run: impl FnMut() -> T) {
-    let started = Instant::now();
-    let value = black_box(run());
-    let cold = started.elapsed().as_secs_f64();
-    let mut best = f64::INFINITY;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let again = black_box(run());
-        best = best.min(started.elapsed().as_secs_f64());
-        if again != value {
-            eprintln!("the benchmark is not deterministic");
-            std::process::exit(1);
-        }
-    }
-    println!("{name} {value} {best:.4} {cold:.4}");
 }

@@ -781,6 +781,10 @@ const IMAGE_BODIES: &[&str] = &[
     // Calling `g` compiles its argument `one()` into promise code, which has no statement record
     // and no argument after the call, so the call site's three constants end that code's table.
     "one <- function() a; g <- function(x) x; g(one())",
+    // A compiled `switch` tests the arm it chose by identity against the arm's own constant, so
+    // the decoded code must give back the scalar its arm test compares with. Each name below
+    // runs a different arm, and the empty alternatives fall through to the next one.
+    "pick <- \"integer\"; x <- switch(pick, integer = , double = 1L, logical = 2L, 3L); pick <- \"logical\"; y <- switch(pick, integer = , double = 1L, logical = 2L, 3L); pick <- \"none\"; z <- switch(pick, integer = , double = 1L, logical = 2L, 3L); x * 100L + y * 10L + z",
 ];
 
 /// A compiled closure survives the code image's encoding: decoding its code against the same
@@ -991,6 +995,7 @@ const LOAD_MODES: usize = 6;
 /// compiling, and code the decoder accepts from a mutated but rehashed payload runs without
 /// crashing.
 pub fn check_code_image_load(entropy: &mut impl Entropy) {
+    syntax::testing::enable_invariants();
     let body = if entropy.below(3) == 0 {
         IMAGE_BODIES[entropy.below(IMAGE_BODIES.len())].to_owned()
     } else {

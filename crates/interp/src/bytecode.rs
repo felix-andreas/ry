@@ -501,6 +501,75 @@ pub enum Uncompilable {
     NotACall,
 }
 
+/// Iterations after which a loop the tree walker runs compiles: a `for` loop over at least this
+/// many elements compiles before its first iteration, and a `while` or `repeat` loop compiles
+/// once it has run this many.
+pub const LOOP_COMPILE_ITERATIONS: usize = 16;
+
+/// Runs `call`, a `for`, `while` or `repeat` loop the tree walker was about to evaluate in `env`,
+/// as compiled code, or returns `None` when the loop stays with the tree walker. GNU R compiles
+/// such loops in the global environment only, which is where they are not inside a function
+/// whose frame semantics (`on.exit`, `missing`, `sys.function`) the compiled loop would have
+/// to reproduce. `sequence` is a `for` loop's evaluated sequence, which the compiled loop steps
+/// through instead of evaluating the expression again.
+///
+/// The code compiles for this one evaluation and is dropped after it, as in GNU R, which also
+/// retries a loop it could not compile at each evaluation. It runs on `env`'s bindings, so code
+/// called from the loop sees every assignment at once, and in an activation with no call frame,
+/// so `parent.frame()`, `sys.call()` and the calls conditions report are those of the tree
+/// walker.
+pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    // A `return` would end the compiled activation as if it were a function, where the tree
+    // walker raises "no function to return from".
+    if env != heap.known().global_env || interp().debugger.is_some() || calls_return(call) {
+        return Ok(None);
+    }
+    let body = match sequence {
+        Some(sequence) => {
+            let arguments = call.cdr();
+            let rest = values::cons(sequence, arguments.cdr().cdr())?;
+            values::lcons(call.car(), values::cons(arguments.car(), rest)?)?
+        }
+        None => call,
+    };
+    let function = values::triple(SexpType::Closure, nil(), body, env)?;
+    let code = compile_with_locals(body, function, None)?;
+    heap.set_cdr(function, code);
+    let profile = values::ints_mut(code.cdr().element(PROFILE));
+    profile[profile::TIER_STATE] = profile::TIER_OFF;
+    profile[profile::NEXT] = i32::MAX;
+    // A closure's frame restores the source reference on leaving, and this activation has none.
+    let srcref = interp().srcref;
+    let result = run(function, code, env);
+    interp().srcref = srcref;
+    result?;
+    interp().visible = false;
+    Ok(Some(nil()))
+}
+
+/// Whether `expression` calls `return` outside the functions it defines.
+unsafe fn calls_return(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head == symbols().function {
+        return false;
+    }
+    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "return" {
+        return true;
+    }
+    let mut cell = expression;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        if calls_return(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
 /// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
 /// arguments calls this, so that such a call runs in a slot frame rather than in the environment
 /// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
@@ -731,8 +800,13 @@ pub mod profile {
     pub const ENTRIES: usize = 0;
     /// Backward jumps taken since the counter was last reset.
     pub const BACK_EDGES: usize = 1;
-    /// The optimizing tier's state for this code, which only that tier interprets.
+    /// The optimizing tier's state for this code, which only that tier interprets, apart from
+    /// [`TIER_OFF`].
     pub const TIER_STATE: usize = 2;
+    /// The [`TIER_STATE`] of a loop compiled for the tree walker ([`super::run_loop`]), which no
+    /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
+    /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
+    pub const TIER_OFF: i32 = i32::MIN;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
@@ -1271,6 +1345,9 @@ pub mod feedback {
     pub const BRANCH_TAKEN: u16 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    /// A `GetVar` read an active binding, so every read there must call the binding again.
+    /// Compiled code records it, and the bit says nothing about the value's type.
+    pub const ACTIVE_BINDING: u16 = 1 << 13;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -1483,13 +1560,27 @@ mod fusion {
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
 /// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
 unsafe fn compile(body: Sexp, function: Sexp) -> R<Sexp> {
+    compile_with_locals(body, function, local_symbols(body, function.car()))
+}
+
+/// [`compile`] with the symbols the frame can bind given, or `None` for code that reads and
+/// writes an environment's bindings, such as a loop in the global environment.
+unsafe fn compile_with_locals(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+) -> R<Sexp> {
     let threshold = crate::heap().swap_report_threshold(usize::MAX);
-    let compiled = compile_unreported(body, function);
+    let compiled = compile_unreported(body, function, locals);
     crate::heap().swap_report_threshold(threshold);
     compiled
 }
 
-unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
+unsafe fn compile_unreported(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+) -> R<Sexp> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -1497,7 +1588,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
         formal = formal.cdr();
     }
     let mut compiler = Compiler {
-        local_symbols: local_symbols(body, function.car()),
+        local_symbols: locals,
         formals: formal_symbols,
         code: Vec::new(),
         constants: Vec::new(),
@@ -1751,7 +1842,10 @@ const SWITCH_NAME_ARMS: usize = 1;
 /// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
 /// alternative, which is an error).
 const SWITCH_POSITION_ARMS: usize = 2;
-/// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
+/// Where it keeps, for arms 0, 1, 2, ..., the constant pool index of the integer scalar
+/// [`Op::SwitchArm`] returns for that arm. The arm tests compare those scalars by identity, and a
+/// code image keeps each pool entry as one object but does not keep an object shared between two
+/// constants, so the table names the scalars by pool index rather than holding them.
 const SWITCH_NUMBERS: usize = 3;
 /// Where it keeps the `switch` call, which its errors name.
 const SWITCH_CALL: usize = 4;
@@ -1797,19 +1891,14 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
     }
     let name_arms = values::integer_vector(&name_arms)?;
     let position_arms = values::integer_vector(&position_arms)?;
-    let mut numbers = Vec::with_capacity(arms.len() + 1);
-    for number in 0..=arms.len() {
-        numbers.push(values::scalar_integer(number as i32)?);
-    }
-    let numbers = values::list_vector(&numbers)?;
+    let numbers = values::integer_vector(&vec![0; arms.len() + 1])?;
     let table = values::list_vector(&[name_vector, name_arms, position_arms, numbers, call])?;
     Ok((table, arms))
 }
 
 /// The arm number a `switch` runs for `selector`, from the table [`switch_table`] built, with
 /// the special's errors.
-unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
-    let numbers = table.element(SWITCH_NUMBERS);
+unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(text) => {
@@ -1838,7 +1927,7 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
             _ => 0,
         },
     };
-    Ok(numbers.element(arm as usize))
+    Ok(arm as usize)
 }
 
 /// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
@@ -4161,12 +4250,23 @@ impl Compiler {
             "switch" => {
                 self.expression(args[0].1, dst)?;
                 let (table, arms) = switch_table(call, &args[1..])?;
-                let numbers = table.element(SWITCH_NUMBERS);
+                let mut numbers = Vec::with_capacity(arms.len() + 1);
+                for arm in 0..=arms.len() {
+                    numbers.push(self.constant(values::scalar_integer(arm as i32)?));
+                }
+                for (slot, &number) in table
+                    .element(SWITCH_NUMBERS)
+                    .slice_mut::<i32>()
+                    .iter_mut()
+                    .zip(&numbers)
+                {
+                    *slot = number as i32;
+                }
                 let table = self.constant(table);
                 self.emit(Op::SwitchArm, &[dst, dst, table]);
                 let mut done = Vec::with_capacity(arms.len());
                 for (index, body) in arms.iter().enumerate() {
-                    let number = self.constant(numbers.element(index + 1));
+                    let number = numbers[index + 1];
                     let skip = self.emit_patchable(Op::BranchUnlessSame, &[dst, number, 0]);
                     self.expression(*body, dst)?;
                     done.push(self.emit_patchable(Op::Jump, &[0]));
@@ -5289,7 +5389,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (0..length(names))
                             .all(|name| names.element(name).kind() == SexpType::Symbol)
                 }
-                Switch => valid_switch_table(constant(value)?),
+                Switch => valid_switch_table(constant(value)?, &constant),
                 Cache => value < caches,
                 Target => is_start(value),
                 Loop => value < loops,
@@ -5394,7 +5494,10 @@ unsafe fn valid_fusion_program(
 }
 
 /// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
-unsafe fn valid_switch_table(table: Sexp) -> bool {
+unsafe fn valid_switch_table<'a>(
+    table: Sexp,
+    constant: impl Fn(usize) -> Result<Sexp, &'a str>,
+) -> bool {
     if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
         return false;
     }
@@ -5407,7 +5510,7 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
         || length(name_arms) != length(names)
         || position_arms.kind() != SexpType::Integer
         || length(position_arms) == 0
-        || numbers.kind() != SexpType::List
+        || numbers.kind() != SexpType::Integer
         || table.element(SWITCH_CALL).kind() != SexpType::Language
     {
         return false;
@@ -5415,7 +5518,12 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms)
+    values::ints(numbers).iter().all(|&index| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| constant(index).ok())
+            .is_some_and(|number| number.kind() == SexpType::Integer && length(number) == 1)
+    }) && values::ints(name_arms)
         .iter()
         .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
@@ -5888,6 +5996,13 @@ pub unsafe fn lookup_hints(code: Sexp) -> *mut u32 {
 /// Records `value`'s kind as type feedback for the instruction at `pc`.
 pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
     record_feedback(code.cdr(), pc, value);
+}
+
+/// Marks the `GetVar` at `pc` as one that called an active binding.
+pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
+    if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
+        *bits |= i32::from(feedback::ACTIVE_BINDING);
+    }
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
@@ -9326,8 +9441,10 @@ unsafe fn op_move(_state: &mut Activation<'_, '_>, instruction: Instruction) -> 
 
 #[inline(always)]
 unsafe fn op_switch_arm(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let value = switch_arm(instruction.input(1), state.constant(instruction, 2))?;
-    instruction.output(0, value);
+    let table = state.constant(instruction, 2);
+    let arm = switch_arm(instruction.input(1), table)?;
+    let number = values::ints(table.element(SWITCH_NUMBERS))[arm] as usize;
+    instruction.output(0, pool_constant(state, number));
     Ok(Flow::Next)
 }
 
@@ -10435,6 +10552,10 @@ unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+    if profile[profile::TIER_STATE] == profile::TIER_OFF {
+        profile[profile::BACK_EDGES] = 0;
+        return BackEdge::Continue(pc);
+    }
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
         && machine.code.cdr().element(TIER1) == nil()
     {

@@ -283,6 +283,13 @@ fn build_base(arguments: &[String]) -> crate::Result<PathBuf> {
     Ok(output)
 }
 
+/// Names the project switches (libr's `RUN_FLAG_*` bits for annotation checks, the object
+/// systems, strict mode and the prelude, as a decimal number) that a session started by ry's
+/// `bin/R` runs under instead of the defaults.
+pub const PROJECT_FLAGS_VARIABLE: &str = "RY_RUN_FLAGS";
+
+const PROJECT_FLAGS: c_int = 0b10_0111;
+
 /// Runs a session on ry's runtime, the libR of the R home, which also holds the interpreter.
 fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
     let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session
@@ -350,10 +357,16 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
             .as_ref()
             .map_or(std::ptr::null(), |value| value.as_ptr())
     };
-    // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults;
-    // the profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
+    // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults,
+    // unless the process that started this one hands down its project's switches: `ry test`
+    // does for its worker processes, which must run a package the way `ry test` itself does.
+    // The profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
+    let project = std::env::var(PROJECT_FLAGS_VARIABLE)
+        .ok()
+        .and_then(|bits| bits.parse::<c_int>().ok())
+        .map_or(0b11, |bits| bits & PROJECT_FLAGS);
     let flags =
-        0b11 | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
+        project | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
     let status = unsafe {
         run(
             pointer(&file),

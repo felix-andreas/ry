@@ -1017,6 +1017,61 @@ fn inline_variable_loads_agree_with_tier_zero() {
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
+/// Compiled code calls an active binding at every read, as tier 0 does. The first compiled run
+/// that meets the binding hands its activation to tier 0 once, after the load, and the body
+/// compiled again loads the variable at each read, so calls after the first neither compile nor
+/// deoptimize. The binding returns a new value at each call, so a reused value shows in the sum.
+#[test]
+fn active_bindings_are_called_at_every_compiled_read() {
+    let mut calls = Vec::new();
+    with_interpreter(|| unsafe {
+        use heap::activity::{self, Counter};
+        jit::install_mode(Mode::Force);
+        run("reads <- 0L");
+        let bound = run(
+            ".Internal(makeActiveBinding(quote(counted), function() { reads <<- reads + 1L; reads }, .Internal(environment(NULL))))",
+        );
+        assert!(!bound.starts_with("error"), "{bound}");
+        run("active <- function(n) { s <- counted\nfor (i in 1:n) s <- s + counted\ns }");
+        let integer = |text: String| -> i64 {
+            text.trim_end_matches('L')
+                .parse()
+                .unwrap_or_else(|_| panic!("{text} is not an integer"))
+        };
+        activity::set_enabled(true);
+        for _ in 0..5 {
+            let compiles = activity::counter(Counter::JitCompiles);
+            let deoptimizations = activity::counter(Counter::JitDeoptimizations);
+            let before = integer(run("reads"));
+            let value = integer(run("active(50L)"));
+            let after = integer(run("reads"));
+            calls.push((
+                before,
+                after,
+                value,
+                activity::counter(Counter::JitCompiles) - compiles,
+                activity::counter(Counter::JitDeoptimizations) - deoptimizations,
+            ));
+        }
+        activity::set_enabled(false);
+        jit::install_mode(Mode::Off);
+    });
+    for (call, &(before, after, value, _, _)) in calls.iter().enumerate() {
+        assert_eq!(after - before, 51, "call {call} read the binding {} times", after - before);
+        assert_eq!(value, (before + 1..=after).sum::<i64>(), "call {call}");
+    }
+    let compiles: u64 = calls.iter().map(|call| call.3).sum();
+    let deoptimizations: u64 = calls.iter().map(|call| call.4).sum();
+    assert!(compiles >= 1, "active never compiled");
+    assert!(
+        deoptimizations <= 1,
+        "{deoptimizations} deoptimizations over five calls: {calls:?}"
+    );
+    for (call, row) in calls.iter().enumerate().skip(1) {
+        assert_eq!((row.3, row.4), (0, 0), "call {call} compiled or deoptimized: {calls:?}");
+    }
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
@@ -1035,8 +1090,9 @@ fn formal_shadows_enclosing_function() {
 
 #[test]
 fn a_body_that_could_run_nothing_natively_never_records() {
-    // `is.null` has no native form, so whatever its profile, compiled code for `wrap` would hand
-    // its only call back to tier 0. It is refused when its recording window would open, and
+    // The closures take `...` so that they are not wrappers, which compiled code, a top-level
+    // loop's included, runs without entering. `is.null` has no native form, so whatever its
+    // profile, compiled code for `wrap` would hand its only call back to tier 0. It is refused when its recording window would open, and
     // never records; `twice` does arithmetic, so it records and then compiles.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
@@ -1055,7 +1111,7 @@ fn a_body_that_could_run_nothing_natively_never_records() {
             );
             values::ints(code.cdr().element(PROFILE)).to_vec()
         };
-        run("wrap <- function(x) is.null(x)\ntwice <- function(x) x * 2");
+        run("wrap <- function(x, ...) is.null(x)\ntwice <- function(x, ...) x * 2");
         let ran = run(&format!(
             "for (i in 1:{}) {{ wrap(i); twice(i) }}",
             window + 1
@@ -1081,7 +1137,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
     // `rare` reaches the entry threshold, but it makes one of every 201 closure calls, so its
     // expected calls cannot repay a compile: it is refused, not for good, and its count starts
     // over. A second refusal doubles the wait. Called back to back, the same body then
-    // compiles.
+    // compiles. `rare` takes `...` for the reason `wrap` does above.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
         jit::install_mode(Mode::On);
@@ -1092,7 +1148,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
                 .unwrap_or_else(|_| panic!("rare is not defined"));
             values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
         };
-        run("rare <- function(x) x * 3");
+        run("rare <- function(x, ...) x * 3");
         run("other <- function(x) { y <- x + 1; y }");
         run(&format!(
             "for (i in 1:{}) {{ for (j in 1:200) other(j); rare(i) }}",
@@ -2928,6 +2984,25 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
     });
 }
 
+/// How far the cases of one test may raise the process's peak resident memory. Other tests run
+/// in parallel, so the bound leaves them room; a value built in full before a size check fails
+/// costs gigabytes.
+const PEAK_GROWTH_LIMIT: u64 = 1 << 30;
+
+/// The process's peak resident memory in bytes (`VmHWM`), where the system reports it.
+fn peak_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    let kilobytes: u64 = line
+        .trim_start_matches("VmHWM:")
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kilobytes * 1024)
+}
+
 #[test]
 fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
     // Each case runs on tier 0 and on the typed core, which must agree on every value and error,
@@ -2937,6 +3012,8 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
         "tier_parse <- function(row: Str) -> Result<I64, :Bad> \
          match (Str.to_i64(row)) { :Ok(v) => :Ok(v * 2i64)\n :Err(_) => :Err(:Bad) }",
         "tier_area <- function(r: Record{w: F64, h: F64}) -> F64 r$w * r$h",
+        "tier_bump <- function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+         match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }",
     ];
     let cases: &[(&str, &[&str])] = &[
         // A record's fields sit in name order, whatever order the literal gives them in, and a
@@ -3033,6 +3110,24 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             &[
                 "{ x <- List.from_r(c(\"1\", \"x\", \"1\", \"drop\", \"5\")); FUNCTION(x) }",
                 "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
+        // A dictionary update that reads the payload where the key is found and where it is
+        // missing, and removes a key it set before, by a function written at the call and by a
+        // typed closure.
+        (
+            "function(rows: List<Str>) -> F64 { \
+             inline <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+             match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }))\n \
+             called <- List.walk(rows, Dict.empty(), function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> \
+             Dict.update(d, row, tier_bump))\n \
+             Num.to_f64(Dict.len(inline)) * 1000 + Result.with_default(Dict.get(inline, \"b\"), -1) * 100 + \
+             Num.to_f64(Dict.len(called)) * 10 + Result.with_default(Dict.get(called, \"a\"), -1) }",
+            &[
+                "{ x <- List.from_r(c(\"a\", \"b\", \"a\", \"c\", \"a\", \"b\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"a\", \"a\", \"a\", \"a\")); FUNCTION(x) }",
+                "{ x <- List.from_r(character(0)); FUNCTION(x) }",
             ],
         ),
         // Text: number formatting, repetition, case, splitting, joining and byte counts of
@@ -3137,6 +3232,7 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 run(helper);
             }
         }
+        let peak_before = peak_resident_bytes();
         for (case, &(definition, calls)) in cases.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled, typed) = unsafe {
@@ -3165,6 +3261,16 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             // SAFETY: the typed core's counters are thread-local and only read.
             let live = unsafe { typed::values::ry_live_objects() };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
+        }
+        // A case that fails for a value too large to build, such as the repeated string past
+        // R's limit, must fail before building it, on every tier.
+        if let (Some(before), Some(after)) = (peak_before, peak_resident_bytes()) {
+            let grown = after.saturating_sub(before);
+            assert!(
+                grown < PEAK_GROWTH_LIMIT,
+                "the cases raised peak memory by {} MB",
+                grown >> 20
+            );
         }
     });
 }
@@ -3365,6 +3471,60 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         (
             "function(x: List<F64>) -> I64 List.count_if(x, function(v: F64) -> Bool v > 1)",
             &["{ a <- [0.5, 2, 3]; FUNCTION(a) }"],
+        ),
+        // A predicate that only compares its item with numbers counts over the whole list: the
+        // number may sit on either side or be a local, and `&`, `|`, `!` and parentheses join
+        // comparisons. A predicate that computes with the item runs per item with the same count.
+        (
+            "function(x: List<F64>, low: F64) -> I64 { high <- low + 2; \
+             List.count_if(x, function(v: F64) -> Bool (v > low & !(v >= high)) | 0.25 == v) }",
+            &[
+                "{ a <- [0.25, 0.5, 2, 3, 2.5, -1]; b <- 0.5; FUNCTION(a, b) }",
+                "{ a <- List.from_r(0[0L]); b <- 0.5; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(x: List<F64>) -> I64 { counts <- function(v: F64) -> Bool v != 2; \
+             List.count_if(x, counts) + List.count_if(x, function(v: F64) -> Bool v * 2 > 1) }",
+            &["{ a <- [0.25, 0.5, 2, 3]; FUNCTION(a) }"],
+        ),
+        // A count whose whole mask is one logical step has no comparison in it.
+        (
+            "function(a: List<Bool>, b: List<Bool>) -> I64 \
+             List.count_if(!a, function(v) v) * 100i64 + List.count_if(a & b, function(v) v) * 10i64 \
+             + List.count_if(a | b, function(v) v)",
+            &[
+                "{ a <- [TRUE, TRUE, FALSE, TRUE]; b <- [TRUE, FALSE, FALSE, TRUE]; FUNCTION(a, b) }",
+                "{ a <- [TRUE, TRUE]; b <- [FALSE, FALSE]; FUNCTION(a, b) }",
+            ],
+        ),
+        // The item's name in the predicate hides an outer local of the same name.
+        (
+            "function(x: List<F64>, v: F64) -> I64 List.count_if(x, function(v: F64) -> Bool v <= 2)",
+            &["{ a <- [0.25, 0.5, 2, 3]; b <- 9; FUNCTION(a, b) }"],
+        ),
+        // A branch on a comparison of two doubles takes either side for every operator, and an
+        // undefined comparison stops the native code so the interpreter answers.
+        (
+            "function(x: List<F64>, t: F64) -> I64 { n <- 0i64; for (v in x) { \
+             if (v > t) n <- n + 1i64; if (v != t) n <- n + 10i64; if (v <= t) n <- n + 100i64; \
+             if (v == t) n <- n + 1000i64 else n <- n + 10000i64; \
+             if (v < t) n <- n + 100000i64; if (v >= t) n <- n + 1000000i64 }; n }",
+            &["{ a <- [0.25, 0.5, 2, 3, 2]; b <- 2; FUNCTION(a, b) }"],
+        ),
+        (
+            "function(a: F64, b: F64) -> I64 { ratio <- a / b; if (ratio != ratio) 1i64 else 2i64 }",
+            &[
+                "{ x <- 1; y <- 2; FUNCTION(x, y) }",
+                "{ x <- 0; y <- 0; tryCatch(FUNCTION(x, y), error = function(e) conditionMessage(e)) }",
+            ],
+        ),
+        (
+            "function(a: F64, b: F64) -> I64 { ratio <- a / b; if (ratio < 1) 1i64 else 2i64 }",
+            &[
+                "{ x <- 1; y <- 2; FUNCTION(x, y) }",
+                "{ x <- 0; y <- 0; tryCatch(FUNCTION(x, y), error = function(e) conditionMessage(e)) }",
+            ],
         ),
         (
             "function(x: List<F64>) -> F64 List.walk(x, 0, function(s: F64, v: F64) -> F64 s + v * v)",

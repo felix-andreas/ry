@@ -103,10 +103,18 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
 /// Runs a script in the home's `Rscript` and returns its stdout and stderr. With `touches`, the
 /// session records the image objects it touches there, which it does only when it started from
 /// the image.
+///
+/// A start that sources a profile never loads the image, so the session runs in the home's
+/// directory with `HOME` pointing there too, away from the user's `~/.Rprofile` (CI's
+/// `setup-r` writes one) and any `./.Rprofile`.
 fn rscript(home: &Path, touches: Option<&Path>) -> (String, String) {
     let mut command = Command::new(home.join("bin/Rscript"));
     command
         .args(["-e", "cat(sum(1:10), is.function(stats::lm), '\\n')"])
+        .current_dir(home)
+        .env("HOME", home)
+        .env_remove("R_PROFILE")
+        .env_remove("R_PROFILE_USER")
         .env_remove("R_HOME")
         .env_remove("RY_IMAGE")
         .env_remove("R_LIBS")
