@@ -20,7 +20,7 @@ A `for`, `while` or `repeat` that the tree walker evaluates compiles when all of
   `LOOP_COMPILE_ITERATIONS` elements, or a `while` or `repeat` loop has run that many iterations
   in the tree walker.
 
-Otherwise the tree walker runs it, as for every loop inside a function that the compiler rejected.
+Otherwise the tree walker runs it.
 
 ## How the compiled loop runs
 
@@ -47,10 +47,10 @@ Otherwise the tree walker runs it, as for every loop inside a function that the 
 - The `for`, `while` or `repeat` special's `LoopContext` stays pushed while the compiled loop runs,
   so a `break` from `tryCatch(break)` or `eval(quote(break))` is found as before, and the compiled
   loop catches it at its own loop target.
-- The code lives for one evaluation of the loop and is dropped after it. There is no table from
-  calls to code, and no marker on the call for a loop the compiler rejected: a language object's gp
-  bits are serialized, so a marker would change `serialize()` and `digest()` of a quoted loop. GNU R
-  also retries each time.
+- The code lives for one evaluation of the loop and is dropped after it, so a loop evaluated again
+  compiles again, as in GNU R. There is no table from calls to code and no marker on the call: a
+  language object's gp bits are serialized, so a marker would change `serialize()` and `digest()`
+  of a quoted loop.
 - The optimizing tier never sees this code. Its `TIER_STATE` is `profile::TIER_OFF`, which entry
   scheduling skips and `back_edge` turns into a reset of the back-edge counter, so no baseline or
   tier-1 code is compiled and no feedback is recorded. The tier's frames and resume points assume a

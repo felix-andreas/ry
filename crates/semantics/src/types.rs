@@ -724,6 +724,20 @@ pub fn array_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
     }
 }
 
+/// The key and value types of a ry `Dict<K, V>`.
+pub fn dict_entries<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(Ty<'db>, Ty<'db>)> {
+    match ty.kind(db) {
+        TyKind::Named(name, arguments)
+            if arguments.len() == 2
+                && name.text(db) == "Dict"
+                && crate::stubs::is_ry_type(db, "Dict") =>
+        {
+            Some((arguments[0], arguments[1]))
+        }
+        _ => None,
+    }
+}
+
 /// Whether every value of `ty` is a tag, so that two such types join into one tag union.
 pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
     match ty.kind(db) {

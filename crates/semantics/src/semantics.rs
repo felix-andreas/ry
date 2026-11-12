@@ -17,7 +17,7 @@ pub mod types;
 
 use {
     crate::{
-        check::ListItems,
+        check::Empty,
         hir::{ExpressionKind, Symbol},
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
@@ -1227,14 +1227,14 @@ pub enum Elaboration {
     /// An unsuffixed number literal the checker typed as `I64`, which R reads as a `double`.
     I64Literal(TextRange),
     /// A list expression the runtime may build empty, whose item storage only the checker
-    /// knows (`ItemCheck::typed_lists`).
-    TypedList(TextRange, ListItems),
+    /// knows (`ItemCheck::typed_empties`), or a dictionary built from no entries.
+    TypedEmpty(TextRange, Empty),
 }
 
 impl Elaboration {
     pub fn range(self) -> TextRange {
         match self {
-            Elaboration::I64Literal(range) | Elaboration::TypedList(range, _) => range,
+            Elaboration::I64Literal(range) | Elaboration::TypedEmpty(range, _) => range,
         }
     }
 
@@ -1242,7 +1242,7 @@ impl Elaboration {
     pub fn at(self, range: TextRange) -> Elaboration {
         match self {
             Elaboration::I64Literal(_) => Elaboration::I64Literal(range),
-            Elaboration::TypedList(_, items) => Elaboration::TypedList(range, items),
+            Elaboration::TypedEmpty(_, items) => Elaboration::TypedEmpty(range, items),
         }
     }
 }
@@ -1255,7 +1255,7 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
         let Some(check) = item_check(db, span.item) else {
             continue;
         };
-        if check.i64_literals.is_empty() && check.typed_lists.is_empty() {
+        if check.i64_literals.is_empty() && check.typed_empties.is_empty() {
             continue;
         }
         let Some(module) = item_hir(db, span.item) else {
@@ -1270,9 +1270,9 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
         );
         elaborations.extend(
             check
-                .typed_lists
+                .typed_empties
                 .iter()
-                .map(|&(id, items)| Elaboration::TypedList(module.range(id) + offset, items)),
+                .map(|&(id, items)| Elaboration::TypedEmpty(module.range(id) + offset, items)),
         );
     }
     elaborations.sort_unstable_by_key(|elaboration| {
@@ -3630,7 +3630,7 @@ mod tests {
             column_misses: Default::default(),
             match_findings: ThinVec::new(),
             i64_literals: ThinVec::new(),
-            typed_lists: ThinVec::new(),
+            typed_empties: ThinVec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

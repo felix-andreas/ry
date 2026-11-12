@@ -9,18 +9,3 @@
 # Each entry: `case` (the file name in cases/ without `.R`), `engine` (as `--engine` names it),
 # `area` (the part of ry the bug lives in), and a one-line `reason`.
 
-[[failure]]
-case = "print__deparse_undefined_s4_class"
-engine = "ry-jit-gctorture"
-area = "jit"
-reason = "SIGSEGV when the engine loads base R from GNU R's home; passes with ry's own home and on some hosts"
-provisional = true
-intermittent = true
-
-[[failure]]
-case = "s4__native_definitions"
-engine = "ry-jit-gctorture"
-area = "jit"
-reason = "SIGSEGV when the engine loads base R from ry's own home (main e3bb8627, 4 of 4 runs); passes with GNU R's home"
-provisional = true
-intermittent = true
