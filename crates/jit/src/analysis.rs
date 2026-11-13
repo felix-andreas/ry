@@ -26,7 +26,7 @@ pub use interp::effects::{Speculation, base_builtin, resolve_function};
 use {
     crate::{
         native::{self, Native},
-        runtime::elidable,
+        runtime::{UNFORCED_FORMALS, elidable},
     },
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
@@ -39,6 +39,7 @@ use {
     smallvec::{SmallVec, smallvec},
     std::{
         alloc::{AllocError, Allocator, Layout},
+        cell::Cell,
         fmt,
         ptr::NonNull,
     },
@@ -653,6 +654,23 @@ pub enum Argument {
     Slot(usize),
 }
 
+/// What an inlined call ([`Action::Frame`]) passes for one formal, which the callee's first
+/// load of the formal reads.
+#[derive(Clone, Copy, Debug)]
+pub enum Passing {
+    /// What the caller evaluated before the call.
+    Value(Argument),
+    /// The planning body's formal of this name, which compiled code has not loaded and which
+    /// may hold a promise nothing has forced. The callee's load of its formal reads the
+    /// binding in the outermost frame, through every inlined caller that passed it on, and
+    /// forces a promise only when that runs no code. Any other promise leaves compiled code
+    /// at the load.
+    Variable(Sexp),
+    /// Nothing: the callee has never read the formal, and a read hands the call to tier 0,
+    /// which binds the formal to a promise.
+    Promise,
+}
+
 /// A callback-taking library function compiled code runs as a loop of its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Traversal {
@@ -928,9 +946,7 @@ pub enum Action<'a> {
     /// A call of a closure known at compile time whose body, planned as `callee`, runs inside
     /// this compiled code on registers of its own but without a call frame. `steps` evaluate
     /// the arguments that have no effect, and the callee reads each one where it first loads
-    /// the formal, which is where a promise would be forced. An argument of `None` is not
-    /// evaluated: the callee has never read its formal, and a read hands the call to tier 0,
-    /// which binds the formal to a promise. The callee's code
+    /// the formal ([`Passing`]), which is where a promise would be forced. The callee's code
     /// runs nothing that could look at the missing frame: every point where it would hands
     /// the call to tier 0 through a frame state, which gives the call its real frame first.
     /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
@@ -939,7 +955,7 @@ pub enum Action<'a> {
         callee: &'a Plan<'a>,
         function: Sexp,
         call: Sexp,
-        args: &'a [Option<Argument>],
+        args: &'a [Passing],
         dst: (usize, Ty),
     },
     /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
@@ -1208,6 +1224,15 @@ const TEMPORARIES: usize = 32;
 /// How deeply an inlined call may itself inline calls.
 const MAX_INLINE_DEPTH: usize = 3;
 
+/// The longest body, in bytecode words, that is planned as an inlined frame. A longer one runs
+/// long enough that the frame it saves is a small share of the call.
+const MAX_FRAME_WORDS: usize = 512;
+
+/// How many bytecode words of callees one compilation plans as inlined frames, refused ones
+/// included. Planning a callee costs time and arena memory whether or not the call gets its
+/// frame, and a body with many call sites would otherwise plan every callee three levels deep.
+const FRAME_BUDGET: usize = 4096;
+
 /// An inlined call being lowered.
 struct Lowering<'a> {
     /// The state as of the next step.
@@ -1465,7 +1490,8 @@ pub unsafe fn plan<'a>(
     patient: bool,
     shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
-    plan_at(arena, code, frame, patient, shared, 0)
+    let budget = arena.0.alloc(Cell::new(FRAME_BUDGET));
+    plan_at(arena, code, frame, patient, shared, 0, budget)
 }
 
 /// [`plan`] for a body `depth` inlined calls inside the one being compiled.
@@ -1476,6 +1502,7 @@ unsafe fn plan_at<'a>(
     patient: bool,
     shared: bool,
     depth: usize,
+    budget: &'a Cell<usize>,
 ) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
@@ -1512,7 +1539,13 @@ unsafe fn plan_at<'a>(
         declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         callees: Map::with_hasher_in(FxBuildHasher, arena),
+        formals,
+        lazy_formals: depth == 0 && {
+            let state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
+            state >= 0 && state & UNFORCED_FORMALS != 0
+        },
         depth,
+        budget,
         closure_code: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
@@ -1785,8 +1818,16 @@ struct Builder<'a> {
     /// its value, or `None` for one that cannot be, so each body is planned once however many
     /// calls of it the body makes.
     callees: Map<'a, Sexp, Result<(&'a Plan<'a>, Ty), &'static str>>,
+    /// The closure's formals, the variables that may hold a promise nothing has forced.
+    formals: Sexp,
+    /// Whether inlined code must not read a formal compiled code has not loaded: the body's
+    /// formals kept arriving unforced ([`UNFORCED_FORMALS`]), and each such read hands the
+    /// instruction to tier 0.
+    lazy_formals: bool,
     /// How many inlined calls surround the body being planned.
     depth: usize,
+    /// The bytecode words of callees the compilation may still plan as inlined frames.
+    budget: &'a Cell<usize>,
     /// The byte code of each `function` expression of this body that has run, by source body.
     /// Its feedback says what the closure's arguments have been.
     closure_code: Map<'a, Sexp, Sexp>,
@@ -1867,6 +1908,17 @@ impl<'a> Builder<'a> {
             }
             formal = formal.cdr();
         }
+    }
+
+    unsafe fn is_formal(&self, symbol: Sexp) -> bool {
+        let mut formal = self.formals;
+        while formal.kind() == SexpType::Pairlist {
+            if formal.tag() == symbol {
+                return true;
+            }
+            formal = formal.cdr();
+        }
+        false
     }
 
     fn slot(&self, symbol: Sexp) -> usize {
@@ -3508,12 +3560,20 @@ impl<'a> Builder<'a> {
         function: Sexp,
         dst: usize,
     ) -> Result<Action<'a>, &'static str> {
-        let (callee, result) = self.callee(function)?;
         let formals = values::pairlist_items(function.car());
         let arguments = values::pairlist_items(call.cdr());
         if arguments.len() != formals.len() {
             return Err("the call does not pass each formal one argument");
         }
+        let positional = arguments.iter().all(|&(tag, expression)| {
+            tag == values::nil()
+                && expression != values::missing_arg()
+                && expression != values::symbols().dots
+        });
+        if !positional {
+            return Err("a named, missing or `...` argument");
+        }
+        let (callee, result) = self.callee(function)?;
         let mut lowering = Lowering {
             state: state.clone(),
             steps: List::new_in(self.arena),
@@ -3523,12 +3583,19 @@ impl<'a> Builder<'a> {
             inlined: false,
         };
         let mut args = List::new_in(self.arena);
-        for (&(tag, expression), &(formal, _)) in arguments.iter().zip(&formals) {
-            if tag != values::nil()
-                || expression == values::missing_arg()
-                || expression == values::symbols().dots
+        for (&(_, expression), &(formal, _)) in arguments.iter().zip(&formals) {
+            // Reading the variable before the call would have to leave a promise unforced,
+            // and a formal the caller passes on before it reads it is exactly that.
+            if !self.lazy_formals
+                && self.is_formal(expression)
+                && !self.defaulted.contains_key(&expression)
+                && self
+                    .slot_of
+                    .get(&expression)
+                    .is_none_or(|&slot| lowering.state.slots[slot].status & status::LOADED == 0)
             {
-                return Err("a named, missing or `...` argument");
+                args.push(Passing::Variable(expression));
+                continue;
             }
             if expression.kind() == SexpType::Symbol
                 && let Some(slot) = self.peek_slot(&mut lowering, expression, true)
@@ -3539,7 +3606,7 @@ impl<'a> Builder<'a> {
                 if lowering.state.slots[slot].ty.in_variables() {
                     return Err("an argument that is a number of either kind");
                 }
-                args.push(Some(Argument::Slot(slot)));
+                args.push(Passing::Value(Argument::Slot(slot)));
                 continue;
             }
             let slot = callee.slots.iter().position(|&symbol| symbol == formal);
@@ -3548,25 +3615,13 @@ impl<'a> Builder<'a> {
             let Some(register) = self.lower_expression(&mut lowering, expression, 0) else {
                 // The argument stays a promise, which only tier 0 forces, so the call is
                 // worth inlining only while the callee has not read the formal.
-                let feedback = values::ints(function.cdr().cdr().element(FEEDBACK));
-                let unread =
-                    callee
-                        .actions
-                        .iter()
-                        .zip(callee.insts.iter())
-                        .all(|(action, inst)| match *action {
-                            Action::GetVar { slot: read, .. } if Some(read) == slot => {
-                                feedback.get(inst.pc).copied().unwrap_or(0) == 0
-                            }
-                            _ => true,
-                        });
-                if !unread {
+                if has_read(callee, function, formal) {
                     return Err("an argument the callee reads that may have an effect");
                 }
                 lowering.state = state;
                 lowering.steps.truncate(steps);
                 lowering.next = next;
-                args.push(None);
+                args.push(Passing::Promise);
                 continue;
             };
             let ty = lowering.state.registers[register];
@@ -3589,7 +3644,7 @@ impl<'a> Builder<'a> {
             if !admitted {
                 return Err("an argument of another type than the callee has seen");
             }
-            args.push(Some(Argument::Unboxed { register, ty }));
+            args.push(Passing::Value(Argument::Unboxed { register, ty }));
         }
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
@@ -3610,8 +3665,8 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The plan of `function`'s body as an inlined frame and the type of its value, or `None`
-    /// when a call of it needs its frame.
+    /// The plan of `function`'s body as an inlined frame and the type of its value, or why a
+    /// call of it needs its frame.
     unsafe fn callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
         if let Some(&found) = self.callees.get(&function) {
             return found;
@@ -3645,6 +3700,13 @@ impl<'a> Builder<'a> {
         if !elidable(values::ints(constants.element(PROFILE))[profile::TIER_STATE]) {
             return Err("calls of the callee have needed their frame");
         }
+        // Tier 0 records only near a body's thresholds, and never in a small closure it runs
+        // without an activation, so a body without any feedback says nothing about which of
+        // its instructions have run.
+        let feedback = values::ints(constants.element(FEEDBACK));
+        if feedback.iter().all(|&word| word == 0) {
+            return Err("the callee has no type feedback yet");
+        }
         // Giving the call its frame later binds each formal in the slot the code numbers it
         // by, so the body must run in a slot frame.
         let table = constants.element(bytecode::SLOTS);
@@ -3661,6 +3723,17 @@ impl<'a> Builder<'a> {
         if !numbered {
             return Err("the callee takes `...`");
         }
+        if shape(code).loops {
+            return Err("the callee loops");
+        }
+        let words = values::length(code.car());
+        if words > MAX_FRAME_WORDS {
+            return Err("the callee is too long");
+        }
+        let Some(left) = self.budget.get().checked_sub(words) else {
+            return Err("the compilation has planned enough callees");
+        };
+        self.budget.set(left);
         let plan = plan_at(
             self.arena,
             code,
@@ -3668,6 +3741,7 @@ impl<'a> Builder<'a> {
             false,
             self.shared,
             self.depth + 1,
+            self.budget,
         )
         .map_err(|Refusal(why)| why)?;
         // A loop would need a counter and an entry of its own for a body that leaves compiled
@@ -3675,7 +3749,6 @@ impl<'a> Builder<'a> {
         if plan.loops != 0 || !plan.loop_headers.is_empty() {
             return Err("the callee loops");
         }
-        let feedback = values::ints(constants.element(FEEDBACK));
         let mut result = Ty::Bottom;
         for (position, action) in plan.actions.iter().enumerate() {
             let frameless = match *action {
@@ -4130,6 +4203,9 @@ impl<'a> Builder<'a> {
         }
         let current = lowering.state.slots[slot];
         if current.may_be(status::NOT_LOADED) {
+            if self.lazy_formals && self.is_formal(symbol) {
+                return None;
+            }
             let ty = if current.may_be(status::LOADED) {
                 current.ty
             } else {
@@ -4533,6 +4609,49 @@ impl<'a> Builder<'a> {
         }
         self.speculated.insert(symbol, function);
         function
+    }
+}
+
+/// Whether calls of `function`, planned as the inlined frame `plan`, have read `formal`: a load
+/// of it has run, the body reads it for a call it inlines, or the body passes it on to an
+/// inlined call that has read it.
+unsafe fn has_read(plan: &Plan, function: Sexp, formal: Sexp) -> bool {
+    unsafe {
+        let feedback = values::ints(function.cdr().cdr().element(FEEDBACK));
+        let slot = plan.slots.iter().position(|&symbol| symbol == formal);
+        let peeks = |steps: &[(Action, StateId)]| {
+            steps.iter().any(
+                |&(step, _)| matches!(step, Action::Peek { slot: read, .. } if Some(read) == slot),
+            )
+        };
+        plan.actions
+            .iter()
+            .zip(plan.insts.iter())
+            .any(|(action, inst)| match *action {
+                Action::GetVar { slot: read, .. } if Some(read) == slot => {
+                    feedback.get(inst.pc).copied().unwrap_or(0) != 0
+                }
+                Action::Frame {
+                    steps,
+                    callee,
+                    function,
+                    args,
+                    ..
+                } => {
+                    peeks(steps)
+                        || args.iter().zip(values::pairlist_items(function.car())).any(
+                            |(passing, (inner, _))| {
+                                matches!(*passing, Passing::Variable(symbol) if symbol == formal)
+                                    && has_read(callee, function, inner)
+                            },
+                        )
+                }
+                Action::Inline { steps }
+                | Action::Call { steps, .. }
+                | Action::NativeCall { steps, .. } => peeks(steps),
+                Action::Traverse { prelude, steps, .. } => peeks(prelude) || peeks(steps),
+                _ => false,
+            })
     }
 }
 

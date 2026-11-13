@@ -17,8 +17,8 @@
 use {
     crate::{
         analysis::{
-            self, Action, Argument, Effect, Fast, Fold, Intrinsic, Numeric, Plan, Refusal, StateId,
-            StateRef, Store, Ty, jump_target, status,
+            self, Action, Argument, Effect, Fast, Fold, Intrinsic, Numeric, Passing, Plan, Refusal,
+            StateId, StateRef, Store, Ty, jump_target, status,
         },
         native,
         runtime::{
@@ -191,8 +191,8 @@ struct InlinedCall {
     /// The caller's frame state after the call. An exit inside the call runs the call to its
     /// end in tier 0, so that is where the caller continues.
     caller: FrameState,
-    /// By the callee's slot, what the call passes when the slot is a formal.
-    passed: Vec<Option<Passed>>,
+    /// What the call passes for each formal of the callee.
+    passed: Vec<(Sexp, Passed)>,
     /// Where the caller continues, which takes the call's value.
     continuation: Label,
     /// The type every `Return` of the callee hands the continuation.
@@ -205,6 +205,12 @@ struct InlinedCall {
 enum Passed {
     Object(Value),
     Unboxed(Value, Ty),
+    /// The formal `symbol` of the caller, whose activation is `caller`
+    /// ([`Passing::Variable`]).
+    Variable {
+        caller: Value,
+        symbol: Sexp,
+    },
     /// The caller did not evaluate the argument, so a load of the formal needs the promise.
     Lazy,
 }
@@ -256,6 +262,17 @@ impl<'p> Frame<'p> {
             block_start: 0,
             call: None,
         }
+    }
+
+    /// What the inlined call this frame runs passed for the formal in `slot`.
+    fn passed(&self, slot: usize) -> Option<Passed> {
+        let symbol = *self.plan.slots.get(slot)?;
+        self.call
+            .as_ref()?
+            .passed
+            .iter()
+            .find(|(formal, _)| *formal == symbol)
+            .map(|&(_, passed)| passed)
     }
 }
 
@@ -616,7 +633,7 @@ impl<'p> Translator<'p> {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
                     if self.frame.call.is_some() {
-                        self.load_in_call(position, &before, slot, ty, Some(dst))?;
+                        self.load_in_call(position, &before, slot, ty, Some(dst), true)?;
                     } else {
                         self.load_slot(position, &before, slot, ty, forcing, volatile, Some(dst))?;
                     }
@@ -770,7 +787,7 @@ impl<'p> Translator<'p> {
             }
             Action::Peek { slot, ty } => {
                 if self.frame.call.is_some() {
-                    self.load_in_call(position, &before, slot, ty, None)?;
+                    self.load_in_call(position, &before, slot, ty, None, false)?;
                 } else {
                     self.peek(position, &before, slot, ty)?;
                 }
@@ -1725,7 +1742,7 @@ impl<'p> Translator<'p> {
         callee: &'p Plan<'p>,
         function: Sexp,
         call: Sexp,
-        args: &[Option<Argument>],
+        args: &[Passing],
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
         let plan = self.frame.plan;
@@ -1735,21 +1752,33 @@ impl<'p> Translator<'p> {
                 return Err(Refusal("an argument that leaves compiled code"));
             }
         }
-        let mut passed = vec![None; callee.slots.len()];
+        let mut passed = Vec::with_capacity(args.len());
         let mut formals = Vec::with_capacity(args.len());
         for (argument, (formal, _)) in args.iter().zip(values::pairlist_items(function.car())) {
             let slot = callee.slots.iter().position(|&symbol| symbol == formal);
             formals.push(slot.map_or(NO_SLOT, |slot| slot as u32));
-            let Some(slot) = slot else {
-                continue;
-            };
-            passed[slot] = Some(match *argument {
-                Some(Argument::Slot(slot)) => Passed::Object(self.load_slot_cell(slot)),
-                Some(Argument::Unboxed { register, ty }) => {
+            let argument = match *argument {
+                Passing::Value(Argument::Slot(slot)) => Passed::Object(self.load_slot_cell(slot)),
+                Passing::Value(Argument::Unboxed { register, ty }) => {
                     Passed::Unboxed(self.use_register(register, ty), ty)
                 }
-                None => Passed::Lazy,
-            });
+                // An inlined caller has no frame that holds its formal, so the callee reads
+                // what the caller itself was passed.
+                Passing::Variable(symbol) => match &self.frame.call {
+                    Some(call) => call
+                        .passed
+                        .iter()
+                        .find(|(formal, _)| *formal == symbol)
+                        .map(|&(_, passed)| passed)
+                        .ok_or(Refusal("a formal the inlined call was not passed"))?,
+                    None => Passed::Variable {
+                        caller: self.frame.activation,
+                        symbol,
+                    },
+                },
+                Passing::Promise => Passed::Lazy,
+            };
+            passed.push((formal, argument));
         }
         let next = self.next_pc(position)?;
         let after = self.after(position)?;
@@ -3940,6 +3969,11 @@ impl<'p> Translator<'p> {
     /// assigned comes from the closure's environment. Neither runs code. A value of another
     /// type leaves at the load itself: nothing was forced, so tier 0 evaluates the argument
     /// in the frame it gives the call, and records the type.
+    ///
+    /// A load that is not `forcing` reads the variable for a call the body makes, before the
+    /// body itself reads it, so it takes a variable passed by name only once its promise is
+    /// forced.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn load_in_call(
         &mut self,
         position: usize,
@@ -3947,6 +3981,7 @@ impl<'p> Translator<'p> {
         slot: usize,
         ty: Ty,
         dst: Option<usize>,
+        forcing: bool,
     ) -> Result<(), Refusal> {
         let pc = self.frame.plan.insts[position].pc;
         let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
@@ -3961,11 +3996,7 @@ impl<'p> Translator<'p> {
         }
         self.builder.switch_to_block(load);
         let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-        let passed = self
-            .frame
-            .call
-            .as_ref()
-            .and_then(|call| call.passed.get(slot).copied().flatten());
+        let passed = self.frame.passed(slot);
         let loaded = match passed {
             Some(Passed::Unboxed(value, from)) if from == ty => {
                 match ty {
@@ -3993,6 +4024,33 @@ impl<'p> Translator<'p> {
             Some(Passed::Object(value)) => {
                 self.store_slot_cell(slot, value);
                 Some((value, local))
+            }
+            Some(Passed::Variable { caller, symbol }) => {
+                let source = self.builder.ins().iconst(I64, symbol.as_ptr() as i64);
+                let slot_constant = iconst(&mut self.builder, slot);
+                let forcing = self.builder.ins().iconst(I64, i64::from(forcing));
+                let result = self
+                    .call(
+                        runtime::jit_load_passed as *const () as usize,
+                        &[I64, I64, I64, I64, I64],
+                        Some(I32),
+                        &[
+                            caller,
+                            source,
+                            self.frame.activation,
+                            slot_constant,
+                            forcing,
+                        ],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let found = self.builder.ins().icmp_imm_s(
+                    IntCC::NotEqual,
+                    result,
+                    outcome::LOAD_FAILED as i64,
+                );
+                let unforced = self.deopt(pc, before.id, None, position, reason::UNFORCED);
+                self.guard(found, unforced);
+                Some((self.load_slot_cell(slot), local))
             }
             // Only tier 0 forces a promise, in the frame it gives the call.
             Some(Passed::Lazy) => {
@@ -4495,8 +4553,7 @@ impl<'p> Translator<'p> {
             .iter()
             .enumerate()
             .filter(|&(slot, current)| {
-                current.may_be(status::DIRTY)
-                    || call.is_some_and(|call| call.passed.get(slot).is_some_and(Option::is_some))
+                current.may_be(status::DIRTY) || self.frame.passed(slot).is_some()
             })
             .map(|(slot, current)| (slot as u32, exit_kind(current.ty)))
             .collect();

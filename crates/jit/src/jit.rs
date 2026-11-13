@@ -139,6 +139,11 @@ pub unsafe fn inlined_frames(function: Sexp) -> usize {
     }
 }
 
+/// How many times compiled code has left for tier 0 on this thread.
+pub fn deoptimizations() -> u64 {
+    runtime::DEOPTIMIZATIONS.with(Cell::get)
+}
+
 pub fn install_mode(mode: Mode) {
     let (entries, back_edges) = match mode {
         Mode::Off => {
@@ -675,6 +680,7 @@ unsafe fn compile_in<'a>(
             osr,
             exits,
             handoffs: Cell::new(0),
+            declined_loads: Cell::new(0),
         });
         // Everything the machine code and the speculations point to stays reachable from the
         // external pointer while the enclosure lives, so the collector never frees an object

@@ -123,6 +123,16 @@ pub mod reason {
     pub const INTERRUPT: i32 = 2;
     /// An inline fast path does not apply, so the interpreter runs the instruction.
     pub const HANDOFF: i32 = 3;
+    /// An inlined call read a formal of the compiled body that holds a promise only tier 0
+    /// forces, so the interpreter runs the instruction. It counts against the body
+    /// ([`UNFORCED_FORMALS`]), not against the inlined callee as a hand-off does.
+    pub const UNFORCED: i32 = 4;
+}
+
+thread_local! {
+    /// How many times compiled code has left for tier 0 on this thread. A test reads it to pin
+    /// that a body stops leaving at a point it left from repeatedly.
+    pub static DEOPTIMIZATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Results of [`jit_step`] and the load helpers.
@@ -193,6 +203,10 @@ pub struct Compiled {
     /// tier 0, or it could not start. Past [`MAX_FRAME_HANDOFFS`] the code is discarded and
     /// the callee is no longer inlined.
     pub handoffs: Cell<u32>,
+    /// How often an inlined call's read of one of the body's variables ([`jit_peek_slot`],
+    /// [`jit_load_passed`]) found nothing it could take without running code. Past
+    /// [`MAX_FRAME_HANDOFFS`] the code is discarded and the body marked [`UNFORCED_FORMALS`].
+    pub declined_loads: Cell<u32>,
 }
 
 /// One frame of a compiled body: what its register window holds and which variables its slots
@@ -423,6 +437,12 @@ pub const SHARED: i32 = 1 << 22;
 /// A tier state flag: calls of the body inlined without a frame kept needing one, so the
 /// compiler no longer inlines it.
 pub const NO_ELISION: i32 = 1 << 23;
+
+/// A tier state flag: inlined calls in the body's compiled code kept reading a formal whose
+/// promise needs code to force, which hands the call to tier 0. The compiler then neither
+/// reads a formal for an inlined call before the body itself has, nor passes one on to an
+/// inlined call that reads it.
+pub const UNFORCED_FORMALS: i32 = 1 << 24;
 
 /// The tier state of a body the tier no longer compiles and whose calls it no longer inlines
 /// without a frame either.
@@ -827,6 +847,35 @@ unsafe fn finish_load(
 pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
+            let found = peek_variable(activation, slot);
+            if found == outcome::LOAD_FAILED {
+                count_declined_load(compiled(activation));
+            }
+            found
+        })
+    }
+}
+
+/// Counts a time an inlined call could not take one of the compiled body's variables without
+/// running code. At the limit the code is discarded and the body marked [`UNFORCED_FORMALS`].
+unsafe fn count_declined_load(compiled: &Compiled) {
+    let count = compiled.declined_loads.get() + 1;
+    compiled.declined_loads.set(count);
+    // Only the crossing discards, as for a frame's hand-offs.
+    if count == MAX_FRAME_HANDOFFS {
+        unsafe {
+            let counters = values::ints_mut(compiled.code.cdr().element(PROFILE));
+            if counters[profile::TIER_STATE] >= 0 {
+                counters[profile::TIER_STATE] |= UNFORCED_FORMALS;
+            }
+            invalidate(compiled.code);
+        }
+    }
+}
+
+unsafe fn peek_variable(activation: &mut Activation, slot: i64) -> i32 {
+    unsafe {
+        {
             let machine = machine(activation);
             let symbol = layout(activation).slots[slot as usize];
             let heap = heap();
@@ -870,7 +919,7 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
                 env = env.enclosure();
             }
             outcome::LOAD_FAILED
-        })
+        }
     }
 }
 
@@ -1179,11 +1228,15 @@ unsafe fn materialize(
         let state = interp::interp();
         let parked = (*root).parked;
         if crate::logging() {
+            let code = inlined_of(innermost).code;
+            let op = values::ints(code.car())
+                .get(innermost.pc)
+                .and_then(|&word| bytecode::op_of(word as u32));
             eprintln!(
-                "jit: deopt at pc {} (reason {}) in {} inlined in {}",
+                "jit: deopt at pc {} ({op:?}, reason {}) in {} inlined in {}",
                 innermost.pc,
                 innermost.why,
-                crate::describe(inlined_of(innermost).code),
+                crate::describe(code),
                 crate::describe(compiled.code)
             );
         }
@@ -1528,6 +1581,60 @@ pub unsafe extern "C" fn jit_load_free(activation: *mut Activation, slot: i64) -
     }
 }
 
+/// Loads the formal of `slot` for the inlined call `callee` from the formal `symbol` of
+/// `caller`, the root activation, which passed the variable without reading it
+/// ([`crate::analysis::Passing::Variable`]). A `forcing` load is the callee's own read of the
+/// formal, which is where a promise of the argument would be forced, so a promise the variable
+/// holds is forced when that runs no code ([`eval::force_quietly`]). A load that is not
+/// `forcing` takes a promise only once it is forced. Any other promise, an active binding or
+/// a missing variable declines with [`outcome::LOAD_FAILED`], which hands the load to tier 0
+/// and counts against the caller's code.
+pub unsafe extern "C" fn jit_load_passed(
+    caller: *mut Activation,
+    symbol: *mut Header,
+    callee: *mut Activation,
+    slot: i64,
+    forcing: i64,
+) -> i32 {
+    unsafe {
+        checked(caller, outcome::LOAD_FAILED, |caller| {
+            let Some(symbol) = Sexp::from_raw(symbol) else {
+                return outcome::LOAD_FAILED;
+            };
+            let machine = machine(caller);
+            let env = machine.env();
+            let held = if env == values::nil() {
+                machine.local_binding(symbol)
+            } else {
+                heap()
+                    .frame_cell(env, symbol)
+                    .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
+                    .map(|cell| cell.cdr())
+            };
+            let value = match held {
+                Some(value) if value.kind() == SexpType::Promise => {
+                    if forcing != 0 {
+                        scoped(|| eval::force_quietly(value))
+                    } else {
+                        Some(value.car())
+                    }
+                }
+                held => held,
+            };
+            match value {
+                Some(value) if value != values::missing_arg() && value != values::unbound() => {
+                    *slot_cell(&*callee, slot) = value;
+                    status::RUNTIME_LOCAL as i32
+                }
+                _ => {
+                    count_declined_load(compiled(caller));
+                    outcome::LOAD_FAILED
+                }
+            }
+        })
+    }
+}
+
 /// Writes a dirty slot back to the environment. A boxed value hands the reference compiled
 /// code held over to the binding. Returns 1 on success.
 pub unsafe extern "C" fn jit_flush(
@@ -1603,9 +1710,13 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
+            DEOPTIMIZATIONS.with(|count| count.set(count.get() + 1));
             if crate::logging() {
+                let op = values::ints(machine.code.car())
+                    .get(pc as usize)
+                    .and_then(|&word| bytecode::op_of(word as u32));
                 eprintln!(
-                    "jit: deopt at pc {pc} (reason {why}) in {}",
+                    "jit: deopt at pc {pc} ({op:?}, reason {why}) in {}",
                     crate::describe(machine.code)
                 );
             }

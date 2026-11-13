@@ -1,0 +1,44 @@
+[stdout]
+| [1] 13040
+| [1] 13040
+| [1] 13040
+| [1] 13040
+| [1] 13040
+| [1] "callee(i, 2)"
+| [1] "too big: 91"
+| stop("too big: ", x)
+| [1] "caught"
+| [1] 13040
+| [1] 1620
+| [1] 1620
+| [1] 1620
+| [1] 1620
+| [1] 1620
+| [1] 2185.5
+| [1] "big 91 warner(i, 2) 24" "big 92 warner(i, 2) 24" "big 93 warner(i, 2) 24"
+| warner(i, 2)
+| [1] "warner(i, 2)"
+| [1] 1620
+| [1] 8080
+| [1] 8080
+| [1] 8080
+| [1] 8080
+| [1] 8080
+| [1] "inner(x)"
+| [[1]]
+| middle(i, 2)
+| 
+| [[2]]
+| inner(x)
+| 
+| [[3]]
+| stop("inner fails at ", a)
+| 
+| [1] "inner fails at 91"
+| [1] 8080
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 8080
