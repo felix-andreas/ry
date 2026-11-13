@@ -765,16 +765,6 @@ static void probe_elt_3(SEXP x)
     note("  INTEGER_ELT[3]: %d", INTEGER_ELT(x, 3));
 }
 
-/* `name(x, na.rm = TRUE)`, which uses the class's method when it has one. */
-static double summary(const char *name, SEXP x)
-{
-    SEXP call = PROTECT(lang3(install(name), x, ScalarLogical(TRUE)));
-    SET_TAG(CDDR(call), install("na.rm"));
-    double value = asReal(eval(call, R_BaseEnv));
-    UNPROTECT(1);
-    return value;
-}
-
 static void probe_sum(SEXP x)
 {
     note("  sum: %d", asInteger(summary("sum", x)));

@@ -668,6 +668,19 @@ impl<'a> Builder<'a> {
         }
         crate::link(self.sources.libr, &libr)?;
         crate::link(self.sources.rcmd, &self.front_end())?;
+        // Windows has no system LAPACK, so the tree keeps GNU R's `Rblas.dll` and `Rlapack.dll`
+        // (copied beside the runtime by `tools/base-r/lapack.sh`) in `bin/x64`. There the build's
+        // own R steps find them under `R_HOME` (grDevices calls `solve` while it loads), and
+        // every R home assembled over the tree copies them from there.
+        if self.platform == Platform::Windows {
+            for name in ["Rblas.dll", "Rlapack.dll"] {
+                let beside = self.sources.libr.with_file_name(name);
+                if beside.is_file() {
+                    let installed = self.root.join("bin/x64").join(name);
+                    fs::copy(&beside, &installed).map_err(io_error(&installed))?;
+                }
+            }
+        }
         Ok(())
     }
 

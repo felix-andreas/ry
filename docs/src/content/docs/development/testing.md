@@ -49,9 +49,19 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check. CI runs the same recipes,
-but only when started by hand: the orchestrating agent starts it on main at its hourly check when
-main has new commits, so a push or a pull request gets no CI run of its own.
+behavior. `just gate` runs every test plus clippy and a formatting check. CI runs `just ci`, which
+builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
+flake's `ci` dev shell. That shell pins everything the tests touch (the Rust toolchain, GNU R 4.6.2
+built as the oracle recorded it, GCC 13.3, glibc and the oracle's locales), so this command
+reproduces a CI run on any machine with nix:
+
+```sh
+nix develop .#ci -c just ci
+```
+
+To change what CI runs, edit the `ci` recipe or the shell in `flake.nix`; the workflow file only
+calls them. CI runs only when started by hand: the orchestrating agent starts it on main at its
+hourly check when main has new commits, so a push or a pull request gets no CI run of its own.
 
 ### Blessing expectations
 
@@ -354,7 +364,7 @@ meant to fail. Behavior that needs base R, such as a warning handler watching a 
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. The matrix products are ry's own kernels, so their bits hold
 on every machine; the LAPACK cases hold only on the reference libraries, so on another BLAS (such as
-CI's OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
+OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
 `crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
@@ -373,8 +383,8 @@ cells are not traced, and a minor collection that keeps dead strings in the tabl
 
 Tests that load base R take it from the GNU R installation `R_HOME` names, and the runtime then
 behaves as that version; without `R_HOME` they use ry's own base R (`just base-r`), and the
-scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so CI sets
-`R_HOME` to 4.6.2.
+scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so `just ci`
+sets `R_HOME` to 4.6.2.
 Run them once per supported version, for example `R_HOME=/opt/R/4.6.1/lib/R cargo test -p
 interp`, and the oracle the same way with `ORACLE_R` ([Corpus and oracle](/development/corpus-and-oracle)).
 
