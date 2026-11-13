@@ -2837,6 +2837,8 @@ unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
         }
     }
     crate::sort::sort_strings(&mut names);
+    #[cfg(windows)]
+    eprintln!("DIAG list.dirs {names:?}");
     string_vector(&names)
 }
 
@@ -3092,6 +3094,8 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
         trimmed => trimmed,
     };
     let cannot_create = |directory: &str, failure: std::io::Error| -> R<Sexp> {
+        #[cfg(windows)]
+        eprintln!("DIAG dir.create failed {directory:?}: {failure:?}");
         if show_warnings {
             crate::conditions::warning(format!(
                 "cannot create dir '{directory}', reason '{}'",
@@ -3100,6 +3104,8 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
         }
         scalar_bool(false)
     };
+    #[cfg(windows)]
+    eprintln!("DIAG dir.create {path:?} recursive={recursive}");
     // GNU R makes each parent in turn and then the path itself, so `dir.create("a/.",
     // recursive = TRUE)` makes `a` and still reports that `a/.` exists.
     if recursive {

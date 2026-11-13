@@ -4117,3 +4117,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
     times on the slice), which a small-buffer type would absorb.
+
+## Open: the VS Code extension has no eslint configuration
+
+`bun run lint` in `editors/code` fails because there is no `eslint.config.js` (eslint 9 needs one); no config has ever been committed. Add one before relying on the lint script.
