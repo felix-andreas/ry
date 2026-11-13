@@ -1,0 +1,81 @@
+[stdout]
+| [1] 1 2 3
+| [1] 1 2 3
+| a   b 
+| 1 2 3 
+| a   b 
+| 1 2 3 
+| [1] "argument 2 is empty"
+| [1] "argument 2 is empty"
+| [1] "2 arguments passed to 'length' which requires 1"
+| [1] "2 arguments passed to 'length' which requires 1"
+| [1] 3
+| [1] 3
+| [1] 4
+| [1] 4
+| [1] 1 2 1 2 1
+| [1] 1 2 1 2 1
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] 3 4
+| [1] 3 4
+| [1] 2 4 6
+| [1] 2 4 6
+| [1] "z"
+| [1] "z"
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| p q 
+| 1 2 
+| 
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| p q 
+| 1 2 
+| 
+| [1] 4
+| [1] 4
+| [1] 4
+| [1] 4
+| [1] "a1+a2"
+| [1] "a1+a2"
+| [1] 1 1
+| [1] "s" "s"
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] 1
+| 
+| NULL
+| [1] 4
+| [1] 0
+| [1] 99
+|   b 
+| 1 2 
+| NULL
+| [1] 3
+| [1] "max method"
+| [1] 2
+| [1] 42
+| [1] "combined coins"
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| An object of class "Coin"
+| Slot "side":
+| [1] "heads"
+| 
+| 
+| [1] "1 argument passed to '%*%' which requires at least 2"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "1 argument passed to '%*%' which requires at least 2"

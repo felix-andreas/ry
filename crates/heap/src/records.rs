@@ -10,7 +10,10 @@
 //! Tag and field names are interned symbols, which the heap roots for its whole life, so the
 //! tables hold them without tracing.
 
-use {crate::object::Sexp, rustc_hash::FxHashMap};
+use {
+    crate::object::{LAZY_RECORD, Sexp},
+    rustc_hash::FxHashMap,
+};
 
 /// A record, tuple or tag shape.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -143,6 +146,8 @@ impl Layouts {
             return id;
         }
         let id = self.layouts.len() as u32;
+        // A record's layout word keeps its top bit for the lazy mark.
+        assert!(id < LAZY_RECORD, "too many record layouts");
         self.kinds_start.push(self.slot_kinds.len() as u32);
         self.slot_kinds
             .extend(std::iter::repeat_n(0, layout.slot_count()));

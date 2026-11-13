@@ -9,15 +9,18 @@ it, and then publishes the GitHub release and the VS Code extension. The workflo
 `.github/workflows/release.yml`, and there is no other release path.
 
 A run started by hand has two more inputs. `platforms` set to `linux` builds and releases only the
-Linux archive, and unticking `vscode` leaves the VS Code extension out of the release and the
-Marketplace. A tag push always releases every platform and the extension.
+Linux archive, and set to `unix` the Linux and macOS archives. Unticking `vscode` leaves the VS Code
+extension out of the release and the Marketplace. A tag push always releases every platform and the
+extension.
 
 ## Platform tiers
 
 Linux x86_64 is tier 1: its archive must pass the smoke test before a release is cut. macOS on Apple
-silicon and Windows x86_64 are best effort. When either fails, start the workflow by hand with
-`platforms` set to `linux`; the release then has Linux binaries only, its notes say so, and macOS and
-Windows users stay on the last release that has their archive until a later release fixes the build.
+silicon and Windows x86_64 are best effort. When Windows fails, start the workflow by hand with
+`platforms` set to `unix`, and when macOS fails, with `linux`. The release then lacks those archives,
+its notes say so, and their users stay on the last release that has their archive until a later
+release fixes the build. Windows users then get the extension without a bundled `ry`, which runs the
+`ry` on their `PATH`.
 
 Every step of the workflow past runner setup is a `just` recipe (or `tools/smoke-test.sh`), so each
 one runs locally as well:
