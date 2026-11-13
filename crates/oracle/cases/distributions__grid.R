@@ -1,6 +1,9 @@
 # d/p/q over every distribution, with both tails and log scales, at points that reach the
 # extreme tails and the switches between series, continued-fraction and asymptotic code.
 # Each line is a checksum of the exact bit pattern of every double, so a last-bit change fails.
+# The Cauchy quantiles, and so those of t with one degree of freedom, print as `-`: GNU R takes
+# them from the C library's `tanpi` where it has one, so distributions__cauchy_quantiles.R checks
+# them on the recorded build only.
 bits <- function(x) {
   r <- as.numeric(writeBin(as.double(x), raw()))
   sprintf("%.0f", sum(r * ((seq_along(r) %% 251) + 1)))
@@ -58,6 +61,8 @@ for (dn in names(xs)) {
       pv <- c(pv, suppressWarnings(do.call(p, c(list(xs[[dn]]), as.list(ps), list(lower.tail = lt, log.p = lg)))))
       qv <- c(qv, suppressWarnings(do.call(q, c(list(if (lg) LP else P), as.list(ps), list(lower.tail = lt, log.p = lg)))))
     }
-    cat(sprintf("%-26s d %-12s p %-12s q %s\n", tag, bits(dv), bits(pv), bits(qv)))
+    follows_tanpi <- dn == "cauchy" || (dn == "t" && identical(ps, 1))
+    cat(sprintf("%-26s d %-12s p %-12s q %s\n", tag, bits(dv), bits(pv),
+      if (follows_tanpi) "-" else bits(qv)))
   }
 }

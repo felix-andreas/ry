@@ -61,6 +61,21 @@ test *args:
 # The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
 gate: battery clippy fmt-check (notices "--check") (readme "--check")
 
+# CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
+# in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
+# the CI runner's: `R_HOME` makes the runtime's suites load base R from the reference GNU R.
+ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    just fmt-check
+    just clippy
+    just battery
+
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
@@ -122,16 +137,18 @@ perf:
     cargo test -p semantics --profile iterate --test test_perf -- --ignored --nocapture
     cargo test -p ry-lang --profile iterate --test test_perf -- --ignored --nocapture
 
-# Times one published benchmark suite (public, packages, kernels, applications, or all) on GNU R, ry and,
-# where a program has a typed version, ry typed in strict mode, in paired shuffled rounds with a checksum gate
-# against GNU R, e.g. `just bench kernels --rounds 3 --filter fib` on target/release, or
+# Times one published benchmark suite (public, packages, kernels, applications, typed, or all). The first four
+# run on GNU R, ry and, where a program has a typed version, ry typed in strict mode; `typed` runs every typed
+# program against its Rust twin and needs rustc, not GNU R. Rounds are paired and shuffled, with a checksum
+# gate against the suite's baseline, e.g. `just bench kernels --rounds 3 --filter fib` on target/release,
+# `just bench typed --ry target/iterate/ry --any-build` for a look at another build, or
 # `just bench all --release ry-x86_64-unknown-linux-gnu.tar.gz --write` on a tagged release archive (10+ rounds,
 # stores each suite's results.json, which the READMEs and the benchmarks page render).
 bench suite *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # A release archive brings its own build; anything else measures target/release.
-    case " {{ args }} " in *" --release "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
+    # A release archive or a named binary brings its own build; anything else measures target/release.
+    case " {{ args }} " in *" --release "*|*" --ry "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
@@ -139,7 +156,7 @@ bench-check *args:
     cargo build --release -p ry-lang
     python3 -I tools/bench/tooling/check.py {{ args }}
 
-# Scores typed ry's hill climb: speed against Rust, friendliness cases, and seeded soundness fuzzing, e.g.
+# Scores typed ry's hill climb: speed against Rust (one round of the `typed` benchmark suite), friendliness cases, and seeded soundness fuzzing, e.g.
 # `just climb`, `just climb --only friendly`, or `just climb --log "adapt literal arithmetic"` to append a step to tools/climb/log.tsv.
 climb *args:
     cargo build --release -p ry-lang -p libr

@@ -309,15 +309,15 @@ language server once per load, for as long as the setting stays off. A `#:` bloc
 statement then applies alone, and so does a paired `#:` definition. An inline type definition with
 no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
 `type` stays nominal, so a plain value is still not accepted where it is expected, but its
-representation is `Unknown`. The setting also governs running code: `ry run` and `ry R` still
-run annotated code, but ry's runtime registers no checks for the annotations.
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry R` run
+annotated code either way, and ry's runtime takes a function's signature from its `#:` block alone.
 
-### Inline annotations at run time
+### Annotations at run time
 
 `ry run` runs annotated code on ry's runtime and `ry R` on GNU R, which reads the erasure. ry's runtime
 reads the annotations themselves and checks a function's parameter and return types at its
 boundary, so a function called with the wrong kind of value fails where it was called instead of
-somewhere inside it. The checks come from the inline spelling, so this example has a single block:
+somewhere inside it:
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
@@ -328,6 +328,47 @@ scale("a", 1)
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`
 ```
+
+**A signature counts the same wherever it is written.** The runtime resolves a function's
+signature by the rules the checker uses ([together](#inline-and-comment-annotations-together)): a
+type written on the function wins, then the function type on the name it is assigned to, then the
+`#:` block [attached](#attachment) to its statement. The two functions below are checked exactly
+like `scale` above, and a signature written entirely in ry types
+[compiles to native code](#native-functions) in any of the three forms.
+
+```r
+#: fn(values: double, by: double) -> double
+scale <- function(values, by) values * by
+
+halve: fn(value: double) -> double <- function(value) value / 2
+
+halve("a")
+```
+
+```text ry run runtime=ry
+Error in halve("a") :
+  argument `value` must be `double`, not `character`
+```
+
+GNU R reads a `#:` block as a comment, so a file annotated only in `#:` blocks runs under
+`Rscript` without checks.
+
+Three kinds of signature are not checked at run time:
+
+- **A coercion.** `@trust`, `@if-unknown` and `@new` say how the value gets its type instead of
+  declaring one to check, and a coercion governs the value wherever it is written. A function under
+  one has no run-time checks, whatever types its literal writes, and it is not compiled.
+- **The name of a type alias**, as in `#: Scaler` with
+  `#: @alias Scaler {fn(values: double, by: double) -> double}`. The runtime reads the types where
+  they are written, and resolving an alias takes the checker.
+- **A block the checker rejects.** A `#:` line that does not parse is a comment, and a block whose
+  directives are out of order declares nothing. A block with an error that only the checker can
+  see, such as an unknown type name, declares nothing to the checker, and the runtime checks the
+  types it recognizes in it.
+
+The console attaches a `#:` block the same way. A command that ends in a `#:` block is unfinished,
+so the console reads the next line into the same command, and a blank line ends the wait and leaves
+the block attached to nothing.
 
 A check never changes what code that satisfies its annotations does, which the oracle pins by
 comparing annotated cases on ry's runtime against GNU R running their erasure. The checks follow
@@ -4404,10 +4445,11 @@ type: `double`, `integer`, `character`, `logical`, R vectors such as `double[]`,
 **Which functions are judged.** A function literal is a native function when every parameter is
 annotated with a ry type, the declared result is a ry type, `NULL` or left out, and at least one of
 them is a ry type. A signature written in a `#:` comment, or on the name the function is assigned
-to, is judged by the same rules. The runtime compiles a function only from the types written on its
-parameters, so a function whose parameter types are written apart from it also gets an
-`interpreted` warning that asks for the inline form. The warning is left out while
-`[check] inline-annotations = false`, because the inline form is not available then.
+to, is judged by the same rules and compiles exactly like the inline form
+([Annotations at run time](#annotations-at-run-time)). The one exception is a signature that is
+only the name of a type alias. The runtime reads the types where they are written, so such a
+function runs in the interpreter and gets an `interpreted` warning that asks for the function type
+in place of the alias.
 
 A type parameter bounded by an R type, as in `<T: numeric>`, counts as an R type.
 

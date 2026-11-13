@@ -6,8 +6,8 @@
 //! Three commands prepare homes rather than run one. `assemble ROOT --include DIR --libr FILE
 //! --base DIR` creates an R home over a base R tree, and `build-base SOURCE OUTPUT --include DIR
 //! --libr FILE --sha256 SUM` builds ry's base R tree from GNU R's unpacked source release
-//! ([`crate::base`]). `start-image BASE --libr FILE` writes a built tree's start-up image again,
-//! for a runtime of another build.
+//! ([`crate::base`]). `start-image BASE --libr FILE` writes a built tree's images for a runtime
+//! of another build, beside those of the builds that wrote theirs before ([`crate::images`]).
 //!
 //! The `ry-rcmd` binary is this front end alone, and `ry` is it too when started under one of
 //! the names [`invoked_as_front_end`] recognizes, so a release can ship `ry` as its only file.
@@ -252,9 +252,7 @@ fn start_image(arguments: &[String]) -> crate::Result<PathBuf> {
         .transpose()?;
     let rcmd = std::env::current_exe()
         .map_err(|error| crate::Error::Io(PathBuf::from("ry-rcmd"), error))?;
-    let base = absolute(base)?;
-    crate::base::write_start_image(&base, &rcmd, &absolute(libr)?, layout.as_deref())?;
-    Ok(base.join("library/base/R/ry-start.image"))
+    crate::base::write_start_image(&absolute(base)?, &rcmd, &absolute(libr)?, layout.as_deref())
 }
 
 fn build_base(arguments: &[String]) -> crate::Result<PathBuf> {
@@ -284,6 +282,13 @@ fn build_base(arguments: &[String]) -> crate::Result<PathBuf> {
     )?;
     Ok(output)
 }
+
+/// Names the project switches (libr's `RUN_FLAG_*` bits for annotation checks, the object
+/// systems, strict mode and the prelude, as a decimal number) that a session started by ry's
+/// `bin/R` runs under instead of the defaults.
+pub const PROJECT_FLAGS_VARIABLE: &str = "RY_RUN_FLAGS";
+
+const PROJECT_FLAGS: c_int = 0b10_0111;
 
 /// Runs a session on ry's runtime, the libR of the R home, which also holds the interpreter.
 fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
@@ -352,10 +357,16 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
             .as_ref()
             .map_or(std::ptr::null(), |value| value.as_ptr())
     };
-    // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults;
-    // the profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
+    // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults,
+    // unless the process that started this one hands down its project's switches: `ry test`
+    // does for its worker processes, which must run a package the way `ry test` itself does.
+    // The profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
+    let project = std::env::var(PROJECT_FLAGS_VARIABLE)
+        .ok()
+        .and_then(|bits| bits.parse::<c_int>().ok())
+        .map_or(0b11, |bits| bits & PROJECT_FLAGS);
     let flags =
-        0b11 | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
+        project | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
     let status = unsafe {
         run(
             pointer(&file),
@@ -401,6 +412,29 @@ fn write_start_image(home: &Path, path: &str, layout: Option<&str>) -> crate::Re
     };
     std::mem::forget(library);
     Ok(status)
+}
+
+/// The build identity of the runtime at `library_path` (`ry_runtime_id`), which names the images
+/// it loads ([`crate::images`]).
+pub(crate) fn runtime_identity(library_path: &Path) -> crate::Result<String> {
+    type RuntimeId = unsafe extern "C" fn() -> *const c_char;
+    let library = load_runtime(library_path)?;
+    let identity = unsafe { library.get::<RuntimeId>(b"ry_runtime_id\0") }
+        .map(|entry| {
+            let pointer = unsafe { entry() };
+            unsafe { std::ffi::CStr::from_ptr(pointer) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .map_err(|error| {
+            crate::Error::Usage(format!(
+                "{} is not ry's runtime: {error}",
+                library_path.display()
+            ))
+        });
+    // The runtime keeps global state and threads that must not be torn down by unloading it.
+    std::mem::forget(library);
+    identity
 }
 
 /// Loads ry's runtime, the libR at `library_path`.

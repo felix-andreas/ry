@@ -1,0 +1,72 @@
+[stdout]
+| [1] "a b c"
+| [1] "unknown"
+| [1] "ACC000001"
+| [1] "unknown"
+| [1] "x;1;2.5;TRUE"
+| [1] "unknown"
+| [1] "ac"
+| [1] "unknown"
+| [1] ""
+| [1] "unknown"
+| [1] "a NA c"
+| [1] "unknown"
+| [1] "NA NA"
+| [1] "unknown"
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| [1] "solo"
+| [1] "unknown"
+| [1] "a 1" "b 2" "c 1"
+| [1] "unknown" "unknown" "unknown"
+| [1] " x"
+| [1] "unknown"
+| [1] "x++y"
+| [1] "unknown"
+| character(0)
+| character(0)
+| [1] "a__y" "b__z"
+| [1] "unknown" "unknown"
+| [1] "1"       "b"       "NULL"    "c(2, 3)"
+| [1] "unknown" "unknown" "unknown" "unknown"
+| [1] "lo 1" "hi 2"
+| [1] "unknown" "unknown"
+| [1] "abc"
+| [1] "unknown"
+| [1] "a b"
+| [1] "unknown"
+| [1] "a.1, NA.2"
+| [1] "unknown"
+| [1] ""
+| [1] "unknown"
+| [1] "x" "y"
+| [1] "unknown" "unknown"
+| [1] "café x"
+| [1] "UTF-8"
+| [1] "x café"
+| [1] "UTF-8"
+| [1] "cafécafé"
+| [1] "UTF-8"
+| [1] 63 61 66 c3 a9 20 78
+| [1] "a\\xffb x"
+| [1] "bytes"
+| [1] 61 ff 62 20 63 61 66 e9
+| [1] "plain-café"
+| [1] "UTF-8"
+| [1] "plaincaféascii"
+| [1] "UTF-8"
+| [1] 78 63 61 66 e9 61 ff 62
+| [1] "café NA"
+| [1] "UTF-8"
+| [1] "invalid separator"
+| [1] "invalid separator"
+| [1] "invalid 'collapse' argument"
+| [1] "invalid 'collapse' argument"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid 'collapse' argument"

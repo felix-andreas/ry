@@ -10,7 +10,9 @@ use {
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value, present},
         dispatch::{self, basic_class},
         eval,
-        subset::{modifiable, set_attribute_checked, set_names, set_row_names},
+        subset::{
+            modifiable, modifiable_attributes, set_attribute_checked, set_names, set_row_names,
+        },
         unwind::R,
         values::{self, alloc, get_attr, length, nil, symbols},
     },
@@ -335,7 +337,7 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
             "invalid to use names()<- on an S4 object of class '{class}'"
         )));
     }
-    let object = modifiable(object)?;
+    let object = modifiable_attributes(object)?;
     // GNU R's `names<-` turns any value but a plain character vector into text with a
     // dispatched `as.character(value)`, so a Date names by its formatted dates. The value goes
     // into the call as it is, which evaluates a symbol or a call there, as in GNU R.

@@ -360,6 +360,10 @@ pub struct Code {
     /// lowers the analysis's syntax tree ([`Loader::syntax`]) reads instead of the text.
     pub source_start: u32,
     pub source_end: u32,
+    /// The byte offset, in the file as written, of the statement the code belongs to. A lazy
+    /// definition's code is the value it binds, and the statement is the whole assignment,
+    /// whose name and whose `#:` comment above may declare the value's type.
+    pub statement_start: u32,
     /// Whether the code registers S4 classes or methods, after which R refreshes its S4 caches.
     pub registers_s4: bool,
     /// Whether running it only binds names and registers classes, so it may run before the
@@ -1408,6 +1412,7 @@ pub fn diff<'text>(
             end: span.char_end,
             source_start: span.source_start,
             source_end: span.source_end,
+            statement_start: item.span.source_start,
             registers_s4: false,
             effect_free: true,
         }
@@ -1421,6 +1426,7 @@ pub fn diff<'text>(
         end: item.span.char_end,
         source_start: item.span.source_start,
         source_end: item.span.source_end,
+        statement_start: item.span.source_start,
         registers_s4: registers_s4(item),
         effect_free,
     };

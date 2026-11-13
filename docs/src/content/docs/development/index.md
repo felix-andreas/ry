@@ -55,9 +55,10 @@ frees space without forcing a full rebuild: it removes build configurations noth
 days and incremental caches older than an hour, and `just prune --tests` also removes test
 executables.
 
-The nix dev shell (`nix develop`) carries the same toolchain, but its closure is about 6.5 GB, and
-its GNU R is nixpkgs' build rather than the reference one, so the script is the default for cloud
-sessions.
+The flake's dev shells carry the same toolchain and a GNU R built like the reference one, and CI
+runs in them: `nix develop .#ci` holds what `just ci` needs, and `nix develop` adds the editing
+tools. The script stays the default for cloud sessions, because it restores the reference R and
+the oracle's packages from the binary cache in seconds and needs no nix store.
 
 ## Build and test
 
@@ -135,7 +136,8 @@ cargo's thin LTO inside each crate). After an edit to the interpreter it rebuild
 under 16 GB of memory. No inlining then crosses a crate boundary, so a single program can run
 a quarter faster or slower than under release: `ry --version` names the profile
 (`ry 0.4.3-beta (iterate build)`), and `tools/bench/bench.py` refuses any binary that is not a
-release build. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
+release build. Its `--any-build` flag lifts that refusal for a look at where a build stands, for
+example `just bench typed --ry target/iterate/ry --any-build`, and such a run cannot be stored. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
 release's inlining: the `.text` of `ry` and `libR.so` is within 0.2% of release's, and its link
 peaks near 11 GB.
 

@@ -10,7 +10,7 @@ iana-time-zone = { path = "patches/iana-time-zone" }
 crossterm = { path = "patches/crossterm" }
 
 [workspace.package]
-version = "0.4.3-beta"
+version = "0.4.4"
 repository = "https://github.com/felix-andreas/ry"
 
 [workspace.dependencies]

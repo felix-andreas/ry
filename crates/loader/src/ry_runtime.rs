@@ -58,28 +58,68 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderCallers", 2, do_callers),
     internal("ryLoaderWaitEdits", 2, do_wait_edits),
     internal("ryLoaderCompile", 2, do_compile).invisible(),
+    internal("ryLoaderAttach", 0, do_attach).invisible(),
 ];
 
 /// Attaches the loader's R side as `tools:ry`, which gives the session `load_all()`: the
 /// environment the start-up image carries, or one [`build`] evaluates when the session started
 /// without an image.
 ///
+/// A profile may have attached the loader already with `.Internal(ryLoaderAttach())` and
+/// loaded packages with it. The loader then only moves to the front of the search path, where
+/// a session's start puts it, and keeps what it loaded.
+///
 /// # Safety
 /// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn attach() -> R<()> {
     scope(|| {
-        let runtime = match interp::image::host_environment() {
-            Some(runtime) => runtime,
-            None => build()?,
-        };
-        let setup = values::new_env(values::global_env())?;
-        define(install("runtime")?, runtime, setup)?;
-        let expressions = parse_text(ATTACH, "<ry loader>")?;
-        for index in 0..length(expressions) {
-            eval(expressions.element(index), setup)?;
+        if ATTACHED_BY_PROFILE.swap(false, Ordering::Relaxed) {
+            let moved = eval_script(MOVE_TO_FRONT, values::new_env(values::global_env())?)?;
+            if values::as_logical_scalar(moved) == 1 {
+                return Ok(());
+            }
+        }
+        attach_fresh()
+    })
+}
+
+/// `.Internal(ryLoaderAttach())`: attaches the loader while the session is still starting, for
+/// code a profile runs. The profiles are sourced before the session's start attaches the
+/// loader, and a worker process that a test runner starts loads the package from its profile.
+///
+/// An attached loader stays as it is, because attaching anew would forget what it loaded.
+unsafe fn do_attach(_call: &Call<'_>) -> R<Sexp> {
+    scope(|| {
+        let attached = eval_script(r#""tools:ry" %in% search()"#, values::base_env())?;
+        if values::as_logical_scalar(attached) != 1 {
+            attach_fresh()?;
+            ATTACHED_BY_PROFILE.store(true, Ordering::Relaxed);
         }
         Ok(())
-    })
+    })?;
+    Ok(nil())
+}
+
+static ATTACHED_BY_PROFILE: AtomicBool = AtomicBool::new(false);
+
+unsafe fn attach_fresh() -> R<()> {
+    let runtime = match interp::image::host_environment() {
+        Some(runtime) => runtime,
+        None => build()?,
+    };
+    let setup = values::new_env(values::global_env())?;
+    define(install("runtime")?, runtime, setup)?;
+    eval_script(ATTACH, setup)?;
+    Ok(())
+}
+
+unsafe fn eval_script(text: &str, environment: Sexp) -> R<Sexp> {
+    let expressions = parse_text(text, "<ry loader>")?;
+    let mut value = nil();
+    for index in 0..length(expressions) {
+        value = eval(expressions.element(index), environment)?;
+    }
+    Ok(value)
 }
 
 /// Evaluates the loader's R code into a new environment, the one [`attach`] puts on the search
@@ -89,10 +129,7 @@ pub unsafe fn attach() -> R<()> {
 /// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn build() -> R<Sexp> {
     let runtime = values::new_env(values::base_env())?;
-    let expressions = parse_text(RUNTIME_RY, "<ry loader>")?;
-    for index in 0..length(expressions) {
-        eval(expressions.element(index), runtime)?;
-    }
+    eval_script(RUNTIME_RY, runtime)?;
     Ok(runtime)
 }
 
@@ -114,6 +151,18 @@ unsafe fn do_changed(_call: &Call<'_>) -> R<Sexp> {
         .collect();
     values::string_vector(&roots)
 }
+
+/// `attach()` copies the bindings, and the loader's functions keep the environment they were
+/// defined in, which holds the session's state. False when the profile detached the loader.
+const MOVE_TO_FRONT: &str = r#"
+local({
+  if (!("tools:ry" %in% search())) return(FALSE)
+  runtime <- environment(get("load_all", envir = as.environment("tools:ry")))
+  detach("tools:ry", character.only = TRUE)
+  attach(runtime, name = "tools:ry", warn.conflicts = FALSE)
+  TRUE
+})
+"#;
 
 const ATTACH: &str = r#"
 runtime$.ry_packages <- new.env(parent = emptyenv())
@@ -175,13 +224,14 @@ struct FileSource {
 }
 
 /// Where a lazy definition or a statement is in its file: the byte range of its syntax node,
-/// and the 1-based line and the column it starts at.
+/// the 1-based line it starts on, and the byte offset its statement starts at
+/// ([`Code::statement_start`]).
 #[derive(Clone, Copy)]
 struct Position {
     start: u32,
     end: u32,
     line: u32,
-    column: u32,
+    statement: u32,
 }
 
 impl Position {
@@ -190,7 +240,7 @@ impl Position {
             start: code.source_start,
             end: code.source_end,
             line: code.line,
-            column: code.column,
+            statement: code.statement_start,
         }
     }
 }
@@ -693,10 +743,15 @@ unsafe fn release(handles: Option<FxHashMap<String, Sexp>>) {
     }
 }
 
-/// A position as the one integer vector a promise carries: start, end, line, column.
+/// A position as the one integer vector a promise carries: start, end, line, statement.
 unsafe fn position_value(position: Position) -> R<Sexp> {
-    let numbers = [position.start, position.end, position.line, position.column]
-        .map(|number| i32::try_from(number).unwrap_or(i32::MAX));
+    let numbers = [
+        position.start,
+        position.end,
+        position.line,
+        position.statement,
+    ]
+    .map(|number| i32::try_from(number).unwrap_or(i32::MAX));
     values::integer_vector(&numbers)
 }
 
@@ -715,7 +770,7 @@ unsafe fn position_of_value(value: Sexp) -> R<Position> {
         start: number(0)?,
         end: number(1)?,
         line: number(2)?,
-        column: number(3)?,
+        statement: number(3)?,
     })
 }
 
@@ -750,56 +805,73 @@ unsafe fn lower_handle_code(handle: Sexp, position: Position) -> R<Sexp> {
 }
 
 /// Lowers the code at `position` of `source`, with source references against `srcfile` when
-/// there is one. In a tree the code is the outermost node spanning exactly its range, and in text
-/// it is the code alone, parsed on its own: a top-level item parses the same either way, so a
-/// file whose text is all the loader holds is never parsed whole. Source references count lines,
-/// bytes and columns as the file does, so the code is parsed after as many spaces as its line
-/// has bytes before it, its source references read the line's real text in their place, and its
-/// lines are shifted to the line it starts on.
+/// there is one. In a tree the code is the outermost node spanning exactly its range. Otherwise
+/// the code is parsed on its own, so a file whose text is all the loader holds is never parsed
+/// whole: a top-level item parses the same either way.
+///
+/// A definition's value is parsed inside its statement, together with the `#:` lines directly
+/// above it, because the name it is assigned to and that comment may declare the types the
+/// runtime registers for a function. Source references count lines and bytes as the file does:
+/// the piece is parsed after as many spaces as its first line has bytes before it, the source
+/// references read the line's real text in their place, and lines are counted from the line the
+/// piece starts on.
 unsafe fn lower_code(source: &Source, position: Position, srcfile: Option<Sexp>) -> R<Sexp> {
     let missing = || error("a definition's code is not in its source file");
-    let Position {
-        start, end, line, ..
-    } = position;
-    let (code, prefix) = match source {
+    let (start, end) = (position.start as usize, position.end as usize);
+    let statement = position.statement as usize;
+    let root;
+    let text: &str = match source {
         Source::Tree(tree) => {
-            let node = node_spanning(tree, start, end)?;
             if srcfile.is_none() {
-                return lower_node(&node);
+                return lower_node(&node_spanning(tree, position.start, position.end)?);
             }
-            (node.text().to_string(), line_prefix(&node))
+            root = tree.syntax_node();
+            root.text()
         }
-        Source::Text(text) => {
-            let code = text.get(start as usize..end as usize).ok_or_else(missing)?;
-            let before = text.get(..start as usize).ok_or_else(missing)?;
-            let prefix = &before[before.rfind('\n').map_or(0, |newline| newline + 1)..];
-            (code.to_owned(), prefix.to_owned())
-        }
+        Source::Text(text) => text,
     };
-    let Some(srcfile) = srcfile else {
-        return lower_node(&sole_node(&code, 0)?);
-    };
-    let node = sole_node(
-        &format!("{}{code}", " ".repeat(prefix.len())),
-        prefix.len() as u32,
-    )?;
-    lower_node_at_line(&node, &format!("{prefix}{code}"), line as usize, srcfile)
-}
-
-/// The text of `node`'s line before it, read back token by token to the line's start.
-fn line_prefix(node: &SyntaxNode) -> String {
-    let mut pieces = Vec::new();
-    let mut token = node.first_token().and_then(|token| token.prev_token());
-    while let Some(current) = token {
-        let text = current.text();
-        if let Some(newline) = text.rfind('\n') {
-            pieces.push(text[newline + 1..].to_owned());
-            break;
-        }
-        pieces.push(text.to_owned());
-        token = current.prev_token();
+    if statement > start
+        || start > end
+        || !text.is_char_boundary(start)
+        || text.get(statement..end).is_none()
+    {
+        return Err(missing());
     }
-    pieces.iter().rev().map(String::as_str).collect()
+    let line_start = |offset: usize| text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+    let mut piece = line_start(statement);
+    let prefix = &text[piece..statement];
+    // Other code before the statement on its line is left out, and then the comment above
+    // belongs to that code.
+    if prefix.trim().is_empty() {
+        while piece > 0 {
+            let above = line_start(piece - 1);
+            if !text[above..piece].trim_start().starts_with("#:") {
+                break;
+            }
+            piece = above;
+        }
+    }
+    let parsed = format!(
+        "{}{}{}",
+        &text[piece..statement - prefix.len()],
+        " ".repeat(prefix.len()),
+        &text[statement..end]
+    );
+    let parse = syntax::parse(&parsed);
+    // A `#:` line that does not read as an annotation is a comment to R, so it declares
+    // nothing and the code below it still runs.
+    if parse.errors().iter().any(|error| !error.in_annotation) {
+        return Err(missing());
+    }
+    let node = node_spanning(&parse, (start - piece) as u32, (end - piece) as u32)?;
+    let Some(srcfile) = srcfile else {
+        return lower_node(&node);
+    };
+    let lines_above = text[piece..start].matches('\n').count();
+    let line = (position.line as usize)
+        .checked_sub(lines_above)
+        .ok_or_else(missing)?;
+    lower_node_at_line(&node, &text[piece..end], line, srcfile)
 }
 
 /// The outermost node of `tree` spanning exactly `start..end`.
@@ -819,6 +891,12 @@ fn node_spanning(tree: &syntax::Parse, start: u32, end: u32) -> R<SyntaxNode> {
         Some(node) => node.clone(),
         None => element.parent().ok_or_else(missing)?,
     };
+    if node == root {
+        node = root
+            .children()
+            .find(|child| child.text_range() == range)
+            .ok_or_else(missing)?;
+    }
     while let Some(parent) = node.parent()
         && parent.text_range() == range
         && parent != root
@@ -829,20 +907,6 @@ fn node_spanning(tree: &syntax::Parse, start: u32, end: u32) -> R<SyntaxNode> {
         return Err(missing());
     }
     Ok(node)
-}
-
-/// The one top-level node of `text` that starts at byte `start` and runs to its end.
-fn sole_node(text: &str, start: u32) -> R<SyntaxNode> {
-    let missing = || error("a definition's code is not in its source file");
-    let parse = syntax::parse(text);
-    if !parse.errors().is_empty() {
-        return Err(missing());
-    }
-    let root = parse.syntax_node();
-    let range = TextRange::new(TextSize::from(start), root.text_range().end());
-    root.children()
-        .find(|node| node.text_range() == range)
-        .ok_or_else(missing)
 }
 
 /// An external pointer owning `file`, freed by the collector once nothing references it. It

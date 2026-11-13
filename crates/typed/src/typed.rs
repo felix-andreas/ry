@@ -29,13 +29,14 @@ pub mod ir;
 pub mod lower;
 pub mod ownership;
 pub mod shapes;
+pub mod unbox;
 pub mod values;
 
 use {
     crate::{
         backend::{Callee, Code, Trampoline},
         ir::{Item, Type},
-        lower::{Callees, RCall, RResult, Speculation},
+        lower::{Callees, Lowered, RCall, RResult, Speculation},
         values::{Boxed, List, Str},
     },
     heap::{
@@ -51,6 +52,7 @@ use {
     std::{
         borrow::Cow,
         cell::{Cell, RefCell},
+        time::{Duration, Instant},
     },
 };
 
@@ -95,6 +97,8 @@ thread_local! {
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
+    /// How long the compilations nested in the one under way took, measured only for the log.
+    static NESTED_COMPILE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
     /// did anything visible first.
     static R_CALLS: Cell<u64> = const { Cell::new(0) };
@@ -310,17 +314,31 @@ unsafe fn compiled_or_refusal(
             "it is called while its own code is being compiled",
         ));
     }
+    // The clock is read only for the log. A function's time leaves out the callees compiled
+    // while it was lowered, which log their own, and a refused compilation logs its time too, so
+    // the logged times add up to the time the session spent compiling.
+    let started = interp::annotations::typed_logging().then(Instant::now);
+    let outer = NESTED_COMPILE.replace(Duration::ZERO);
     let result = compile(function, params);
+    let total = started.map_or(Duration::ZERO, |started| started.elapsed());
+    let own = total.saturating_sub(NESTED_COMPILE.replace(outer + total));
     COMPILING.with_borrow_mut(|compiling| compiling.remove(&key));
     let compiled = match result {
         Ok(compiled) => {
             interp::heap().add_global_root(function);
-            if interp::annotations::typed_logging() {
-                eprintln!("typed: compiled for {params:?} -> {:?}", compiled.result);
+            if started.is_some() {
+                eprintln!(
+                    "typed: compiled for {params:?} -> {:?} in {} us",
+                    compiled.result,
+                    own.as_micros()
+                );
             }
             Ok(&*Box::leak(Box::new(compiled)))
         }
         Err(refusal) => {
+            if started.is_some() {
+                eprintln!("typed: refused {params:?} after {} us", own.as_micros());
+            }
             decline(|| format!("no code for {params:?}: {}", refusal.0));
             Err(refusal)
         }
@@ -368,28 +386,39 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
     })
 }
 
-/// Compiles `function` for `params` until the code is current. Compiled code confirms the tag
-/// shapes it constructs, and a `match` over any tag compiled before them, in this code or in a
-/// function it calls, would not test for them.
+/// Compiles `function` for `params`. Compiled code confirms the tag shapes it constructs, and a
+/// `match` over any tag lowered before them, in this code or in a function it calls, would not
+/// test for them. So the shapes a lowering constructs are confirmed before any machine code is
+/// generated, and the function is lowered again until its matches saw every confirmed shape.
+/// Only lowering repeats, which is a small part of a compilation.
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
     for _ in 0..MAX_SHAPE_ROUNDS {
-        let compiled = compile_once(function, params)?;
-        if compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
-            return Ok(compiled);
+        let (lowered, linker) = lower_settled(function, params)?;
+        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
+            params.iter().map(|&ty| storage(ty)).collect();
+        let result = storage(lowered.function.result);
+        if !interp::annotations::admits_storage(function, &arguments, result) {
+            return Err(Refusal::new("the types fail the closure's annotations"));
+        }
+        for &shape in &lowered.constructed {
+            shapes::confirm(shape);
+        }
+        if earliest(lowered.epoch, linker.epoch).is_none_or(|epoch| epoch == shapes::epoch()) {
+            return generate(params, lowered, linker);
         }
     }
     Err(Refusal::new("the shapes a `match` tests for keep growing"))
 }
 
-/// How many times [`compile`] tries before the shapes settle.
+/// How many times [`compile`] lowers before the shapes settle.
 const MAX_SHAPE_ROUNDS: usize = 4;
 
-unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
+/// Lowers `function` with a result type that its recursive calls agree with.
+unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Linker), Refusal> {
     let declared = declared_result(function);
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
     let mut refusal = Refusal::new("the result type depends on the recursion");
-    let mut found = None;
-    'guesses: for &first in &guesses {
+    for &first in &guesses {
         let mut guess = first;
         for _ in 0..=MAX_REVISIONS {
             let mut linker = Linker::default();
@@ -397,24 +426,23 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
                 Ok(lowered) => lowered,
                 Err(why) => {
                     refusal = why;
-                    continue 'guesses;
+                    break;
                 }
             };
             let result = lowered.function.result;
             if result == guess || !calls_itself(&lowered.function) {
-                found = Some((lowered, linker));
-                break 'guesses;
+                return Ok((lowered, linker));
             }
             guess = result;
         }
     }
-    let (lowered, linker) = found.ok_or(refusal)?;
+    Err(refusal)
+}
+
+/// Machine code for a lowered function whose shapes are confirmed.
+unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<Compiled, Refusal> {
     let mut ir = lowered.function;
-    let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
-        params.iter().map(|&ty| storage(ty)).collect();
-    if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
-        return Err(Refusal::new("the types fail the closure's annotations"));
-    }
+    unbox::unbox(&mut ir);
     fusion::fuse(&mut ir);
     ownership::insert(&mut ir);
     let sites: Vec<usize> = lowered
@@ -448,9 +476,6 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
     std::mem::forget(lowered.r_calls);
     let mut speculations = lowered.speculations;
     speculations.extend(linker.speculations);
-    for &shape in &lowered.constructed {
-        shapes::confirm(shape);
-    }
     let epoch = earliest(lowered.epoch, linker.epoch);
     Ok(Compiled {
         code,
@@ -661,11 +686,12 @@ unsafe fn list_type(value: Sexp, length: usize) -> Option<Type> {
     item.map(Type::List)
 }
 
-/// Whether a `CHARSXP` is a string the typed core can hold: not `NA`, and UTF-8.
+/// Whether a `CHARSXP` is a string the typed core can hold: not `NA`, and UTF-8. An interned
+/// string had its bytes checked when it was interned, so only another string is read here.
 unsafe fn usable_string(charsxp: Sexp) -> bool {
     charsxp != interp::heap().known().na_string
         && !charsxp.has_gp(gp::LATIN1 | gp::BYTES)
-        && std::str::from_utf8(charsxp.bytes()).is_ok()
+        && (charsxp.is_valid_utf8() || std::str::from_utf8(charsxp.bytes()).is_ok())
 }
 
 /// The arguments of one call as machine words, with what converting them allocated.

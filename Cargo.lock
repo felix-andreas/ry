@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "features"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "futures-io",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "format"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "regex",
  "serde",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "heap"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "libc",
  "rustc-hash",
@@ -1729,7 +1729,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "ide"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "bumpalo",
  "salsa",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "interp"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "ab_glyph",
  "bincode",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "jit"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "bumpalo",
  "hashbrown 0.17.1",
@@ -2088,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "libr"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "cc",
  "dirs",
@@ -2147,7 +2147,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "loader"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "bincode",
  "heap",
@@ -2509,7 +2509,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oracle"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "clap",
  "libc",
@@ -3493,7 +3493,7 @@ dependencies = [
 
 [[package]]
 name = "rcmd"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "libloading",
  "syntax",
@@ -3501,7 +3501,7 @@ dependencies = [
 
 [[package]]
 name = "rdb"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "bzip2",
  "flate2",
@@ -3627,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "repl"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "crossterm 0.28.1",
  "dirs",
@@ -3810,7 +3810,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ry-lang"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "async-lsp",
  "clap",
@@ -3950,7 +3950,7 @@ dependencies = [
 
 [[package]]
 name = "semantics"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "boxcar",
  "bumpalo",
@@ -4217,7 +4217,7 @@ checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "sniff"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "syntax",
 ]
@@ -4265,7 +4265,7 @@ dependencies = [
 
 [[package]]
 name = "ssa"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -4447,7 +4447,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "memchr",
  "text-size",
@@ -4471,7 +4471,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "foldhash 0.2.0",
  "hashbrown 0.17.1",
@@ -4897,7 +4897,7 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "typed"
-version = "0.4.3-beta"
+version = "0.4.4"
 dependencies = [
  "heap",
  "interp",
@@ -5721,7 +5721,7 @@ dependencies = [
 
 [[package]]
 name = "zed_ry"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "zed_extension_api",
 ]

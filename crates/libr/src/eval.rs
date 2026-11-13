@@ -22,7 +22,7 @@ use {
         strings::Encoding,
     },
     interp::{
-        TaskCallbackRoutine, builtin_libraries,
+        AltrepSummary, TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         graphics_engine,
         native::{Interface, foreign_context},
@@ -90,7 +90,6 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
                 crate::altrep::compact_realseq(length, first, increment)?
             }))
         },
-        compact_sequence_steps: |object| unsafe { crate::altrep::compact_sequence_steps(object) },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         altrep_int_elt: |object, index| unsafe {
             crate::altrep::int_elt(object, index as crate::R_xlen_t)
@@ -98,14 +97,19 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         altrep_real_elt: |object, index| unsafe {
             crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
-        altrep_summary: |object, which, remove_na| unsafe {
-            match which {
-                interp::AltrepSummary::Sum => crate::altrep::sum(object, remove_na),
-                interp::AltrepSummary::Min => crate::altrep::min(object, remove_na),
-                interp::AltrepSummary::Max => crate::altrep::max(object, remove_na),
-            }
+        altrep_string_elt: |object, index| unsafe {
+            Ok(crate::altrep::sexp_elt(object, index as crate::R_xlen_t)?)
         },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
+        altrep_wrap: |object| unsafe { Ok(crate::altrep::try_wrap(object)?) },
+        altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
+        altrep_summary: |object, method, remove_na| unsafe {
+            Ok(match method {
+                AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
+                AltrepSummary::Min => crate::altrep::min(object, remove_na)?,
+                AltrepSummary::Max => crate::altrep::max(object, remove_na)?,
+            })
+        },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {
             crate::boundary::run_pending_finalizers();
@@ -592,14 +596,6 @@ pub unsafe extern "C" fn R_ShowMessage(message: *const c_char) {
     let mut text = crate::strings::c_bytes(message).to_vec();
     text.push(b'\n');
     crate::boundary::write_console(&text, true);
-}
-
-impl crate::boundary::Handout for Option<Sexp> {
-    fn hand_out(self, runtime: &mut crate::Runtime) {
-        if let Some(value) = self {
-            value.hand_out(runtime);
-        }
-    }
 }
 
 // The builtins the interpreter calls native code through.
@@ -1386,8 +1382,9 @@ const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
 /// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
 /// session the slow way in this process's environment and saves it. `layout`, when not null,
 /// names the directory of the touch profile that lays the image out (`interp::image::write`).
-/// Returns 0 once written, and 1 after reporting why it was not. The base tree's build calls
-/// this through `ry-rcmd write-start-image`; nothing else writes an image.
+/// Returns 0 once written, and 1 after reporting why it was not. `ry-rcmd write-start-image`
+/// calls this when a base tree is built, and when a home is assembled over a tree with no image
+/// of this build; nothing else writes an image.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_write_start_image(path: *const c_char, layout: *const c_char) -> c_int {
     runtime();

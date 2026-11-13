@@ -151,7 +151,7 @@ warnings, and in [strict mode](/guide#strict-mode) they print every error and re
 that has one.
 
 The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at
-function boundaries](/reference/type-system#inline-annotations-at-run-time), and GNU R runs the
+function boundaries](/reference/type-system#annotations-at-run-time), and GNU R runs the
 script with them erased. ry's runtime is under construction: a script that calls something it
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
@@ -265,9 +265,13 @@ A value outside a variable's range is ignored, as on GNU R.
 ### Start-up image
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
-have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
-start-up code. On Linux an empty `ry run` script takes about 30 ms from the image and about 90 ms
-without it (`RY_IMAGE=0`). The image is written when ry is built and never at run time.
+have loaded (`library/base/R/ry-start.<build>.image`, where `<build>` identifies the ry build),
+and a start loads it instead of running base R's start-up code. On Linux an empty `ry run` script
+takes about 30 ms from the image and about 90 ms without it (`RY_IMAGE=0`). The image is written
+when ry is built, or when a ry build first starts over a base R tree that has none of its own, and
+never by a running session. Several ry builds can share one base R tree: each keeps its own images
+in it, and the tree keeps those of the four builds that wrote theirs most recently, plus any build
+a running session uses.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
@@ -281,6 +285,7 @@ or `RY_METHODS_NATIVE`.
 | Variable | Effect |
 | --- | --- |
 | `RY_IMAGE` | `0` turns the image off: every start runs the slow way. |
+| `RY_IMAGE_LOG` | `1` prints `ry: image unused: <reason>` for each image a start or load could not use, and `ry: image written: ...` when a start writes its build's images. |
 
 ## load and server
 
@@ -305,12 +310,40 @@ output is testthat's own reporter's, and the command exits with `1` when a test 
   The pattern matches the name without a leading `test-` or `test_` and without the extension, so
   `--filter '^parse$'` selects `test-parse.R` and `test_parse.R`.
 - `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
+- `--jobs N` (or `-j N`) runs the test files in `N` worker processes, one file at a time in each,
+  and `--jobs 1` runs them in the `ry test` process. See [Parallel tests](#parallel-tests).
 - `--watch` keeps running: after every edit under `R/`, `src/`, `data/`, `inst/`, `tests/`,
   `DESCRIPTION` or `NAMESPACE` it reloads only what changed (rebuilding compiled code after a
   `src/` edit), runs first the test files the edit can affect, and then the rest. It learns of
   edits from the operating system's file notifications, so it costs nothing while you type. A file is affected
   when you edited it, or when it mentions a function whose definition reaches a changed one. An
   edit to a helper or setup file, or a reload that has to run top-level code, reruns everything.
+
+### Parallel tests
+
+Workers are testthat's own parallel runner, so a package set up for it needs no change:
+`Config/testthat/start-first` in `DESCRIPTION` orders the files, `testthat::is_parallel()` is
+`TRUE` in a worker, and each worker runs `tests/testthat/setup*.R` and the helpers once. Each
+worker is a separate R process, so test files must not depend on state another file leaves behind.
+
+| You write | Files run in |
+| --- | --- |
+| `ry test --jobs 4` | 4 workers |
+| `ry test --jobs 1` | the `ry test` process |
+| `ry test`, and `DESCRIPTION` has `Config/testthat/parallel: true` and `Config/testthat/edition: 3` | one worker per core |
+| `ry test` otherwise | the `ry test` process |
+
+A run never starts more workers than it has test files, and one test file runs without workers.
+Without `--jobs`, testthat's own switches apply as they do under `devtools::test()`: the
+`TESTTHAT_PARALLEL` environment variable overrides `DESCRIPTION`, and `TESTTHAT_CPUS` or
+`options(Ncpus =)` sets the worker count in place of the core count.
+
+A worker loads the package the way `ry test` itself does, lazily and under the project's
+`ry.toml`, so it needs neither pkgload nor every package in `Imports` installed. With
+`--runtime gnu-r`, workers load the package with `pkgload::load_all()`, as under testthat alone.
+
+`--profile-summary` measures one process, so it runs the files without workers, and combining it
+with more than one job is an error.
 
 ## document
 
@@ -368,16 +401,22 @@ is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built.
 
-An install on ry's runtime also writes the package's code image, `R/<package>.ryc` beside its
-lazy-load database: the compiled code of every closure, which a later session takes instead of
+An install on ry's runtime also writes the package's code image, `R/<package>.<build>.ryc`
+beside its lazy-load database: the compiled code of every closure, which a later session takes instead of
 compiling the closure itself, and the package's lazy-load records uncompressed, which a later
 session reads in place instead of inflating them. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
 INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and
 the image then keeps the profile of that run, so a function that ran hot there is handed to the
 optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no
-image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
-or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
-the package to write a fresh one. The base packages (base, stats, utils, methods and the rest)
+image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image for other package sources
+is ignored, and a damaged one warns once and is ignored; reinstall the package to write a fresh
+one. A package installed by another ry build, such as the version you upgraded from, runs without
+its image, and the first such package a session loads from a library prints one note naming every
+package in that library to reinstall:
+
+```
+ry: another build of ry installed these packages in library, so their functions compile as they run, which is slower, until you reinstall them: one, two
+``` The base packages (base, stats, utils, methods and the rest)
 carry images that ry's own build writes, holding their uncompressed records but no code.
 
 ## debug-adapter

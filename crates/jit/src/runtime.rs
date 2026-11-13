@@ -7,7 +7,7 @@
 //! and compiled code reacts by deoptimizing, which hands the unwind to the interpreter.
 
 use {
-    crate::analysis::{Speculation, resolve_function},
+    crate::analysis::{Speculation, bit, resolve_function},
     heap::{
         object::{
             Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
@@ -159,6 +159,9 @@ pub struct Compiled {
     pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
+    /// By slot, a bitset of the variables the code loads at every read because a read called
+    /// an active binding.
+    pub volatile: Box<[u64]>,
     /// Each deoptimization point's write-back, indexed by the number compiled code passes to
     /// [`jit_deopt_exit`].
     pub exits: Box<[Exit]>,
@@ -573,8 +576,23 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let epoch = heap().binding_epoch();
+            let reads = interp::interp().active_binding_reads;
             let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));
-            finish_load(activation, slot, loaded, epoch)
+            let result = finish_load(activation, slot, loaded, epoch);
+            // Code that would reuse the value of a load that called an active binding hands the
+            // activation to tier 0 after the load, and the recompile reads the variable again at
+            // every use. Comparing a count also catches a binding that a forced promise read,
+            // which only costs that variable its reuse. Code that already loads the variable at
+            // every read says so in its metadata rather than in an argument, because an extra
+            // argument at every load site costs the register allocator an instruction in loops.
+            if result != outcome::LOAD_FAILED
+                && interp::interp().active_binding_reads != reads
+                && !bit(&compiled(activation).volatile, slot as usize)
+            {
+                bytecode::record_active_binding(machine.code, pc as usize);
+                return outcome::LOAD_INVALIDATED;
+            }
+            result
         })
     }
 }
@@ -1210,7 +1228,7 @@ pub unsafe extern "C" fn jit_loop_sequence(
         let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
             Some(value) => {
-                let steps = (interp::interp().hooks.compact_sequence_steps)(value);
+                let steps = values::compact_sequence(value).map(|(_, first, step)| (first, step));
                 let (first, step) = steps.unwrap_or((0.0, 0.0));
                 let sequence = match steps {
                     Some(_) => value,
@@ -1222,6 +1240,41 @@ pub unsafe extern "C" fn jit_loop_sequence(
                 Ok(sequence)
             }
             None => Ok(values::nil()),
+        })
+    }
+}
+
+/// A plain copy of `value` when it is an attribute-free compact sequence of `kind`, for a load
+/// that expects a plain vector, such as a formal declared `integer[]` called with `1:n`, or for
+/// an assignment into a variable the body changes. An attribute-free plain vector of `kind`,
+/// such as the one `a:a` gives, comes back as it is, and anything else gives null, which fails
+/// the caller's guard. The sequence itself stays compact, as GNU R's element reads leave it.
+pub unsafe extern "C" fn jit_sequence_contents(
+    activation: *mut Activation,
+    value: *mut Header,
+    kind: i64,
+) -> *mut Header {
+    unsafe {
+        guarded(activation, std::ptr::null_mut(), |activation| {
+            let Some(value) = Sexp::from_raw(value) else {
+                return std::ptr::null_mut();
+            };
+            if value.kind() as i64 != kind || value.attrib() != values::nil() {
+                return std::ptr::null_mut();
+            }
+            if !value.is_altrep() {
+                return value.as_ptr();
+            }
+            if values::compact_sequence(value).is_none() {
+                return std::ptr::null_mut();
+            }
+            match scoped(|| values::read_contents(value)) {
+                Ok(contents) => contents.as_ptr(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
         })
     }
 }
@@ -1673,6 +1726,27 @@ pub unsafe extern "C" fn jit_dict_get(
                 standard_library::compiled_get_result(dict, usize::try_from(position).ok())
             }
             None => Err(error("Dict.get() reached compiled code without a dict")),
+        })
+    }
+}
+
+/// `from:to` when it makes integers, or `NULL` for tier 0 to make anything else: doubles,
+/// the error for a missing bound, or, after parking it, an exhausted heap's error.
+pub unsafe extern "C" fn jit_colon(activation: *mut Activation, from: f64, to: f64) -> *mut Header {
+    unsafe {
+        checked(activation, std::ptr::null_mut(), |activation| {
+            let range = -f64::from(i32::MAX)..=f64::from(i32::MAX);
+            if !range.contains(&from) || !range.contains(&to) || from != from.floor() {
+                return std::ptr::null_mut();
+            }
+            match scoped(|| arith::colon(from, to)) {
+                Ok(sequence) if sequence.kind() == SexpType::Integer => sequence.as_ptr(),
+                Ok(_) => std::ptr::null_mut(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
         })
     }
 }
