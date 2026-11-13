@@ -2496,7 +2496,7 @@ impl Heap {
         // promises count as the frame's own cycles.
         if count as usize == self.frame_cycles(env, result, false) {
             if !self.roots.precious.contains(env) {
-                self.clear_frame(env);
+                self.clear_frame(env, |_, dots| dots == result);
             }
             return;
         }
@@ -2537,8 +2537,11 @@ impl Heap {
             .count()
     }
 
-    /// Releases the bindings of a frame nothing else references, and its enclosure.
-    unsafe fn clear_frame(&mut self, env: Sexp) {
+    /// Releases the bindings of a frame nothing else references, and its enclosure. A `...` list
+    /// that `kept` answers for keeps its arguments: the list can outlive its frame uncounted, as
+    /// the result of the call (`get("...")` returns the list itself) or in a root, and whoever
+    /// holds it can still read the arguments.
+    unsafe fn clear_frame(&mut self, env: Sexp, kept: impl Fn(&Heap, Sexp) -> bool) {
         let nil = self.known.nil;
         // Clearing a binding changes no frame, so the cells are read in place rather than
         // copied out first, and `nil` is immortal, so storing it needs no count or barrier.
@@ -2550,7 +2553,9 @@ impl Heap {
             let value = cell.cdr();
             match value.kind() {
                 SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
-                SexpType::Dots if value.refcount() == 1 => self.release_dots(value),
+                SexpType::Dots if value.refcount() == 1 && !kept(self, value) => {
+                    self.release_dots(value)
+                }
                 _ => {}
             }
             if value.release_reference() {
@@ -2664,7 +2669,7 @@ impl Heap {
                 .count();
             if count as usize == self.frame_cycles(env, unbound, true) + dead + entry.swept as usize
             {
-                self.clear_frame(env);
+                self.clear_frame(env, |_, dots| dots.gc_bits() & gc_bits::HELD != 0);
             }
         }
     }
@@ -3773,7 +3778,7 @@ impl Heap {
             if self.space.is_marked(entry.env) {
                 self.returned.push(entry);
             } else {
-                self.clear_frame(entry.env);
+                self.clear_frame(entry.env, |heap, dots| heap.space.is_marked(dots));
             }
         }
         self.release_swept_lists();

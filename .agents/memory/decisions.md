@@ -4872,6 +4872,27 @@ check` releases its trees once, and memoized records are compact" below).
   `print(x)` call. The collection that frees that environment lowers no count, so each printed
   frame kept one count and the next `:=` copied it. `release_printed` rebinds `x` to `NULL` when
   the call returns, as GNU R's `PrintObjectS3` does.
+- **A value on its way to the caller is counted while exit code runs.** Nothing counted a
+  function's result between the body and the caller, so `on.exit(x[1] <<- 0L); x` returned the
+  modified vector where GNU R returns the one the body produced, and under the in-place rule
+  exit code that updated a frame the function was returning changed the returned frame.
+  `run_on_exit` (`eval.rs`) raises the result's count before the exit expressions and lowers it
+  after them, as GNU R's `endcontext` does, so such exit code writes to a copy. Pinned by the
+  oracle case `environments__on_exit_keeps_returned_value` and the scenario.
+- **A locked binding takes the fork.** The in-place write stores nothing in the binding, so it
+  would have changed a frame behind `lockBinding` or a locked namespace. `assign` treats a
+  locked cell like an active one, and storing the fork raises R's "cannot change value of
+  locked binding" before the variable changes.
+- **A `...` list that outlives its frame keeps its arguments.** `get("...")` and
+  `environment()$...` return the list itself, uncounted. `clear_frame` asks its caller which
+  lists to keep: the call's result when the frame is released at return, a list a root holds
+  when a reconcile releases it, and a marked list when the sweep does. Pinned by the oracle
+  case `environments__dots_list_returned_from_its_frame`.
+- **An update nested in an update of the same frame is replaced by the outer one.**
+  `x[id == 1L, v := { x[id == 2L, v := 0L]; 5L }]` sends the nested update to a fork, because
+  the outer query is running. The outer update then finds another frame in its variable, forks
+  the frame it began with and stores that, which is what `x <- update(x)` does when computing
+  the update reassigns `x`. The scenario pins it.
 - **The index is a secondary index, not a cache of a slow path.** The first filter still scans,
   and the scan is as fast as it was. The index answers a different question (all rows of a value)
   that a repeated filter asks, the way `string_codes` answers a repeated join on a text column.

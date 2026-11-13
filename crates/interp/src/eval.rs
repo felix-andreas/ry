@@ -3970,6 +3970,12 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         Err(_) => None,
     };
     interp().returned_values.push(returned);
+    // The value is on its way to the caller and nothing counts it yet, so exit code that
+    // modifies a variable holding it would write into the value the caller receives. GNU R
+    // counts it for as long as the exit code runs.
+    if let Some(value) = returned {
+        value.increment_refcount();
+    }
     let mut outcome = result;
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
@@ -3999,6 +4005,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             }
             Ok(_) => {}
         }
+    }
+    if let Some(value) = returned {
+        value.decrement_refcount();
     }
     interp().returned_values.pop();
     crate::heap().release_handles(mark);

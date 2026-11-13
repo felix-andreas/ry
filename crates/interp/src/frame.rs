@@ -1573,10 +1573,12 @@ unsafe fn assign(
     // registers holds one reference for as long as the frame lives, so a count of two leaves one
     // holder, and the write is in place only when that holder is the variable itself: an active
     // binding's function can return a frame whose one holder is a list other variables share.
+    // A locked binding takes the fork as well, so that storing the fork raises R's error for it.
     // A query of this frame that is still running further out planned against its columns, so
     // an update nested in one of its arguments goes to a fork as well.
-    let held_by_variable = eval::find_cell(name, env)
-        .is_some_and(|cell| !cell.has_gp(gp::ACTIVE_BINDING) && cell.cdr() == subject);
+    let held_by_variable = eval::find_cell(name, env).is_some_and(|cell| {
+        !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) && cell.cdr() == subject
+    });
     let running = interp()
         .frame_queries
         .iter()

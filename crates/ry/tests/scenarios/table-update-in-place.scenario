@@ -10,7 +10,9 @@
 # shared list gets the copy assigned back, and the list keeps its rows. An update that warns is
 # applied before the warning is raised, whether or not the frame was shared. An update nested in
 # a running query of the same frame goes to a copy, so the outer query reads the rows it began
-# with.
+# with, and an outer update then stores its own result over the nested one. Exit code that
+# updates a frame the function is returning leaves the returned frame alone, and a locked
+# binding raises R's error and keeps its rows.
 
 requires ry-runtime
 
@@ -101,6 +103,20 @@ file rules.R
 | total <- x[id == 1L, .(total = sum(v), after = { x[id == 2L, v := 100L]; sum(x$v) })]
 | cat("an outer query reads the rows it began with:", total$total, total$after, "\n")
 | print(x$v)
+| x <- make()
+| x[id == 1L, v := { x[id == 2L, v := 0L]; 5L }]
+| cat("an outer update replaces the one nested in it:", x$v, "\n")
+| x <- make()
+| returned <- (function() { on.exit(x[id == 1L, v := 0L]); x })()
+| cat("exit code leaves the returned frame alone:", returned$v, "while the variable holds", x$v, "\n")
+| own <- (function() { frame <- make(); on.exit(frame[id == 1L, v := 0L]); frame })()
+| cat("and a function's own returned frame:", own$v, "\n")
+| x <- make()
+| lockBinding("x", environment())
+| message <- tryCatch(x[id == 1L, v := 0L], error = function(caught) conditionMessage(caught))
+| unlockBinding("x", environment())
+| cat(message, "\n")
+| cat("a locked binding keeps its rows:", x$v, "\n")
 
 run ry run --runtime ry rules.R
 expect exit 0
@@ -116,3 +132,8 @@ expect stdout "the update is applied before its warning: 1 20 1 40"
 expect stdout "and so is the update of a shared frame: 1 20 1 40 while the other variable keeps 10 20 30 40"
 expect stdout "an outer query reads the rows it began with: 40 240"
 expect stdout "[1]  10 100  30 100"
+expect stdout "an outer update replaces the one nested in it: 5 20 5 40"
+expect stdout "exit code leaves the returned frame alone: 10 20 30 40 while the variable holds 0 20 0 40"
+expect stdout "and a function's own returned frame: 10 20 30 40"
+expect stdout "cannot change value of locked binding for 'x'"
+expect stdout "a locked binding keeps its rows: 10 20 30 40"
