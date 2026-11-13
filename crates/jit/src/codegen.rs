@@ -7,10 +7,12 @@
 //! root cell, which is what roots them, so every object compiled code holds is visible to the
 //! collector at every allocation, and every object handed to a helper is a valid `SEXP`.
 //!
-//! Each guard that can fail branches to a cold deoptimization block. That block boxes the
-//! unboxed values tier 0 will read, writes dirty variables back, stores the loop states and
-//! asks the interpreter to continue at the guarded instruction (or after it, when the
-//! instruction already ran).
+//! Each guard that can fail branches to the exit of a frame state ([`ssa::FrameState`]), which
+//! names the raw cells tier 0 needs: the unboxed registers it will read, the dirty variables and
+//! the loop states. The exit only saves those cells. [`runtime::jit_deopt_exit`] boxes them,
+//! writes the variables back and asks the interpreter to continue at the guarded instruction
+//! (or after it, when the instruction already ran), so a guard costs the compiled body a
+//! handful of stores rather than a boxing sequence of its own.
 
 use {
     crate::{
@@ -35,8 +37,8 @@ use {
     smallvec::SmallVec,
     ssa::{
         AbiParam, Allocator, Block as Label, Builder, CallConv, FloatCC, Ieee64, IntCC,
-        MemFlagsData, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type, Value,
-        Variable,
+        MemFlagsData, SigRef, Signature, Source, StackSlot, StackSlotData, StackSlotKind, Type,
+        Value, Variable,
         types::{F64, I8, I32, I64},
     },
     std::sync::atomic::AtomicBool,
@@ -110,18 +112,6 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>, u3
     Ok((entry, exits, size))
 }
 
-/// A cold block that hands the activation back to the interpreter.
-struct Deopt {
-    label: Label,
-    pc: usize,
-    state: StateId,
-    /// A register the state has unboxed that holds a boxed value here.
-    boxed: Option<usize>,
-    /// The instruction whose live registers apply.
-    live: usize,
-    why: i32,
-}
-
 /// An edge that converts representations before reaching its target block.
 struct PendingEdge {
     label: Label,
@@ -156,7 +146,8 @@ struct Translator<'p> {
     loop_firsts: Vec<Variable>,
     loop_steps: Vec<Variable>,
     labels: Vec<Option<Label>>,
-    deopts: Vec<Deopt>,
+    /// What each frame state writes back, by the state's number.
+    exits: Vec<Exit>,
     edges: Vec<PendingEdge>,
     nil: i64,
     /// The position of the first instruction of the block being translated.
@@ -226,7 +217,7 @@ impl<'p> Translator<'p> {
             loop_firsts,
             loop_steps,
             labels: Vec::new(),
-            deopts: Vec::new(),
+            exits: Vec::new(),
             edges: Vec::new(),
             nil: values::nil().as_ptr() as i64,
             block_start: 0,
@@ -342,7 +333,20 @@ impl<'p> Translator<'p> {
                 }
             }
         }
-        Ok(self.emit_deopts())
+        if let Some((shared, buffer)) = self.builder.emit_exits() {
+            self.builder.switch_to_block(shared);
+            let number = self.builder.block_params(shared)[0];
+            let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
+            let result = self.call(
+                runtime::jit_deopt_exit as *const () as usize,
+                &[I64, I64, I64],
+                Some(I64),
+                &[self.activation, pointer, number],
+            );
+            let result = result.unwrap_or(number);
+            self.builder.ins().return_(&[result]);
+        }
+        Ok(std::mem::take(&mut self.exits).into_boxed_slice())
     }
 
     /// Enters at a loop header with tier 0's registers in the window and every variable in the
@@ -3980,6 +3984,15 @@ impl<'p> Translator<'p> {
         self.builder.switch_to_block(done);
     }
 
+    /// A cold block that hands the activation back to the interpreter at `pc`, in `state`.
+    /// `boxed` is a register the state has unboxed that holds a boxed value there, and `live`
+    /// the instruction whose live registers apply.
+    ///
+    /// The block is the exit of a frame state, which saves the raw values tier 0 does not
+    /// already hold: the unboxed registers, the slots that may be dirty, and the words of the
+    /// loops around `pc`. Tier 0 reads a loop's words only while it runs inside that loop, so
+    /// an exit saves no others: saving every loop made each exit's size grow with the body's
+    /// loop count, and kept every loop variable live across the whole body.
     fn deopt(
         &mut self,
         pc: usize,
@@ -3988,167 +4001,80 @@ impl<'p> Translator<'p> {
         live: usize,
         why: i32,
     ) -> Label {
-        let label = self.builder.create_block();
-        self.deopts.push(Deopt {
-            label,
-            pc,
-            state,
-            boxed,
-            live,
-            why,
-        });
-        label
-    }
-
-    /// The registers and slots `deopt` writes back.
-    fn exit(&self, deopt: &Deopt) -> Exit {
-        let state = self.plan.state(deopt.state);
-        let registers = state
+        let state = self.plan.state(state);
+        let registers: Box<[(u32, i32)]> = state
             .registers
             .iter()
             .enumerate()
             .filter(|&(register, ty)| {
-                ty.in_variables()
-                    && deopt.boxed != Some(register)
-                    && self.plan.live.get(deopt.live, register)
+                ty.in_variables() && boxed != Some(register) && self.plan.live.get(live, register)
             })
             .map(|(register, &ty)| (register as u32, exit_kind(ty)))
             .collect();
-        let slots = state
+        let slots: Box<[(u32, i32)]> = state
             .slots
             .iter()
             .enumerate()
             .filter(|(_, current)| current.may_be(status::DIRTY))
             .map(|(slot, current)| (slot as u32, exit_kind(current.ty)))
             .collect();
-        Exit {
-            pc: deopt.pc,
-            why: deopt.why,
-            registers,
-            slots,
-        }
-    }
-
-    /// Stores the raw values `exit` lists into the scratch area and jumps to the shared exit.
-    fn emit_deopt(
-        &mut self,
-        deopt: &Deopt,
-        exit: &Exit,
-        number: usize,
-        scratch: StackSlot,
-        shared: Label,
-    ) {
-        self.builder.switch_to_block(deopt.label);
-        self.builder.set_cold_block(deopt.label);
-        let mut cell = 0;
-        let mut store = |builder: &mut Builder, value: Value| {
-            builder.ins().stack_store(I64, value, scratch, 8 * cell);
-            cell += 1;
-        };
-        for &(register, kind) in &exit.registers {
-            let register = register as usize;
-            match kind {
-                representation::DOUBLE => {
-                    let value = self.builder.use_var(self.doubles[register]);
-                    store(&mut self.builder, value);
-                }
-                representation::NUM => {
-                    let value = self.builder.use_var(self.doubles[register]);
-                    store(&mut self.builder, value);
-                    let flag = self.builder.use_var(self.integers[register]);
-                    store(&mut self.builder, flag);
-                }
-                _ => {
-                    let value = self.builder.use_var(self.integers[register]);
-                    store(&mut self.builder, value);
-                }
-            }
-        }
-        for &(slot, kind) in &exit.slots {
-            let slot = slot as usize;
-            let status = self.status(slot);
-            store(&mut self.builder, status);
-            match kind {
-                representation::BOXED => {}
-                representation::DOUBLE => {
-                    let value = self.builder.use_var(self.slot_doubles[slot]);
-                    store(&mut self.builder, value);
-                }
-                representation::NUM => {
-                    let value = self.builder.use_var(self.slot_doubles[slot]);
-                    store(&mut self.builder, value);
-                    let flag = self.builder.use_var(self.slot_integers[slot]);
-                    store(&mut self.builder, flag);
-                }
-                _ => {
-                    let value = self.builder.use_var(self.slot_integers[slot]);
-                    store(&mut self.builder, value);
-                }
-            }
-        }
-        // Tier 0 reads a loop's words only while it runs inside that loop, so an exit writes
-        // the loops around its pc and no others. Writing every loop made each exit's size grow
-        // with the body's loop count, and kept every loop variable live across the whole body.
         // SAFETY: the code object is rooted while it compiles, and its loop table is an
         // integer vector.
         let table = unsafe { values::ints(self.code.cdr().element(bytecode::LOOPS)) };
-        for index in 0..self.plan.loops {
-            let encloses = table
-                .get(4 * index..4 * index + 2)
-                .is_none_or(|range| (range[0] as usize..=range[1] as usize).contains(&deopt.pc));
-            if !encloses {
-                continue;
+        let loops: Box<[u32]> = (0..self.plan.loops)
+            .filter(|&index| {
+                table
+                    .get(4 * index..4 * index + 2)
+                    .is_none_or(|range| (range[0] as usize..=range[1] as usize).contains(&pc))
+            })
+            .map(|index| index as u32)
+            .collect();
+        let mut sources: SmallVec<[Source; 32]> = SmallVec::new();
+        for &(register, kind) in &registers {
+            let register = register as usize;
+            match kind {
+                representation::DOUBLE => sources.push(Source::Variable(self.doubles[register])),
+                representation::NUM => {
+                    sources.push(Source::Variable(self.doubles[register]));
+                    sources.push(Source::Variable(self.integers[register]));
+                }
+                _ => sources.push(Source::Variable(self.integers[register])),
             }
-            let words = (8 * runtime::LOOP_WORDS * index) as i32;
-            let state = [
-                self.loop_indexes[index],
-                self.loop_counts[index],
-                self.loop_firsts[index],
-                self.loop_steps[index],
-            ];
-            for (word, variable) in state.into_iter().enumerate() {
-                let value = self.builder.use_var(variable);
-                self.builder
-                    .ins()
-                    .store(flags(), value, self.loops, words + 8 * word as i32);
+        }
+        for &(slot, kind) in &slots {
+            let slot = slot as usize;
+            sources.push(Source::Stack(self.statuses, 4 * slot as i32, I32));
+            match kind {
+                representation::BOXED => {}
+                representation::DOUBLE => {
+                    sources.push(Source::Variable(self.slot_doubles[slot]));
+                }
+                representation::NUM => {
+                    sources.push(Source::Variable(self.slot_doubles[slot]));
+                    sources.push(Source::Variable(self.slot_integers[slot]));
+                }
+                _ => sources.push(Source::Variable(self.slot_integers[slot])),
             }
         }
-        let number = iconst(&mut self.builder, number);
-        self.builder.ins().jump(shared, &[number]);
-    }
-
-    /// Emits every deoptimization point and the one exit they share, which calls
-    /// [`runtime::jit_deopt_exit`] with the point's number.
-    fn emit_deopts(&mut self) -> Box<[Exit]> {
-        let deopts = std::mem::take(&mut self.deopts);
-        if deopts.is_empty() {
-            return Box::default();
+        for &index in &loops {
+            let index = index as usize;
+            sources.extend([
+                Source::Variable(self.loop_indexes[index]),
+                Source::Variable(self.loop_counts[index]),
+                Source::Variable(self.loop_firsts[index]),
+                Source::Variable(self.loop_steps[index]),
+            ]);
         }
-        let exits: Box<[Exit]> = deopts.iter().map(|deopt| self.exit(deopt)).collect();
-        let cells = exits.iter().map(Exit::cells).max().unwrap_or(0).max(1);
-        let scratch = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (8 * cells) as u32,
-            3,
-        ));
-        let shared = self.builder.create_block();
-        self.builder.append_block_param(shared, I64);
-        self.builder.set_cold_block(shared);
-        for (number, (deopt, exit)) in deopts.iter().zip(&exits).enumerate() {
-            self.emit_deopt(deopt, exit, number, scratch, shared);
-        }
-        self.builder.switch_to_block(shared);
-        let number = self.builder.block_params(shared)[0];
-        let pointer = self.builder.ins().stack_addr(I64, scratch, 0);
-        let result = self.call(
-            runtime::jit_deopt_exit as *const () as usize,
-            &[I64, I64, I64],
-            Some(I64),
-            &[self.activation, pointer, number],
-        );
-        let result = result.unwrap_or(number);
-        self.builder.ins().return_(&[result]);
-        exits
+        let frame_state = self.builder.frame_state(None, &sources);
+        debug_assert_eq!(frame_state.as_u32() as usize, self.exits.len());
+        self.exits.push(Exit {
+            pc,
+            why,
+            registers,
+            slots,
+            loops,
+        });
+        self.builder.exit_block(frame_state)
     }
 
     fn guard(&mut self, condition: Value, failed: Label) {

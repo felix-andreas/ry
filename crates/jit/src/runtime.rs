@@ -168,10 +168,10 @@ pub struct Compiled {
 
 /// What one deoptimization point writes back before tier 0 resumes at `pc`.
 ///
-/// Each point only stores its raw values into a scratch area, one 8-byte cell each in the order
-/// below, and jumps to one shared exit that calls [`jit_deopt_exit`] with this point's number.
-/// Boxing and flushing in a cold block per point would make those blocks most of a function's
-/// code and most of its compile time.
+/// Each point is the exit of a frame state: it only saves its raw values into a buffer, one
+/// 8-byte cell each in the order below, and continues in one shared block that calls
+/// [`jit_deopt_exit`] with the state's number. Boxing and flushing in a cold block per point
+/// would make those blocks most of a function's code and most of its compile time.
 pub struct Exit {
     pub pc: usize,
     pub why: i32,
@@ -181,20 +181,8 @@ pub struct Exit {
     /// Slots that may be dirty: one cell for the status, then the value cells as for a
     /// register, none for a [`representation::BOXED`] slot.
     pub slots: Box<[(u32, i32)]>,
-}
-
-impl Exit {
-    /// The scratch cells this exit uses.
-    pub fn cells(&self) -> usize {
-        let value = |kind: i32| match kind {
-            representation::NUM => 2,
-            representation::BOXED => 0,
-            _ => 1,
-        };
-        let registers: usize = self.registers.iter().map(|&(_, kind)| value(kind)).sum();
-        let slots: usize = self.slots.iter().map(|&(_, kind)| 1 + value(kind)).sum();
-        registers + slots
-    }
+    /// The loops around `pc`, [`LOOP_WORDS`] cells each.
+    pub loops: Box<[u32]>,
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
@@ -984,6 +972,12 @@ pub unsafe extern "C" fn jit_deopt_exit(
             if i64::from(status) == crate::analysis::status::RUNTIME_DIRTY {
                 // A failure parks its error, which the deoptimization below then raises.
                 jit_flush(activation, i64::from(slot), kind, bits);
+            }
+        }
+        for &index in &exit.loops {
+            let words = (*activation).loops.add(LOOP_WORDS * index as usize);
+            for word in 0..LOOP_WORDS {
+                *words.add(word) = next().read();
             }
         }
         jit_deopt(activation, exit.pc as i64, exit.why)
