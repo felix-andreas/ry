@@ -42,6 +42,20 @@ The quality bar is four things.
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
+- `UseMethod` differs from GNU R in two ways, and the two together crash.
+  - Inside `try()` it dispatches: `g <- function(x) { r <- try(UseMethod("g"), silent = TRUE);
+    ... }` runs `g.default` in ry. GNU R raises "'UseMethod' used in an inappropriate fashion"
+    there without calling a method, because the call's function context is `try`'s, not `g`'s.
+  - It dispatches on the variable, not on the argument: `f <- function(x) { x <- structure(1,
+    class = "k"); UseMethod("f") }` called as `f(c(10, 20))` runs `f.k` in ry and `f.default`
+    in GNU R, which reads the class of the argument as passed.
+  - With `f <- function(x) { x <- structure(1, class = "k"); r <- try(UseMethod("f"), silent =
+    TRUE); UseMethod("f") }`, a method `f.k` that stops on its first call, and a caller `g <-
+    function() { w <- c(30, 40); f(w) }`, `g()` ends in a segmentation fault, and under
+    `RY_GC_STRESS=young` in the panic "a promise was forced after its last counted reference
+    was released" (`eval.rs`). Once the generic overwrites `x`, only the uncounted `frame_args`
+    entry holds the argument's promise, and the failed dispatch releases it. Matching GNU R on
+    the first point removes the path.
 
 ## Open: one switch for every fast path
 
