@@ -116,9 +116,13 @@ pub struct Heap {
     young_large: Vec<Sexp>,
     /// Whether the collections running are the deeper ones of an escalation.
     escalating: bool,
-    /// The share of the younger old generation the last escalation found dead, which predicts
-    /// what an intermediate collection would free ([`Heap::escalate_if_full`]).
+    /// The share of the younger old generation the last intermediate collection of an
+    /// escalation found dead, which predicts what the next one would free
+    /// ([`Heap::escalate_if_full`]).
     younger_dead_share: f64,
+    /// Escalations since the last intermediate one that went straight to a major collection
+    /// because the prediction said an intermediate one would free too little.
+    predicted_majors: u32,
     /// Bytes of objects outside the oldest generation the last intermediate or major sweep freed.
     untenured_freed: usize,
     /// Bytes of large vectors allocated since the last major collection.
@@ -588,6 +592,10 @@ impl HeapGrowth {
 
 const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 
+/// How many escalations in a row go straight to a major collection on the prediction alone
+/// before an intermediate one measures the younger old generation again.
+const RETRY_INTERMEDIATE_AFTER: u32 = 4;
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
     pub minor_collections: u64,
@@ -774,6 +782,7 @@ impl Heap {
             young_large: Vec::new(),
             escalating: false,
             younger_dead_share: 1.0,
+            predicted_majors: 0,
             untenured_freed: 0,
             large_allocated_since_major: 0,
             remembered: Vec::new(),
@@ -3172,9 +3181,14 @@ impl Heap {
     /// An intermediate collection that cannot free enough only adds its tracing to the major
     /// collection after it, which happens whenever the objects promoted since the last deeper
     /// collection are a structure the program is still building. The share of them the last
-    /// escalation found dead predicts what an intermediate collection would free now, and
-    /// when that is short of what the small objects need, the escalation goes straight to a
-    /// major collection.
+    /// intermediate collection found dead predicts what one would free now, and when that is
+    /// short of what the small objects need, the escalation goes straight to a major
+    /// collection. Only an intermediate collection measures that share: tenured objects that
+    /// died keep their younger children alive through the remembered set until a major
+    /// collection, so a major one finds most of the younger generation dead where an
+    /// intermediate one frees almost nothing. Every few predicted major collections an
+    /// intermediate one runs anyway, so a program that starts making short-lived objects
+    /// again gets cheap collections back.
     unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
         let mut kind = Collection::Intermediate;
         loop {
@@ -3196,10 +3210,14 @@ impl Heap {
                 return;
             }
             let younger = self.space.younger_old_bytes();
-            if kind == Collection::Intermediate && !vectors_full {
+            if kind == Collection::Intermediate
+                && !vectors_full
+                && self.predicted_majors < RETRY_INTERMEDIATE_AFTER
+            {
                 let expected = (younger as f64 * self.younger_dead_share) as usize;
                 if self.old_small_bytes.saturating_sub(expected) + margin > node_limit {
                     kind = Collection::Major;
+                    self.predicted_majors += 1;
                 }
             }
             if kind == Collection::Major {
@@ -3208,13 +3226,14 @@ impl Heap {
             self.escalating = true;
             self.collect_keeping(kind, keep, request);
             self.escalating = false;
-            // Right after an intermediate collection the younger old generation is nearly
-            // empty, and a share of a few objects predicts nothing.
-            if younger > self.policy.min_node_limit / 20 {
-                self.younger_dead_share = (self.untenured_freed as f64 / younger as f64).min(1.0);
-            }
             if kind == Collection::Major {
                 return;
+            }
+            self.predicted_majors = 0;
+            // Right after a deeper collection the younger old generation is nearly empty, and a
+            // share of a few objects predicts nothing.
+            if younger > self.policy.min_node_limit / 20 {
+                self.younger_dead_share = (self.untenured_freed as f64 / younger as f64).min(1.0);
             }
             kind = Collection::Major;
         }
@@ -3965,14 +3984,33 @@ impl Heap {
                 } else if TENURED && object.is_carded() {
                     // A deeper collection derives each card of a tenured vector from scratch:
                     // dirty exactly where an element is younger than the vector.
+                    // A character vector skips repeated strings as the uncarded path below does,
+                    // but a card needs the repeat's age too, so the table keeps whether each
+                    // string was younger in the low bit of its address, which a CHARSXP's
+                    // alignment leaves free. A string's age cannot change between two of its
+                    // marks, because the first one already aged it.
+                    let strings = object.kind() == SexpType::String;
+                    let mut marked = [0usize; 64];
                     let length = object.length() as usize;
                     let cards = object.cards();
                     for card in 0..object.card_count() {
                         let start = card * CARD_ELEMENTS;
                         let mut card_younger = false;
                         for index in start..(start + CARD_ELEMENTS).min(length) {
-                            card_younger |=
-                                self.mark_child::<TENURED>(object.stored_element(index));
+                            let element = object.stored_element(index);
+                            if !strings {
+                                card_younger |= self.mark_child::<TENURED>(element);
+                                continue;
+                            }
+                            let address = element.as_ptr() as usize;
+                            let slot = (address >> 4) as u8 as usize % marked.len();
+                            if marked[slot] & !1 == address {
+                                card_younger |= marked[slot] & 1 != 0;
+                                continue;
+                            }
+                            let younger = self.mark_child::<TENURED>(element);
+                            marked[slot] = address | younger as usize;
+                            card_younger |= younger;
                         }
                         *cards.add(card) = if card_younger {
                             CARD_UNTENURED

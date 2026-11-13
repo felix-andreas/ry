@@ -396,9 +396,12 @@ everything dead. The heap has two limits, as GNU R's `R_VSize` and `R_NSize` do:
 vectors (at least 64 MB) and one on small objects (at least 32 MB). When a minor collection leaves
 less than a fifth of a limit's minimum free, an intermediate collection runs, then a major one if
 that is still not enough. An intermediate collection is skipped when it would not free enough: the
-share of the younger old objects (old but not yet tenured) that the last escalation found dead
-predicts what it frees now, so a program that keeps what it builds goes straight to the major
-collection instead of tracing its young structure twice. After each major collection the limits move with GNU R's fractions: a
+share of the younger old objects (old but not yet tenured) that the last intermediate collection
+found dead predicts what it frees now, so a program that keeps what it builds goes straight to the
+major collection instead of tracing its young structure twice. A major collection does not update
+that share, because a dead tenured object keeps its younger children alive for an intermediate
+collection, and after four predicted major collections in a row an intermediate one runs anyway to
+measure again. After each major collection the limits move with GNU R's fractions: a
 limit grows by a fifth when the survivors plus that fifth fill more than 70% of it, and shrinks by
 a fifth when they fill less than 30%. A major collection that escalation forced before the program
 allocated a limit's worth of vectors grows the vector limit too, because the working set it keeps
