@@ -1653,6 +1653,28 @@ impl Emitter<'_> {
                 self.fail_if(too_long, &inst.fail_drops)?;
                 SmallVec::from_slice(&[lo, hi])
             }
+            Op::ReplaceEach(a, pattern, replacement) => {
+                let (x, pattern, replacement) =
+                    (self.get(*a)?, self.get(*pattern)?, self.get(*replacement)?);
+                let replaced = self.call(
+                    address!(values::ry_str_replace_each),
+                    &[I64; 6],
+                    &[I64, I64],
+                    &[
+                        x[0],
+                        x[1],
+                        pattern[0],
+                        pattern[1],
+                        replacement[0],
+                        replacement[1],
+                    ],
+                );
+                let [lo, hi] = [replaced[0], replaced[1]];
+                let both = self.builder.ins().bor(lo, hi);
+                let too_long = self.builder.ins().icmp_imm_s(IntCC::Equal, both, 0);
+                self.fail_if(too_long, &inst.fail_drops)?;
+                SmallVec::from_slice(&[lo, hi])
+            }
             Op::Split(a, separator) => {
                 let (x, separator) = (self.get(*a)?, self.get(*separator)?);
                 let list = self.call_words(

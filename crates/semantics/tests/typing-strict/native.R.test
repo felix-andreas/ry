@@ -282,17 +282,17 @@ NULL
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
-# blocked: reversed_first
-reversed_first <- function(first: F64) -> F64 {
-  flipped <- List.reverse([first, 2, 3])
-  flipped[[1]]
+# blocked: dropped_first
+dropped_first <- function(first: F64) -> F64 {
+  rest <- List.drop_at([first, 2, 3], 1)
+  rest[[1]]
 }
-cat(reversed_first(1), "\n")
+cat(dropped_first(1), "\n")
 #++++
 == script.R
-reversed_first: fn(first: F64) -> F64
+dropped_first: fn(first: F64) -> F64
 NULL
-87..99 warning[interpreted] this function runs in the interpreter, because `List.reverse` is not compiled natively yet. Write the step with a loop or another standard library function
+82..94 warning[interpreted] this function runs in the interpreter, because `List.drop_at` is not compiled natively yet. Write the step with a loop or another standard library function
 
 #---- standard_library_function_passed_by_name
 #~~~~ script.R

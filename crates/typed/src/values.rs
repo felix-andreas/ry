@@ -3959,6 +3959,57 @@ pub unsafe extern "C" fn ry_str_repeat(lo: u64, hi: u64, count: i64) -> Str {
     })
 }
 
+/// `Str.replace_each(string, pattern, replacement)`: every occurrence of `pattern`, matched
+/// literally from the left, replaced. The arguments are borrowed. A string with nothing to
+/// replace comes back shared, and a result longer than [`MAX_STR_BYTES`] as the null string.
+pub unsafe extern "C" fn ry_str_replace_each(
+    lo: u64,
+    hi: u64,
+    pattern_lo: u64,
+    pattern_hi: u64,
+    replacement_lo: u64,
+    replacement_hi: u64,
+) -> Str {
+    let string = Str { lo, hi };
+    let text = string.as_str();
+    let pattern = Str {
+        lo: pattern_lo,
+        hi: pattern_hi,
+    };
+    let pattern = pattern.as_str();
+    let replacement = Str {
+        lo: replacement_lo,
+        hi: replacement_hi,
+    };
+    let replacement = replacement.bytes();
+    let count = if pattern.is_empty() {
+        0
+    } else {
+        text.matches(pattern).count()
+    };
+    if count == 0 {
+        str_dup(string);
+        return string;
+    }
+    let Some(total) = replacement
+        .len()
+        .checked_mul(count)
+        .and_then(|added| (text.len() - pattern.len() * count).checked_add(added))
+        .filter(|&total| total <= MAX_STR_BYTES)
+    else {
+        return Str { lo: 0, hi: 0 };
+    };
+    str_build(total, |cursor| {
+        let mut last = 0;
+        for (at, _) in text.match_indices(pattern) {
+            cursor.push(&text.as_bytes()[last..at]);
+            cursor.push(replacement);
+            last = at + pattern.len();
+        }
+        cursor.push(&text.as_bytes()[last..]);
+    })
+}
+
 /// The longest string compiled code builds by repetition, R's own limit on a string's bytes.
 pub const MAX_STR_BYTES: usize = i32::MAX as usize;
 
