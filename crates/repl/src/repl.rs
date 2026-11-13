@@ -321,6 +321,47 @@ impl ConsoleHooks for RuntimeReloadWatcher {
     }
 }
 
+/// What to add to a `dlopen` failure of ry's runtime. glibc 2.41 and later refuse a library without
+/// a `PT_GNU_STACK` header with an error that reads like a mount problem, so that case is named
+/// first; only another failure of a freshly extracted library suggests a `noexec` mount.
+fn load_failure_hint(error: &str, extracted: bool, library_path: &Path) -> String {
+    if error.contains("cannot enable executable stack") {
+        "; the runtime lacks a PT_GNU_STACK program header that marks its stack non-executable, \
+         which glibc 2.41 and later require. This is a bug in how ry was packaged, not a problem \
+         with your system. Setting GLIBC_TUNABLES=glibc.rtld.execstack=2 works around it"
+            .to_owned()
+    } else if extracted {
+        format!(
+            "; ry extracted it into {}, which may be on a `noexec` mount that cannot run \
+             code. Set XDG_CACHE_HOME to another directory, or RY_LIBR to ry's runtime \
+             elsewhere",
+            library_path.parent().unwrap_or(library_path).display()
+        )
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_stack_header_is_not_blamed_on_a_mount() {
+        let path = Path::new("/cache/libR.so");
+        let error = "cannot enable executable stack as shared object requires: Invalid argument";
+        let hint = load_failure_hint(error, true, path);
+        assert!(
+            hint.contains("PT_GNU_STACK") && hint.contains("GLIBC_TUNABLES"),
+            "{hint}"
+        );
+        assert!(!hint.contains("noexec"), "{hint}");
+        let hint = load_failure_hint("failed to map segment from shared object", true, path);
+        assert!(hint.contains("noexec") && hint.contains("/cache"), "{hint}");
+        assert_eq!(load_failure_hint("other", false, path), "");
+    }
+}
+
 #[cfg(unix)]
 type RuntimeLibrary = libloading::os::unix::Library;
 #[cfg(not(unix))]
@@ -343,19 +384,10 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
     #[cfg(not(unix))]
     let library = unsafe { RuntimeLibrary::new(&library_path) };
     let library = library.map_err(|error| {
-        let hint = if extracted {
-            format!(
-                "; ry extracted it into {}, which may be on a `noexec` mount that cannot run \
-                 code. Set XDG_CACHE_HOME to another directory, or RY_LIBR to ry's runtime \
-                 elsewhere",
-                library_path.parent().unwrap_or(&library_path).display()
-            )
-        } else {
-            String::new()
-        };
         ReplError(format!(
-            "failed to load ry's runtime at {}: {error}{hint}",
-            library_path.display()
+            "failed to load ry's runtime at {}: {error}{}",
+            library_path.display(),
+            load_failure_hint(&error.to_string(), extracted, &library_path)
         ))
     })?;
     let library: &'static RuntimeLibrary = Box::leak(Box::new(library));

@@ -451,9 +451,10 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **`formatC()` reads its 13 formals in one walk** (`formals` in `base_fast_paths.rs`, `eval::slot_formals`), takes a formal left to its default as the known constant without forcing it, and reads `OutDec` only when `decimal.mark` is defaulted. With a leaner `format_c_vector`, report runs 4.5% fewer warm instructions (`do_format_c` 4.2k to 3.3k Ir per call). `format.default` still uses per-formal lookups; its remaining cost is in the table above.
 - **What is left on report's text path** (Ir per call): `sprintf` about 2.1k, of which `set_mkchar` 590 and its own body about 760; `paste` about 1.3k, of which `set_mkchar_bytes` 490 and `join_row` 240; `formatC`'s `store_string` 595. The interning share belongs to the one-probe item below.
 
+## Open: a string `switch` without the linear name scan
 ## Open: one probe to intern a new string (B4)
 
-- **`mk_char` probes the string table twice for a string it does not hold.** `find` misses, then `intern_new` calls `StringTable::insert`, which walks the same probe sequence again to find the empty slot (`crates/heap/src/heap.rs`, `crates/heap/src/strings.rs`). A find-or-insert entry that returns the empty slot from the miss would save the second walk. Measured on the report workload (single process, release, callgrind): `paste` and `paste0` run 240k times on scalars that mostly build new strings, and interning costs about 470 Ir per call (`find` 105, `scan` 68, `intern_new` 274), of which the second probe is about 100 Ir per call. The slot must stay valid across the allocation in `new_char`, so the entry has to be re-derived when that allocation ran a collection (which sweeps dead strings from the table) or when the insert has to grow the table.
+- **A compiled `switch` on a string selector scans its arm names on every call.** `switch_arm` in `crates/interp/src/bytecode.rs` goes through `eval::switch_selector`, then compares the interned selector against each name in the table by identity, and compares text only if none matches (a missing name, or another encoding). On the expr_tree workload, `switch_arm` and `switch_selector` together are at most 3.6% of warm Ir under callgrind, which bounds the gain. The likely shape is a selector-to-arm map built once with the table, or a dense string id (below) indexing it, plus inlining the string case of `switch_selector` before its generic vector checks. It touches `bytecode.rs` call sites, so coordinate with whoever is rewriting them.
 
 ## Open: a dense id for interned strings (strings track)
 
@@ -2816,11 +2817,6 @@ tagging fences `r` for Zed if that proves distant.
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
   Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
-- **After 0.4.4 publishes, rewrite installation.md line ~25 to use `releases/latest`.** Every
-  release before 0.4.4 is a pre-release, so `releases/latest/` resolves to the old `0.1.1` tag and
-  the installation page names the tag in each URL. 0.4.4 is the first full release, and nightlies
-  are pre-releases with `--latest=false`, so from then on `releases/latest` is the newest full
-  release.
 - **The README's diagnostics are not checked.** `docs/` samples are tests (`test_docs`), but the
   two diagnostics in `README.md` and `editors/code/README.md` are pasted text that goes stale when
   a message or blame range changes; re-capture them after such a change.

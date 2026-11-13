@@ -5,6 +5,14 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### The VS Code extension on Windows
+
+The Marketplace had no Windows package for 0.4.4, so VS Code on Windows installed the universal `ry.vsix`, which bundles no binary, and failed with "spawn ry ENOENT" in the log only. A release now publishes the universal `ry.vsix` only when every platform has its package, and the extension shows an error with a link to the installation page when it finds no `ry` to start.
+
+### The Linux runtime loads on glibc 2.41 and later
+
+The `libR.so` of 0.4.4 had no `PT_GNU_STACK` program header, because BOLT's `-use-gnu-stack` overwrote it. glibc 2.41 and later then refused to load the library ("cannot enable executable stack"), so `ry run` failed on such systems. The release build now links with `-z noexecstack`, restores the header after BOLT, and fails if `libR.so` or `ry` lacks it. A load failure for this cause now says that the runtime was packaged without the header, instead of suggesting a `noexec` mount. Until you upgrade, `GLIBC_TUNABLES=glibc.rtld.execstack=2` works around it.
+
 ### Parallel tests
 
 `ry test --jobs N` runs the test files in `N` worker processes, and a package that sets `Config/testthat/parallel: true` uses every core without the flag. The workers load the package through ry's lazy loader under the project's `ry.toml`, so they need neither pkgload nor every import installed. On the finance benchmark code base (501 test files, 43,011 expectations, 4 cores) the suite takes 84 s with four workers against 252 s in one process. See [the CLI reference](/reference/cli#parallel-tests).

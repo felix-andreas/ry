@@ -217,7 +217,11 @@ if [ -n "$bolt" ]; then
 	"$bolt" "$optimized/$library" -o "$runtime" -data="$work/libR.fdata" \
 		-reorder-blocks=ext-tsp -reorder-functions=cdsort -split-functions -split-all-cold \
 		-split-eh -icf=safe -use-gnu-stack -dyno-stats
+	# `-use-gnu-stack` turns the PT_GNU_STACK entry into the PT_LOAD of the moved code. Without
+	# the header glibc 2.41 and later refuse to load libR, so it goes back over the PT_NOTE entry.
+	python3 -I tools/layout/gnu_stack.py restore "$runtime"
 fi
+python3 -I tools/layout/gnu_stack.py check "$runtime"
 # `--emit-relocs` leaves static relocation sections, which keep the symbol table alive through a
 # plain strip and double the file. Only those go: the dynamic relocations stay.
 objcopy --remove-relocations='*' "$runtime"

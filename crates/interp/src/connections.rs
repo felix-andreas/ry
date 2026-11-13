@@ -3803,6 +3803,28 @@ fn parse_mode(mode: &[u8]) -> Option<Mode> {
 }
 
 pub(crate) fn os_message(failure: &std::io::Error) -> String {
+    // On Windows the raw code is a Win32 error, not an errno, so strerror would name the wrong
+    // failure (ERROR_PATH_NOT_FOUND, 3, reads "No such process"). The kind carries the errno
+    // wording GNU R reports there.
+    #[cfg(windows)]
+    {
+        use std::io::ErrorKind;
+        let text = match failure.kind() {
+            ErrorKind::NotFound => "No such file or directory",
+            ErrorKind::PermissionDenied => "Permission denied",
+            ErrorKind::AlreadyExists => "File exists",
+            ErrorKind::InvalidInput => "Invalid argument",
+            _ => {
+                let text = failure.to_string();
+                return match text.rfind(" (os error") {
+                    Some(end) => text[..end].to_owned(),
+                    None => text,
+                };
+            }
+        };
+        text.to_owned()
+    }
+    #[cfg(not(windows))]
     match failure.raw_os_error() {
         // SAFETY: strerror returns a valid C string for any error number.
         Some(code) => unsafe {
