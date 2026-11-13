@@ -91,6 +91,25 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
 
+## Parked: cheaper global bindings in top-level loops (tier 0)
+
+Branch `perf/global-loop-tier0` holds the work, which is not merged and not gated.
+- **What it does.** Global reads and writes go through the site's cached binding cell, validated by the existing `Heap::lookup_stamp`, the one stamp tier 1 also checks; no new invalidation source. `lockBinding` and `makeActiveBinding` move no stamp, so every fast path reads the cell's flags. ForStep keeps its variable's cell under the stamp. `x <- left op right` on an unshared scalar global overwrites it in place (reuse bit 2 on `Op::Arithmetic`, `assign_in_place`).
+- **Pinned by** the oracle case `base__global_loop_bindings` (recorded with GNU R 4.6.2; passes on ry-jit, ry-gctorture-young and ry-jit-gctorture). It covers each binding-change path (assign, `<<-`, eval, rm, `sys.source`, `list2env`, `delayedAssign`, attach and detach, masks of `+` and `<-`, `makeActiveBinding`, `lockBinding`, removing or reassigning the loop variable) and in-place captures.
+- **Ir per iteration** of `s <- 0; for (i in 1:N) s <- s + i` (the 2e6 run minus the 1e6 run; GNU R 249, target about 270):
+
+  | part | main | branch | with the draft fast paths |
+  |---|---|---|---|
+  | GetVar x2 | 332 | 142 | |
+  | SetVar plus Arithmetic | 256 | 138 | |
+  | ForStep | 200 | 152 | |
+  | Jump (back edge) | 63 | 63 | |
+  | total | 856 | 495 | 412 |
+
+- **Draft, not gated.** The branch's last commit adds a call-free ForStep path and inline back-edge counting in `jump_fast` (495 to 412). It was not run through the oracle or test_tiers.
+- **Remaining ceilings**, estimated rather than built: GetVar about 40 each (stamp, start and flag checks, kind switch, feedback), the arithmetic plus in-place store about 80 (it re-decodes the SetVar and repeats the stamp check), ForStep about 75. That puts the realistic total near 280 and the ceiling near 220.
+- **Unmeasured:** compile cost, RSS, and the effect on the application workloads, testthat_full and the public suite. Top-level loops may be rare in the applications, so measure the workloads before building more; the lead's bar is 3% on a named workload (2% on testthat).
+
 ## Open: console input in ry's runtime
 
 - Ctrl-C during the script `ry run` queues before its console is not reported to the preflight, because the script goes to R as one unit: the console session keeps the bindings of the script's unrun rest.
@@ -119,12 +138,20 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 
 ### Typed ry against Rust: the programs above twice Rust's time
 
-The bar is twice the Rust twin's time (`tools/bench/typed/`, `just bench typed` on a release build; a single program runs on any build with the typed harness prepended, `ry run main.R` in a scratch project). The ratios below are typed time over Rust time on a release build of a shared machine, so read them as an order, not as results. At or under the bar: `vasicek`, `array_sum`, `sales`, `closures`, `drawdown`, `bond_book`, `array_filter`, `array_dot`, `loop_sum`, `array_map`, `report`, `vector_arith`, `log_rank`, `fib` and `orders`. Every step below has to keep compile time flat: the typed core is single-pass, and the suite reports its total compile time beside `rustc`'s. Compare that total before and after any change to inlining, which is where it grows.
+The bar is twice the Rust twin's time (`tools/bench/typed/`, `just bench typed` on a release build; a single program runs on any build with the typed harness prepended, `ry run main.R` in a scratch project). The ratios below are typed time over Rust time on a release build of a shared machine, so read them as an order, not as results. At or under the bar: `vasicek`, `array_sum`, `sales`, `closures`, `drawdown`, `bond_book`, `array_filter`, `array_dot`, `loop_sum`, `array_map`, `report`, `vector_arith`, `log_rank`, `fib`, `orders` and `team_scores`. Every step below has to keep compile time flat: the typed core is single-pass, and the suite reports its total compile time beside `rustc`'s. Compare that total before and after any change to inlining, which is where it grows.
 
 | Program | Ratio | Top cost | Next step |
 | --- | --- | --- | --- |
 | `expr_tree` | about 12 | The tree is built by untyped R, so every `evaluate` call converts it into boxes (see "Box conversion at the boundary" above). Evaluating a natively built tree is about 4% of the time. | Keep the box beside the R record it came from, or build the tree in typed code. |
-| `team_scores` | about 2.2 | About 1,420 instructions per row (callgrind), spread out: `parsed` is a `List` of `Result` boxes, each holding a record box, so a row allocates two boxes, pushes them on two lists and frees them (about 300 in the runtime, and a third of the roughly 340 in generated code); the scan for the separators and the cut of each piece (about 290); the two number parsers (about 165); the dictionary update (about 130); and the conversion of the `List<Str>` argument on every call (about 150, see below). | `List.map` followed by `List.keep_oks` and `List.walk` fuses into one pass that builds neither list nor box, with `List.len` of either list a counter. Then: a piece that is only parsed is parsed from its offsets without being cut (`Op::Parse` over a range), and the scan compares sixteen bytes at a time. |
+
+`team_scores` is under the bar since its three loops fuse into one (`decisions.md`, "A loop that fills a list is fused with the loop that reads it"). It runs about 890 instructions per row, and two steps would cut more: a piece that is only parsed can be parsed from its offsets without being cut out of the string (`Op::Parse` over a range, about 150 instructions per row for the cuts), and the scan for the separators can compare sixteen bytes at a time (about 180 for the scan).
+
+Loop fusion (`crates/typed/src/loops.rs`) leaves these lists in place:
+
+- **A third stage after two mapped lists.** In `List.map` → `List.map` → a consumer, the first two loops fuse and the third does not. After the first fusion the second list's length is a copy of a copy of the source's length, and its `Set` index is the first consumer's counter, which is assigned from the producer's counter and is not the same variable. `set_source` needs to follow copy chains, and the pass needs a helper that renames an operand, which `crates/typed` does not have.
+- **Loops that share an assigned variable** (a consumer that assigns what the producer reads) stay apart, also where an order of the two bodies exists that keeps every value.
+- **A loop with a call** of R or of a typed function that was not inlined never fuses, because the call could observe the order of the two loops.
+- **A counter nothing else reads.** `unbox::remove_unread` keeps `count = count + 1` when only that instruction reads `count`, so a fused list whose length is never asked for still counts its items.
 
 Two boundary costs sit inside several ratios and belong to no single program: a `List<Str>` argument held by untyped code is converted to a native list on every call, and a numeric list argument is scanned for `NA` on every call (`typed::type_of`). `sales` and `team_scores` pay the first, and a benchmark whose numeric lists are held by untyped code pays the second. A list that records "no `NA`" once, at `List.from_r` or when native code built it, removes the scan.
 
@@ -310,6 +337,14 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Measured.** On team_scores (JIT on, threads pinned), warm Ir went from 2,457.8M to 2,409.2M (-1.98%) per repeat over 14,116 `withRestarts` calls. `make_restart_for` fell from 55M to about 22M. The baseline was a main profile a few commits behind the branch base, not a paired build. The remaining setup is the five inner closures `withRestarts` must define (30M in `bytecode::inner_closure`, mostly its scan of the outer function's constants; `ls()` of the frame shows them, so they stay) and `is_plain_restart`'s method scope (about 18M).
 - **Why parked.** A native muffle in `warning_call` (`conditions.rs`) skips `.signalSimpleWarning`, `withRestarts` and the handler when `suppressWarnings`'s own handler applies, which removes this path from team_scores. What is left matters only for the conditions workload, estimated at 1.5 to 2% there, below the bar.
 - **To revive.** Merge main into the branch and re-measure the conditions workload. The oracle case `conditions__restart_objects` on the branch pins restart fields, names, class, the frame `makeRestart` leaves, copy-on-write of the shared attributes, muffling, `conditionCall`, nested handlers and the frames `withRestarts` leaves; it passes on four engines. The full x3, RSS and `test_tiers` gates were not run.
+
+## Parked: S3 method resolution without a scope walk (branch `perf/s3-resolution`)
+
+- **What it does.** `lookup_in_scope` (`crates/interp/src/dispatch.rs`) resolves a method name in one frame read when the dispatch scope is attached (the calling environment lacks `gp::DETACHED`) and the name's symbol lacks `gp::BOUND_ELSEWHERE`. That sticky bit is set whenever any attached frame other than base binds the symbol, so in that case only the methods table (when it is detached) and base can hold the method. Otherwise the scope walk (calling frames up to the top environment, then the search path) is built once per dispatch, lazily, and shared by every candidate name and by `NextMethod`. `MethodCache` keeps one `MethodRow` record per method name (symbol, string, default name, top, table, stamp, cell) in place of parallel columns, and `default_name` stores `generic.default` in the row. No cache was added.
+- **Invariant check.** With `syntax::testing::enable_invariants()`, each fast resolution is checked against the full walk. `check_s3_lookup_agreement` in `crates/interp/src/testing.rs`, run by `fuzz_s3_method_lookups_agree_with_a_full_walk`, mixes dispatches with random assignments, removals, delayed and active bindings, detached frames and tables. The fuzz test was never built or run.
+- **Measured.** Warm Ir per repeat against a main profile a few commits behind the branch base (not a paired build): objects -1.80% (`resolve_s3` inclusive 5.07% to 3.36%), validation -1.11% (3.34% to 2.40%), testthat -1.05% (2.11% to 1.30%). Timeseries, where `resolve_s3` was 7.43%, was not measured.
+- **Why parked.** The remaining work did not justify its cost under the usage budget.
+- **To revive.** Merge main into the branch, then build and run the fuzz test. Record `crates/oracle/cases/dispatch__method_lookup_scope.R` with `oracle record`; it pins frame, global and table methods, `registerS3method` after the first dispatch, shadowing, implicit classes, `NextMethod` with `.Generic`, `.Class` and `.Method`, and detached tables and frames, and its output matched GNU R 4.6.2 by hand. Measure timeseries, then run the full x3, RSS, `test_tiers` and switch gates. Head: `cdae318ce1e21aeae3d4c588fcb4dc5c6c42444b`.
 
 ## Measured and not taken: O(1) `Sys.getenv` and `options`
 
