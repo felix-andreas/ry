@@ -8504,13 +8504,16 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Simplicity.** `Db::one_shot`, `NameLookup`, `projected_name_layer`, `project_interface_groups`,
   `interface_group`, `item_interface_reads`, `item_frame_binders`, `parse_memo`,
   `item_syntax_memo`, `with_held_tree` and the `SpliceCache` type are gone.
-- **Performance.** On the finance bench (4 cores, `ry check --no-cache`), wall time is 0.85 to
-  0.88 s against 0.75 to 0.89 s with the two paths, CPU time is equal (2.8 to 2.9 s against 2.6
-  to 3.0 s), and peak RSS is 253 MB against 243 MB. The first single-path build peaked at
-  276 MB: about 100,000 per-item `frame_binder` memos for constructed names that nothing binds,
-  which the bound bit removes. In the server, a body edit and a signature edit settle in 3 ms
-  and a new top-level definition in 6 ms at the median on both builds; a request right
-  after an edit costs about 0.3 ms more, because the edited file's items lower again.
+- **Performance.** On the finance bench (4 cores, `ry check --no-cache`, seven interleaved
+  runs of each build), wall time is 0.76 to 0.80 s against 0.72 to 0.77 s with the two paths,
+  CPU time is 2.8 to 2.9 s against 2.6 to 2.8 s, and peak RSS is 252 MB against 244 MB. The
+  first single-path build peaked at 276 MB: about 100,000 per-item `frame_binder` memos for
+  constructed names that nothing binds, which the bound bit removes. In the server, a body edit
+  and a signature edit settle in 3 to 4 ms and a new top-level definition in 6 to 7 ms at the
+  median on both builds, and a request right after an edit takes the same time on both (hover
+  1.5 to 2.0 ms). Opening a file costs more: its diagnostics settle in 24 ms against 16 ms on
+  an idle server, and in 100 to 130 ms against 41 to 44 ms for the file open at start-up
+  (`backlog.md`, "Open: the analysis core after the single lookup path").
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
   so the re-check stays with the readers of the name. A file's groups list items, not positions

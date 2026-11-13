@@ -96,10 +96,17 @@ the host's store", has the shape and the measurements behind this list.
   contain inference variables. Three caches exist only because of the current shape and go with
   it: the per-thread recent-entry cache in front of the interner's shards (`types.rs`), and
   `InferenceTable`'s `resolve_cache` and `definition_cache` (`infer.rs`).
-- **A request right after an edit costs about 0.3 ms more than with a per-item syntax memo**,
-  because every item of the edited file lowers again before `item_hir` backdates. Lowering only
-  the items whose window of the tree changed needs the splice to report which top-level runs it
-  copied.
+- **Opening a file settles its diagnostics 8 ms later than with the two paths** (24 ms against
+  16 ms on an idle server on the finance bench, and 100 to 130 ms against 41 to 44 ms for the
+  file open at start-up; `tools/bench/tooling/lsp_latency.py`). Keystroke latency is equal.
+  Not profiled. The likely cause is that opening lowers the file's durability, which makes
+  salsa verify every memo's inputs once, and `project_bound_names` reads a memo of every file
+  where the two-path lookup read only the names the file uses. At start-up the same query is
+  computed for the whole project before the first file's check can finish.
+- **Every item of an edited file lowers again before `item_hir` backdates**, because no memo
+  holds the item's syntax. It does not show in request latency after an edit. Lowering only
+  the items whose window of the tree changed needs the splice to report which top-level runs
+  it copied.
 - **Tag completion and two reference searches walk every syntax tree untracked** (`ide.rs`,
   the callers of `parse` over all project files). The `spelled_names` query is the model: a
   per-file memo of the names a file spells, so a search opens only the files that can match.
