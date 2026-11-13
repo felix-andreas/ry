@@ -21,7 +21,7 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::{Durability, Setter},
     semantics::{
-        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        AnalysisSettings, DataFiles, Db, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         SourcePaths,
         diagnostics::{
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
@@ -581,8 +581,8 @@ fn analyze_project_with(
     let mut failures = 0;
     let exclude = exclude_matcher(&config, root)?;
     let mut db = match purpose {
-        Purpose::Diagnostics => RootDatabase::one_shot(),
-        Purpose::Rewrites => RootDatabase::one_shot_with_editor_facts(),
+        Purpose::Diagnostics => RootDatabase::for_command(false),
+        Purpose::Rewrites => RootDatabase::for_command(true),
     };
     // The sources and the environment are independent inputs, and a large `NAMESPACE` takes
     // as long to parse as the walk and the reads take, so the two overlap. `DESCRIPTION` is
@@ -827,34 +827,33 @@ fn analyze_project_with(
     let mut surfaces: Vec<Option<Fingerprint>> = vec![None; files.len()];
     for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
-        semantics::with_held_tree(db, file, || {
-            // A file that is not checked contributes only its share of the project-wide maps.
-            if checked(index) {
-                derive_from_syntax(db, file, &config.lint);
-            } else {
-                semantics::diagnostics::warm_project_folds(db, file);
-                semantics::metadata::file_attached_namespaces(db, file);
-            }
-            let root = semantics::parse(db, file).syntax_node();
-            let mut tokens = FxHashSet::default();
-            if want_tokens {
-                namespace::collect_used_tokens(&root, &imported, &mut tokens);
-            }
-            // A partial plan exists only when every recorded surface matches, so only a file
-            // recorded without one needs its surface computed.
-            let surface = match (cache, previous) {
-                (CacheUse::ReadWrite, None) => Some(check_cache::surface(
-                    file.text(db),
-                    &root,
-                    &project_fold_shares(db, file),
-                )),
-                (CacheUse::ReadWrite, Some(previous)) if previous.surface(index).is_none() => Some(
-                    check_cache::surface(file.text(db), &root, &project_fold_shares(db, file)),
-                ),
-                (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => None,
-            };
-            (tokens, surface)
-        })
+        let _held = db.trees().hold(file);
+        // A file that is not checked contributes only its share of the project-wide maps.
+        if checked(index) {
+            derive_from_syntax(db, file, &config.lint);
+        } else {
+            semantics::diagnostics::warm_project_folds(db, file);
+            semantics::metadata::file_attached_namespaces(db, file);
+        }
+        let root = semantics::parse(db, file).syntax_node();
+        let mut tokens = FxHashSet::default();
+        if want_tokens {
+            namespace::collect_used_tokens(&root, &imported, &mut tokens);
+        }
+        // A partial plan exists only when every recorded surface matches, so only a file
+        // recorded without one needs its surface computed.
+        let surface = match (cache, previous) {
+            (CacheUse::ReadWrite, None) => Some(check_cache::surface(
+                file.text(db),
+                &root,
+                &project_fold_shares(db, file),
+            )),
+            (CacheUse::ReadWrite, Some(previous)) if previous.surface(index).is_none() => Some(
+                check_cache::surface(file.text(db), &root, &project_fold_shares(db, file)),
+            ),
+            (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => None,
+        };
+        (tokens, surface)
     }) {
         file_tokens[index] = tokens;
         surfaces[index] = surface;
@@ -940,33 +939,35 @@ fn analyze_project_with(
         thread::scope(|scope| {
             for test in [false, true] {
                 let db = db.clone();
-                scope.spawn(move || {
-                    semantics::NameLookup::new(&db, project, test);
+                scope.spawn(move || match test {
+                    true => {
+                        semantics::test_definitions(&db, project);
+                        semantics::test_conditional_slot_items(&db, project);
+                    }
+                    false => {
+                        semantics::package_definitions(&db, project);
+                        semantics::conditional_slot_items(&db, project);
+                    }
                 });
             }
         });
     }
-    // The walk that finds the project's cyclic groups reads every item's edges on one thread,
-    // so it runs beside the parallel edge pass and waits only on edges another thread is still
-    // computing. The walk records one dependency edge per item, and salsa keeps that capacity
-    // in the handle's reused query-stack frame, so every later query at the same depth would
-    // clear a table sized for the whole project: a throwaway handle takes the walk and drops
-    // the frame.
-    thread::scope(|scope| {
-        if let Some(project) = ProjectFiles::try_get(&db) {
-            let db = db.clone();
-            scope.spawn(move || {
-                semantics::project_interface_groups(&db, project);
-            });
+    in_parallel(&db, workers, &checked_order, |db, index| {
+        if checked(index) {
+            for &item in semantics::item_tree(db, files[index]) {
+                semantics::item_interface_edges(db, item);
+            }
         }
+    });
+    // Each file's walk for its cyclic groups reads the edges of every item the file reaches, so
+    // it follows the edge pass rather than computing other files' edges on its own thread.
+    if let Some(project) = ProjectFiles::try_get(&db) {
         in_parallel(&db, workers, &checked_order, |db, index| {
             if checked(index) {
-                for &item in semantics::item_tree(db, files[index]) {
-                    semantics::item_interface_edges(db, item);
-                }
+                semantics::file_interface_groups(db, project, files[index]);
             }
         });
-    });
+    }
     // Whether the file's findings are known, from the record or from this run.
     let has_findings: Vec<bool> = (0..files.len())
         .map(|index| recorded[index].is_some() || checked(index))
@@ -1238,7 +1239,6 @@ pub(crate) fn check_package_code(
                 semantics::item_interface_edges(db, item);
             }
         });
-        semantics::project_interface_groups(&db.clone(), check.project);
     }
     for (index, diagnostics) in in_parallel(db, workers, &strict, |db, index| {
         let file = files[index].file;
@@ -1314,7 +1314,7 @@ fn install_environment(
             .map(|stub| (stub.stem.clone(), stub.text.clone())),
     );
 
-    // A one-shot check changes one input after analysis starts: the attached namespaces,
+    // A command's check changes one input after analysis starts: the attached namespaces,
     // known only once every file is parsed. Every other input is high durability, so a memo
     // that never read the attached set skips verification in the revision that sets it.
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())

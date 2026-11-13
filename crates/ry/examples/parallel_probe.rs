@@ -4,9 +4,9 @@
 
 use {
     semantics::{
-        Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache,
+        Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, TreeStore,
         diagnostics::file_diagnostics,
-        global_scheme, interface_group, item_naming, item_tree, package_definitions,
+        global_scheme, item_group, item_naming, item_tree, package_definitions,
         stubs::install_shipped_stubs,
         types::{Name, Ty, TyKind, unknown},
     },
@@ -33,7 +33,7 @@ static BLOCKS: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone)]
 struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: Arc<SpliceCache>,
+    trees: Arc<TreeStore>,
 }
 
 impl Default for ProbeDatabase {
@@ -48,7 +48,7 @@ impl Default for ProbeDatabase {
                 }
                 _ => {}
             }))),
-            splice_cache: Arc::default(),
+            trees: Arc::default(),
         }
     }
 }
@@ -58,8 +58,8 @@ impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
 impl Db for ProbeDatabase {
-    fn splice_cache(&self) -> &SpliceCache {
-        &self.splice_cache
+    fn trees(&self) -> &TreeStore {
+        &self.trees
     }
 }
 
@@ -182,9 +182,7 @@ fn main() {
     }
     // Cycle members all take their group's first member's level.
     let same_group = |a: usize, b: usize| {
-        interface_group(&db, project, nodes[a])
-            .as_deref()
-            .is_some_and(|members| members.contains(&nodes[b]))
+        item_group(&db, project, nodes[a]).is_some_and(|members| members.contains(&nodes[b]))
     };
     let mut level: Vec<usize> = vec![0; nodes.len()];
     let mut changed = true;
@@ -360,6 +358,6 @@ fn interface_groups(db: &dyn Db, files: &[SourceFile]) -> usize {
     files
         .iter()
         .flat_map(|&file| item_tree(db, file).iter())
-        .filter(|&&item| interface_group(db, project, item).is_some())
+        .filter(|&&item| item_group(db, project, item).is_some())
         .count()
 }
