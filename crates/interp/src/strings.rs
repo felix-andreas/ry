@@ -606,9 +606,6 @@ fn split_chars(text: &str, pieces: &mut Pieces) {
     );
 }
 
-/// Splits as GNU R does: each search runs on what is left of the text, so `^` matches at every
-/// piece, and an empty match at the start of the rest splits off one character. Pushes the byte
-/// range of each piece onto `pieces`.
 /// The byte a one-byte separator matches, when it matches only itself: any byte with
 /// `fixed = TRUE`, and otherwise one that is not a metacharacter in either regex flavor.
 fn literal_byte(separator: &str, options: PatternOptions) -> Option<u8> {
@@ -635,6 +632,9 @@ fn split_byte(byte: u8, text: &str, pieces: &mut Pieces) {
     }
 }
 
+/// Splits as GNU R does: each search runs on what is left of the text, so `^` matches at every
+/// piece, and an empty match at the start of the rest splits off one character. Pushes the byte
+/// range of each piece onto `pieces`.
 fn split_text(matcher: &Matcher, text: &str, pieces: &mut Pieces) -> R<()> {
     let mut offset = 0;
     while offset < text.len() {
