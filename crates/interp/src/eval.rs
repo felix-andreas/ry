@@ -2777,6 +2777,21 @@ pub unsafe fn pending_env_of(header: usize) -> Sexp {
 #[cold]
 #[inline(never)]
 unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *TRACE.get_or_init(|| std::env::var_os("RY_REIFY_TRACE").is_some()) {
+        let name = match cause {
+            Reify::Builtin(op) => builtin_def(op)?.name,
+            Reify::Site(name) => name,
+        };
+        let head = |call: Sexp| {
+            let car = call.car();
+            if car.kind() == SexpType::Symbol { values::symbol_name(car).to_string() } else { format!("<{:?}>", car.kind()) }
+        };
+        let state = interp();
+        let frame = &state.frames[index];
+        let top = state.frames.last().map_or(String::new(), |top| head(top.call));
+        eprintln!("REIFY\t{name}\t{}\t{top}\t{}", head(frame.call), state.frames.len() - 1 - index);
+    }
     if activity::enabled() {
         let name = match cause {
             Reify::Builtin(op) => builtin_def(op)?.name,
