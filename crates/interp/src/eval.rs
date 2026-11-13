@@ -3876,7 +3876,7 @@ const STACK_SEGMENT: usize = 4 * 1024 * 1024;
 /// (`libr`'s and `rdb`'s readers run R hooks on their own), so a stack pointer outside
 /// `[floor, ceiling]` means a segment the interpreter has not measured.
 #[inline(always)]
-fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
+pub(crate) fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
     let marker = 0u8;
     let pointer = std::ptr::addr_of!(marker) as usize;
     let state = interp();

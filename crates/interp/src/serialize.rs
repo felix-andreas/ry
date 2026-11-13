@@ -7,7 +7,7 @@ use {
         builtins::{BuiltinDef, Call, builtin, internal},
         code_image::{self, Source},
         connections::Rconnection,
-        eval,
+        eval::{self, on_large_stack},
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols, unbound},
     },
@@ -37,6 +37,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("memDecompress", 2, do_mem_decompress),
 ];
 
+/// The fewest bytes an item takes in the binary formats: its flags word.
+const ITEM_BYTES: usize = 4;
+
 // Special item codes.
 const REFSXP: u32 = 255;
 const NILVALUE_SXP: u32 = 254;
@@ -60,6 +63,8 @@ const BCREPREF: u32 = 243;
 const IS_OBJECT: u32 = 1 << 8;
 const HAS_ATTR: u32 = 1 << 9;
 const HAS_TAG: u32 = 1 << 10;
+/// The bits of a promise that GNU R writes: whether its evaluation is under way or was interrupted.
+const GNU_PROMISE_BITS: u16 = 0b11;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -275,7 +280,12 @@ impl Reader<'_> {
             "NaN" => f64::NAN,
             "Inf" => f64::INFINITY,
             "-Inf" => f64::NEG_INFINITY,
-            _ => word.parse().map_err(|_| error("read error"))?,
+            // `serialize(ascii = NA)` writes a double in hexadecimal, which keeps every bit.
+            _ => word
+                .parse()
+                .ok()
+                .or_else(|| crate::coerce::parse_real(&word))
+                .ok_or_else(|| error("read error"))?,
         })
     }
 
@@ -344,10 +354,29 @@ impl Reader<'_> {
         Ok(bytes)
     }
 
-    /// A byte count, which a corrupt stream may give as negative.
+    /// A count the format stores as one integer, which a corrupt stream may give as negative.
     fn count(&mut self) -> R<usize> {
         usize::try_from(self.integer()?)
             .map_err(|_| error("negative length vectors are not allowed"))
+    }
+
+    /// Refuses a vector of `count` elements that the rest of the input cannot hold, before the
+    /// vector is allocated, so a corrupt length costs an error and not the memory it names.
+    /// `width` is the fewest bytes an element takes in the binary formats; in the ASCII format
+    /// an element is at least a character and a newline. How much a connection still holds is
+    /// unknown, so only a slice is checked.
+    fn expect_elements(&self, count: usize, width: usize) -> R<()> {
+        let Input::Slice { bytes, position } = &self.input else {
+            return Ok(());
+        };
+        let width = match self.format {
+            Format::Ascii => width.min(2),
+            Format::Xdr | Format::Binary => width,
+        };
+        match count.checked_mul(width) {
+            Some(needed) if needed <= bytes.len() - position => Ok(()),
+            _ => Err(error("ReadItem: unexpected end of serialized data")),
+        }
     }
 
     fn length(&mut self) -> R<usize> {
@@ -373,29 +402,78 @@ impl Reader<'_> {
             return Err(error("names in persistent strings are not supported yet"));
         }
         let count = self.length()?;
+        self.expect_elements(count, ITEM_BYTES)?;
         let result = alloc(SexpType::String, count)?;
         for index in 0..count {
-            let item = self.item()?;
+            let item = self.character()?;
             values::set_elt(result, index, item);
         }
         Ok(result)
     }
 
+    /// An item that must be a `CHARSXP`: a symbol's name or a string vector's element. The
+    /// collector and the accessors take an object's kind from the position that holds it, so a
+    /// stream that puts another kind there is refused rather than stored.
+    unsafe fn character(&mut self) -> R<Sexp> {
+        let item = self.item()?;
+        if item.kind() != SexpType::Char {
+            return Err(error(
+                "a string in serialized data is not a character value",
+            ));
+        }
+        Ok(item)
+    }
+
+    /// An item that must be an environment or `NULL`, for which this returns `None`: an
+    /// environment's enclosure, a closure's or a promise's environment.
+    unsafe fn environment(&mut self) -> R<Option<Sexp>> {
+        let item = self.item()?;
+        match item.kind() {
+            SexpType::Environment => Ok(Some(item)),
+            SexpType::Nil => Ok(None),
+            _ => Err(error(
+                "an environment in serialized data is not an environment",
+            )),
+        }
+    }
+
+    /// An item that must be an attribute list: `NULL`, or a pairlist of cells named by symbols.
+    unsafe fn attributes(&mut self) -> R<Sexp> {
+        let item = self.item()?;
+        if !named_cells(item) {
+            return Err(error(
+                "attributes in serialized data are not a list of named values",
+            ));
+        }
+        Ok(item)
+    }
+
+    /// An item that must be a cell's tag: a symbol or `NULL`. Calls and argument lists are read
+    /// by tag everywhere, and a reader takes a tag that is not `NULL` for a symbol.
+    unsafe fn tag(&mut self) -> R<Sexp> {
+        let item = self.item()?;
+        if item.kind() != SexpType::Nil && !named_symbol(item) {
+            return Err(error("a name in serialized data is not a symbol"));
+        }
+        Ok(item)
+    }
+
     unsafe fn item(&mut self) -> R<Sexp> {
         let flags = self.integer()? as u32;
-        self.item_with(flags)
+        // A stream nests as deeply as its writer liked, and every level is a frame here.
+        on_large_stack(|| unsafe { self.item_with(flags) })
     }
 
     /// One cell of a pairlist, call or `...` list, without its cdr. The cell is not rooted: the
     /// caller links it into a rooted list before anything else allocates.
     unsafe fn cell(&mut self, kind: SexpType, flags: u32) -> R<Sexp> {
         let attributes = if flags & HAS_ATTR != 0 {
-            self.item()?
+            self.attributes()?
         } else {
             nil()
         };
         let tag = if flags & HAS_TAG != 0 {
-            self.item()?
+            self.tag()?
         } else {
             nil()
         };
@@ -455,7 +533,7 @@ impl Reader<'_> {
                 return Ok(value);
             }
             1 => {
-                let name = self.item()?;
+                let name = self.character()?;
                 let symbol = crate::heap().install_char(name)?;
                 self.add_reference(symbol);
                 return Ok(symbol);
@@ -499,10 +577,12 @@ impl Reader<'_> {
                 let locked = self.integer()? != 0;
                 let env = values::new_env(crate::heap().known().empty_env)?;
                 self.add_reference(env);
-                let enclosure = self.item()?;
+                // GNU R's oldest streams wrote the base environment as `NULL`.
+                let base = crate::heap().known().base_env;
+                let enclosure = self.environment()?.unwrap_or(base);
                 let frame = self.item()?;
                 let hash_table = self.item()?;
-                let attributes = self.item()?;
+                let attributes = self.attributes()?;
                 crate::heap().set_enclosure(env, enclosure);
                 fill_frame(env, frame)?;
                 if hash_table.kind() == SexpType::List {
@@ -526,15 +606,38 @@ impl Reader<'_> {
                 return Ok(env);
             }
             3 | 5 => {
-                let attributes = if has_attributes { self.item()? } else { nil() };
-                let tag = if has_tag { self.item()? } else { nil() };
-                let car = self.item()?;
-                let cdr = bytecode_expression(self.item()?);
+                let attributes = if has_attributes {
+                    self.attributes()?
+                } else {
+                    nil()
+                };
                 let object_kind = if kind == 3 {
                     SexpType::Closure
                 } else {
                     SexpType::Promise
                 };
+                // The tag is the environment. A promise that was forced has none, and a closure
+                // always has one.
+                let environment = if has_tag { self.environment()? } else { None };
+                let tag = environment.unwrap_or(if object_kind == SexpType::Closure {
+                    crate::heap().known().base_env
+                } else {
+                    nil()
+                });
+                let car = self.item()?;
+                if object_kind == SexpType::Closure {
+                    if !named_cells(car) {
+                        return Err(error(
+                            "the formal arguments in serialized data are not a list of named \
+                             arguments",
+                        ));
+                    }
+                } else if car == crate::heap().known().unbound && environment.is_none() {
+                    return Err(error(
+                        "a promise in serialized data has neither a value nor an environment",
+                    ));
+                }
+                let cdr = bytecode_expression(self.item()?);
                 let object = values::triple(object_kind, car, cdr, tag)?;
                 if object_kind == SexpType::Closure
                     && let Some(closures) = &mut self.closures
@@ -546,7 +649,7 @@ impl Reader<'_> {
                 let mut attributes = attributes;
                 if object_kind == SexpType::Closure
                     && attributes.kind() == SexpType::Pairlist
-                    && attributes.tag().kind() == SexpType::Symbol
+                    && named_symbol(attributes.tag())
                     && values::symbol_name(attributes.tag()) == crate::annotations::STREAM_ATTRIBUTE
                 {
                     crate::heap().root(object);
@@ -558,7 +661,13 @@ impl Reader<'_> {
                     crate::heap().set_attrib(object, attributes);
                 }
                 object.set_object(is_object);
-                object.set_gp(levels);
+                // GNU R keeps only a promise's evaluation state in its bits. ry's other promise
+                // bits describe a live frame, so no stream may set them.
+                object.set_gp(if object_kind == SexpType::Promise {
+                    levels & GNU_PROMISE_BITS
+                } else {
+                    levels
+                });
                 return Ok(object);
             }
             2 | 6 | 17 => {
@@ -635,7 +744,9 @@ impl Reader<'_> {
                 return values::mkchar_bytes(&self.string(count)?, encoding);
             }
             21 => {
-                let reps_count = self.integer()? as usize;
+                // Every slot of the table is filled by a definition later in the stream.
+                let reps_count = self.count()?;
+                self.expect_elements(reps_count, ITEM_BYTES)?;
                 let reps = alloc(SexpType::List, reps_count)?;
                 let code = self.bytecode(reps)?;
                 return Ok(code);
@@ -643,7 +754,7 @@ impl Reader<'_> {
             ALTREP_SXP => {
                 let info = self.item()?;
                 let state = self.item()?;
-                let attributes = self.item()?;
+                let attributes = self.attributes()?;
                 let object = altrep_unserialize(info, state)?;
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
@@ -659,6 +770,7 @@ impl Reader<'_> {
         let object = match kind {
             10 | 13 => {
                 let count = self.length()?;
+                self.expect_elements(count, 4)?;
                 let vector = alloc(
                     if kind == 10 {
                         SexpType::Logical
@@ -682,6 +794,7 @@ impl Reader<'_> {
             }
             14 => {
                 let count = self.length()?;
+                self.expect_elements(count, 8)?;
                 let vector = alloc(SexpType::Real, count)?;
                 let data = values::reals_mut(vector);
                 if self.format == Format::Xdr {
@@ -698,6 +811,7 @@ impl Reader<'_> {
             }
             15 => {
                 let count = self.length()?;
+                self.expect_elements(count, 16)?;
                 let vector = alloc(SexpType::Complex, count)?;
                 for index in 0..count {
                     let r = self.real()?;
@@ -708,15 +822,17 @@ impl Reader<'_> {
             }
             16 => {
                 let count = self.length()?;
+                self.expect_elements(count, ITEM_BYTES)?;
                 let vector = alloc(SexpType::String, count)?;
                 for index in 0..count {
-                    let element = self.item()?;
+                    let element = self.character()?;
                     values::set_elt(vector, index, element);
                 }
                 vector
             }
             19 | 20 => {
                 let count = self.length()?;
+                self.expect_elements(count, ITEM_BYTES)?;
                 let vector = alloc(
                     if kind == 19 {
                         SexpType::List
@@ -733,6 +849,7 @@ impl Reader<'_> {
             }
             24 => {
                 let count = self.length()?;
+                self.expect_elements(count, 1)?;
                 let vector = alloc(SexpType::Raw, count)?;
                 if self.format == Format::Ascii {
                     for index in 0..count {
@@ -767,7 +884,7 @@ impl Reader<'_> {
         object.set_gp(levels);
         object.set_object(is_object);
         if has_attributes {
-            let attributes = self.item()?;
+            let attributes = self.attributes()?;
             crate::heap().set_attrib(object, attributes);
         }
         Ok(())
@@ -777,12 +894,13 @@ impl Reader<'_> {
     unsafe fn bytecode(&mut self, reps: Sexp) -> R<Sexp> {
         // The code vector: ry recompiles from the source expression instead.
         self.item()?;
-        let count = self.integer()? as usize;
+        let count = self.count()?;
+        self.expect_elements(count, ITEM_BYTES)?;
         let constants = alloc(SexpType::List, count)?;
         for index in 0..count {
             let kind = self.integer()? as u32;
             let value = match kind {
-                21 => self.bytecode(reps)?,
+                21 => on_large_stack(|| unsafe { self.bytecode(reps) })?,
                 6 | 2 | BCREPDEF | BCREPREF | ATTRLANGSXP | ATTRLISTSXP => {
                     self.bytecode_language(kind, reps)?
                 }
@@ -802,14 +920,14 @@ impl Reader<'_> {
     unsafe fn bytecode_language(&mut self, kind: u32, reps: Sexp) -> R<Sexp> {
         match kind {
             BCREPREF => {
-                let index = self.integer()? as usize;
+                let index = reference_slot(reps, self.integer()?)?;
                 Ok(reps.element(index))
             }
             BCREPDEF | 6 | 2 | ATTRLANGSXP | ATTRLISTSXP => {
                 let mut kind = kind;
                 let mut position: Option<usize> = None;
                 if kind == BCREPDEF {
-                    position = Some(self.integer()? as usize);
+                    position = Some(reference_slot(reps, self.integer()?)?);
                     kind = self.integer()? as u32;
                 }
                 let mut has_attributes = false;
@@ -826,26 +944,41 @@ impl Reader<'_> {
                     _ => SexpType::Pairlist,
                 };
                 let object = values::triple(object_kind, nil(), nil(), nil())?;
+                if has_attributes {
+                    let attributes = self.attributes()?;
+                    crate::heap().set_attrib(object, attributes);
+                }
+                let tag = self.tag()?;
+                crate::heap().set_tag(object, tag);
+                let car_kind = self.integer()? as u32;
+                let car = on_large_stack(|| unsafe { self.bytecode_language(car_kind, reps) })?;
+                crate::heap().set_car(object, car);
+                let cdr_kind = self.integer()? as u32;
+                let cdr = on_large_stack(|| unsafe { self.bytecode_language(cdr_kind, reps) })?;
+                argument_cells(cdr)?;
+                crate::heap().set_cdr(object, cdr);
+                // GNU R fills the slot before it reads the cell's parts. A stream could then
+                // refer to a cell from inside itself and build a list without an end, which no
+                // expression is; here such a reference reads the empty slot.
                 if let Some(position) = position {
                     values::set_elt(reps, position, object);
                 }
-                if has_attributes {
-                    let attributes = self.item()?;
-                    crate::heap().set_attrib(object, attributes);
-                }
-                let tag = self.item()?;
-                crate::heap().set_tag(object, tag);
-                let car_kind = self.integer()? as u32;
-                let car = self.bytecode_language(car_kind, reps)?;
-                crate::heap().set_car(object, car);
-                let cdr_kind = self.integer()? as u32;
-                let cdr = self.bytecode_language(cdr_kind, reps)?;
-                argument_cells(cdr)?;
-                crate::heap().set_cdr(object, cdr);
                 Ok(object)
             }
             _ => self.item(),
         }
+    }
+}
+
+/// The slot of the byte-code reference table that a stream names. GNU R trusts the index; a
+/// stream that names a slot outside the table is refused here, because reading or writing that
+/// slot would touch memory past the table.
+unsafe fn reference_slot(reps: Sexp, index: i32) -> R<usize> {
+    match usize::try_from(index) {
+        Ok(index) if index < values::length(reps) => Ok(index),
+        _ => Err(error(
+            "byte-code reference outside its table in serialized data",
+        )),
     }
 }
 
@@ -860,6 +993,24 @@ unsafe fn argument_cells(rest: Sexp) -> R<()> {
     Ok(())
 }
 
+/// Whether `object` is a symbol that has a name. The marker for an unbound value, which a stream
+/// can put anywhere, is a symbol without one.
+unsafe fn named_symbol(object: Sexp) -> bool {
+    object.kind() == SexpType::Symbol && object.car().kind() == SexpType::Char
+}
+
+/// Whether `list` ends in `NULL` and every cell of it is named by a symbol. Formal arguments and
+/// attributes are read on that assumption, without a check.
+unsafe fn named_cells(mut list: Sexp) -> bool {
+    while list.kind() == SexpType::Pairlist {
+        if !named_symbol(list.tag()) {
+            return false;
+        }
+        list = list.cdr();
+    }
+    list.kind() == SexpType::Nil
+}
+
 /// A closure body or promise code that GNU R compiled: its expression.
 unsafe fn bytecode_expression(value: Sexp) -> Sexp {
     value
@@ -868,6 +1019,11 @@ unsafe fn bytecode_expression(value: Sexp) -> Sexp {
 unsafe fn fill_frame(env: Sexp, mut frame: Sexp) -> R<()> {
     while frame.kind() == SexpType::Pairlist {
         let symbol = frame.tag();
+        if !named_symbol(symbol) {
+            return Err(error(
+                "a binding in serialized data is not named by a symbol",
+            ));
+        }
         let value = frame.car();
         crate::heap().define(env, symbol, value)?;
         // GNU R keeps active and locked bindings in the cell's gp bits, which it serializes
@@ -889,28 +1045,23 @@ unsafe fn fill_frame(env: Sexp, mut frame: Sexp) -> R<()> {
 /// Materializes the ALTREP classes GNU R serializes: compact sequences, deferred strings and
 /// wrappers.
 unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
-    let class = if info.kind() == SexpType::Pairlist {
+    let class = if info.kind() == SexpType::Pairlist && named_symbol(info.car()) {
         values::symbol_name(info.car()).into_owned()
     } else {
         String::new()
     };
     match class.as_str() {
         "compact_intseq" => {
-            let data = crate::coerce::coerce_vector(state, SexpType::Real)?;
-            let count = values::reals(data)[0] as usize;
-            let start = values::reals(data)[1] as i64;
-            let step = values::reals(data)[2] as i64;
+            let (count, start, step) = compact_sequence(state)?;
+            let (start, step) = (start as i64, step as i64);
             let result = alloc(SexpType::Integer, count)?;
             for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-                *slot = (start + index as i64 * step) as i32;
+                *slot = start.wrapping_add((index as i64).wrapping_mul(step)) as i32;
             }
             Ok(result)
         }
         "compact_realseq" => {
-            let data = values::reals(state);
-            let count = data[0] as usize;
-            let start = data[1];
-            let step = data[2];
+            let (count, start, step) = compact_sequence(state)?;
             let result = alloc(SexpType::Real, count)?;
             for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
                 *slot = start + index as f64 * step;
@@ -925,20 +1076,54 @@ unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
             };
             crate::coerce::coerce_vector(argument, SexpType::String)
         }
-        name if name.starts_with("wrap_") => {
+        name => {
+            let kind = match name {
+                "wrap_logical" => SexpType::Logical,
+                "wrap_integer" => SexpType::Integer,
+                "wrap_real" => SexpType::Real,
+                "wrap_complex" => SexpType::Complex,
+                "wrap_string" => SexpType::String,
+                "wrap_raw" => SexpType::Raw,
+                "wrap_list" => SexpType::List,
+                _ => {
+                    return Err(error(format!(
+                        "cannot unserialize ALTVEC object of class '{class}'"
+                    )));
+                }
+            };
             // GNU serializes a wrapper's state as the pairlist `(wrapped, metadata)`.
-            if state.kind() == SexpType::Pairlist {
-                Ok(state.car())
+            let wrapped = if state.kind() == SexpType::Pairlist {
+                state.car()
             } else if state.kind() == SexpType::List && length(state) >= 1 {
-                Ok(state.element(0))
+                state.element(0)
             } else {
-                Ok(state)
+                state
+            };
+            // The caller sets the stream's attributes on the result. A vector of the wrapper's
+            // type was read from this stream and belongs to nothing else, whereas `NULL`, a
+            // string's element or an environment would be shared with the whole session.
+            if wrapped.kind() != kind {
+                return Err(error(format!(
+                    "a '{class}' object in serialized data does not wrap a vector of its type"
+                )));
             }
+            Ok(wrapped)
         }
-        _ => Err(error(format!(
-            "cannot unserialize ALTVEC object of class '{class}'"
-        ))),
     }
+}
+
+/// The length, first value and step of a compact sequence, which GNU R writes as three doubles.
+unsafe fn compact_sequence(state: Sexp) -> R<(usize, f64, f64)> {
+    if matches!(state.kind(), SexpType::Real | SexpType::Integer)
+        && let [count, start, step, ..] =
+            *values::reals(crate::coerce::coerce_vector(state, SexpType::Real)?)
+        && count >= 0.0
+    {
+        return Ok((count as usize, start, step));
+    }
+    Err(error(
+        "cannot unserialize a compact sequence whose state is not a length, a start and a step",
+    ))
 }
 
 /// Reads one serialized object from `bytes`.

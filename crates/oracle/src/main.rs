@@ -1,8 +1,8 @@
 use {
     clap::{Parser, Subcommand},
     oracle::{
-        BUILD_FILE, Build, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
-        Verdict,
+        BUILD_FILE, Build, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE,
+        ProcessEngine, Verdict,
         bench::{self, Summary},
         build_file, check_build, diff, engine_from_environment, engine_packages, expected_path,
         fails_run, find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
@@ -618,27 +618,30 @@ fn compare(
                 1 => case.display().to_string(),
                 _ => format!("{} [{name}]", case.display()),
             };
-            let failure = match engine.run(case) {
-                Ok(actual) => diff("GNU R", &expected, &name, &actual)
-                    .map(|difference| format!("DIFFERS {shown}\n{difference}")),
+            let (run, failure) = match engine.run(case) {
+                Ok(actual) => match diff("GNU R", &expected, &name, &actual) {
+                    Some(difference) => (
+                        CaseRun::Failed,
+                        Some(format!("DIFFERS {shown}\n{difference}")),
+                    ),
+                    None => (CaseRun::Passed, None),
+                },
                 Err(EngineError::Unavailable(_)) => {
                     tally.unavailable += 1;
                     continue;
                 }
-                Err(error) => Some(format!("ERROR   {shown}: {error}")),
+                Err(EngineError::Crashed(error)) => {
+                    (CaseRun::Crashed, Some(format!("CRASHED {shown}: {error}")))
+                }
+                Err(error) => (CaseRun::Failed, Some(format!("ERROR   {shown}: {error}"))),
             };
             let entry = known_failure(&known, case, &name);
-            let verdict = verdict(failure.is_some(), entry);
+            let verdict = verdict(run, entry);
             tally.fails |= fails_run(verdict);
             match verdict {
                 Verdict::Passed => {
                     println!("ok      {shown}");
                     tally.passed += 1;
-                }
-                Verdict::IntermittentPassed => {
-                    println!("ok      {shown} (listed as intermittent)");
-                    tally.passed += 1;
-                    tally.intermittent_passed += 1;
                 }
                 Verdict::ListedButPassing => {
                     println!(
@@ -653,9 +656,6 @@ fn compare(
                         if entry.provisional {
                             notes.push("provisional".to_string());
                         }
-                        if entry.intermittent {
-                            notes.push("intermittent".to_string());
-                        }
                         println!("known   {shown}: {} ({})", entry.reason, notes.join(", "));
                     }
                     tally.known += 1;
@@ -663,6 +663,12 @@ fn compare(
                 Verdict::New => {
                     if let Some(failure) = &failure {
                         println!("{failure}");
+                    }
+                    if entry.is_some() {
+                        println!(
+                            "        {shown}: listed in {KNOWN_FAILURES_FILE}, but a crash is \
+                             never a known failure"
+                        );
                     }
                     tally.new += 1;
                 }
@@ -713,13 +719,6 @@ fn compare(
             ));
         }
         println!("{line}");
-        if tally.intermittent_passed > 0 {
-            println!(
-                "{partial}{}: intermittent, passed here: {}",
-                engine.name(),
-                tally.intermittent_passed
-            );
-        }
         failed |= tally.fails;
     }
     if selection.missing > 0 {
@@ -744,7 +743,6 @@ struct Tally {
     known: usize,
     new: usize,
     listed_but_passing: usize,
-    intermittent_passed: usize,
     unavailable: usize,
     /// Whether any case's [`Verdict`] fails the run.
     fails: bool,

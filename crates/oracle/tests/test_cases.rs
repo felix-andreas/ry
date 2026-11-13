@@ -10,8 +10,8 @@
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine, Verdict,
-        check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
+        BUILD_FILE, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
+        Verdict, check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
         gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
         libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, render,
         runnable_cases, ry_runtime_available, verdict, write_build,
@@ -129,9 +129,16 @@ fn second_engine_matches_gnu_r() {
     let name = second.name();
     let mut failures = Vec::new();
     for case in cases() {
-        let failure = match second.run(&case) {
+        let (run, failure) = match second.run(&case) {
             Err(EngineError::Unavailable(_)) => return,
-            Err(error) => Some(format!("{}: {error}", case.display())),
+            Err(EngineError::Crashed(error)) => (
+                CaseRun::Crashed,
+                Some(format!("{} crashed: {error}", case.display())),
+            ),
+            Err(error) => (
+                CaseRun::Failed,
+                Some(format!("{}: {error}", case.display())),
+            ),
             Ok(actual) => {
                 let expected = match gnu_r.run(&case) {
                     Ok(expected) => expected,
@@ -141,12 +148,17 @@ fn second_engine_matches_gnu_r() {
                     }
                     Err(error) => panic!("{}: {error}", case.display()),
                 };
-                diff("GNU R", &expected, &name, &actual)
-                    .map(|difference| format!("{}\n{difference}", case.display()))
+                match diff("GNU R", &expected, &name, &actual) {
+                    Some(difference) => (
+                        CaseRun::Failed,
+                        Some(format!("{}\n{difference}", case.display())),
+                    ),
+                    None => (CaseRun::Passed, None),
+                }
             }
         };
         let entry = known_failure(&known, &case, &name);
-        match verdict(failure.is_some(), entry) {
+        match verdict(run, entry) {
             Verdict::Known => {
                 if let Some(entry) = entry {
                     eprintln!("known {}: {}", case.display(), entry.reason);
@@ -157,7 +169,7 @@ fn second_engine_matches_gnu_r() {
                 "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
                 case.display()
             )),
-            Verdict::Passed | Verdict::IntermittentPassed => {}
+            Verdict::Passed => {}
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -171,72 +183,57 @@ fn known_failures_are_valid() {
     }
 }
 
-/// A crash that depends on the host or on timing is listed as intermittent, and its case passing
-/// does not fail the run, while any other listed case that passes does, so its fix deletes it.
+/// A listed case that passes fails the run, so its fix deletes its entry. A listed case that
+/// crashes fails it too, and no mark turns either into a pass.
 #[test]
-fn a_passing_intermittent_entry_does_not_fail_the_run() {
-    let known = parse_known_failures(
-        r#"
-[[failure]]
-case = "base__match_arg_native"
-engine = "ry-jit-gctorture"
-area = "jit"
-reason = "aborts under the collector on some hosts"
-intermittent = true
-
-[[failure]]
-case = "base__match_arg_native"
-engine = "ry-gctorture"
-area = "gc"
-reason = "aborts under the collector"
-"#,
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+fn a_listed_case_fails_the_run_when_it_passes_or_crashes() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"ry-jit-gctorture\"\n\
+                 area = \"jit\"\nreason = \"prints one warning GNU R does not\"\n";
+    let known = parse_known_failures(entry, directory).unwrap_or_else(|error| panic!("{error}"));
     let case = case_directory().join("base__match_arg_native.R");
-    let intermittent = known_failure(&known, &case, "ry-jit-gctorture");
-    let plain = known_failure(&known, &case, "ry-gctorture");
+    let listed = known_failure(&known, &case, "ry-jit-gctorture");
+    assert!(listed.is_some());
 
-    assert_eq!(verdict(false, intermittent), Verdict::IntermittentPassed);
-    assert!(!fails_run(verdict(false, intermittent)));
-    assert_eq!(verdict(true, intermittent), Verdict::Known);
-    assert!(!fails_run(verdict(true, intermittent)));
+    assert_eq!(verdict(CaseRun::Passed, listed), Verdict::ListedButPassing);
+    assert!(fails_run(verdict(CaseRun::Passed, listed)));
+    assert_eq!(verdict(CaseRun::Failed, listed), Verdict::Known);
+    assert!(!fails_run(verdict(CaseRun::Failed, listed)));
+    assert_eq!(verdict(CaseRun::Crashed, listed), Verdict::New);
+    assert!(fails_run(verdict(CaseRun::Crashed, listed)));
 
-    assert_eq!(verdict(false, plain), Verdict::ListedButPassing);
-    assert!(fails_run(verdict(false, plain)));
-    assert_eq!(verdict(true, plain), Verdict::Known);
-    assert!(!fails_run(verdict(true, plain)));
+    assert!(fails_run(verdict(CaseRun::Failed, None)));
+    assert!(fails_run(verdict(CaseRun::Crashed, None)));
+    assert!(!fails_run(verdict(CaseRun::Passed, None)));
 
-    assert!(fails_run(verdict(true, None)));
-    assert!(!fails_run(verdict(false, None)));
+    match parse_known_failures(&format!("{entry}intermittent = true\n"), directory) {
+        Ok(_) => panic!("an entry marked intermittent must be refused"),
+        Err(error) => assert!(error.contains("intermittent"), "{error}"),
+    }
 }
 
-/// Only a collector-stress engine's crash may be intermittent: a failure under any other engine
-/// reproduces on every host, so the file refuses the mark there.
+/// An entry that names an unknown engine, a case that does not exist, or the same case and engine
+/// twice is refused.
 #[test]
-fn intermittent_is_refused_outside_the_gctorture_engines() {
-    let entry = |engine: &str| {
+fn a_mistyped_or_repeated_known_failure_is_refused() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = |case: &str, engine: &str| {
         format!(
-            "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"{engine}\"\n\
-             area = \"jit\"\nreason = \"crashes\"\nintermittent = true\n"
+            "[[failure]]\ncase = \"{case}\"\nengine = \"{engine}\"\narea = \"jit\"\n\
+             reason = \"differs\"\n"
         )
     };
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for engine in ["ry", "ry-tier0", "ry-jit"] {
-        let error = parse_known_failures(&entry(engine), directory)
-            .expect_err("an intermittent entry under an engine without gctorture");
+    let valid = entry("base__match_arg_native", "ry-jit");
+    assert!(parse_known_failures(&valid, directory).is_ok());
+    for refused in [
+        entry("base__match_arg_native", "ry-turbo"),
+        entry("base__no_such_case", "ry-jit"),
+        format!("{valid}{valid}"),
+    ] {
         assert!(
-            error.contains(&format!(
-                "`base__match_arg_native` under `{engine}` is marked intermittent, which only an \
-                 entry under ry-gctorture, ry-gctorture-young, ry-jit-gctorture may be"
-            )),
-            "{error}"
+            parse_known_failures(&refused, directory).is_err(),
+            "{refused}"
         );
-    }
-    for engine in ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"] {
-        if let Err(error) = parse_known_failures(&entry(engine), directory) {
-            panic!("{error}");
-        }
     }
 }
 

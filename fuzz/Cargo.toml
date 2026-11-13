@@ -25,11 +25,14 @@ libr = { path = "../crates/libr", optional = true }
 # Only the `ry` binary uses mimalloc, so the targets skip building it.
 ry-lang = { path = "../crates/ry", default-features = false }
 
-# The runtime targets link polars, whose build needs far more memory than the
-# analysis targets, so `--no-default-features` builds the analysis targets alone.
+# `runtime` adds the interpreter's targets. `polars` adds the two targets whose crates link Polars
+# (`csv` through `table`, `unserialize` through `libr`). Instrumented, Polars needs far more memory
+# to build than everything else here, so `--no-default-features --features runtime` builds every
+# other target on a machine that cannot build it.
 [features]
-default = ["runtime"]
-runtime = ["dep:interp", "dep:table", "dep:libr"]
+default = ["runtime", "polars"]
+runtime = ["dep:interp"]
+polars = ["dep:table", "dep:libr"]
 
 [[bin]]
 name = "parse"
@@ -121,7 +124,7 @@ bench = false
 [[bin]]
 name = "unserialize"
 path = "fuzz_targets/unserialize.rs"
-required-features = ["runtime"]
+required-features = ["polars"]
 test = false
 doc = false
 bench = false
@@ -136,7 +139,7 @@ bench = false
 [[bin]]
 name = "csv"
 path = "fuzz_targets/csv.rs"
-required-features = ["runtime"]
+required-features = ["polars"]
 test = false
 doc = false
 bench = false
@@ -144,9 +147,9 @@ bench = false
 # Its own workspace, so the libFuzzer build and its sanitizer flags stay out of the main one.
 [workspace]
 
-# Polars is a dependency, not a fuzzing subject, and at opt-level 3 with
-# coverage instrumentation its largest crates need more memory than a 16GB
-# machine has. A lower level without debug info keeps the build within it.
+# Polars is a dependency, not a fuzzing subject, and with coverage instrumentation its largest
+# crates need more memory than a 16GB machine has. A lower level without debug info lowers the
+# peak, which is still too high for four parallel jobs in 15GB: `polars-core` alone passes 7GB.
 [profile.release.package.polars]
 opt-level = 1
 debug = false

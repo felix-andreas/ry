@@ -63,6 +63,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - After each release, append rows to the progress dashboard (`releasing.md`, "The progress dashboard"). Its `cran_popular` dataset is empty ("Open: the CRAN package corpus").
 - The Zed extension is not in Zed's registry, and the `VSCE_PAT` fallback for the VS Code Marketplace stops working on December 1, 2026 (`releasing.md`).
 - CI runs only on manual dispatch (user decision), and the orchestrator starts it on main when main has new commits (`decisions.md`, "CI runs in the flake's dev shell").
+- `.github/pending/test.yml` (the tests that need no GNU R and a 60-second pass of every fuzz target that builds without Polars, started by hand or by a release, never on a push) and the release workflow's dependency on it wait for the user's `git pull && just accept` (`decisions.md`, "The tests that need no GNU R run by hand and gate a release, never on push").
 
 ## Long-term
 
@@ -242,6 +243,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - **A new dev-dependency feature goes into `crates/features`**, or building and testing compile two dependency trees (`decisions.md`, "Workspace-wide feature unification").
 - **A full disk shows up as a test-build failure** (ENOSPC, or a Bus error at link). Run `just prune` first; a cloud container's quota is about 40 GB whatever `df` says.
 - **CI is `nix develop .#ci -c just ci`.** Reproduce a failure in that shell, and change CI in the `ci` recipe or `flake.nix` (`decisions.md`, "CI runs in the flake's dev shell").
+- **A crash is never a known failure.** The oracle counts a case whose engine was killed by a signal as new under every engine, even when `known_failures.toml` lists it, and the file has no intermittent mark (`decisions.md`, "A crash is never a known failure").
 - **Agent containers are provisioned by `tools/dev-setup.sh`, and `flake.nix` inputs stay `git+https`** (`decisions.md`, "Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell", "Flake inputs are git URLs").
 - **Nightly releases are GitHub pre-releases with `--latest=false`, and the Zed extension reads full releases only** (`pre_release: false`, `editors/zed/src/lib.rs`). Zed matches the flag exactly, so the two move together.
 - **BOLT's `-use-gnu-stack` overwrites libR's `PT_GNU_STACK` header, and glibc 2.41+ refuses a library without it.** `tools/layout/optimize.sh` restores it (`gnu_stack.py`), and `just package` checks.

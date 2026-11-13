@@ -39,9 +39,18 @@ without one it publishes with `--oidc`, which works only inside GitHub Actions.
 
 ## The workflows
 
-`.github/workflows/` holds four workflows: `release.yml`, `nightly.yml` (below), `docs.yml` (the docs deploy below) and
-`ci.yml`. CI runs only when started by hand (from the Actions tab, on any ref), not on pushes or pull
-requests. The orchestrating agent starts it on main at its hourly check when main has new commits.
+`.github/workflows/` holds `release.yml`, `nightly.yml` (below), `docs.yml` (the docs deploy below),
+`cachix.yml` (fills the nix binary cache at each release) and `ci.yml`. `ci.yml` is the full gate
+against GNU R. It runs only when started by hand (from the Actions tab, on any ref), not on pushes
+or pull requests: the orchestrating agent starts it on main at its hourly check when main has new
+commits.
+
+`.github/pending/` holds two staged files that run nothing until a maintainer accepts them with the
+command below. `test.yml` runs the fixture suites, the tests of the crates that need no R and a
+bounded fuzz pass ([Testing](/development/testing#running-one-case)). Like `ci.yml`, it starts only
+by hand, not on pushes or pull requests. The staged `release.yml` adds a `tests` job that calls
+`test.yml`, and `publish` needs it, so a release is the one event that runs these tests without a
+hand start. A nightly build is not gated on the tests.
 
 Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
 under the same name in `.github/pending/`. A maintainer then moves it into place, commits and
@@ -210,14 +219,15 @@ version that differs from any of the three.
    a scratch directory, smoke-tests it (`tools/smoke-test.sh`), packages the VS Code extension and
    builds the nix package.
 2. Run `just try` and read every step's output. `crates/oracle/known_failures.toml` must be
-   empty, intermittent entries included ([Testing](/development/testing#known-oracle-failures)).
+   empty ([Testing](/development/testing#known-oracle-failures)).
 3. Write the release's entry on the [news page](/news).
 4. Run `just bump-version X.Y.Z-beta` (it commits), and push.
 5. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the
    version, untick **publish**, and run it. It builds and smoke-tests every archive without
-   publishing anything.
+   publishing anything. With the staged `release.yml` accepted, the run also executes `test.yml`.
 6. Push the tag (`git tag X.Y.Z-beta && git push origin X.Y.Z-beta`), or run the workflow again
-   with **publish** ticked.
+   with **publish** ticked. With the staged `release.yml` accepted, nothing is published unless
+   the `tests` job passes.
 7. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
    hand and run `ry --version`, and check the extension's version on the Marketplace.
 8. Update [Installation](/installation) to name the new release and its archives. For the first

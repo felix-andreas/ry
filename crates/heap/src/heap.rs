@@ -965,6 +965,13 @@ impl Heap {
         &self.policy
     }
 
+    /// Sets the largest single allocation the heap attempts and returns the previous one. A
+    /// harness that reads hostile input lowers it, so a length the input invents is refused
+    /// with the error for a vector that does not fit, instead of being allocated.
+    pub fn set_allocation_ceiling(&mut self, bytes: usize) -> usize {
+        std::mem::replace(&mut self.allocation_ceiling, bytes)
+    }
+
     /// Changes the collection policy. The allocation fast path reads a budget derived from it,
     /// which this recomputes, so the policy has no other mutable access.
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {

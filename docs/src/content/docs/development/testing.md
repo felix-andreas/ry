@@ -49,7 +49,23 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check. CI runs `just ci`, which
+behavior. `just gate` runs every test plus clippy and a formatting check.
+
+Tests run locally, with `just gate` for everything and the two recipes below for the part that
+needs no GNU R. CI runs tests only when a maintainer starts a workflow by hand or tags a release,
+never on a push or a pull request. The workflow for the part without GNU R, `test.yml`, is staged
+in `.github/pending/` and runs nothing until a maintainer accepts it
+([Releasing](/development/releasing#the-workflows)). It has two jobs:
+
+| Job | Recipe | What it runs |
+| --- | --- | --- |
+| `tests` | `just test-fast` | Every test of the crates that build without the interpreter, libR and Polars (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `oracle`, `rcmd`, `repl` and `ry-lang`): every fixture suite, the property fuzzers' bounded passes, the simulator and the scenarios. A test that compares with GNU R or runs ry's runtime skips, because the runner has neither |
+| `fuzz` | `just fuzz-all 60 runtime` | Every libFuzzer target that builds without Polars (15 of 17, all but `csv` and `unserialize`) for 60 seconds of wall clock each. Every target runs, and the job fails if any finds a failure. A failing input is uploaded with the run |
+
+The staged `release.yml` calls `test.yml`, and its `publish` job needs it, so once both files are
+accepted a release with a failing test publishes nothing.
+
+The full gate is `ci.yml`. It runs `just ci`, which
 builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
 flake's `ci` dev shell. That shell pins everything the tests touch (the Rust toolchain, GNU R 4.6.2
 built as the oracle recorded it, GCC 13.3, glibc and the oracle's locales), so this command
@@ -59,9 +75,9 @@ reproduces a CI run on any machine with nix:
 nix develop .#ci -c just ci
 ```
 
-To change what CI runs, edit the `ci` recipe or the shell in `flake.nix`; the workflow file only
-calls them. CI runs only when started by hand: the orchestrating agent starts it on main at its
-hourly check when main has new commits, so a push or a pull request gets no CI run of its own.
+To change what a workflow runs, edit its recipe or the shell in `flake.nix`; the workflow files only
+call them. The full gate runs only when started by hand: the orchestrating agent starts it on main
+at its hourly check when main has new commits. A pull request gets no run of its own.
 
 ### Blessing expectations
 
@@ -426,9 +442,9 @@ but not yet confirmed on main itself.
 ```toml
 [[failure]]
 case = "base__match_arg_native"
-engine = "ry-jit-gctorture"
+engine = "ry-jit"
 area = "jit"
-reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+reason = "the compiled body warns twice where GNU R warns once"
 ```
 
 `oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
@@ -438,24 +454,15 @@ only for a failure main already has, never for one your own change introduces. A
 listed failure as `known` without its diff and ends with one line per engine:
 
 ```
-ry-jit-gctorture: 409 passed, 16 failed (16 known, 0 new), 0 skipped
+ry-jit: 409 passed, 16 failed (16 known, 0 new), 0 skipped
 ```
 
-A crash under a gctorture engine (`ry-gctorture`, `ry-gctorture-young` or `ry-jit-gctorture`) can
-depend on the host or on timing, because it depends on where the collector happens to run. For
-such an entry, `intermittent = true` makes a passing case not fail the run. The case prints as
-`ok ... (listed as intermittent)`, counts as passed, and is tallied on its own line:
-
-```
-ok      cases/print__deparse_undefined_s4_class.R [ry-jit-gctorture] (listed as intermittent)
-known   cases/base__match_arg_native.R [ry-jit-gctorture]: aborts: after a deopt exit, ... (area jit)
-ry-jit-gctorture: 1 passed, 1 failed (1 known, 0 new), 0 skipped
-ry-jit-gctorture: intermittent, passed here: 1
-```
-
-A run where it fails reports it as known. The oracle refuses `intermittent` under any other
-engine, because a failure there reproduces on every host. A beta release requires the file to be
-empty, intermittent entries included.
+A crash is never a known failure. When an engine is killed by a signal, the run prints the case
+as `CRASHED` and counts it as new even if the file lists it, because a crash is a memory-safety
+bug and blocks until it is fixed. Where it shows can depend on the host, since it depends on
+where the collector happens to run, which is why the gctorture engines (`ry-gctorture`,
+`ry-gctorture-young` and `ry-jit-gctorture`) exist. The file has no mark that lets a case pass on
+some runs and fail on others. A beta release requires the file to be empty.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
 a case needs a package that is not installed or a locale that is not generated. A case names them
@@ -475,8 +482,9 @@ PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package 
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
-The oracle refuses a file whose entry names an unknown engine, a missing case, the same case and
-engine twice, or `intermittent` outside the gctorture engines, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+The oracle refuses a file whose entry names an unknown engine, a missing case, an unknown key, or
+the same case and engine twice. `known_failures_are_valid` in `test_cases.rs` checks the file
+without running R.
 
 ### The table engine
 
@@ -609,20 +617,62 @@ thin wrapper around a battery its crate exports, which the crate's in-tree harne
 | `lsp` | the language-server simulator, `run_session`, reading its choices from the input |
 | `load_index`, `reload` | `loader::testing::check_load_index_input`, `check_random_reload` |
 | `sniff` | `sniff::check_sniff_invariants` |
-| `csv` | `table::io::check_csv_input` |
+| `csv` | `table::io::check_csv_bytes` |
 | `interp_lower`, `interp_unserialize`, `bytecode` | `interp::testing::check_lowering_input`, `check_unserialize_input`, `check_bytecode_agreement` |
+| `interp_code_image`, `interp_code_image_file` | `interp::testing::check_code_image_round_trip`, `check_code_image_file` |
 | `unserialize` | `R::serialize::check_unserialize_input` |
 
 The `semantics` target derives its document kind and an incremental edit from the input bytes, so a
 single byte stream drives the full battery, the spliced reparse of the edit included. The generator-driven targets
 (`lsp`, `reload`, `bytecode`) read the generator's choices from the input through
-`syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session. The
-runtime targets link polars, so `cargo fuzz build --no-default-features` builds only the analysis
-targets on a machine with little memory.
+`syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session.
+
+Two features of `fuzz/Cargo.toml` select the targets. `runtime` adds the interpreter's targets, and
+`polars` adds `csv` and `unserialize`, whose crates link Polars. Building Polars with coverage
+instrumentation needs more memory than everything else in the workspace: in a 15 GB container
+with four build jobs, the compiler is killed while it builds `polars-core`. On such a machine,
+`cargo fuzz build --no-default-features --features runtime` builds the other 15 targets, and
+`--no-default-features` alone builds the analysis targets.
+
+A target that links the runtime's heap runs without leak detection. LeakSanitizer does not scan
+mapped memory, which is where the heap keeps its objects, so memory that a live object owns would
+be reported as leaked. The `heap` crate turns the check off for a fuzz build
+(`__lsan_default_options` in `crates/heap/src/space.rs`); the analysis targets keep it, except
+`reload` and `load_index`. The loader parses ahead on a detached thread, and a leak check that runs
+while that thread exits reports the thread's own bookkeeping, so those two targets turn the check
+off themselves.
+
+`interp_unserialize` runs with a ceiling of 16 MB on one allocation
+(`Heap::set_allocation_ceiling`, set by `check_unserialize_input`). A valid stream can name more
+memory than it holds, because a compact sequence is three numbers and reads as a vector of any
+length. Under the ceiling such a stream fails with the error for a vector that does not fit, so
+the target's memory is bounded by the size of its input.
+
+The reader treats its input as hostile, because `unserialize()` and `readRDS()` take any file. It
+refuses a length that the rest of the input cannot hold, a byte-code reference outside its table,
+and an item of the wrong kind in a position that implies one: a symbol's name, a string's element,
+an attribute list or an attribute's name, an environment, the name of a binding, of an argument or
+of a formal argument. Every such stream is pinned in `crates/interp/tests/test_fuzz.rs`, where one
+test asserts that each is refused and that every stream GNU R wrote for libR's conformance cases
+still reads. That test runs under collection stress, since the damage a wrong kind did showed only
+at a later collection.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
-cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` runs every target
-for two minutes each after seeding the corpora. Without `just`, from `fuzz/`:
+cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` seeds the
+corpora, builds every target and runs each for two minutes. A second argument names the features, so
+`just fuzz-all 60 runtime` leaves out the two Polars targets, and that is what the staged `test.yml`
+runs ([Running one case](#running-one-case)).
+
+The two minutes are wall clock, enforced by `timeout`, and a target that is interrupted at the
+bound has passed. libFuzzer's own `-max_total_time` cannot bound the pass, because it starts
+counting only after the target has replayed its whole corpus, and seven targets are seeded with
+every fixture source in the repository (about 5,300 files). `ide` runs four to seven inputs a
+second, so its replay alone takes about 15 minutes. `fuzz-all` replays the seeds in random order
+(`-prefer_small=0`), so a target that cannot finish its corpus inside the bound reads a different
+sample on each run. For a run that mutates beyond the seeds on a slow target, use `just fuzz-run`
+with a long `-max_total_time`.
+
+Without `just`, from `fuzz/`:
 
 ```sh
 cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources

@@ -52,18 +52,24 @@ pub fn check_lowering_input(text: &str) {
 }
 
 /// Reading any byte stream as a serialized object must fail with an R error or succeed, never
-/// panic.
-pub fn check_unserialize_input(bytes: &[u8]) {
+/// panic. Returns whether the stream read as an object.
+///
+/// A valid stream can name more memory than it holds: a compact sequence is three numbers and
+/// reads as a vector of any length. The check therefore runs with a low ceiling on one
+/// allocation, so that its memory is bounded by the size of the input.
+pub fn check_unserialize_input(bytes: &[u8]) -> bool {
+    const ALLOCATION_CEILING: usize = 16 * 1024 * 1024;
     with_interpreter(|| {
         let mark = crate::heap().handle_mark();
+        let ceiling = crate::heap().set_allocation_ceiling(ALLOCATION_CEILING);
         // SAFETY: the interpreter is installed.
-        unsafe {
-            drop(serialize::unserialize(bytes, values::nil()));
-        }
+        let read = unsafe { serialize::unserialize(bytes, values::nil()).is_ok() };
+        crate::heap().set_allocation_ceiling(ceiling);
         crate::truncate_frames(crate::interp(), 0);
         crate::interp().foreign_calls.clear();
         crate::heap().release_handles(mark);
-    });
+        read
+    })
 }
 
 /// Generates a program over `a` and `b` and checks that the tier-0 bytecode agrees with the AST
