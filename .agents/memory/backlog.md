@@ -358,6 +358,20 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   | of which `real_format_candidates` (`scientific()` on the emulated long double, against GNU's 473 for all of `formatReal`) | 1.13k | 1.03% | about 1.3% together with a leaner text buffer |
   | of which the text buffer | 1.19k | 1.07% | |
 
+## Measured and not taken: one pass over the formals for the base fast paths
+
+- **Under the bar on every workload.** The fast-path helpers `argument`, `is_default`, `is_supplied` and `dots` (`crates/interp/src/base_fast_paths.rs`) each walk the closure's formals pairlist again through `eval::slot_formal`. Their self cost, which holds the inlined walk (forcing an argument is excluded, because a single pass would still force it), as a share of warm Ir (callgrind, profiling build, threads 1, `RY_BENCH_REPEAT` 5 minus 2):
+
+  | Workload | Self share | Main caller |
+  |---|---:|---|
+  | report | 5.15% | `formatC()` (`do_format_c`: 11 lookups per call, about 48 Ir each) |
+  | validation | 1.88% | `format.default` (15 lookups over 17 formals) |
+  | strings | 0.58% | |
+  | objects, testthat, conditions, functional | 0.47%, 0.43%, 0.37%, 0.26% | |
+  | the other seven | 0.06% or less | |
+
+  A table built in one walk still pays the walk (about 75 Ir for 15 formals), and each lookup still re-resolves the frame, because forcing an argument can give a slot frame an environment, and roots the value (about 20 Ir). That saves about 40%: about 2.1% on report and 0.9% on validation.
+
 ## Open: one probe to intern a new string (Track C, strings)
 
 - **`mk_char` probes the string table twice for a string it does not hold.** `find` misses, then `intern_new` calls `StringTable::insert`, which walks the same probe sequence again to find the empty slot (`crates/heap/src/heap.rs`, `crates/heap/src/strings.rs`). A find-or-insert entry that returns the empty slot from the miss would save the second walk. Measured on the report workload (single process, release, callgrind): `paste` and `paste0` run 240k times on scalars that mostly build new strings, and interning costs about 470 Ir per call (`find` 105, `scan` 68, `intern_new` 274), of which the second probe is about 100 Ir per call. The slot must stay valid across the allocation in `new_char`, so the entry has to be re-derived when that allocation ran a collection (which sweeps dead strings from the table) or when the insert has to grow the table.
