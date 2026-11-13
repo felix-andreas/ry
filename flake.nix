@@ -57,16 +57,17 @@
           pkgs:
           let
             inherit (pkgs) lib;
+            # Ubuntu 24.04's GCC is 13.3, and 13.4 no longer pairs up the two halves of a complex
+            # sum into one vector add, which swaps the operands and so whether NA or NaN wins
+            # (kernels__complex_na_nan_sums). The compilers come from an older nixpkgs, wrapped
+            # against this one's glibc and libraries; gfortran compiles R's own BLAS.
+            gcc13-3 = import nixpkgs-gcc13-3 { inherit (pkgs.stdenv.hostPlatform) system; };
+            gcc = pkgs.wrapCC gcc13-3.gcc13.cc;
+            gfortran = pkgs.wrapCC gcc13-3.gfortran13.cc;
+            stdenv = pkgs.overrideCC pkgs.stdenv gcc;
             # Ubuntu 24.04's reference LAPACK, the very binary the recordings loaded: La_library()
             # names liblapack.so.3.12.0. It calls BLAS through libblas.so.3, which R's own libRblas
             # shadows once R has loaded it, as on Ubuntu.
-            # Ubuntu 24.04's GCC is 13.3, and 13.4 no longer pairs up the two halves of a complex
-            # sum into one vector add, which swaps the operands and so whether NA or NaN wins
-            # (kernels__complex_na_nan_sums). The compiler comes from an older nixpkgs, wrapped
-            # against this one's glibc and libraries.
-            stdenv = pkgs.overrideCC pkgs.stdenv (
-              pkgs.wrapCC (import nixpkgs-gcc13-3 { inherit (pkgs.stdenv.hostPlatform) system; }).gcc13.cc
-            );
             lapack = pkgs.stdenv.mkDerivation {
               pname = "ubuntu-lapack";
               version = "3.12.0-3build1.1";
@@ -84,7 +85,7 @@
                 pkgs.dpkg
                 pkgs.autoPatchelfHook
               ];
-              buildInputs = [ pkgs.gfortran13.cc.lib ];
+              buildInputs = [ gfortran.cc.lib ];
               unpackPhase = ''
                 for source in $srcs; do dpkg-deb -x "$source" .; done
               '';
@@ -113,7 +114,7 @@
             version = self.lib.baseRVersion;
             src = self.lib.baseRSource pkgs;
             nativeBuildInputs = [
-              pkgs.gfortran13
+              gfortran
               pkgs.pkg-config
               pkgs.perl
               # configure checks date-time conversions against the time zone database.
@@ -151,7 +152,10 @@
               "--with-x"
               "--without-recommended-packages"
               "--disable-java"
-              "FC=${pkgs.gfortran13}/bin/gfortran"
+              # Absolute, so that R CMD INSTALL compiles with them whatever is on PATH.
+              "CC=${gcc}/bin/gcc"
+              "CXX=${gcc}/bin/g++"
+              "FC=${gfortran}/bin/gfortran"
               # Sys.which() runs the `which` configure found. Debian's prints a match the way PATH
               # spells it (`./tool`), where GNU which prints an absolute path.
               "WHICH=${pkgs.debianutils}/bin/which.debianutils"
@@ -164,11 +168,17 @@
               "ac_cv_func_tanpi=no"
               "ac_cv_func_pown=no"
             ];
+            # Ubuntu's GCC hardens by default with exactly these flags; Nix's set adds others
+            # (strict flex arrays, zeroed call-used registers) that move stack layout, and so what
+            # a case that reads GNU R's uninitialized memory prints
+            # (base__replacement_promises_and_errors).
+            hardeningDisable = [ "all" ];
+            env.NIX_CFLAGS_COMPILE = "-D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fcf-protection";
             enableParallelBuilding = true;
             postInstall = ''
               HOME="$TMPDIR" "$out/bin/R" CMD INSTALL ${rlang}
             '';
-            passthru = { inherit stdenv; };
+            passthru = { inherit stdenv gfortran; };
             meta = {
               mainProgram = "R";
               platforms = lib.platforms.linux;
@@ -393,12 +403,16 @@
                 rustToolchain
                 gnuR
                 # tools/base-r/lapack.sh compiles LAPACK's Fortran.
-                pkgs.gfortran13
+                gnuR.gfortran
                 pkgs.just
                 pkgs.python3
                 pkgs.glibc.bin
               ]
               ++ packages;
+              # The Rust toolchain propagates nixpkgs' default GCC, which would come first on PATH.
+              shellHook = ''
+                export PATH="${gnuR.stdenv.cc}/bin:$PATH"
+              '';
               # Nix's glibc looks for time zones in its own store path, which has none.
               TZDIR = "${pkgs.tzdata}/share/zoneinfo";
               # The locales oracle cases switch to (`# oracle: requires locale`), which
