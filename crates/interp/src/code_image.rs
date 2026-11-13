@@ -1,8 +1,8 @@
 //! Code images: the compiled code of an installed package's closures, written beside each
-//! lazy-load database when the package is installed (`R/<package>.ryc` beside
-//! `R/<package>.rdb`), so that a closure fetched from the database takes its code from the image
-//! instead of compiling it, and a trained image brings the type feedback and counters of its
-//! training run.
+//! lazy-load database when the package is installed (`R/<package>.<build>.ryc` beside
+//! `R/<package>.rdb`, named by the runtime build that wrote it, `rcmd::images`), so that a
+//! closure fetched from the database takes its code from the image instead of compiling it, and
+//! a trained image brings the type feedback and counters of its training run.
 //!
 //! A fetch does not decode anything: it notes where each closure's code lies in the image, and
 //! the call that would compile the closure decodes it instead ([`take_pending`]). Decoding costs
@@ -89,9 +89,10 @@ const ENTRY_SIZE: usize = 52;
 /// The flag bit of an image written after a training run.
 const TRAINED: u32 = 1;
 
-/// The code image of the lazy-load database `database`: its path with `.rdb` replaced by `.ryc`.
-pub fn path(database: &str) -> PathBuf {
-    Path::new(database.strip_suffix(".rdb").unwrap_or(database)).with_extension("ryc")
+/// The code image the runtime build `build` loads for the lazy-load database `database`: its
+/// path with `.rdb` replaced by `.<build>.ryc` (`rcmd::images`).
+pub fn path(database: &str, build: &str) -> PathBuf {
+    rcmd::images::code_image(Path::new(database), build)
 }
 
 /// The lazy-load databases this process read from and the code images it opened for them.
@@ -106,6 +107,8 @@ pub struct State {
     /// The runtime build images are stamped with; empty when the host named none, which turns
     /// images off.
     pub build: &'static str,
+    /// The package libraries this session named packages to reinstall in ([`note_foreign`]).
+    noted_libraries: Vec<PathBuf>,
 }
 
 /// The lazy-load databases this process fetched from, numbered in the order they were first
@@ -245,10 +248,15 @@ unsafe fn give_up(database: u32, message: &str) {
     let state = &mut interp().code_image;
     state.databases.images[database as usize] = ImageSlot::Absent;
     drop_pending(state, database);
+    let image = path(&state.databases.paths[database as usize], state.build);
     report_damage(&format!(
         "cannot use the code image {} ({message}), so its functions compile as they run; \
          reinstall the package to repair it",
-        path(&state.databases.paths[database as usize]).display()
+        image.display()
+    ));
+    crate::image::report_unused(&format!(
+        "the code image {} is damaged: {message}",
+        image.display()
     ));
 }
 
@@ -614,55 +622,120 @@ unsafe fn slots_fit(code: Sexp, body: Sexp, formals: Sexp) -> bool {
 }
 
 /// Opens the image of `database`. `None` when there is none, `RY_CODE_IMAGE=0` turns images off,
-/// or another build wrote it; an error when it cannot be read or is damaged.
+/// or it does not apply ([`Unused`]); an error when it cannot be read or is damaged.
 fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     if std::env::var_os("RY_CODE_IMAGE").is_some_and(|value| value == "0") {
         return Ok(None);
     }
-    let file = match ImageFile::open(&path(database)) {
+    let file = match ImageFile::open(&path(database, build)) {
         Ok(file) => file,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+            note_foreign(database, build);
+            return Ok(None);
+        }
         Err(failure) => return Err(failure.to_string()),
     };
     let Some(stamp) = DatabaseStamp::of(database)? else {
         return Ok(None);
     };
-    Ok(parse(file.bytes(), build, stamp)?.map(|entries| {
-        let bits = || {
-            (0..entries.len().div_ceil(64))
-                .map(|_| Cell::new(0))
-                .collect()
-        };
-        Rc::new(Image {
-            verified: bits(),
-            streams_verified: bits(),
-            file,
-            entries,
-        })
-    }))
+    let entries = match parse(file.bytes(), build, stamp)? {
+        Ok(entries) => entries,
+        Err(unused) => {
+            crate::image::report_unused(&format!(
+                "the code image {} {}",
+                path(database, build).display(),
+                match unused {
+                    Unused::Format => "has another file format",
+                    Unused::Build => "was written by another build of the runtime",
+                    Unused::Database => "was written for another version of its database",
+                }
+            ));
+            return Ok(None);
+        }
+    };
+    let bits = || {
+        (0..entries.len().div_ceil(64))
+            .map(|_| Cell::new(0))
+            .collect()
+    };
+    Ok(Some(Rc::new(Image {
+        verified: bits(),
+        streams_verified: bits(),
+        file,
+        entries,
+    })))
 }
 
-/// The record table of an image, or `None` when it was written by another build or for another
-/// version of the database.
+/// Tells the user, once per package library and session, which packages there another build of
+/// ry installed, when `database` is one of them ([`rcmd::images::foreign_code_image`]): their code
+/// images load only into that build, so in this one their functions compile as they run until
+/// they are reinstalled. Upgrading ry or rebuilding its runtime does this to every installed package, and
+/// without the note it would only show as slowness.
+fn note_foreign(database: &str, build: &str) {
+    let database = Path::new(database);
+    // A library that cannot be read has no images to load either; the slow path is all there is.
+    if !rcmd::images::foreign_code_image(database, build).unwrap_or(false) {
+        return;
+    }
+    crate::image::report_unused(&format!(
+        "the code image of {} was written by another build of the runtime",
+        database.display()
+    ));
+    let Some(library) = database.ancestors().nth(3) else {
+        return;
+    };
+    let noted = &mut interp().code_image.noted_libraries;
+    if noted.iter().any(|path| path == library) {
+        return;
+    }
+    noted.push(library.to_path_buf());
+    let package = database
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let packages = rcmd::images::foreign_packages(library, build).unwrap_or_else(|_| vec![package]);
+    crate::write_console(
+        format!(
+            "ry: another build of ry installed these packages in {}, so their functions compile \
+             as they run, which is slower, until you reinstall them: {}\n",
+            library.display(),
+            packages.join(", ")
+        )
+        .as_bytes(),
+        true,
+    );
+}
+
+/// Why an image that reads fine does not apply to this process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unused {
+    /// Another layout version, which is another build's output.
+    Format,
+    /// Another build of the runtime wrote it.
+    Build,
+    /// It was written beside another version of its database.
+    Database,
+}
+
+/// The record table of an image, or why it does not apply.
 pub fn parse(
     bytes: &[u8],
     build: &str,
     stamp: DatabaseStamp,
-) -> Result<Option<Vec<Entry>>, String> {
+) -> Result<Result<Vec<Entry>, Unused>, String> {
     let mut input = Reader { bytes };
     let failed = |failure: heap::ImageError| failure.to_string();
     if input.take(MAGIC.len()).map_err(failed)? != MAGIC {
-        // Another layout version is another build's output.
-        return Ok(None);
+        return Ok(Err(Unused::Format));
     }
     if input.blob().map_err(failed)? != build.as_bytes() {
-        return Ok(None);
+        return Ok(Err(Unused::Build));
     }
     let _flags = input.u32().map_err(failed)?;
     let length = input.u64().map_err(failed)?;
     let modified = input.u64().map_err(failed)?;
     if (DatabaseStamp { length, modified }) != stamp {
-        return Ok(None);
+        return Ok(Err(Unused::Database));
     }
     let count = input.u32().map_err(failed)? as usize;
     if count > bytes.len() / ENTRY_SIZE {
@@ -699,7 +772,7 @@ pub fn parse(
         }
         entries.push(entry);
     }
-    Ok(Some(entries))
+    Ok(Ok(entries))
 }
 
 /// The FNV-1a hash of `bytes`, the same in every build.
@@ -872,7 +945,7 @@ unsafe fn write_image(
         .map(|(offset, recorded)| (*offset, recorded.length, &recorded.stream[..]))
         .collect();
     let bytes = image_bytes(build, trained, stamp, &table, &payloads)?;
-    let target = path(database);
+    let target = path(database, build);
     let staged = target.with_extension("ryc.partial");
     // The image is written beside the target and renamed over it, never rewritten in place: a
     // process that maps the old image keeps reading the old file, where writing into it would

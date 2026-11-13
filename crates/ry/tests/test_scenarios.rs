@@ -399,9 +399,12 @@ fn native_diagnostics_agree_with_the_typed_core() {
             .iter()
             .map(|line| {
                 if line.starts_with(|first: char| first.is_alphabetic() || first == '.') {
+                    // The name may carry the function's type, as in `f: fn(x: I64) -> I64`.
                     owner = line
                         .split_once(" <- function")
-                        .map(|(defined, _)| defined)
+                        .map(|(defined, _)| {
+                            defined.split_once(": ").map_or(defined, |(name, _)| name)
+                        })
                         .filter(|defined| !defined.contains(' '));
                 }
                 owner
@@ -867,6 +870,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         spawned: None,
         hide_gnu_r: false,
         ignore_sigint: false,
+        standard_input: None,
         environment: BTreeMap::new(),
         library,
     };
@@ -1502,6 +1506,8 @@ struct Journey {
     /// Set by `ignore SIGINT`: later runs start with SIGINT ignored, as a background job of a
     /// non-interactive shell does.
     ignore_sigint: bool,
+    /// Set by `stdin`: the file the next `run` reads as its standard input.
+    standard_input: Option<PathBuf>,
     /// Variables `env` sets (`Some`) and `unset` removes (`None`) for later `run` steps.
     environment: BTreeMap<String, Option<String>>,
     /// The package library this scenario's R processes search ([`scenario_library`]).
@@ -1572,6 +1578,10 @@ impl Journey {
                         lsp_types::FileChangeType::CREATED
                     },
                 );
+                Ok(())
+            }
+            ["stdin", path] => {
+                self.standard_input = Some(self.root.join(path));
                 Ok(())
             }
             ["env", name, value] => {
@@ -2081,6 +2091,11 @@ impl Journey {
                     command
                         .env("PATH", path_without_gnu_r()?)
                         .env_remove("R_HOME");
+                }
+                if let Some(path) = self.standard_input.take() {
+                    let input = fs::File::open(&path)
+                        .map_err(|error| format!("opening {}: {error}", path.display()))?;
+                    command.stdin(input);
                 }
                 let output = command
                     .output()

@@ -333,6 +333,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.pow_int", num_pow_int),
     library("Num.sqrt", num_sqrt),
     library("Num.log", num_log),
+    library("Num.exp", num_exp),
     library("Num.asin", num_asin),
     library("Num.acos", num_acos),
     library("Num.is_nan", num_is_nan),
@@ -3432,6 +3433,13 @@ unsafe fn num_log(call: &Call<'_>) -> R<Sexp> {
         )));
     }
     scalar_real(value.ln())
+}
+
+unsafe fn num_exp(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
+    real_function(call, f64::exp)
 }
 
 /// An inverse sine or cosine, whose argument must lie in `[-1, 1]`.

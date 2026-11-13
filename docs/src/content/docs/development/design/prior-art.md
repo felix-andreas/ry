@@ -650,7 +650,7 @@ instructions, and Koa 22.9% slower once warm.
 | Piece | What it holds | When a type check fails |
 | --- | --- | --- |
 | Start image (`crates/heap/src/image.rs`, [architecture](/development/architecture/#the-start-up-image)) | Base R's heap after start-up, mapped in place, with the closures bound in base R's namespaces stored as bytecode the writer compiles (a lazy-load binding start-up never forced, or a body the compiler rejects or finds too small to compile, keeps its source). No machine code: a session compiles hot base closures to native code at run time | Not applicable |
-| Install-time code (`R/<package>.ryc`, [CLI reference](/reference/cli/#build-and-install)) | Machine code for a package's numeric functions, for the argument types annotations or constant defaults declare, otherwise for double, integer and logical scalars and vectors | The call runs in the interpreter |
+| Install-time code (`R/<package>.<build>.ryc`, [CLI reference](/reference/cli/#build-and-install)) | Machine code for a package's numeric functions, for the argument types annotations or constant defaults declare, otherwise for double, integer and logical scalars and vectors | The call runs in the interpreter |
 | Typed core (`crates/typed`) | Strict typed closures on native values, lowered and compiled at their first call | The call reruns in the interpreter |
 
 The start image skips running start-up code and compiling base R to bytecode, but not compiling

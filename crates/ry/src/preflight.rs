@@ -656,11 +656,12 @@ impl ConsoleFilter {
 impl InputFilter for ConsoleFilter {
     fn filter(&mut self, input: &str) -> Filtered {
         self.held.push_str(input);
+        self.held.push('\n');
         if input_is_unfinished(&self.held) {
-            self.held.push('\n');
             return Filtered::Hold;
         }
-        let command = std::mem::take(&mut self.held);
+        let mut command = std::mem::take(&mut self.held);
+        command.pop();
         self.released = None;
         let program = match self.preflight.check(&command) {
             None => return Filtered::Refuse,

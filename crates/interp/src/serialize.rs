@@ -2408,11 +2408,20 @@ impl Decoder<'_, '_> {
                     )));
                 }
                 let symbol = values::install(&name)?;
-                return base_function_of(symbol).ok_or_else(|| {
-                    error(format!(
+                let mut function = heap
+                    .frame_cell(known.base_env, symbol)
+                    .map_or(nil(), |cell| cell.cdr());
+                // Base is lazy-loaded, and the writer fetched every function it named, so a
+                // session that has not called this one yet holds a promise for it.
+                if function.kind() == SexpType::Promise {
+                    function = crate::eval::force_promise(function)?;
+                }
+                if function.kind() != SexpType::Closure {
+                    return Err(error(format!(
                         "the code image names base function '{name}', which is not a closure in base"
-                    ))
-                });
+                    )));
+                }
+                return Ok(function);
             }
             tag::CODE => return self.code(depth + 1),
             tag::CELLS => return self.cells(depth),

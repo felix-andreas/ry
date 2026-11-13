@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Tests of bench.py's release-archive mode: what results.json records about the archive, and which
-images the run accepts.
+"""Tests of bench.py: its release-archive mode (what results.json records about the archive, and
+which images the run accepts) and the typed suite, which scores typed ry against Rust.
 
 A fake archive stands in for a release: its `ry` is a shell script that, like the real one,
 extracts a runtime library (a C library built here that exports `ry_runtime_id`) and a base R tree
 into the cache directory on its first start, writes an R home whose `.libr` names that library, and
-prints `R.home()`. crates/ry/tests/test_release_metadata.rs runs this file.
+prints `R.home()`. The typed suite's tests feed `summarize` rounds written by hand, and compile one
+small Rust program against the suite's own harness.rs. crates/ry/tests/test_release_metadata.rs runs
+this file.
 
 usage: python3 -I tools/bench/test_bench.py
 """
-import hashlib, importlib.util, io, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
+import argparse, hashlib, importlib.util, io, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
 from contextlib import redirect_stdout
 
 here = pathlib.Path(__file__).resolve().parent
@@ -35,17 +37,6 @@ esac
 """
 
 
-def start_image(identity):
-    """A start-up image header: the magic, the header's length, then the identity with its length."""
-    name = identity.encode()
-    return b"RYSTART\0" + (16 + len(name)).to_bytes(8, "little") + len(name).to_bytes(8, "little") + name
-
-
-def code_image(identity):
-    name = identity.encode()
-    return b"RYCODE\0\0" + len(name).to_bytes(8, "little") + name
-
-
 class ReleaseArchive(unittest.TestCase):
     def setUp(self):
         self.directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
@@ -67,10 +58,13 @@ class ReleaseArchive(unittest.TestCase):
         (payload / "library/base/R").mkdir(parents=True)
         (payload / "library/stats/R").mkdir(parents=True)
         source = self.directory / "id.c"
-        source.write_text(f'const char *ry_runtime_id(void) {{ return "{IDENTITY}"; }}\n')
+        # bench.py refuses a runtime that cannot report an unused image, which it detects by the
+        # name of the variable that turns the report on.
+        source.write_text(f'const char *ry_runtime_id(void) {{ return "{IDENTITY}"; }}\n'
+                          'const char *ry_image_log(void) { return "RY_IMAGE_LOG"; }\n')
         subprocess.run(["cc", "-shared", "-fPIC", "-o", payload / "libR.so", source], check=True)
-        (payload / "library/base/R/ry-start.image").write_bytes(start_image(IDENTITY))
-        (payload / "library/stats/R/stats.ryc").write_bytes(code_image(IDENTITY))
+        (payload / f"library/base/R/ry-start.{IDENTITY}.image").write_bytes(b"RYSTART\0")
+        (payload / f"library/stats/R/stats.{IDENTITY}.ryc").write_bytes(b"RYCODE\0\3")
         ry = stage / "ry"
         ry.write_text(FAKE_RY.format(version=version))
         ry.chmod(0o755)
@@ -99,13 +93,124 @@ class ReleaseArchive(unittest.TestCase):
 
     def test_refuses_a_library_image_another_build_wrote(self):
         ry, _ = bench.unpack_release(self.archive())
-        foreign = self.corpus_library / "zoo/R/zoo.ryc"
+        foreign = self.corpus_library / "zoo/R/zoo.otherbuild.ryc"
         foreign.parent.mkdir(parents=True)
-        foreign.write_bytes(code_image("otherbuild"))
+        foreign.write_bytes(b"RYCODE\0\3")
         with self.assertRaises(SystemExit) as refusal, redirect_stdout(io.StringIO()):
             bench.refuse_foreign_images([ry])
-        self.assertIn(f"{foreign} (otherbuild)", str(refusal.exception))
         self.assertIn(f"runtime {IDENTITY}", str(refusal.exception))
+        self.assertTrue(str(refusal.exception).endswith("reinstall them with this build: zoo"))
+
+
+class NoRefusals:
+    """Stands in for a runner where `summarize` asks which typed programs fell back."""
+
+    def typed_refusal(self, program, engine):
+        return None
+
+    def compile_seconds(self, program):
+        return {"rust": 0.25, "ry_typed": 0.002}
+
+
+class TypedSuite(unittest.TestCase):
+    def setUp(self):
+        self.args = argparse.Namespace(ry="ry", baseline=None, jit_off=False, rscript="/no/such/Rscript",
+                                       seed=1, rounds=3, extra_rounds=0)
+        self.table = bench.engines(self.args, bench.RUST_SUITE)
+
+    def summarize(self, rounds):
+        """The results of `rounds`, each a map from a program to its `(seconds, checksum)` on Rust
+        and on typed ry."""
+        programs = [{"id": name, "display": name, "typed_source": f"{name}.typed.R"} for name in rounds[0]]
+        state = {"rounds": [{name: {engine.key: {"seconds": seconds, "checksum": checksum, "peak_mib": 1.0}
+                                    for engine, (seconds, checksum) in zip(self.table, pair)}
+                             for name, pair in round_.items()} for round_ in rounds]}
+        return bench.summarize(bench.RUST_SUITE, {"name": "Typed ry against Rust"}, programs, self.table, state,
+                               self.args, {}, NoRefusals())
+
+    def test_lists_every_typed_program_beside_its_rust_twin(self):
+        typed = {path.name.removesuffix(".typed.R") for owner in ("kernels", "applications")
+                 for path in (here / owner).glob("*.typed.R")}
+        programs = bench.load_suite(bench.RUST_SUITE)["programs"]
+        self.assertEqual({program["id"] for program in programs}, typed)
+        for program in programs:
+            self.assertTrue((bench.root / program["rust_source"]).is_file(), program["rust_source"])
+
+    def test_runs_rust_and_typed_ry_without_gnu_r(self):
+        self.assertEqual([(engine.key, engine.typed) for engine in self.table], [("rust", False), ("ry_typed", True)])
+        self.assertEqual(bench.baseline_key(bench.RUST_SUITE), self.table[0].key)
+
+    def test_a_ratio_is_typed_rys_time_over_rusts(self):
+        results = self.summarize([{"double": ((0.010, "7"), (0.020, "7")), "half": ((0.040, "3"), (0.020, "3"))},
+                                  {"double": ((0.012, "7"), (0.024, "7")), "half": ((0.040, "3"), (0.020, "3"))},
+                                  {"double": ((0.011, "7"), (0.022, "7")), "half": ((0.044, "3"), (0.022, "3"))}])
+        self.assertEqual((results["baseline"], results["ratio_kind"]), ("rust", "slowdown"))
+        ratios = {row["id"]: row["ratio"]["ry_typed"] for row in results["programs"]}
+        self.assertEqual(ratios["double"], {"median": 2.0, "low": 2.0, "high": 2.0})
+        self.assertEqual(ratios["half"], {"median": 0.5, "low": 0.5, "high": 0.5})
+        self.assertEqual(results["geomean"]["ry_typed"], {"median": 1.0, "low": 1.0, "high": 1.0, "programs": 2})
+        self.assertEqual(results["programs"][0]["seconds"], {"rust": 0.011, "ry_typed": 0.022})
+        self.assertEqual(bench.ratio_label(results, "ry_typed"), "ry typed / Rust")
+        # `VmHWM` starts afresh at `exec`, so a Rust program's peak is its own and is recorded.
+        self.assertEqual(results["programs"][0]["peak_mib"], {"rust": 1.0, "ry_typed": 1.0})
+        self.assertEqual(results["programs"][0]["compile_seconds"], {"rust": 0.25, "ry_typed": 0.002})
+
+    def test_a_program_rust_finishes_too_fast_to_time_stays_out_of_the_mean(self):
+        floor = bench.RUST_SHORT
+        results = self.summarize([{"timed": ((0.010, "7"), (0.030, "7")),
+                                   "short": ((floor / 2, "3"), (floor * 40, "3"))}] * 3)
+        self.assertEqual(results["meta"]["too_short_seconds"], floor)
+        short = results["programs"][1]
+        self.assertEqual(short["flags"], [{"kind": "too_short", "engine": "rust"}])
+        self.assertEqual(short["ratio"]["ry_typed"]["median"], 80.0)
+        self.assertEqual(results["geomean"]["ry_typed"], {"median": 3.0, "low": 3.0, "high": 3.0, "programs": 1})
+
+    def test_a_checksum_that_differs_from_rusts_fails_the_program(self):
+        results = self.summarize([{"wrong": ((0.010, "7"), (0.020, "8")),
+                                   "close": ((0.010, "0.30000000000000004"), (0.020, "0.3"))}] * 3)
+        wrong, close = results["programs"]
+        self.assertEqual(wrong["failures"], [{"engine": "ry_typed", "reason": "checksum 8, Rust printed 7"}])
+        self.assertEqual(wrong["ratio"], {})
+        self.assertNotIn("compile_seconds", wrong)
+        self.assertNotIn("failures", close)
+        self.assertEqual(results["geomean"]["ry_typed"]["programs"], 1)
+
+    def test_reads_the_compile_time_off_a_typed_log_line(self):
+        compiled = bench.COMPILED.search("typed: compiled for [List(Str), List(F64)] -> F64 in 2693 us")
+        self.assertEqual(compiled["microseconds"], "2693")
+        self.assertIsNone(bench.COMPILED.search("typed: `pipeline` runs in the interpreter: it calls `paste`"))
+
+    def test_a_rust_program_reports_what_the_typed_harness_reports(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        shutil.copy(here / bench.RUST_SUITE / "harness.rs", directory / "harness.rs")
+        source = directory / "answer.rs"
+        source.write_text("mod harness;\n\nfn main() {\n"
+                          "    harness::measure(\"answer\", || std::hint::black_box(40.5) + 1.5);\n}\n")
+        runner = bench.RustRunner(bench.RUST_SUITE, self.args)
+        self.addCleanup(runner.close)
+        program = {"id": "answer", "rust_source": str(source)}
+        rust = bench.Engine("rust", "Rust", None, dict(os.environ, RY_BENCH_REPEAT="4"))
+        result = runner.run(program, rust)
+        self.assertEqual(result["checksum"], "42")
+        self.assertGreater(runner.compile_seconds(program)["rust"], 0.0)
+        self.assertNotIn("ry_typed", runner.compile_seconds(program))
+        self.assertGreaterEqual(result["cold"], 0.0)
+        self.assertGreaterEqual(result["seconds"], 0.0)
+        refused = runner.run(program, bench.Engine("rust", "Rust", None, dict(os.environ, RY_BENCH_REPEAT="none")))
+        self.assertEqual(refused, {"seconds": None, "reason": "RY_BENCH_REPEAT must be a positive whole number, not `none`"})
+
+
+class BuildProfile(unittest.TestCase):
+    def test_names_a_build_that_is_not_a_release(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        ry = directory / "ry"
+        for version, expected in (("0.4.4-beta", None), ("0.4.3-beta (iterate build)", "ry 0.4.3-beta (iterate build)"),
+                                  ("0.4.3-beta (nightly.20261110.1955.a15ce0)", None)):
+            ry.write_text(FAKE_RY.format(version=version))
+            ry.chmod(0o755)
+            self.assertEqual(bench.unreleased_build(str(ry)), expected)
 
 
 if __name__ == "__main__":
