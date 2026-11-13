@@ -554,6 +554,9 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
             None => split_chars(&text, &mut pieces),
             Some(None) => pieces.push((0, text.len())),
             Some(Some(separator)) if separator.is_empty() => split_chars(&text, &mut pieces),
+            Some(Some(separator)) if let Some(byte) = literal_byte(separator, options) => {
+                split_byte(byte, &text, &mut pieces)
+            }
             Some(Some(separator)) => {
                 if matchers[position].is_none() {
                     matchers[position] =
@@ -606,6 +609,32 @@ fn split_chars(text: &str, pieces: &mut Pieces) {
 /// Splits as GNU R does: each search runs on what is left of the text, so `^` matches at every
 /// piece, and an empty match at the start of the rest splits off one character. Pushes the byte
 /// range of each piece onto `pieces`.
+/// The byte a one-byte separator matches, when it matches only itself: any byte with
+/// `fixed = TRUE`, and otherwise one that is not a metacharacter in either regex flavor.
+fn literal_byte(separator: &str, options: PatternOptions) -> Option<u8> {
+    let &[byte] = separator.as_bytes() else {
+        return None;
+    };
+    if options.fixed {
+        return Some(byte);
+    }
+    let special = options.ignore_case && byte.is_ascii_alphabetic();
+    (!special && !b".\\|()[]{}^$*+?".contains(&byte)).then_some(byte)
+}
+
+/// [`split_text`] for a separator that is one byte, which a byte search finds without the
+/// matcher. The separator is ASCII, so it never matches inside a multibyte character.
+fn split_byte(byte: u8, text: &str, pieces: &mut Pieces) {
+    let mut start = 0;
+    for position in memchr::memchr_iter(byte, text.as_bytes()) {
+        pieces.push((start, position));
+        start = position + 1;
+    }
+    if start < text.len() {
+        pieces.push((start, text.len()));
+    }
+}
+
 fn split_text(matcher: &Matcher, text: &str, pieces: &mut Pieces) -> R<()> {
     let mut offset = 0;
     while offset < text.len() {

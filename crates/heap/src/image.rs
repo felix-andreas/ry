@@ -1111,7 +1111,7 @@ impl Heap {
     unsafe fn intern_with_bits(&mut self, text: &[u8], bits: u16) -> Result<Sexp, ImageError> {
         let scan = strings::scan(text);
         let hash = strings::hash(&scan, bits & gp::ENCODING);
-        Ok(self.intern_new(text, bits & !gp::CACHED, hash)?)
+        Ok(self.intern_new(text, bits & !gp::CACHED, hash, None)?)
     }
 }
 
