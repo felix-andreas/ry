@@ -4737,7 +4737,14 @@ impl Lowering<'_> {
             ));
         }
         let ty = if i64 { Type::I64 } else { Type::Dbl };
-        let parses = self.builder.emit(Type::Bool, Op::Parses(i64, string));
+        let parses = self.builder.local(Type::Bool);
+        let number = self.builder.emit(
+            ty,
+            Op::Parse {
+                string,
+                parsed: parses,
+            },
+        );
         let (valid, invalid, join) = (
             self.builder.block(),
             self.builder.block(),
@@ -4749,7 +4756,6 @@ impl Lowering<'_> {
             otherwise: invalid,
         });
         self.builder.switch_to(valid);
-        let number = self.builder.emit(ty, Op::Parse(string));
         let ok = self.tag("Ok", &[number])?;
         self.builder.switch_to(invalid);
         let reason = self.tag("InvalidNumStr", &[])?;

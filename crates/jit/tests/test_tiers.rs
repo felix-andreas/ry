@@ -3098,6 +3098,22 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- \"x\"; FUNCTION(x) }",
             ],
         ),
+        // Tags with string payloads built on different branches of a loop body and matched after
+        // the branches join: no box is built, and each pass reads the payload of the tag it
+        // built, not one an earlier pass left behind.
+        (
+            "function(rows: List<Str>) -> F64 { total <- 0\n for (row in rows) { \
+             found <- if (Str.count_utf8_bytes(row) > 20i64) :Long(row) else \
+             match (Str.to_f64(row)) { :Ok(v) => :Num(v, row)\n :Err(_) => :Bad }\n \
+             total <- total + match (found) { :Long(text) => Num.to_f64(Str.count_utf8_bytes(text))\n \
+             :Num(v, text) => v + Num.to_f64(Str.count_utf8_bytes(text))\n :Bad => -1 } }\n total }",
+            &[
+                "{ x <- List.from_r(c(\"1.5\", \"a string that is longer than twenty bytes\", \"x\", \
+                 \"22\", \"another string that is longer than twenty bytes\", \"nope\", \"3\")); \
+                 FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
         // A mapped typed closure, its `:Ok` payloads kept, and a dictionary folded and updated.
         (
             "function(rows: List<Str>) -> F64 { parsed <- List.map(rows, tier_parse)\n \

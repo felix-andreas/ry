@@ -9,7 +9,7 @@
 //! value must be shared and a `Drop` where a local dies, and lists what a failing instruction
 //! must drop before it gives up.
 
-use smallvec::SmallVec;
+use {smallvec::SmallVec, std::fmt};
 
 /// A local's index into [`Function::locals`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -181,6 +181,30 @@ impl Function {
     }
 }
 
+/// One instruction per line, as `RY_TYPED_DUMP` prints a function before its machine code.
+impl fmt::Display for Function {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(formatter, "typed function {}", self.name)?;
+        for (number, block) in self.blocks.iter().enumerate() {
+            writeln!(formatter, "block {number}:")?;
+            for inst in &block.insts {
+                let assigned = inst.assigned();
+                for local in &assigned {
+                    write!(formatter, "  {}: {:?}", local.0, self.ty(*local))?;
+                }
+                let moves = if inst.moves == 0 {
+                    String::new()
+                } else {
+                    format!(" moves {:#b}", inst.moves)
+                };
+                writeln!(formatter, "  = {:?}{moves}", inst.op)?;
+            }
+            writeln!(formatter, "  {:?}", block.terminator)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub insts: Vec<Inst>,
@@ -190,7 +214,8 @@ pub struct Block {
 #[derive(Clone, Debug)]
 pub struct Inst {
     /// The local the instruction assigns. An [`Op::CountTrue`] has none and assigns the locals
-    /// of its counts, so read [`Inst::assigned`] for what an instruction writes.
+    /// of its counts, and an [`Op::Parse`] also assigns whether the string parsed, so read
+    /// [`Inst::assigned`] for what an instruction writes.
     pub dest: Option<Local>,
     pub op: Op,
     /// The operands this instruction takes ownership of, by position in [`Op::operands`]. The
@@ -219,6 +244,7 @@ impl Inst {
     pub fn assigned(&self) -> SmallVec<[Local; 4]> {
         match &self.op {
             Op::CountTrue { counts, .. } => counts.iter().map(|&(_, local)| local).collect(),
+            Op::Parse { parsed, .. } => self.dest.into_iter().chain([*parsed]).collect(),
             _ => self.dest.into_iter().collect(),
         }
     }
@@ -499,11 +525,13 @@ pub enum Op {
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
     Split(Local, Local),
-    /// A string parsed as the destination's type (`I64` or `Dbl`), with Rust's number syntax,
-    /// failing when it does not parse. [`Op::Parses`] tests first.
-    Parse(Local),
-    /// Whether a string parses as an `I64` (`true`) or as a double that is not `NaN`.
-    Parses(bool, Local),
+    /// A string parsed as the destination's type (`I64` or `Dbl`) with Rust's number syntax, and
+    /// into `parsed` whether it parses, which a double that is `NaN` does not. The destination
+    /// is zero when it does not parse.
+    Parse {
+        string: Local,
+        parsed: Local,
+    },
     /// An empty dictionary of the destination's type.
     DictNew,
     /// Whether the dictionary holds the key.
@@ -576,8 +604,7 @@ impl Op {
             | DictLen(a)
             | DictKeys(a)
             | DictValues(a)
-            | Parse(a)
-            | Parses(_, a) => SmallVec::from_slice(&[*a]),
+            | Parse { string: a, .. } => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
             | Bits(_, a, b)
             | Compare(_, _, a, b)
@@ -653,13 +680,45 @@ impl Op {
     pub fn can_fail(&self) -> bool {
         use Op::*;
         match self {
-            Const(_) | Copy(_) | Compare(..) | Not(_) | And(..) | Or(..) | ToDbl(_)
-            | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
-            | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
-            | Same(..) | Step(..) | ItemAt(..) | Construct(..) | Field(..) | ShapeOf(_)
-            | ByteCount(_) | Split(..) | Parses(..) | DictContains(..) | DictRemove(..)
-            | DictFind(..) | DictAt(..) | Push(..) | Unique(_) | Swap(..) | ToUtf8(_)
-            | DictLen(_) | DictKeys(_) | DictValues(_) => false,
+            Const(_)
+            | Copy(_)
+            | Compare(..)
+            | Not(_)
+            | And(..)
+            | Or(..)
+            | ToDbl(_)
+            | LglToInt(_)
+            | Length(_)
+            | Relabel(..)
+            | Dup(_)
+            | Drop(_)
+            | Concat(..)
+            | Join(..)
+            | Text(..)
+            | Affix(..)
+            | VectorText(..)
+            | VectorAffix(..)
+            | RoundDigits(..)
+            | Same(..)
+            | Step(..)
+            | ItemAt(..)
+            | Construct(..)
+            | Field(..)
+            | ShapeOf(_)
+            | ByteCount(_)
+            | Split(..)
+            | Parse { .. }
+            | DictContains(..)
+            | DictRemove(..)
+            | DictFind(..)
+            | DictAt(..)
+            | Push(..)
+            | Unique(_)
+            | Swap(..)
+            | ToUtf8(_)
+            | DictLen(_)
+            | DictKeys(_)
+            | DictValues(_) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

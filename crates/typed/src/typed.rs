@@ -445,6 +445,9 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
     unbox::unbox(&mut ir);
     fusion::fuse(&mut ir);
     ownership::insert(&mut ir);
+    if std::env::var_os("RY_TYPED_DUMP").is_some() {
+        eprintln!("{ir}");
+    }
     let sites: Vec<usize> = lowered
         .r_calls
         .iter()
