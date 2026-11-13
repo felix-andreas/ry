@@ -133,10 +133,14 @@
 | List of 2
 |  $ value  : chr "restored"
 |  $ visible: logi FALSE
+| [1] NA
+| rebound inherits: warning 
+| next handler: NAs introduced by coercion 
+| [1] NA
 [messages]
 [warnings]
 - after (in g())
 [errors]
 [value]
-NULL
-| NULL
+integer
+| NA_integer_

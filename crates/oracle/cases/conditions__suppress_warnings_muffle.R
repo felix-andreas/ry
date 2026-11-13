@@ -103,3 +103,16 @@ show("original after redefinition", original(warning("o")))
 assign("suppressWarnings", original, envir = baseenv())
 lockBinding("suppressWarnings", baseenv())
 show("restored", suppressWarnings(warning("restored")))
+
+# The stock handler's text in an environment directly inside the base namespace muffles as the
+# stock handler does, and one whose environment rebinds `inherits` runs it.
+muffle_in <- function(env) eval(quote(function(w) if (inherits(w, classes)) tryInvokeRestart("muffleWarning")), env)
+plain_env <- new.env(parent = asNamespace("base"))
+plain_env$classes <- "warning"
+r <- withCallingHandlers(as.integer("p"), warning = muffle_in(plain_env))
+print(r)
+rebound_env <- new.env(parent = asNamespace("base"))
+rebound_env$classes <- "warning"
+rebound_env$inherits <- function(x, what) { cat("rebound inherits:", what, "\n"); FALSE }
+r <- withCallingHandlers(as.integer("q"), warning = muffle_in(rebound_env), warning = function(w) { cat("next handler:", conditionMessage(w), "\n"); invokeRestart("muffleWarning") })
+print(r)

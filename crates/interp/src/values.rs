@@ -251,7 +251,6 @@ symbol_table! {
     restart_args = "restartArgs",
     inherits = "inherits",
     try_invoke_restart = "tryInvokeRestart",
-    suppress_warnings = "suppressWarnings",
     w = "w",
 }
 
