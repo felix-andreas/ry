@@ -2068,7 +2068,7 @@ fn mirrored(operator: BinaryOperator) -> BinaryOperator {
 
 fn guard_members<'db>(db: &'db dyn Db, resolved: Ty<'db>) -> Vec<Ty<'db>> {
     match resolved.kind(db) {
-        TyKind::Union(members) => members.clone(),
+        TyKind::Union(members) => members.to_vec(),
         _ => vec![resolved],
     }
 }
@@ -2487,7 +2487,7 @@ fn shape_verdict<'db>(
             .position(|field| field.name == name)
             .is_some_and(filled)
     };
-    for read in &function.default_reads {
+    for read in function.default_reads.iter() {
         let name = read.formal.text(db);
         if !supplied(read.formal)
             && !supplied(read.default_of)
@@ -3150,7 +3150,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let TyKind::NativeRecord(fields) = expected.kind(self.db) else {
             return None;
         };
-        let [field] = fields.as_slice() else {
+        let [field] = fields else {
             return None;
         };
         let mut current = value;
@@ -3238,7 +3238,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         // Of a union such as `Record{...} | NULL`, only a member of the literal's own shape can
         // be the one the literal was meant to be.
         let candidates: Vec<Ty<'db>> = match expected.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
+            TyKind::Union(members) => members.to_vec(),
             _ => vec![expected],
         };
         let (component, expected, found) = match module.kind(value) {
@@ -3254,7 +3254,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     return None;
                 }
                 let mut differing = Vec::new();
-                for found_field in &found_fields {
+                for found_field in found_fields.iter() {
                     let expected_field = expected_fields
                         .iter()
                         .find(|field| field.name == found_field.name)?;
@@ -3283,7 +3283,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 let mut differing = Vec::new();
                 for ((&item, &expected_ty), &found_ty) in
-                    module[items].iter().zip(&expected_items).zip(&found_items)
+                    module[items].iter().zip(&expected_items.iter()).zip(&found_items.iter())
                 {
                     let expected_ty = self.table.resolve(self.db, expected_ty);
                     let found_ty = self.table.resolve(self.db, found_ty);
@@ -3813,9 +3813,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.table.level -= 1;
                 Ty::new(
                     self.db,
-                    TyKind::Function(FunctionType {
-                        positional: Vec::new(),
-                        named,
+                    TyKind::Function(&FunctionType {
+                        positional: &[],
+                        &named,
                         variadic,
                         ret: return_ty,
                         inferred: true,
@@ -3825,7 +3825,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .filter(|parameter| uses.quotes(parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect(),
-                        default_reads,
+                        &default_reads,
                         missing_tested: module[parameters]
                             .iter()
                             .filter(|parameter| uses.missing_tested.contains(&parameter.name))
@@ -5082,7 +5082,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // `x <- NULL; x$a <- 1` and `list()` both grow into a one-field list.
                 TyKind::Null => Ty::new(
                     self.db,
-                    TyKind::Record(vec![RecordField {
+                    TyKind::Record(&[RecordField {
                         name: Name::new(self.db, field_name),
                         ty: value,
                         optional: false,
@@ -5090,7 +5090,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 ),
                 TyKind::Tuple(items) if items.is_empty() => Ty::new(
                     self.db,
-                    TyKind::Record(vec![RecordField {
+                    TyKind::Record(&[RecordField {
                         name: Name::new(self.db, field_name),
                         ty: value,
                         optional: false,
@@ -6296,7 +6296,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         match resolved.kind(self.db) {
             TyKind::Union(members) => {
                 let mut elements = Vec::with_capacity(members.len());
-                for &member in members {
+                for &member in members.iter() {
                     let element = self.iteration_element(member).map_err(|_| resolved)?;
                     elements.push(element);
                 }
@@ -7650,7 +7650,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.strict_origins.truncate(origins_mark);
         Ty::new(
             self.db,
-            TyKind::Named(Name::new(self.db, "formula"), Vec::new()),
+            TyKind::Named(Name::new(self.db, "formula"), &[]),
         )
     }
 
@@ -7844,7 +7844,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             return resolved;
         }
         let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
+            TyKind::Union(members) => members.to_vec(),
             _ => vec![resolved],
         };
         // `!` coerces a numeric operand as a condition does (`!0` is TRUE), and `!NULL` is an
@@ -9425,7 +9425,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .copied()
                     .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
                     .collect(),
-                TyKind::Union(members) => members.clone(),
+                TyKind::Union(members) => members.to_vec(),
                 _ => vec![resolved],
             };
             let atomics: Option<Vec<Atomic>> = members
@@ -9654,7 +9654,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let numeric_beside = members
                     .iter()
                     .any(|&member| numeric_operand_parts(self.db, member).is_some());
-                for &member in members {
+                for &member in members.iter() {
                     if let Some(part) = numeric_operand_parts(self.db, member) {
                         parts.push(part);
                         continue;
@@ -9725,7 +9725,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let module = self.module;
         let expression = function_id;
         let ExpressionKind::Function { parameters, body } = module.kind(expression) else {
-            return Ty::new(self.db, TyKind::Function(declared.clone()));
+            return Ty::new(self.db, TyKind::Function(&declared.clone()));
         };
         let range = module.range(expression);
 
@@ -9758,21 +9758,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut positional_index = 0usize;
         let mut used_named = Bitset::new_in(self.arena, declared.named.len());
         let mut formal_types: Vec<(Ty<'db>, bool)> = Vec::with_capacity(parameters.len());
-        let mut signature = FunctionType {
-            positional: Vec::new(),
-            named: Vec::new(),
-            variadic: None,
-            ret: declared.ret,
-            inferred: false,
-            flag_return: None,
-            quoted: Vec::new(),
-            default_reads: Vec::new(),
-            missing_tested: Vec::new(),
-            condition_only: Vec::new(),
-            null_unless: None,
-            reduces: None,
-            from_calls: false,
-        };
+        let mut signature = FunctionType::declared(&[], &[], None, declared.ret);
         for (parameter, paired) in module[parameters].iter().zip(paired) {
             if paired == Paired::Rest {
                 signature.variadic = Some(RestParameter {
@@ -9844,8 +9830,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::Mismatch {
-                    expected: Ty::new(self.db, TyKind::Function(declared.clone())),
-                    found: Ty::new(self.db, TyKind::Function(signature.clone())),
+                    expected: Ty::new(self.db, TyKind::Function(&declared.clone())),
+                    found: Ty::new(self.db, TyKind::Function(&signature.clone())),
                 },
             });
         }
@@ -10054,7 +10040,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.table.level -= 1;
         // Not resolved: annotation-sourced types hold no inference variables, and resolving
         // would expand the aliases and nominals the author wrote.
-        Ty::new(self.db, TyKind::Function(signature))
+        Ty::new(self.db, TyKind::Function(&signature))
     }
 
     /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
@@ -11699,7 +11685,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut reported: Vec<TextRange> = Vec::new();
         for (keys, columns, name) in [
             (&left_keys, left, frame),
-            (&right_keys, right.as_slice(), other_name),
+            (&right_keys, right, other_name),
         ] {
             for (key, range) in keys {
                 if !columns.iter().any(|column| column.name.text(db) == key)
@@ -11721,7 +11707,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             .map(|column| (column.name.text(db).to_owned(), column.ty))
             .collect();
         if !matches!(how.as_str(), "semi" | "anti") {
-            for column in &right {
+            for column in right.iter() {
                 let name = column.name.text(db);
                 if right_keys.iter().any(|(key, _)| key == name) {
                     continue;
@@ -12324,7 +12310,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let ty = *self.recorded.get(&value)?;
         match self.structural(ty).kind(self.db) {
             TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, Some(columns)) => {
-                Some(columns.clone())
+                Some(columns.to_vec())
             }
             _ => None,
         }
@@ -13078,7 +13064,7 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     fn infer_list(&mut self, arguments: &[Argument]) -> Ty<'db> {
         if arguments.is_empty() {
-            return Ty::new(self.db, TyKind::Tuple(Vec::new()));
+            return Ty::new(self.db, TyKind::Tuple(&[]));
         }
         // `list(...)` splices arguments whose number and names are unknown, so the list is
         // open: any field may be present, and reading one yields `Unknown`.
@@ -13129,9 +13115,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
         if all_named {
-            Ty::new(self.db, TyKind::Record(fields))
+            Ty::new(self.db, TyKind::Record(&fields))
         } else {
-            Ty::new(self.db, TyKind::Tuple(items))
+            Ty::new(self.db, TyKind::Tuple(&items))
         }
     }
 
@@ -13762,7 +13748,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> bool {
         let witness = Ty::new(
             self.db,
-            TyKind::Named(Name::new(self.db, UNCHECKED_WITNESS), Vec::new()),
+            TyKind::Named(Name::new(self.db, UNCHECKED_WITNESS), &[]),
         );
         let mut witnessed = call_arguments.to_vec();
         for argument in &mut witnessed {
@@ -13851,7 +13837,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.overload_probe_depth -= 1;
         }
         if outcome.is_empty() {
-            Ok((resolved, function.clone()))
+            Ok((resolved, *function))
         } else {
             Err(outcome)
         }
@@ -14493,8 +14479,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .collect();
                 let expected = Ty::new(
                     self.db,
-                    TyKind::Function(FunctionType {
-                        positional,
+                    TyKind::Function(&FunctionType {
+                        &positional,
                         named: arguments
                             .iter()
                             .filter_map(|argument| {
@@ -14513,10 +14499,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                         ret,
                         inferred: true,
                         flag_return: None,
-                        quoted: Vec::new(),
-                        default_reads: Vec::new(),
-                        missing_tested: Vec::new(),
-                        condition_only: Vec::new(),
+                        quoted: &[],
+                        default_reads: &[],
+                        missing_tested: &[],
+                        condition_only: &[],
                         null_unless: None,
                         reduces: None,
                         from_calls: true,
@@ -15240,11 +15226,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             TyKind::Named(name, items) if name.text(db) == "List" => {
                 let (TyKind::Named(found_name, found_items), [item]) =
-                    (found.kind(db), items.as_slice())
+                    (found.kind(db), items)
                 else {
                     return None;
                 };
-                let (true, [found_item]) = (found_name == name, found_items.as_slice()) else {
+                let (true, [found_item]) = (found_name == name, found_items) else {
                     return None;
                 };
                 (self.item_variable(*item)?, *found_item)
@@ -15783,7 +15769,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .map(|_| self.fresh(Constraint::Unconstrained))
                 .collect()
         };
-        let nominal = Ty::new(self.db, TyKind::Named(name, arguments.clone()));
+        let nominal = Ty::new(self.db, TyKind::Named(name, &arguments.clone()));
         if !matches!(definition.body.kind(self.db), TyKind::Unknown) {
             let representation = apply_definition(self.db, &definition, &arguments);
             self.record_expectation(value, representation);
@@ -15909,7 +15895,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let matrix = Ty::new(
             self.db,
-            TyKind::Named(Name::new(self.db, "matrix"), Vec::new()),
+            TyKind::Named(Name::new(self.db, "matrix"), &[]),
         );
         if keep_dimensions {
             return Some(matrix);
@@ -16865,7 +16851,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
         } else {
-            for column in &columns {
+            for column in columns.iter() {
                 if let Some(scope) = self.column_scopes.last_mut() {
                     scope.subset_data = Ty::new(db, TyKind::Record(vec![column.clone()]));
                 }
@@ -16893,7 +16879,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.infer(*callee);
         }
         let applied_ty = match &applied {
-            Some(applied) => Ty::new(db, TyKind::Record(applied.clone())),
+            Some(applied) => Ty::new(db, TyKind::Record(&applied.clone())),
             None => unknown(db),
         };
         self.record(value, applied_ty);
@@ -17592,7 +17578,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let mut results = Vec::with_capacity(members.len());
             // An empty `list()` member is the accumulator on a path that never filled it,
             // where R reads `NULL`.
-            for &member in members {
+            for &member in members.iter() {
                 if is_empty_list(self.db, member) {
                     results.push(null(self.db));
                     continue;
@@ -17792,7 +17778,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Result<Ty<'db>, TypeError<'db>> {
         if let TyKind::Union(members) = subject.kind(self.db) {
             let mut results = Vec::with_capacity(members.len());
-            for &member in members {
+            for &member in members.iter() {
                 let result = self
                     .subset_result(origin, range, member, index)
                     .map_err(|error| widen_error_container(error, subject))?;
@@ -17874,7 +17860,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::Named(..) => Ok(VectorIndexShape::ScalarLike),
             TyKind::Union(members) => {
                 let mut shape = VectorIndexShape::ScalarLike;
-                for &member in members {
+                for &member in members.iter() {
                     if self.classify_vector_index(range, member)? == VectorIndexShape::VectorLike {
                         shape = VectorIndexShape::VectorLike;
                     }
@@ -17982,7 +17968,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let mut results = Vec::with_capacity(members.len());
             let mut absent: Option<TypeError<'db>> = None;
             let mut unfilled = false;
-            for &member in members {
+            for &member in members.iter() {
                 // An empty `list()` member is the accumulator on a path that never filled
                 // it, where R reads `NULL`.
                 if is_empty_list(self.db, member) {
@@ -18725,7 +18711,7 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
     match x.kind(db) {
         TyKind::Vector(element) | TyKind::List(element) => (vec![*element], false),
         TyKind::NamedVector(element) | TyKind::NamedList(element) => (vec![*element], true),
-        TyKind::Tuple(items) => (items.clone(), false),
+        TyKind::Tuple(items) => (items.to_vec(), false),
         TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
             (fields.iter().map(|field| field.ty).collect(), true)
         }
@@ -18918,7 +18904,7 @@ fn frame_of<'db>(db: &'db dyn Db, kind: FrameKind, columns: Vec<(String, Ty<'db>
             optional: false,
         });
     }
-    Ty::new(db, TyKind::Frame(kind, Some(fields)))
+    Ty::new(db, TyKind::Frame(kind, Some(&fields)))
 }
 
 /// The element type of a vector type.
@@ -18939,7 +18925,7 @@ fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 }
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
-    Ty::new(db, TyKind::Named(Name::new(db, "factor"), Vec::new()))
+    Ty::new(db, TyKind::Named(Name::new(db, "factor"), &[]))
 }
 
 /// The column type data.table gives values of several column types stacked together: the

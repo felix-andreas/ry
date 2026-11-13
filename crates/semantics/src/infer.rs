@@ -497,7 +497,7 @@ impl<'db> InferenceTable<'db> {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (&left, &right) in left.iter().zip(right) {
+                for (&left, &right) in left.iter().zip(right.iter()) {
                     self.unify(db, left, right)?;
                 }
                 Ok(())
@@ -511,7 +511,7 @@ impl<'db> InferenceTable<'db> {
                 {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (left, right) in left.iter().zip(right) {
+                for (left, right) in left.iter().zip(right.iter()) {
                     self.unify(db, left.ty, right.ty)?;
                 }
                 Ok(())
@@ -528,7 +528,7 @@ impl<'db> InferenceTable<'db> {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for column in left {
+                for column in left.iter() {
                     let Some(other) = right.iter().find(|other| other.name == column.name) else {
                         return Err(UnifyError::Mismatch(a, b));
                     };
@@ -548,10 +548,10 @@ impl<'db> InferenceTable<'db> {
                 {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (&left, &right) in left.positional.iter().zip(&right.positional) {
+                for (&left, &right) in left.positional.iter().zip(&right.positional.iter()) {
                     self.unify(db, left, right)?;
                 }
-                for (left, right) in left.named.iter().zip(&right.named) {
+                for (left, right) in left.named.iter().zip(&right.named.iter()) {
                     self.unify(db, left.ty, right.ty)?;
                 }
                 if let (Some(left), Some(right)) = (&left.variadic, &right.variadic) {
@@ -566,7 +566,7 @@ impl<'db> InferenceTable<'db> {
                 if left_name != right_name || left_arguments.len() != right_arguments.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (&left, &right) in left_arguments.iter().zip(right_arguments) {
+                for (&left, &right) in left_arguments.iter().zip(right_arguments.iter()) {
                     self.unify(db, left, right)?;
                 }
                 Ok(())
@@ -575,18 +575,18 @@ impl<'db> InferenceTable<'db> {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (&left, &right) in left.iter().zip(right) {
+                for (&left, &right) in left.iter().zip(right.iter()) {
                     self.unify(db, left, right)?;
                 }
                 Ok(())
             }
             (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => {
                 if left.len() != right.len()
-                    || left.iter().zip(right).any(|(l, r)| l.name != r.name)
+                    || left.iter().zip(right.iter()).any(|(l, r)| l.name != r.name)
                 {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (left, right) in left.iter().zip(right) {
+                for (left, right) in left.iter().zip(right.iter()) {
                     self.unify(db, left.ty, right.ty)?;
                 }
                 Ok(())
@@ -935,7 +935,7 @@ impl<'db> InferenceTable<'db> {
             {
                 let mut variable = None;
                 let mut concrete = Vec::new();
-                for &member in expected_members {
+                for &member in expected_members.iter() {
                     let member = self.shallow_resolve(db, member);
                     if matches!(member.kind(db), TyKind::Var(_)) {
                         variable = Some(member);
@@ -1403,7 +1403,7 @@ impl<'db> InferenceTable<'db> {
             return None;
         };
         // Optionality is not compared: `compatible` does not compare it either.
-        for expected_field in expected_fields {
+        for expected_field in expected_fields.iter() {
             let name = expected_field.name.text(db);
             let Some(actual_field) = actual_fields
                 .iter()
@@ -1431,7 +1431,7 @@ impl<'db> InferenceTable<'db> {
             });
         }
         // Surplus fields last: a wrong type in a shared field is the likelier mistake.
-        for actual_field in actual_fields {
+        for actual_field in actual_fields.iter() {
             if expected_fields
                 .iter()
                 .any(|field| field.name == actual_field.name)
@@ -1604,7 +1604,7 @@ fn pair_parameters<'db>(
     );
     let mut paired: Vec<Option<(Ty<'db>, bool)>> = vec![None; actual_parameters.len()];
     let mut overflow = Vec::new();
-    for field in &expected.named {
+    for field in expected.named.iter() {
         match actual_parameters
             .iter()
             .position(|(name, ..)| *name == Some(field.name))
@@ -1742,7 +1742,7 @@ fn record_occurrences<'db>(
         }
         // Nested nominal variance is not composed: conservatively invariant.
         TyKind::Named(_, arguments) => {
-            for &argument in arguments {
+            for &argument in arguments.iter() {
                 record_occurrences(db, argument, parameters, true, occurrences);
                 record_occurrences(db, argument, parameters, false, occurrences);
             }
@@ -2126,44 +2126,16 @@ mod tests {
         assert!(matches!(table.resolve(&db, var).kind(&db), TyKind::Var(_)));
         let named_lambda = Ty::new(
             &db,
-            TyKind::Function(FunctionType {
-                positional: Vec::new(),
-                named: vec![Parameter {
+            TyKind::Function(&FunctionType::declared(&[], &[Parameter {
                     name: Name::new(&db, "x"),
                     ty: int,
                     optional: false,
                     default: None,
-                }],
-                variadic: None,
-                ret: int,
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+                }], None, int)),
         );
         let positional_interface = Ty::new(
             &db,
-            TyKind::Function(FunctionType {
-                positional: vec![int],
-                named: Vec::new(),
-                variadic: None,
-                ret: scalar(&db, Atomic::Double),
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+            TyKind::Function(&FunctionType::declared(&[int], &[], None, scalar(&db, Atomic::Double))),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
     }

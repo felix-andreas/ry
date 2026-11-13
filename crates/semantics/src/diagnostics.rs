@@ -3787,7 +3787,7 @@ impl<'db> TypeRenderer<'db> {
 
     fn render_function(&mut self, db: &'db dyn Db, function: &FunctionType<'db>) -> String {
         let mut parameters = Vec::new();
-        for ty in &function.positional {
+        for ty in function.positional.iter() {
             parameters.push(self.render(db, *ty));
         }
         for (index, field) in function.named.iter().enumerate() {

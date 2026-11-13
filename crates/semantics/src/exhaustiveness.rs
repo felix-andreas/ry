@@ -403,7 +403,7 @@ fn type_constructors(db: &dyn Db, ty: Ty<'_>) -> (Vec<Constructor>, bool) {
         TyKind::Union(members) => {
             let mut constructors = Vec::new();
             let mut complete = true;
-            for &member in members {
+            for &member in members.iter() {
                 let (member_constructors, member_complete) = type_constructors(db, member);
                 for constructor in member_constructors {
                     if !constructors.contains(&constructor) {
@@ -461,7 +461,7 @@ fn constructor_field_types<'db>(
                 TyKind::Tag(member_name, Some(payload)),
             ) if member_name.text(db) == name => Some(vec![*payload]),
             (Constructor::Tuple(length), TyKind::NativeTuple(items)) if items.len() == *length => {
-                Some(items.clone())
+                Some(items.to_vec())
             }
             (Constructor::Record(names), TyKind::NativeRecord(fields))
                 if fields.len() == names.len()

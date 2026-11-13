@@ -171,27 +171,13 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 default: None,
             })
             .collect();
-        let function = FunctionType {
-            positional: Vec::new(),
-            named,
-            variadic: rest.map(|element| RestParameter {
+        let function = FunctionType::declared(&[], &named, rest.map(|element| RestParameter {
                 element,
                 preceding_named: params.len(),
-            }),
-            ret: ret.unwrap_or_else(|| unknown(db)),
-            inferred: false,
-            flag_return: None,
-            quoted: Vec::new(),
-            default_reads: Vec::new(),
-            missing_tested: Vec::new(),
-            condition_only: Vec::new(),
-            null_unless: None,
-            reduces: None,
-            from_calls: false,
-        };
+            }), ret.unwrap_or_else(|| unknown(db)));
         annotation.declared = Some(TypeScheme {
             binders: lowering.scheme_binders(forall),
-            body: Ty::new(db, TyKind::Function(function)),
+            body: Ty::new(db, TyKind::Function(&function)),
         });
     }
     lowering.finish(annotation, node.text_range())
@@ -327,21 +313,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         binders: lowering.scheme_binders(forall),
         body: Ty::new(
             db,
-            TyKind::Function(FunctionType {
-                positional: Vec::new(),
-                named,
-                variadic,
-                ret,
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+            TyKind::Function(&FunctionType::declared(&[], &named, variadic, ret)),
         ),
     });
     lowering.finish(annotation, inline_range(site))
@@ -521,21 +493,7 @@ pub fn merge_annotations<'db>(
             binders,
             body: Ty::new(
                 db,
-                TyKind::Function(FunctionType {
-                    positional: surplus,
-                    named,
-                    variadic,
-                    ret,
-                    inferred: false,
-                    flag_return: None,
-                    quoted: Vec::new(),
-                    default_reads: Vec::new(),
-                    missing_tested: Vec::new(),
-                    condition_only: Vec::new(),
-                    null_unless: None,
-                    reduces: None,
-                    from_calls: false,
-                }),
+                TyKind::Function(&FunctionType::declared(&surplus, &named, variadic, ret)),
             ),
         }),
         inline_parameters: inline
@@ -591,7 +549,7 @@ pub fn comment_slots<'db>(
         return Vec::new();
     }
     if let Some((name, arguments, range)) = annotation.new_nominal {
-        let ty = Ty::new(db, TyKind::Named(name, arguments));
+        let ty = Ty::new(db, TyKind::Named(name, &arguments));
         return vec![SlotType {
             slot: Slot::Value,
             ty,
@@ -693,7 +651,7 @@ pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db
     if let Some((name, arguments, range)) = annotation.new_nominal {
         return vec![SlotType {
             slot: Slot::Value,
-            ty: Ty::new(db, TyKind::Named(name, arguments)),
+            ty: Ty::new(db, TyKind::Named(name, &arguments)),
             range,
         }];
     }
@@ -1043,7 +1001,7 @@ impl<'db> Lowering<'db> {
                 let lowered = ty_node.map(|ty| self.lower_type(&ty));
                 match lowered.map(|ty| ty.kind(self.db)) {
                     Some(TyKind::Named(name, arguments)) => {
-                        annotation.new_nominal = Some((*name, arguments.clone(), range));
+                        annotation.new_nominal = Some((*name, arguments.to_vec(), range));
                     }
                     _ => self.errors.push((
                         "expected a nominal type reference after `@new`.".to_owned(),
@@ -1199,7 +1157,7 @@ impl<'db> Lowering<'db> {
                     ));
                     return unknown(self.db);
                 }
-                Ty::new(self.db, TyKind::Frame(kind, Some(Vec::new())))
+                Ty::new(self.db, TyKind::Frame(kind, Some(&[])))
             }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
@@ -1339,7 +1297,7 @@ impl<'db> Lowering<'db> {
                 if let Some(range) = reference {
                     self.applied_references.push((text, arguments.len(), range));
                 }
-                Ty::new(self.db, TyKind::Named(name, arguments))
+                Ty::new(self.db, TyKind::Named(name, &arguments))
             }
             SyntaxKind::TYPE_FUNCTION => self.lower_function_type(node),
             _ => unknown(self.db),
@@ -1435,7 +1393,7 @@ impl<'db> Lowering<'db> {
         }
         self.nominal_references
             .push((text.to_owned(), token.text_range()));
-        Ty::new(self.db, TyKind::Named(name, Vec::new()))
+        Ty::new(self.db, TyKind::Named(name, &[]))
     }
 
     fn lower_function_type(&mut self, node: &SyntaxNode) -> Ty<'db> {
@@ -1496,21 +1454,7 @@ impl<'db> Lowering<'db> {
             });
         Ty::new(
             self.db,
-            TyKind::Function(FunctionType {
-                positional,
-                named,
-                variadic,
-                ret,
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+            TyKind::Function(&FunctionType::declared(&positional, &named, variadic, ret)),
         )
     }
 }

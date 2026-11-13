@@ -4000,6 +4000,7 @@ dependencies = [
  "rustc-hash",
  "salsa",
  "serde",
+ "smallvec",
  "sniff",
  "stacker",
  "syntax",

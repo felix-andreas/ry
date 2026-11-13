@@ -1756,7 +1756,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         match (first.kind(db), later.kind(db)) {
             (TyKind::NativeRecord(first), TyKind::NativeRecord(later)) => {
                 first.len() != later.len()
-                    || first.iter().zip(later).any(|(first, later)| {
+                    || first.iter().zip(later.iter()).any(|(first, later)| {
                         first.name != later.name || self.layout_differs(first.ty, later.ty)
                     })
             }
@@ -1764,7 +1764,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 first.len() != later.len()
                     || first
                         .iter()
-                        .zip(later)
+                        .zip(later.iter())
                         .any(|(&first, &later)| self.layout_differs(first, later))
             }
             (TyKind::Named(first_name, first), TyKind::Named(later_name, later)) => {
@@ -1772,7 +1772,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     || first.len() != later.len()
                     || first
                         .iter()
-                        .zip(later)
+                        .zip(later.iter())
                         .any(|(&first, &later)| self.layout_differs(first, later))
             }
             _ => match (self.kind_of_value(first), self.kind_of_value(later)) {
