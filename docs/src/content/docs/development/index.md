@@ -48,6 +48,12 @@ these trees, which hold GNU R and CRAN packages, and never ry's own builds or an
 cloud session's proxy holds the write token for `app.cachix.org`, which is why the push names that
 host; elsewhere, set `CACHIX_AUTH_TOKEN`.
 
+`nix develop` (the `default` and `ci` shells) downloads everything from `cache.nixos.org` or
+`ry.cachix.org` and builds nothing. The custom GNU R (`lib.gnuR`) and the R packages built against it
+are not in nixpkgs, so `ry.cachix.org` holds them. The Cachix workflow rebuilds and pushes the two
+shells when `flake.nix`, `flake.lock` or `tools/base-r` changes on main; the Rust toolchain and
+crane's `ry-deps-*` build are left out.
+
 `just doctor` also checks that `ry`, `libR.so` and the start-up image were built from the working
 tree, by recomputing the runtime hash they embed, and it reports free disk and the size of each
 `target/` profile. A cloud container's disk quota is about 40 GB whatever `df` says. `just prune`
