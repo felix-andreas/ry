@@ -443,7 +443,7 @@ release-check version:
 # Unpack the archives in release/VERSION and package the VS Code extension from them: one `.vsix`
 # per platform, bundling that archive's binaries, plus `ry.vsix` without a binary for every other
 # platform. A platform whose archive is missing is skipped with a note, so this runs locally on one
-# machine's archive; the release workflow always has all three.
+# machine's archive and in a release workflow started with `platforms` set to `unix` or `linux`.
 release-assets version:
     #!/usr/bin/env bash
     set -euo pipefail
