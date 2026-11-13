@@ -2736,20 +2736,16 @@ The end-to-end guard rests on the corpus suites.
   on secondary indices; not measured here). The index holds 4 bytes
   per row until the column changes or the table is dropped, with no way for the user to drop it
   earlier.
-- **S3 dispatch from a compiled closure leaves its subject's reference count one higher per
-  call, so a frame's next `:=` copies.** `nrow(x)`, `ncol(x)`, `NROW(x)`, `head(x)` and
-  `as.list(x)` each leave a frame's count one higher (`.Internal(refcnt(x))` reads 7 after five
-  calls where a fresh frame reads 2), and `print(x)` three higher. A collection lowers nothing.
-  The next `:=` then forks the table and copies the written column; the fork is a fresh object,
-  so later updates write in place, but a loop that calls `nrow(x)` in every pass copies in every
-  pass: 100 passes over 4e6 rows take 1.04 s against 0.08 s without the call. The table is not
-  the cause. `p <- list(1, 2); class(p) <- "foo"; dim.foo <- function(x) c(2L, 1L)` followed
-  by twenty `nrow(p)` calls reads a count of 20, a user closure `function(d) dim(d)[1L]` leaks the
-  same way once it runs compiled, and a plain closure call, a call that dispatches nothing
-  (`NROW` of a plain vector) and a direct `dim(x)`, `length(x)`, `names(x)`, `x$v` or `x[["v"]]`
-  leave the count alone. The suspects are the promise a reified slot frame binds for an argument
-  (`reify` in `eval.rs`) and the frames `Heap::release_frame` defers to a reconcile. The cost
-  outside the table is the same: a vector that looks shared is copied by its next replacement.
+- **`capture.output(x)` and `str(x)` leave one reference count on `x` per call, so a frame's
+  next `:=` copies once.** Five `capture.output(print(x))` calls on a fresh frame read a count
+  of 8 against 2, and five `str(x)` calls read 7; `print`, `format`, `head`, `summary`,
+  `as.data.frame`, `nrow` and friends leave the count alone. The fork is a fresh object, so the
+  updates after it write in place. The table is not the cause: a classed list shows the same
+  rise. In both functions a frame returns while one of its promises is counted twice
+  (`Heap::clear_frame` clears a promise only at a count of 1), and the collection that later
+  frees the promise does not lower its value's count. The second holder is not identified;
+  `capture.output` keeps its frame for a local text connection, and `str.default` defines
+  closures in its frame.
 - **A chained `:=` is an error.** `x[id == 1L, v := 5L][id == 2L, v := 6L]` applies the first
   update and then fails with "`:=` updates a DataFrame stored in a variable", because the second
   bracket's subject is a call. data.table code chains updates this way, and

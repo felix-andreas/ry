@@ -4839,6 +4839,26 @@ check` releases its trees once, and memoized records are compact" below).
   promises, and a collection that frees one does not lower its value's count, so every such
   call left the frame looking shared and the next `:=` copied it. `apply_method` in
   `dispatch.rs` clears them when the builtin returns (`Heap::release_argument`).
+- **A detached argument reference gives up the pool's count, and the pool hands out no
+  reference that something else still counts.** A compiled closure takes a variable argument as
+  a pooled reference, and a call that needs the frame's environment (`dim(x)` inside `nrow`, any
+  S3 dispatch) turns the reference into an ordinary promise in place (`detach_reference` in
+  `eval.rs`). A returning frame clears a promise only when the frame alone counts it. The
+  promise kept the count the pool held on it, so it stayed forced and the argument's count rose
+  by one per call: twenty `nrow(p)` calls on a classed list read a count of 20, and a loop that
+  called `nrow(x)` between updates copied the column in every pass (100 passes over 4e6 rows:
+  1.04 s, against 0.077 s with the count dropped at the detach and 0.071 s without the call).
+  The same promise had a second stale count when an earlier call had collected the reference
+  into its `...` (`cat(a)`, `paste(a)`, `list(...)`): that list counts the reference until a
+  reconcile frees it, which is after the pool reuses the reference. `pooled_reference` therefore
+  replaces a reference whose count is above the pool's own. The replacement costs one promise
+  and one three-integer target after a call that collected a variable into `...`, which already
+  allocated a list cell per argument.
+- **Printing a value at top level rebinds it to `NULL` afterwards.** `print_value_top` and
+  `print_dispatch` (`print.rs`) bind the value as `x` in an environment made for the one
+  `print(x)` call. The collection that frees that environment lowers no count, so each printed
+  frame kept one count and the next `:=` copied it. `release_printed` rebinds `x` to `NULL` when
+  the call returns, as GNU R's `PrintObjectS3` does.
 - **The index is a secondary index, not a cache of a slow path.** The first filter still scans,
   and the scan is as fast as it was. The index answers a different question (all rows of a value)
   that a repeated filter asks, the way `string_codes` answers a repeated join on a text column.

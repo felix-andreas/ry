@@ -5,7 +5,8 @@
 # so does a function's parameter, which shares the frame with the caller's variable.
 #
 # The second script pins the edges of that rule. Reading the frame (`dim`, `length`, `names`, `$`,
-# `[[`) leaves it the sole reference. An active binding whose function returns a frame out of a
+# `[[`), calling `nrow`, `ncol` or `NROW` on it between updates, and printing it all leave it the
+# sole reference. An active binding whose function returns a frame out of a
 # shared list gets the copy assigned back, and the list keeps its rows. An update that warns is
 # applied before the warning is raised, whether or not the frame was shared. An update nested in
 # a running query of the same frame goes to a copy, so the outer query reads the rows it began
@@ -57,6 +58,23 @@ file rules.R
 | shape <- dim(x); count <- length(x); column <- x$v; first <- x[["id"]]; header <- names(x)
 | x[id == 1L, v := v + 1L]
 | cat("reading the frame keeps it the sole reference:", identical(before, address(.Internal(inspect(x)))), "\n")
+| x <- make()
+| before <- address(.Internal(inspect(x)))
+| label <- "rows:"
+| for (step in 1:3) {
+|   cat(label, nrow(x), ncol(x), "\n", file = "counts.txt")
+|   text <- paste(label, NROW(x))
+|   x[id == 1L, v := v + 1L]
+| }
+| cat("calls on the frame between updates keep it too:", identical(before, address(.Internal(inspect(x)))), "\n")
+| x <- make()
+| before <- address(.Internal(inspect(x)))
+| sink("printed.txt")
+| x
+| print(x)
+| sink()
+| x[id == 1L, v := v + 1L]
+| cat("and so does printing it:", identical(before, address(.Internal(inspect(x)))), "\n")
 | local_loop <- function() {
 |   frame <- make()
 |   before <- address(.Internal(inspect(frame)))
@@ -87,6 +105,8 @@ file rules.R
 run ry run --runtime ry rules.R
 expect exit 0
 expect stdout "reading the frame keeps it the sole reference: TRUE"
+expect stdout "calls on the frame between updates keep it too: TRUE"
+expect stdout "and so does printing it: TRUE"
 expect stdout "a function's own frame is updated in place: TRUE"
 expect stdout "[1] 13 20 33 40"
 expect stdout "an active binding stores the copy: 0 20 0 40"

@@ -89,11 +89,21 @@ pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
         let call = values::call(function, &[x])?;
         let print_env = values::new_env(env)?;
         crate::eval::define(x, value, print_env)?;
-        eval::eval(call, print_env)?;
+        let printed = eval::eval(call, print_env);
+        release_printed(print_env, x)?;
+        printed?;
         return Ok(());
     }
     let options = PrintOptions::defaults(env);
     print_value(value, &options, &mut String::new())
+}
+
+/// Rebinds `x` to `NULL` in `env`, the environment made for a print call that read the printed
+/// value as `x`, which is what GNU R does once such a call returns. The environment is garbage by
+/// then, and the collection that frees it lowers no reference count, so a value left bound there
+/// would look shared for the rest of its life.
+unsafe fn release_printed(env: Sexp, x: Sexp) -> R<()> {
+    crate::eval::define(x, nil(), env)
 }
 
 /// Prints a value with dispatch, as `print.default` does for list elements that are objects.
@@ -113,7 +123,9 @@ unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) 
             items.extend(options.call_args.iter().copied());
         }
         let call = values::pairlist(&items, SexpType::Language)?;
-        eval::eval(call, env)?;
+        let printed = eval::eval(call, env);
+        release_printed(env, x)?;
+        printed?;
         return Ok(());
     }
     print_value(value, options, tag)
