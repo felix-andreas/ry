@@ -38,7 +38,14 @@ fn with_interpreter<T>(body: impl FnOnce() -> T) -> T {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     install();
-    body()
+    let result = body();
+    // Each test runs on a thread of its own, and the typed core counts and pools its values
+    // per thread. A typed record R drops is released at the collection that finds it dead, so
+    // that collection runs here, on the thread that made the record, rather than in a later
+    // test whose count it would throw off.
+    // SAFETY: the interpreter is installed and this thread holds it.
+    unsafe { interp::heap().collect(Collection::Major) };
+    result
 }
 
 const ARGUMENTS: &[&str] = &[
