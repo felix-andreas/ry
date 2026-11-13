@@ -2727,18 +2727,23 @@ The end-to-end guard rests on the corpus suites.
     take 0.8 GB of bounds (derived from the rule, not measured). Bounding the range by the
     bucketed side's own rows would send such a join to the Polars plan, so it needs a hashed
     kernel path first. `test_memory.rs` has no step of this shape.
-- **`:=` on a row subset loses to data.table.** db-benchmark's loop
-  `for (step in 1:100) x[id4 == step, v1 := v1 + 1L]` at 1e7 rows takes 2.1 s from R and 0.7 to
-  0.9 s from the Rust driver against data.table's 0.5 s. `assign_filtered` in
-  `crates/table/src/query.rs` runs it as a Polars plan (filter, then a left join on a row index,
-  then `when/then`), which builds a new column and a join's scratch on every pass, while
-  data.table answers `id4 == step` from an automatic index and writes the matching rows in
-  place. The target shape is a kernel that evaluates the filter to a mask and the value on the
-  selected rows alone, and writes into the column's buffer when the column is uniquely held.
-  The gap between R and the Rust driver is system time and varies between runs (0.8 to 3.7 s
-  over 100 passes): the R process faults each pass's buffers in afresh, and with transparent
-  huge pages disabled for the process the loop takes 3.1 s. Find out why the driver does not pay
-  it before choosing between the in-place kernel alone and a pool of freed mappings.
+- **Only `:=` reads a column's row index.** A filtered update whose filter is `column == literal`
+  finds its rows in the index `Table::row_index` builds on the second such filter
+  (`decisions.md`, "A filtered `:=` reads a row index and writes in place"). A filtered select
+  (`x[id4 == 5L]`, `DataFrame.filter`), a filtered aggregate and a grouped `:=` still scan the
+  column, and so does every other filter shape: `%in%`, a range, or two equalities joined by
+  `&`. data.table's automatic index serves `==` and `%in%` wherever `i` uses them (its vignette
+  on secondary indices; not measured here). The index holds 4 bytes
+  per row until the column changes or the table is dropped, with no way for the user to drop it
+  earlier.
+- **A frame keeps a raised reference count after some calls, so its next `:=` copies once.**
+  `nrow(x)` and `capture.output(.Internal(inspect(x)))` each leave the frame's count two higher than before
+  (`.Internal(refcnt(x))` reads 4 where a fresh frame reads 2), while a plain closure call
+  `f(x)` leaves it unchanged. The next `:=` then forks the table and copies the written column,
+  and the fork is a fresh object that later updates write in place. A loop that calls such a
+  function on the frame in every pass copies the column in every pass. The cause is in the
+  interpreter's counting for dispatched and `...` calls, not in the table; it has not been
+  traced further.
 - **An aggregate over a filter that keeps no rows gives one row.** `x[v > 5, .(s = sum(v))]`
   with no matching row prints one row with `s = 0`; data.table gives a table with no rows (and
   `x[v > 5, sum(v)]` gives `0` in both). The verb form, `DataFrame.filter` then
@@ -2799,11 +2804,6 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop is engine-bound** (`tools/bench/internal/table/ry.R`, "update subset", 1e6 rows:
-  0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
-  5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
-  engine code in a different process. Both run on the same allocator
-  (`crates/table/benches/allocator.rs`), so the gap is elsewhere and has not been profiled.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.

@@ -22,8 +22,8 @@ use {
     crate::{
         Error, Result, Table, factor,
         kernel::{
-            CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
-            pack_map,
+            Buckets, CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill,
+            gather_column, integer_range, pack_map,
         },
         query::{Comparison, Join, Mult, On, Roll, Side, join_layout},
     },
@@ -270,44 +270,6 @@ fn integer_codes(x: &Column, i: &Column, built: Side) -> Option<Keys> {
     })
 }
 
-/// The least and the greatest valid value, or `(i32::MAX, i32::MIN)` when there is none.
-fn integer_range(values: &[i32], validity: Option<&Bitmap>) -> (i32, i32) {
-    let range = |start: usize, values: &[i32]| {
-        let mut low = i32::MAX;
-        let mut high = i32::MIN;
-        match validity {
-            None => {
-                for value in values {
-                    low = low.min(*value);
-                    high = high.max(*value);
-                }
-            }
-            Some(validity) => {
-                for (offset, value) in values.iter().enumerate() {
-                    if validity.get_bit(start + offset) {
-                        low = low.min(*value);
-                        high = high.max(*value);
-                    }
-                }
-            }
-        }
-        (low, high)
-    };
-    if values.len() < PARALLEL_ROWS {
-        return range(0, values);
-    }
-    THREAD_POOL.install(|| {
-        values
-            .par_chunks(CHUNK_ROWS)
-            .enumerate()
-            .map(|(index, chunk)| range(index * CHUNK_ROWS, chunk))
-            .reduce(
-                || (i32::MAX, i32::MIN),
-                |left, right| (left.0.min(right.0), left.1.max(right.1)),
-            )
-    })
-}
-
 fn logical_codes(x: &Column, i: &Column) -> Option<Keys> {
     let codes = |vector: Vector| match vector {
         Vector::Logical { values, validity } => Some(fill(values.len(), |start, out| {
@@ -382,82 +344,12 @@ fn factor_codes(x: &Column, i: &Column) -> Option<Keys> {
     })
 }
 
-/// Rows grouped by code, each group in row order: the rows with code `c` are
-/// `rows[bounds[c]..bounds[c + 1]]`.
-struct Buckets {
-    bounds: Vec<u32>,
-    rows: Vec<u32>,
-}
-
-impl Buckets {
-    /// Groups the rows by code. Each task owns an equal share of the code range and scans all of
-    /// `codes` for the codes it owns, so the tasks count and place rows without sharing a
-    /// counter, and every bucket fills in row order. Reading the codes once per task is
-    /// sequential and cheap next to the writes, which land all over the buckets and are what the
-    /// tasks divide between them.
-    fn of(codes: &[u32], radix: u32) -> Buckets {
-        let radix = radix as usize;
-        let tasks = if codes.len() < PARALLEL_ROWS {
-            1
-        } else {
-            THREAD_POOL.current_num_threads().max(1)
-        };
-        let share = radix.div_ceil(tasks).max(1);
-        // Code `c` is counted in `bounds[c + 2]`, so the running sum leaves the start of bucket
-        // `c` in `bounds[c + 1]`. Placing a row advances that entry, which ends as the bucket's
-        // end, and the entry before it has ended as its start. The bounds are therefore counted,
-        // advanced and read in one array, with no second copy to advance.
-        let mut bounds = vec![0u32; radix + 2];
-        THREAD_POOL.install(|| {
-            bounds[2..]
-                .par_chunks_mut(share)
-                .enumerate()
-                .for_each(|(task, counts)| {
-                    let low = (task * share) as u32;
-                    for code in codes {
-                        // A code below `low` wraps past the end of the share.
-                        if let Some(count) = counts.get_mut(code.wrapping_sub(low) as usize) {
-                            *count += 1;
-                        }
-                    }
-                });
-        });
-        for code in 0..radix {
-            bounds[code + 2] += bounds[code + 1];
-        }
-        let mut rows = vec![0u32; codes.len()];
-        let out = Shared(rows.as_mut_ptr());
-        THREAD_POOL.install(|| {
-            bounds[1..=radix]
-                .par_chunks_mut(share)
-                .enumerate()
-                .for_each(|(task, next)| {
-                    let low = (task * share) as u32;
-                    for (row, code) in codes.iter().enumerate() {
-                        if let Some(slot) = next.get_mut(code.wrapping_sub(low) as usize) {
-                            // SAFETY: the slot counts up from its bucket's start to its end,
-                            // which lie inside `rows`, and only this task owns the bucket.
-                            unsafe { out.write(*slot as usize, row as u32) };
-                            *slot += 1;
-                        }
-                    }
-                });
-        });
-        Buckets { bounds, rows }
-    }
-
-    fn get(&self, code: u32) -> &[u32] {
-        let code = code as usize;
-        &self.rows[self.bounds[code] as usize..self.bounds[code + 1] as usize]
-    }
-}
-
 /// The join for a small `i`: buckets `i`'s rows by code and scans `x` in parallel runs, counting
 /// each `i` row's matches per run first so that the second pass writes every match straight into
 /// its output position.
 fn scan_x(keys: &Keys, drop_unmatched: bool) -> Matches {
     let (x_height, i_height) = (keys.x.len(), keys.i.len());
-    let buckets = Buckets::of(&keys.i, keys.radix);
+    let buckets = Buckets::of(|| keys.i.iter().copied(), keys.i.len(), keys.radix);
     let threads = THREAD_POOL.current_num_threads().max(1);
     let runs = if x_height < PARALLEL_ROWS {
         1
@@ -535,7 +427,7 @@ fn scan_x(keys: &Keys, drop_unmatched: bool) -> Matches {
 /// Each chunk of `i` first counts the output rows it gives, so the chunks then write disjoint
 /// runs of the output and no row of `i` needs a start position of its own.
 fn scan_i(keys: &Keys, drop_unmatched: bool) -> Matches {
-    let buckets = Buckets::of(&keys.x, keys.radix);
+    let buckets = Buckets::of(|| keys.x.iter().copied(), keys.x.len(), keys.radix);
     let width = |code: u32| {
         let matched = buckets.get(code).len();
         if matched == 0 && !drop_unmatched {

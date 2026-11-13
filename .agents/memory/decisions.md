@@ -3243,10 +3243,11 @@ first lines R had already read, leaving R mid-command.
   that returns `None` runs as R in a data mask that binds only the columns the expression
   mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
   for the grouping (row indices per group) and evaluates once per group.
-- **Copy-on-modify, not by-reference.** `:=` updates in place when the frame's refcount is at most
-  one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
-  call named, searching enclosing scopes, so a global updated inside a function is rebound where
-  it lives. An alias taken before the update keeps the old columns, as the checker models.
+- **Copy-on-modify, not by-reference.** `:=` updates in place when the variable the call names
+  holds the frame's only reference, and otherwise forks the table (cheap: Arrow buffers are
+  shared) and rebinds that variable, searching enclosing scopes, so a global updated inside a
+  function is rebound where it lives. The only reference reads as a count of two, because the
+  finalizer every frame carries counts as one (`assign` in `crates/interp/src/frame.rs`). An alias taken before the update keeps the old columns, as the checker models.
   `DataFrame.set_key` always forks and rebinds.
 - **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
   `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,

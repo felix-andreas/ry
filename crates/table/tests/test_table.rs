@@ -1987,6 +1987,163 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
     });
 }
 
+/// A loop of filtered updates, each selecting the rows where one column equals a literal, gives
+/// the same table through the kernels as through the Polars plans. The first such filter on a
+/// column scans it and later ones read the column's row index, so the steps repeat filters on
+/// one column, and between them they change that column, sort the table and fork it, each of
+/// which must keep a stale index from selecting rows. The large tables select enough rows to
+/// write them in parallel.
+#[test]
+fn fuzz_repeated_equality_updates_agree_with_the_polars_plans() {
+    for_each_seed(40, |seed| {
+        let mut rng = SplitMix64(seed);
+        let large = seed % 8 == 7;
+        let rows = if large {
+            140_000 + rng.below(70_000)
+        } else {
+            1 + rng.below(400)
+        };
+        // A wide range leaves the column without an index, so its filters keep scanning.
+        let range = match rng.below(4) {
+            0 => 3_000_000,
+            1 if !large => 1 + rng.below(40),
+            _ => 2,
+        };
+        let offset = rng.below(9) as i32 - 4;
+        let labels = ["d", "a", "c", "b"];
+        let maybe_na =
+            |rng: &mut SplitMix64, value: i32| if rng.chance(1, 12) { NA_INTEGER } else { value };
+        let k: Vec<i32> = (0..rows)
+            .map(|_| {
+                let value = rng.below(range) as i32 + offset;
+                maybe_na(&mut rng, value)
+            })
+            .collect();
+        let f: Vec<i32> = (0..rows)
+            .map(|_| {
+                let value = 1 + rng.below(if large { 2 } else { labels.len() }) as i32;
+                maybe_na(&mut rng, value)
+            })
+            .collect();
+        let v: Vec<i32> = (0..rows)
+            .map(|_| {
+                let value = rng.below(200) as i32 - 100;
+                maybe_na(&mut rng, value)
+            })
+            .collect();
+        let w: Vec<f64> = (0..rows)
+            .map(|_| match rng.below(14) {
+                0 => NA_REAL,
+                1 => f64::NAN,
+                _ => rng.below(4000) as f64 / 16.0 - 50.0,
+            })
+            .collect();
+        let z: Vec<i32> = (0..rows)
+            .map(|_| {
+                let value = rng.below(2) as i32;
+                maybe_na(&mut rng, value)
+            })
+            .collect();
+        let table = frame(vec![
+            ("k", ints(&k)),
+            ("f", factor(&f, &labels)),
+            ("v", ints(&v)),
+            ("w", doubles(&w)),
+            ("z", RVector::Logical(z)),
+        ]);
+        let (mut kernel, mut plan) = (table.fork(), table.fork());
+        let mut forks = Vec::new();
+        let assert_same_tables = |kernel: &mut Table, plan: &mut Table, what: &str| {
+            assert_eq!(names(kernel), names(plan), "{what}: columns");
+            for name in names(plan) {
+                assert_same_vector(
+                    get(kernel, &name),
+                    get(plan, &name),
+                    &format!("{what}, column {name}"),
+                );
+            }
+        };
+        for step in 0..14 {
+            match rng.below(12) {
+                0 => {
+                    let key = [vec!["k"], vec!["f"], vec!["f", "k"]][rng.below(3)].clone();
+                    for table in [&mut kernel, &mut plan] {
+                        table
+                            .set_key(&key)
+                            .unwrap_or_else(|error| panic!("cannot set the key: {error}"));
+                    }
+                    continue;
+                }
+                1 => {
+                    forks.push((kernel.fork(), plan.fork()));
+                    continue;
+                }
+                _ => {}
+            }
+            let key_value = rng.below(range.min(6)) as i32 + offset;
+            let filter = match rng.below(8) {
+                0 => binary(BinaryOp::Equal, Expr::Integer(key_value), column("k")),
+                1 => binary(
+                    BinaryOp::Equal,
+                    column("k"),
+                    Expr::Double(f64::from(key_value)),
+                ),
+                2 => binary(
+                    BinaryOp::Equal,
+                    column("k"),
+                    [
+                        Expr::Double(f64::from(key_value) + 0.5),
+                        Expr::Double(1e12),
+                        Expr::Double(f64::NAN),
+                        Expr::Na(ColumnType::Integer),
+                        Expr::Integer(i32::MAX),
+                        Expr::Integer(offset - 1),
+                    ][rng.below(6)]
+                    .clone(),
+                ),
+                3 | 4 => binary(
+                    BinaryOp::Equal,
+                    column("f"),
+                    Expr::Character(["d", "a", "c", "b", "missing"][rng.below(5)].into()),
+                ),
+                _ => binary(BinaryOp::Equal, column("k"), Expr::Integer(key_value)),
+            };
+            let assignment = match rng.below(9) {
+                // Writing the filtered column itself changes which rows the next filter selects.
+                0 => set("k", binary(BinaryOp::Add, column("k"), Expr::Integer(1))),
+                1 => set("k", Expr::Na(ColumnType::Integer)),
+                2 => set(
+                    "w",
+                    binary(BinaryOp::Multiply, column("w"), Expr::Double(2.0)),
+                ),
+                3 => set("z", Expr::Unary(UnaryOp::Not, Box::new(column("z")))),
+                4 => set("new", column("v")),
+                5 => set("v", Expr::Na(ColumnType::Integer)),
+                _ => set("v", binary(BinaryOp::Add, column("v"), Expr::Integer(1))),
+            };
+            let update = Query {
+                rows: Rows::Filter(filter),
+                select: Select::Assign(vec![assignment]),
+                ..Query::default()
+            };
+            let what = format!("seed {seed}, step {step}: {update:?}");
+            assert_same_output(
+                execute(&mut kernel, update.clone()),
+                execute_with_plans_only(&mut plan, update),
+                &what,
+            );
+            assert_same_tables(&mut kernel, &mut plan, &what);
+        }
+        for (index, (mut kernel, mut plan)) in forks.into_iter().enumerate() {
+            assert_same_tables(
+                &mut kernel,
+                &mut plan,
+                &format!("seed {seed}: fork {index} after later updates"),
+            );
+        }
+    });
+}
+
 /// Joins of two tables with about 65,536 rows each. Up to that many rows of `i`, and when `i` is
 /// no longer than `x`, the kernel indexes `i` and scans `x`. Past either bound it buckets `x`,
 /// and several tasks build that index, so the sizes sit on both sides of the bound. The keys are

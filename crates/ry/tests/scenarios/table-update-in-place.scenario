@@ -1,0 +1,38 @@
+# A `:=` update of a DataFrame that only one variable refers to writes into that frame, so a loop
+# of small updates costs the rows it touches and not a copy of the frame per pass. The frame's
+# address shows it: the variable holds the same object after the loop. A second variable sharing
+# the frame turns the next update into a copy, which leaves the other variable's rows alone, and
+# so does a function's parameter, which shares the frame with the caller's variable.
+
+requires ry-runtime
+
+file update.R
+| address <- function(inspected) {
+|   sink("address.txt")
+|   inspected
+|   sink()
+|   sub(" .*", "", readLines("address.txt")[1])
+| }
+| x <- DataFrame(id = c(1L, 2L, 1L, 2L), v = c(10L, 20L, 30L, 40L))
+| before <- address(.Internal(inspect(x)))
+| for (step in 1:3) x[id == 1L, v := v + 1L]
+| cat("the sole reference keeps its object:", identical(before, address(.Internal(inspect(x)))), "\n")
+| print(x$v)
+| y <- x
+| x[id == 2L, v := 0L]
+| cat("a shared frame is copied:", !identical(before, address(.Internal(inspect(x)))), "\n")
+| cat("the other variable keeps its object:", identical(before, address(.Internal(inspect(y)))), "\n")
+| print(y$v)
+| print(x$v)
+| update <- function(frame) { frame[id == 1L, v := -1L]; frame$v }
+| print(update(x))
+| print(x$v)
+
+run ry run --runtime ry update.R
+expect exit 0
+expect stdout "the sole reference keeps its object: TRUE"
+expect stdout "[1] 13 20 33 40"
+expect stdout "a shared frame is copied: TRUE"
+expect stdout "the other variable keeps its object: TRUE"
+expect stdout "[1] 13  0 33  0"
+expect stdout "[1] -1  0 -1  0"

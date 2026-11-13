@@ -24,11 +24,13 @@ pub mod query;
 pub use polars;
 use {
     convert::RVector,
+    kernel::{Buckets, CodeValues, Codes, Vector, integer_range},
     ops::sort_frame,
     polars::prelude::{
         ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr,
         Series,
     },
+    polars_arrow::bitmap::Bitmap,
     polars_core::runtime::THREAD_POOL,
     std::{fmt, sync::Arc},
 };
@@ -238,6 +240,9 @@ pub struct Table {
     /// Character columns whose rows are already numbered by distinct string, so grouping by them
     /// reads an integer per row instead of hashing strings.
     string_codes: Vec<(PlSmallStr, Arc<StringCodes>)>,
+    /// The columns an equality filter has selected rows of since they last changed, and how the
+    /// next such filter finds its rows.
+    equality_filters: Vec<(PlSmallStr, EqualityFilter)>,
 }
 
 /// A character column's rows numbered by distinct string: `codes[row]` is 0 for `NA` and
@@ -247,6 +252,26 @@ pub struct StringCodes {
     pub(crate) codes: Vec<u32>,
     /// The first row of each distinct string, indexed by its code minus one.
     pub(crate) first_rows: Vec<u32>,
+}
+
+/// How an equality filter on one column finds its rows.
+#[derive(Clone, Debug)]
+enum EqualityFilter {
+    /// One filter has scanned the column. A second one is worth an index.
+    Scanned,
+    Indexed(Arc<RowIndex>),
+    /// The column cannot be indexed, so every filter scans it.
+    Unindexed,
+}
+
+/// The rows of an integer or a factor column grouped by value, so that `column == value` selects
+/// its rows without reading the column. data.table builds the same structure as a secondary
+/// index. It costs four bytes per row.
+#[derive(Debug)]
+pub(crate) struct RowIndex {
+    /// The value of the first bucket: the column's least value, or zero for a factor's codes.
+    low: i64,
+    buckets: Buckets,
 }
 
 impl Table {
@@ -266,6 +291,7 @@ impl Table {
             frame: DataFrame::new(height, columns)?,
             key: Vec::new(),
             string_codes: Vec::new(),
+            equality_filters: Vec::new(),
         })
     }
 
@@ -288,6 +314,7 @@ impl Table {
             frame: DataFrame::new(height, converted)?,
             key: Vec::new(),
             string_codes: Vec::new(),
+            equality_filters: Vec::new(),
         })
     }
 
@@ -428,16 +455,47 @@ impl Table {
         self.frame = sorted;
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();
         self.string_codes.clear();
+        self.equality_filters.clear();
         Ok(())
     }
 
     /// Records that the column `name` changed: a key that includes it no longer holds, and
-    /// neither do its string codes.
+    /// neither do its string codes or its row index.
     fn forget_column(&mut self, name: &str) {
         if self.key.iter().any(|column| column == name) {
             self.key.clear();
         }
         self.string_codes.retain(|(column, _)| column != name);
+        self.equality_filters.retain(|(column, _)| column != name);
+    }
+
+    /// The row index an equality filter on column `name` reads, or `None` when the filter scans
+    /// the column instead.
+    ///
+    /// The first equality filter on a column scans it, and the second builds the index, which
+    /// every later one reads until the column changes. Building the index costs a few scans, so
+    /// a query that runs once never pays for it, and a loop of filtered updates, each over
+    /// another value of one column, pays for it on its second pass.
+    pub(crate) fn row_index(&mut self, name: &str) -> Option<Arc<RowIndex>> {
+        let Some((_, filter)) = self
+            .equality_filters
+            .iter_mut()
+            .find(|(column, _)| column == name)
+        else {
+            self.equality_filters
+                .push((PlSmallStr::from(name), EqualityFilter::Scanned));
+            return None;
+        };
+        if matches!(filter, EqualityFilter::Scanned) {
+            *filter = match self.frame.column(name).ok().and_then(RowIndex::of) {
+                Some(index) => EqualityFilter::Indexed(Arc::new(index)),
+                None => EqualityFilter::Unindexed,
+            };
+        }
+        match filter {
+            EqualityFilter::Indexed(index) => Some(index.clone()),
+            EqualityFilter::Scanned | EqualityFilter::Unindexed => None,
+        }
     }
 
     /// Numbers the rows of the character column `name` by distinct string, as
@@ -488,6 +546,7 @@ impl Table {
             frame,
             key: Vec::new(),
             string_codes: Vec::new(),
+            equality_filters: Vec::new(),
         }
     }
 
@@ -505,6 +564,84 @@ impl Table {
 pub fn on_every_worker(task: impl Fn() + Sync) {
     THREAD_POOL.broadcast(|_| task());
     rayon::broadcast(|_| task());
+}
+
+impl RowIndex {
+    /// Indexes `column`, or gives `None` for a column of another type and for integers spread
+    /// over a range much wider than the rows, where the bucket bounds would outweigh the rows.
+    fn of(column: &Column) -> Option<RowIndex> {
+        let height = column.len();
+        if let Some(levels) = factor::levels(column.dtype()) {
+            let codes = Codes::of(column)?;
+            let (radix, validity) = (u32::try_from(levels.len()).ok()?, codes.validity.as_ref());
+            let buckets = match &codes.values {
+                CodeValues::U8(values) => bucket(values, validity, radix, |code| u32::from(code)),
+                CodeValues::U16(values) => bucket(values, validity, radix, |code| u32::from(code)),
+                CodeValues::U32(values) => bucket(values, validity, radix, |code| code),
+            };
+            return Some(RowIndex { low: 0, buckets });
+        }
+        if column.dtype() != &DataType::Int32 {
+            return None;
+        }
+        let Vector::Integer { values, validity } = Vector::of(column)? else {
+            return None;
+        };
+        let (low, high) = integer_range(&values, validity.as_ref());
+        let span = if low > high {
+            0
+        } else {
+            u64::try_from(i64::from(high) - i64::from(low) + 1).ok()?
+        };
+        if span > 2 * height as u64 + (1 << 12) {
+            return None;
+        }
+        // The check above bounds the span by twice the rows, and a table's rows are numbered in
+        // 32 bits, so only a table near that limit fails here.
+        let radix = u32::try_from(span).ok()?;
+        let buckets = bucket(&values, validity.as_ref(), radix, |value| {
+            value.wrapping_sub(low) as u32
+        });
+        Some(RowIndex {
+            low: i64::from(low),
+            buckets,
+        })
+    }
+
+    /// The rows that hold `value`, ascending.
+    pub(crate) fn rows(&self, value: i64) -> &[u32] {
+        match u32::try_from(value - self.low) {
+            Ok(code) => self.buckets.get(code),
+            Err(_) => &[],
+        }
+    }
+}
+
+/// Buckets the rows of `values` by `code`, leaving out the rows `validity` marks as `NA`.
+fn bucket<T: Copy + Sync>(
+    values: &[T],
+    validity: Option<&Bitmap>,
+    radix: u32,
+    code: impl Fn(T) -> u32 + Sync,
+) -> Buckets {
+    match validity {
+        None => Buckets::of(
+            || values.iter().map(|value| code(*value)),
+            values.len(),
+            radix,
+        ),
+        // `Buckets::of` leaves out a code at or past the radix, which `u32::MAX` always is.
+        Some(validity) => Buckets::of(
+            || {
+                values
+                    .iter()
+                    .zip(validity.iter())
+                    .map(|(value, valid)| if valid { code(*value) } else { u32::MAX })
+            },
+            values.len(),
+            radix,
+        ),
+    }
 }
 
 /// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for,

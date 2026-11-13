@@ -1080,16 +1080,12 @@ pub(crate) fn scatter(column: Column, rows: &[u32], value: Value) -> Result<Colu
             match &value {
                 Value::Scalar(Scalar::Integer(scalar)) => {
                     let scalar = scalar.unwrap_or(0);
-                    for row in rows {
-                        values[*row as usize] = scalar;
-                    }
+                    scatter_values(&mut values, rows, |_| scalar);
                 }
                 Value::Vector(Vector::Integer {
                     values: written, ..
-                }) => {
-                    for (row, written) in rows.iter().zip(written.iter()) {
-                        values[*row as usize] = *written;
-                    }
+                }) if written.len() == rows.len() => {
+                    scatter_values(&mut values, rows, |offset| written[offset]);
                 }
                 _ => return Err(mismatch()),
             }
@@ -1109,16 +1105,12 @@ pub(crate) fn scatter(column: Column, rows: &[u32], value: Value) -> Result<Colu
             match &value {
                 Value::Scalar(Scalar::Double(scalar)) => {
                     let scalar = scalar.unwrap_or(0.0);
-                    for row in rows {
-                        values[*row as usize] = scalar;
-                    }
+                    scatter_values(&mut values, rows, |_| scalar);
                 }
                 Value::Vector(Vector::Double {
                     values: written, ..
-                }) => {
-                    for (row, written) in rows.iter().zip(written.iter()) {
-                        values[*row as usize] = *written;
-                    }
+                }) if written.len() == rows.len() => {
+                    scatter_values(&mut values, rows, |offset| written[offset]);
                 }
                 _ => return Err(mismatch()),
             }
@@ -1162,6 +1154,43 @@ pub(crate) fn scatter(column: Column, rows: &[u32], value: Value) -> Result<Colu
         }
         _ => Err(mismatch()),
     }
+}
+
+/// Writes `written(offset)` into `values[rows[offset]]` for every offset. A long, strictly
+/// ascending row list is written in parallel: the rows are cut into runs, and each run writes
+/// into the stretch of `values` from its first row up to the next run's first row, which no
+/// other run touches.
+fn scatter_values<T: Copy + Send>(
+    values: &mut [T],
+    rows: &[u32],
+    written: impl Fn(usize) -> T + Sync,
+) {
+    let serial = |values: &mut [T], base: usize, start: usize, rows: &[u32]| {
+        for (offset, row) in rows.iter().enumerate() {
+            values[*row as usize - base] = written(start + offset);
+        }
+    };
+    if rows.len() < PARALLEL_ROWS || !rows.is_sorted_by(|left, right| left < right) {
+        return serial(values, 0, 0, rows);
+    }
+    let mut runs = Vec::with_capacity(rows.len().div_ceil(CHUNK_ROWS));
+    let mut rest = values;
+    let mut base = 0;
+    for (index, run) in rows.chunks(CHUNK_ROWS).enumerate() {
+        let next = rows
+            .get((index + 1) * CHUNK_ROWS)
+            .map_or(base + rest.len(), |row| *row as usize);
+        let Some((stretch, after)) = rest.split_at_mut_checked(next - base) else {
+            break;
+        };
+        runs.push((stretch, base, index * CHUNK_ROWS, run));
+        rest = after;
+        base = next;
+    }
+    THREAD_POOL.install(|| {
+        runs.into_par_iter()
+            .for_each(|(stretch, base, start, run)| serial(stretch, base, start, run));
+    });
 }
 
 /// A numeric column's values and validity, owned: unshared buffers stay unshared, so the caller
@@ -1482,6 +1511,124 @@ pub(crate) fn gather_bits(bits: &Bitmap, rows: &[u32]) -> Bitmap {
     pack(rows.len(), |start, out| {
         let end = (start + out.len() * 8).min(rows.len());
         pack_into(out, &rows[start..end], |row| bits.get_bit(row as usize));
+    })
+}
+
+/// Rows grouped by code, each group in row order: the rows with code `c` are
+/// `rows[bounds[c]..bounds[c + 1]]`.
+#[derive(Debug)]
+pub(crate) struct Buckets {
+    bounds: Vec<u32>,
+    rows: Vec<u32>,
+}
+
+impl Buckets {
+    /// Groups the rows by code. `codes()` gives one code per row, in row order, and a row whose
+    /// code is `radix` or more joins no bucket. Each task owns an equal share of the code range
+    /// and reads every row's code for the codes it owns, so the tasks count and place rows
+    /// without sharing a counter, and every bucket fills in row order. Reading the codes once
+    /// per task is sequential and cheap next to the writes, which land all over the buckets and
+    /// are what the tasks divide between them.
+    pub(crate) fn of<I>(codes: impl Fn() -> I + Sync, len: usize, radix: u32) -> Buckets
+    where
+        I: Iterator<Item = u32>,
+    {
+        let radix = radix as usize;
+        let tasks = if len < PARALLEL_ROWS {
+            1
+        } else {
+            THREAD_POOL.current_num_threads().max(1)
+        };
+        let share = radix.div_ceil(tasks).max(1);
+        // Code `c` is counted in `bounds[c + 2]`, so the running sum leaves the start of bucket
+        // `c` in `bounds[c + 1]`. Placing a row advances that entry, which ends as the bucket's
+        // end, and the entry before it has ended as its start. The bounds are therefore counted,
+        // advanced and read in one array, with no second copy to advance.
+        let mut bounds = vec![0u32; radix + 2];
+        THREAD_POOL.install(|| {
+            bounds[2..]
+                .par_chunks_mut(share)
+                .enumerate()
+                .for_each(|(task, counts)| {
+                    let low = (task * share) as u32;
+                    for code in codes() {
+                        // A code below `low` wraps past the end of the share.
+                        if let Some(count) = counts.get_mut(code.wrapping_sub(low) as usize) {
+                            *count += 1;
+                        }
+                    }
+                });
+        });
+        for code in 0..radix {
+            bounds[code + 2] += bounds[code + 1];
+        }
+        let mut rows = vec![0u32; bounds[radix + 1] as usize];
+        let out = Shared(rows.as_mut_ptr());
+        THREAD_POOL.install(|| {
+            bounds[1..=radix]
+                .par_chunks_mut(share)
+                .enumerate()
+                .for_each(|(task, next)| {
+                    let low = (task * share) as u32;
+                    for (row, code) in codes().enumerate() {
+                        if let Some(slot) = next.get_mut(code.wrapping_sub(low) as usize) {
+                            // SAFETY: the slot counts up from its bucket's start to its end,
+                            // which lie inside `rows`, and only this task owns the bucket.
+                            unsafe { out.write(*slot as usize, row as u32) };
+                            *slot += 1;
+                        }
+                    }
+                });
+        });
+        Buckets { bounds, rows }
+    }
+
+    /// The rows with `code`, ascending. A code no row has, or one past the radix, has none.
+    pub(crate) fn get(&self, code: u32) -> &[u32] {
+        let code = code as usize;
+        // The last two bounds belong to no bucket, as `of` explains.
+        if code + 2 >= self.bounds.len() {
+            return &[];
+        }
+        &self.rows[self.bounds[code] as usize..self.bounds[code + 1] as usize]
+    }
+}
+
+/// The least and the greatest valid value, or `(i32::MAX, i32::MIN)` when there is none.
+pub(crate) fn integer_range(values: &[i32], validity: Option<&Bitmap>) -> (i32, i32) {
+    let range = |start: usize, values: &[i32]| {
+        let mut low = i32::MAX;
+        let mut high = i32::MIN;
+        match validity {
+            None => {
+                for value in values {
+                    low = low.min(*value);
+                    high = high.max(*value);
+                }
+            }
+            Some(validity) => {
+                for (offset, value) in values.iter().enumerate() {
+                    if validity.get_bit(start + offset) {
+                        low = low.min(*value);
+                        high = high.max(*value);
+                    }
+                }
+            }
+        }
+        (low, high)
+    };
+    if values.len() < PARALLEL_ROWS {
+        return range(0, values);
+    }
+    THREAD_POOL.install(|| {
+        values
+            .par_chunks(CHUNK_ROWS)
+            .enumerate()
+            .map(|(index, chunk)| range(index * CHUNK_ROWS, chunk))
+            .reduce(
+                || (i32::MAX, i32::MIN),
+                |left, right| (left.0.min(right.0), left.1.max(right.1)),
+            )
     })
 }
 

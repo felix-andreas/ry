@@ -1553,7 +1553,9 @@ unsafe fn assign(
             "`:=` updates a DataFrame stored in a variable; assign it to one first, as in `y <- lst$a; y[, z := 1]`",
         ));
     }
-    if subject.refcount() <= 1 {
+    // The finalizer `wrap` registers holds one reference to the frame for as long as it lives,
+    // so a frame that only the variable refers to counts two.
+    if subject.refcount() <= 2 {
         update(table)?;
         return Ok(subject);
     }
