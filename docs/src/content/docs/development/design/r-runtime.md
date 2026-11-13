@@ -1075,6 +1075,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
 | A call plan per call site: arguments written straight into the callee's slots | JSC `CodeBlock`, V8 | built | `run_closure`'s matching and binding; a call from a loop costs 2,330 instructions, down from 3,065 on heap frames | `direct_plan` in `bytecode.rs`, `call_with_plan` in `eval.rs` |
 | Closure frames in fixed slots: a call builds its frame in the slot above the top and pops by lowering the depth, never moving it | CPython 3.11 frame stack, Lua `CallInfo` reuse | built | frame push and pop: a call from a loop costs 2,844 instructions, down from 2,927; testthat_full -1.16% with the JIT off and -1.17% with it on, `validation` -0.91% | `FrameStack` in `crates/interp/src/interp.rs` |
+| Tier 0 continues its dispatch loop in the callee: a call to a compiled body pushes a resume record instead of entering Rust, and every way out of the body goes back through it | CPython 3.11 inlined Python calls, LuaJIT | built | the Rust entry and exit per call: the planned `h -> f` pair 4,127 to 2,725 instructions, and with the JIT off `expr_tree` -10.4%, `validation` -1.5%, `objects` -0.8%, `conditions` +0.0% | `enter_in_place`, `finished` in `bytecode.rs`; `enter`, `leave`, `apply_closure_entering` in `eval.rs` |
 | **2. Call facts ahead of time** | | | | |
 | Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | built | 154 guards per `seq()` call; 141.6k to 139.7k instructions per call | the `Op::Guard` arm and `cached_cell` in `bytecode.rs` |
 | A guard on a base function is two bit tests and one load: no binding of the symbol outside base and an attached enclosure chain mean the base binding answers it. Every route that binds a symbol in a frame marks the symbol, and the mark never clears | JSC watchpoints | built | testthat_full over five repetitions, JIT off: 4,145.6M to 4,132.8M instructions (-0.31%), `run_guard` 26.1M to 13.7M; an environment write costs 6 more (934 to 940) | `guard_fast` in `bytecode.rs`; `BOUND_ELSEWHERE`, `DETACHED` and `mark_bound_elsewhere` in `crates/heap/src/env.rs` |
@@ -1626,38 +1627,38 @@ data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a t
 generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
-`ry run` beat data.table under GNU R on every group-by and join question and on two of the three
-`:=` loops, and all three runs give the same checksums. The loop that updates 1% of the rows is
-the exception. data.table builds an index on `id4` during the first pass and afterwards writes
-only the matching rows, in place, while a `:=` on a row subset of a DataFrame computes a whole
-new column on every pass. Each cell is the faster of two runs, in seconds, and the last row is
-each engine's peak resident memory over the whole run, which is the loop that adds 100 columns.
-The last column is the same engine driven from Rust, without R.
+`ry run` beat data.table under GNU R on every question, and all three runs give the same
+checksums. The loop that updates 1% of the rows writes only the matching rows, in place, in both
+engines: data.table builds an index on `id4` during the first pass, and a DataFrame builds a row
+index of `id4` on the second `id4 == step` filter and keeps it until `id4` changes. Each cell is
+the faster of two runs, in seconds, and the last row is each engine's peak resident memory over
+the whole run, which is the loop that adds 100 columns. The last column is the same engine
+driven from Rust, without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.115 | 0.022 | 0.019 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.140 | 0.022 | 0.019 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.231 | 0.084 | 0.079 |
-| groupby q4: three means by `id4` | 0.178 | 0.122 | 0.092 |
-| groupby q5: three sums by `id6` | 0.283 | 0.100 | 0.105 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.868 | 0.102 | 0.126 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.561 | 0.037 | 0.043 |
-| groupby q8: the two largest `v3` by `id6` | 1.512 | 0.127 | 0.132 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.579 | 0.056 | 0.054 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.599 | 0.680 | 0.650 |
-| `:=` on a whole column, 100 times | 4.572 | 0.886 | 0.498 |
-| `:=` on 1% of rows, 100 times | 0.405 | 2.414 | 0.628 |
-| `:=` adding a column, 100 times | 4.876 | 0.812 | 0.782 |
-| join q1: small, on `id1` | 0.366 | 0.106 | 0.080 |
-| join q2: medium, on `id2` | 0.470 | 0.093 | 0.088 |
-| join q3: medium, left, on `id2` | 0.724 | 0.117 | 0.124 |
-| join q4: medium, on factor `id5` | 0.514 | 0.095 | 0.104 |
-| join q5: big, on `id3` | 3.171 | 0.353 | 0.364 |
-| keyed rolling join | 0.120 | 0.063 | 0.053 |
-| total | 21.28 | 6.29 | 4.04 |
-| peak memory (GB) | 7.7 | 8.4 | 4.7 |
+| groupby q1: `sum(v1)` by `id1` | 0.148 | 0.018 | 0.026 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.148 | 0.020 | 0.026 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.293 | 0.084 | 0.097 |
+| groupby q4: three means by `id4` | 0.222 | 0.103 | 0.105 |
+| groupby q5: three sums by `id6` | 0.301 | 0.107 | 0.102 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.915 | 0.097 | 0.121 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.603 | 0.040 | 0.038 |
+| groupby q8: the two largest `v3` by `id6` | 1.679 | 0.139 | 0.133 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.632 | 0.060 | 0.060 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.675 | 0.656 | 0.640 |
+| `:=` on a whole column, 100 times | 4.858 | 0.430 | 0.555 |
+| `:=` on 1% of rows, 100 times | 0.356 | 0.111 | 0.105 |
+| `:=` adding a column, 100 times | 4.920 | 0.965 | 0.755 |
+| join q1: small, on `id1` | 0.363 | 0.096 | 0.114 |
+| join q2: medium, on `id2` | 0.498 | 0.088 | 0.103 |
+| join q3: medium, left, on `id2` | 0.720 | 0.123 | 0.132 |
+| join q4: medium, on factor `id5` | 0.543 | 0.093 | 0.099 |
+| join q5: big, on `id3` | 2.978 | 0.339 | 0.391 |
+| keyed rolling join | 0.120 | 0.055 | 0.053 |
+| total | 21.97 | 3.62 | 3.66 |
+| peak memory (GB) | 7.7 | 4.5 | 4.8 |
 <!-- /bench-table:1e7 -->
 
 At db-benchmark's 5 GB size (1e8 rows) the table holds the ten group-by questions alone,
@@ -1682,6 +1683,19 @@ columns in the engine (`DataFrame.select` of one `Expr.sum` per column), because
 | total | 62.97 | 17.28 | 16.88 |
 | peak memory (GB) | 12.5 | 8.5 | 8.5 |
 <!-- /bench-table:1e8-groupby -->
+
+The two `:=` loops that write existing columns fit at this size as well
+(`just bench-table <dir> --rows 1e8 --updates-only`). The subset loop writes one million rows
+per pass.
+
+<!-- bench-table:1e8-updates -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| `:=` on a whole column, 100 times | 37.738 | 6.616 | 6.431 |
+| `:=` on 1% of rows, 100 times | 3.079 | 0.987 | 1.040 |
+| total | 40.82 | 7.60 | 7.47 |
+| peak memory (GB) | 10.8 | 6.6 | 6.6 |
+<!-- /bench-table:1e8-updates -->
 
 The join questions are measured separately at db-benchmark's 5 GB size
 (`just bench-table <dir> --rows 1e8 --joins-only`), because their inputs are twice the group-by

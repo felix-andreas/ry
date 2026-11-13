@@ -10,13 +10,7 @@ fannkuch <- function(n: I64) -> Record{checksum: I64, max_flips: I64} {
     flips: I64 <- 1
     kk <- perm[[k]]
     while (kk > 1) {
-      i <- 1
-      j <- k
-      while (i < j) {
-        perm <- List.swap(perm, i, j)
-        i <- i + 1
-        j <- j - 1
-      }
+      perm <- List.concat(List.reverse(List.take_first(perm, k)), List.drop_first(perm, k))
       flips <- flips + 1
       k <- kk
       kk <- perm[[k]]
@@ -39,8 +33,7 @@ fannkuch <- function(n: I64) -> Record{checksum: I64, max_flips: I64} {
         } else {
           count[[r]] <- r - 1
           perm0 <- perm1[[1]]
-          for (i in List.range(1, r)) perm1[[i]] <- perm1[[i + 1]]
-          perm1[[r + 1]] <- perm0
+          perm1 <- List.concat(List.append(List.sublist(perm1, 2, r), perm0), List.drop_first(perm1, r + 1))
           r <- r + 1
         }
       }

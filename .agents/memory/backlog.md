@@ -37,11 +37,30 @@ The quality bar is four things.
   suspect.
 - ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
   'lattice'`) and the `timeseries` workload of `just bench applications` fails.
-- Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
+- Recursion past `options(expressions=)` with the JIT on does not finish: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` runs for minutes (stopped after 120 s, unfinished) where GNU R raises an error. A native self-call in tier 1 counts the expression limit down (`jit_depth_budget`) and, when it runs out, hands the activation back to tier 0, which pushes one frame and enters the native code again for the next level, so every level repeats a descent of up to the whole limit. Tier 1 should stop entering a body natively once a descent ran out of budget. At the default limit of 5,000 the repeats cost nothing and the error arrives at once. With the JIT off the same program raises "evaluation nested too deeply: the register file is full". Recursion within the limit is fine, because a tier-0 call runs in the dispatch loop without a Rust frame of its own: `count <- function(n) if (n == 0L) 0L else 1L + count(n - 1L); count(400000L)` returns under that option.
+- `libr`'s `hot_api_functions_stay_within_instruction_budgets` (`crates/libr/tests/test_api_boundary.rs`) fails on two of its budgets, on the `iterate` and the `release` profile alike: `bench_binding_probes` costs 232 instructions per call against a budget of 203, and `bench_duplicate_call` 2,118 against 2,100. Neither loop calls a closure (`R_existsVarInFrame` with `R_GetBindingType`, and `Rf_duplicate` of a small call). Find the change that added the 36 instructions to a binding probe before moving either budget.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
+- A temporary passed on through `...` is modified in place by the callee, and `..1` then reads
+  the modified value: `g <- function(v) { v[1] <- 99; v }; f1 <- function(...) { a <- g(...);
+  ..1 }; f1(c(1, 2))` gives `99 2`, and GNU R gives `1 2`. The cause is unverified; the
+  suspect is the count of a forwarded promise's value, which the `...` list still reaches.
+- `UseMethod` differs from GNU R in two ways, and the two together crash.
+  - Inside `try()` it dispatches: `g <- function(x) { r <- try(UseMethod("g"), silent = TRUE);
+    ... }` runs `g.default` in ry. GNU R raises "'UseMethod' used in an inappropriate fashion"
+    there without calling a method, because the call's function context is `try`'s, not `g`'s.
+  - It dispatches on the variable, not on the argument: `f <- function(x) { x <- structure(1,
+    class = "k"); UseMethod("f") }` called as `f(c(10, 20))` runs `f.k` in ry and `f.default`
+    in GNU R, which reads the class of the argument as passed.
+  - With `f <- function(x) { x <- structure(1, class = "k"); r <- try(UseMethod("f"), silent =
+    TRUE); UseMethod("f") }`, a method `f.k` that stops on its first call, and a caller `g <-
+    function() { w <- c(30, 40); f(w) }`, `g()` ends in a segmentation fault, and under
+    `RY_GC_STRESS=young` in the panic "a promise was forced after its last counted reference
+    was released" (`eval.rs`). Once the generic overwrites `x`, only the uncounted `frame_args`
+    entry holds the argument's promise, and the failed dispatch releases it. Matching GNU R on
+    the first point removes the path.
 
 ## Open: the evaluator's edit loop
 
@@ -143,7 +162,7 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 
 ## Open: tier 1 only ties tier 0 on small builtin calls with an element store
 
-`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. Ir per iteration under `--profile iterate`:
+`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. The allowance has no margin, so the test fails intermittently: the counts move by one instruction per iteration between runs of the same binary, and `x[k] <- list(5)` measures 881 or 882 in tier 0 against 951 or 952 compiled, where 881 against 952 is one instruction over the bound (881 + 70). Three of six runs failed that way. Ir per iteration under `--profile iterate`:
 
 | shape | tier 0 / compiled with guarded base calls | tier 0 / compiled with bound base calls |
 |---|---|---|
@@ -233,7 +252,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
   - `try`, which lowers to an R call of `.ry_try`;
   - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
-  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.reverse`, `List.keep_if`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
+  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.drop_at`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
   - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;
   - a function with `-> NULL` that ends in a loop, `<<-`, `...`, named arguments or a left-out default in a call of a typed function, a `Dict` of anything but `I64`, `F64` and `Str`, and `List.map(xs, Num.to_f64)` by name;
   - a variable, parameter or loop variable assigned a value of another layout (`layout_differs` mirrors the lowerer's value classes), branches that set a name to different layouts, and the value of an `if` without `else`;
@@ -245,20 +264,22 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 ### Gaps the typed public ports found
 
-Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
+Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Every port runs natively and prints GNU R's checksum, because it writes around each gap as noted.
 
 - **Not compiled natively; the whole function runs in the interpreter:**
-  - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
+  - a standard library function passed by name, as in `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure"), so the ports wrap it in a lambda (`\(row) List.sum(row)`);
   - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
-  - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
-  - An annotation does not reach the literals inside a list literal: `bodies: List<Body> <- [(x = 0, ...)]` reports `double` fields, so nbody and fasta spell `0f64`.
-  - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
-  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
-- **Nominal items do not fit an empty list.** `children <- []` then `List.append(children, @Tree(...))` is "expected `T`, found `Tree`", and `children: List<Tree> <- []` is "expected `List<Tree>`, found `List<T>`". A recursive `alias` is refused instead, with a message that prints an enormous expanded type. This blocks a typed awfy `storage`.
+  - A local whose literal is reassigned later in a loop or branch stays `double`: `x <- 0` then `if (n > 1i64) x <- x + 1.5` against an `F64` result reports "expected `F64`, found `double`", so the ports spell `0f64`.
+  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))` against `:Leaf(I64)`).
+  - A literal variable first read as a list index (`cprob_lookup[[j]]`) is decided as `double`, so a later `lookup[[i]] <- j` into a `List<I64>` is an error. The fastaredux ports spell `j <- 1i64`.
+- **A recursive `alias` is refused**, with a message that prints an enormous expanded type; a nominal `type` works.
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
-- **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
+- **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes. It runs at about GNU R's time, the slowest typed port against GNU R. A callgrind profile shows about 450 instructions per byte position, most of them in the `CallTyped` to `matches_at` and in list copies around it, so the cost is the typed core's per-call overhead, not the matching.
+- **A ry list holds no `NaN`**, so the mandelbrot ports freeze a point once `|z| > 2` (`List.map3`) instead of letting it overflow to `NaN` as the R vector code does; the count of points inside the set is the same.
+- **An empty `List.map`, `List.map2`, `List.map3`, `List.join_map` or `List.chunks_of` result stops native code** (`fail_if` in each lowering), and the interpreter runs the call again. The interpreter builds those results with `arrays::from_items(&[])`, which gives `logical(0)`, and the stop keeps the two tiers' values identical. `List.repeat(x, 0i64)` has no stop, so it gives `double(0)` natively against `logical(0)` interpreted. Settle the interpreter's empty result from the checker's type, then drop the stops.
+- **A walk accumulator's tags do not widen.** `List.walk(xs, :None, \(acc, x) :Some(x))` is "this function must return `:None`, but it returns `:Some(I64)`", `List.walk(xs, [:A], \(acc, x) List.append(acc, :B))` is "passed `List<:A>`, but its parameter `acc` accepts `List<:B>`", and a record state `(best = :None, n = 0i64)` fails the same way. The accumulator is left open (`widening_accumulator` in `check.rs`), but the step function's result is still checked against the initial state's tags.
 - **Non-constant defaults.** A typed function whose parameter default is not a constant is not compiled by the typed core. (Unverified.)
 - **Typed values outside elaborated code.** The preflight elaborates only code that `ry run` and the console evaluate, so under `ry load` and `source()` these gaps show (`decisions.md`, "The checker decides a literal's run-time type"; unverified):
   - a literal the checker types `I64` runs as `I64` only in elaborated code, so `ry load` and `source()` convert only annotated bindings;
@@ -1505,11 +1526,16 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ### Tier-0 call entry and dispatch
 
-- On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine`. The register clear is about 16 of `grow_registers`' 57 and must stay.
+- A tier-0 closure call to a compiled body continues in the dispatch loop through `enter_in_place` and `finished`, and a planned site from a slot frame takes `call_fast` and `return_fast` (`decisions.md`, "Closure call setup: the 10x end shape"). A call entered from a builtin, from `Rf_eval`, from `UseMethod` or from the general binding path nests through Rust and pays `run_at`, about 167 instructions, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine`. The register clear is about 16 of `grow_registers`' 57 and must stay.
 - Superinstructions and guard dedup were measured and do not pay (`decisions.md`, "Tier-0 superinstructions do not pay"). Trimming `Activation` saves about 2 instructions per call, because the fields the baseline JIT reads sit at fixed offsets.
 - Leaf code (a closure body that makes no call) could skip saving and restoring the environment flags and pushing and releasing the handle.
-- The closure frame push and pop (`eval::enter` and `eval::leave`) are about 5.9% of a testthat_full iteration, about 460 instructions per call against GNU R's `begincontext` plus `endcontext`, partly two copies of `Frame` into `state.frames`. Building the frame in place and trimming the handle release and `on.exit` checks in `leave` has a ceiling of about 3%.
-- What remains beyond that is a thinner call path (the AOT track's call plans).
+- **A framed call costs about 830 instructions of machinery against the goal's 200, and no single part of it is large.** On the planned fast path the call op is 535, the return op 225 and `release_slots` 69; `decisions.md` (same entry, "Measured: where a framed call's instructions go") has the split. The `Frame` write is 47 of them, so the frame columns pay only together with the rest. What the fast path has: arguments written once, counts from the plan row, one observer byte. What is unbuilt, on every path:
+  1. **The frame as depth-indexed columns.** A call writes the whole 21-field `Frame` (about 112 bytes), including an `on_exit: ThinVec`, two `Rc` clones of the handler and restart stacks, and a `srcref` found by walking the closure's attributes. The target is a 40-byte hot record plus cold columns, one `Interp.on_exit` stack, and handler and restart arenas with a parent index.
+  2. **Pooled default promises and `u32` reference columns.** `eval::default_promises` allocates a promise per default that is code, and a reference's target (frame, slot, header) is a heap integer vector read on every use.
+  3. **A smaller resume record and machine switch** (83 instructions on entry), and a register window that needs no clearing (37).
+  4. **The packed code header**, which folds the guards on the closure and the plan row (37) and removes the `pool_ints` reads that `enter_in_place` makes on the generic path.
+- **The generic path is half of validation's closure calls.** Of 284K `CallGeneric` executions, 115K take the fast path; 55K come from a caller whose frame has an environment, 42K hit a site whose plan word is zero because its body was compiled for a fresh closure, 12K hit a site not prepared yet, and 11K call a closure with a native entry. Those build an `Arg` buffer that `push_frame` copies and test their observers one by one in `eval::enter`. Planning on the first call and entering from a frame with an environment would cover 97K of those 120K. Functional style shows the same gap from the other side: with the JIT on it costs 1.3% more instructions than before calls ran in the loop, because 124K of its 168K `CallGeneric` executions pay for the fast path's tests and then take the generic path, and half of its closure calls are made by builtins and nest through Rust.
+- **In-loop promise forcing waits for item 2.** Running a promise's code in the dispatch loop instead of a Rust frame was built and measured as a net loss on every program tried (`decisions.md`, same entry), because its per-force overhead (a forcing record, a resume record, two heap roots, a walk of the caller's live registers, and the heap read of the reference target) costs about what the Rust frame did. Three of those five go away with pooled promises, so build it again then, not before. Validation forces 772K promises against 284K call instructions, so this is where its gain is.
 
 ### Argument lists collected into `eval::Args`
 
@@ -3013,18 +3039,48 @@ The end-to-end guard rests on the corpus suites.
     take 0.8 GB of bounds (derived from the rule, not measured). Bounding the range by the
     bucketed side's own rows would send such a join to the Polars plan, so it needs a hashed
     kernel path first. `test_memory.rs` has no step of this shape.
-- **`:=` on a row subset loses to data.table.** db-benchmark's loop
-  `for (step in 1:100) x[id4 == step, v1 := v1 + 1L]` at 1e7 rows takes 2.1 s from R and 0.7 to
-  0.9 s from the Rust driver against data.table's 0.5 s. `assign_filtered` in
-  `crates/table/src/query.rs` runs it as a Polars plan (filter, then a left join on a row index,
-  then `when/then`), which builds a new column and a join's scratch on every pass, while
-  data.table answers `id4 == step` from an automatic index and writes the matching rows in
-  place. The target shape is a kernel that evaluates the filter to a mask and the value on the
-  selected rows alone, and writes into the column's buffer when the column is uniquely held.
-  The gap between R and the Rust driver is system time and varies between runs (0.8 to 3.7 s
-  over 100 passes): the R process faults each pass's buffers in afresh, and with transparent
-  huge pages disabled for the process the loop takes 3.1 s. Find out why the driver does not pay
-  it before choosing between the in-place kernel alone and a pool of freed mappings.
+- **Only `:=` reads a column's row index.** A filtered update whose filter is `column == literal`
+  finds its rows in the index `Table::row_index` builds on the second such filter
+  (`decisions.md`, "A filtered `:=` reads a row index and writes in place"). A filtered select
+  (`x[id4 == 5L]`, `DataFrame.filter`), a filtered aggregate and a grouped `:=` still scan the
+  column, and so does every other filter shape: `%in%`, a range, or two equalities joined by
+  `&`. data.table's automatic index serves `==` and `%in%` wherever `i` uses them (its vignette
+  on secondary indices; not measured here). The index holds 4 bytes
+  per row until the column changes or the table is dropped, with no way for the user to drop it
+  earlier.
+- **Some calls leave one reference count on a frame, so the frame's next `:=` copies once.**
+  The copy is a fresh object, so the updates after it write in place; the cost is one column
+  copy, or one per pass when the call sits inside the loop. data.table never notices, since its
+  `:=` writes in place whatever the count says. `print`, `format`, `head`, `summary`,
+  `as.data.frame`, `nrow` and friends leave the count alone. Each of these was run and is
+  followed by a copy:
+  - A local list that held the frame: `capture.output(x)` (its `withVisible` result is a list),
+    `str(x)`, `nrow(list(x)[[1]])`, `do.call(nrow, list(x))`, `Map(nrow, list(x))`,
+    `for (y in list(x)) NULL`, and any `function(v) { kept <- list(v); ... }`. Five such calls on
+    a fresh vector read a count of 6 against 1, in ry and in GNU R alike, because neither lowers
+    an element's count when the list that held it dies with its frame; only a collection frees
+    the list, and a collection lowers no count. Closing this needs the heap to release a list's
+    elements when a frame's clearing drops the list to zero holders, which is sound only where
+    the list cannot be the frame's result or sit on the evaluation stack.
+  - The frame passed through `...` into a builtin: `(function(...) dim(...))(x)` and
+    `(function(...) length(list(...)))(x)`.
+  - A call that fails after forcing the argument: `try(f(x))` where `f` reads its parameter and
+    then stops.
+  - A function that updates its parameter, `function(a) { a[id == 1L, v := 5L]; NULL }`: the
+    parameter's update goes to a fork, as it must, and the caller's frame keeps one count.
+- **Releasing `...` lists and detached references at frame exit costs 0.6% of the testthat
+  workload's warm instructions** (`decisions.md`, "A filtered `:=` reads a row index and writes
+  in place", cost of the exact counts). The part that is not release work is the test
+  `release_slots` (`heap.rs`) makes on every slot for a `...` list. A compiled body knows which
+  slot can hold one, so the release could take that slot's index and test nothing else.
+- **A chained `:=` is an error.** `x[id == 1L, v := 5L][id == 2L, v := 6L]` applies the first
+  update and then fails with "`:=` updates a DataFrame stored in a variable", because the second
+  bracket's subject is a call. data.table code chains updates this way, and
+  `ry migrate data-table` does not split the chain.
+- **A `:=` whose value has the wrong length warns from R's `[<-`.** `x[id == 1L, v := 1:3]`
+  with two matching rows falls back to the R path, whose warning names
+  `.Primitive("[<-")(c(10L, 20L, 30L, 40L), c(1L, 3L), 1:3)` instead of the user's call, and then
+  recycles as R does. The kernel should report the length mismatch itself.
 - **An aggregate over a filter that keeps no rows gives one row.** `x[v > 5, .(s = sum(v))]`
   with no matching row prints one row with `s = 0`; data.table gives a table with no rows (and
   `x[v > 5, sum(v)]` gives `0` in both). The verb form, `DataFrame.filter` then
@@ -3085,11 +3141,6 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop is engine-bound** (`tools/bench/internal/table/ry.R`, "update subset", 1e6 rows:
-  0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
-  5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
-  engine code in a different process. Both run on the same allocator
-  (`crates/table/benches/allocator.rs`), so the gap is elsewhere and has not been profiled.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.

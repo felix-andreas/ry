@@ -120,7 +120,7 @@ use {
         unwind::{R, Unwind},
     },
     heap::{
-        Heap, Liveness, Marker, RootSource,
+        Heap, Liveness, Marker, RootSource, activity,
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
@@ -199,6 +199,52 @@ impl Frame {
     pub unsafe fn owns(&self, env: Sexp) -> bool {
         self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
     }
+}
+
+/// The attached debugger, if any. A call's fast path tests [`activity::hooks`] instead of
+/// this field, so the slot is written only through [`DebuggerSlot::set`] and
+/// [`DebuggerSlot::take`], which keep the [`activity::DEBUGGER`] bit equal to whether it is
+/// occupied.
+pub struct DebuggerSlot(Option<Box<debugger::Adapter>>);
+
+impl DebuggerSlot {
+    pub fn set(&mut self, adapter: Option<Box<debugger::Adapter>>) {
+        activity::set_hook(activity::DEBUGGER, adapter.is_some());
+        self.0 = adapter;
+    }
+
+    pub fn take(&mut self) -> Option<Box<debugger::Adapter>> {
+        activity::set_hook(activity::DEBUGGER, false);
+        self.0.take()
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut Box<debugger::Adapter>> {
+        self.0.as_mut()
+    }
+}
+
+impl std::ops::Deref for DebuggerSlot {
+    type Target = Option<Box<debugger::Adapter>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Says whether the session defines S4, R6 and reference classes ([`Interp::object_systems`]),
+/// keeping the [`activity::NO_OBJECT_SYSTEMS`] bit that a call's fast path tests in step.
+pub fn set_object_systems(allowed: bool) {
+    interp().object_systems = allowed;
+    activity::set_hook(activity::NO_OBJECT_SYSTEMS, !allowed);
+}
+
+/// The bits of [`activity::hooks`] that stand for interpreter state, computed from that state:
+/// what the word must hold, apart from the profiling bits.
+pub fn observer_bits() -> u8 {
+    let state = interp();
+    (if state.debugger.is_some() { activity::DEBUGGER } else { 0 })
+        | (if moves::tracking() { activity::MOVES } else { 0 })
+        | (if state.object_systems { 0 } else { activity::NO_OBJECT_SYSTEMS })
 }
 
 // A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
@@ -379,6 +425,9 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
     state.frames.truncate(depth);
     // An unwind to top level skips the releases of the calls it leaves, so their argument
     // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 {
+        bytecode::forget_resumes(&mut state.bytecode);
+    }
     if depth == 0 && state.references_used != 0 {
         // SAFETY: `state` is the interpreter's own state, which `release_references` reads
         // through `interp()`, and it is not used after this call.
@@ -541,6 +590,9 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The DataFrames whose `x[i, j, by]` queries are running, outermost first. An update of a
+    /// frame that an outer query is still reading must not write into it.
+    pub frame_queries: Vec<Sexp>,
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
@@ -584,7 +636,7 @@ pub struct Interp {
     pub show_error_messages: bool,
     /// The attached Debug Adapter Protocol server, which the evaluator consults before each
     /// statement.
-    pub debugger: Option<Box<debugger::Adapter>>,
+    pub debugger: DebuggerSlot,
     /// Depth of nested default error handling, to stop an error in `options(error=)` looping.
     pub in_error: u32,
     /// Objects that live as long as the session: the options list, `.Random.seed` helpers, and
@@ -785,6 +837,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         symbols,
         visible: true,
         returned_values: Vec::new(),
+        frame_queries: Vec::new(),
         assignment_call: None,
         native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
@@ -796,7 +849,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         error_message: String::new(),
         text_buffer: Vec::new(),
         show_error_messages: true,
-        debugger: None,
+        debugger: DebuggerSlot(None),
         in_error: 0,
         globals: values::Globals::placeholder(),
         hooks,

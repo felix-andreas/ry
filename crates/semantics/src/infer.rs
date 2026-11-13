@@ -1857,6 +1857,12 @@ fn constraint_rejects<'db>(
         Constraint::ArrayItem => match ty.kind(db) {
             TyKind::Any | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),
+            // A nominal `type Tree = :Leaf(I64) | ...` is a ry value when its representation
+            // is, which is what a non-empty `[@Tree(...)]` checks too.
+            TyKind::Named(name, _) if !is_ry_value_type(db, ty) => table
+                .definitions
+                .and_then(|definitions| definitions.get(db, *name))
+                .is_some_and(|definition| is_ry_value_type(db, definition.body)),
             _ => is_ry_value_type(db, ty),
         },
         Constraint::Number | Constraint::Int | Constraint::Frac => match ty.kind(db) {

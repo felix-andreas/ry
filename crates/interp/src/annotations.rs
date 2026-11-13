@@ -388,6 +388,13 @@ pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> 
     ))
 }
 
+/// Whether any frame has registered a parameter promise for checking, which a returning frame
+/// must then drop ([`leave`]).
+#[inline(always)]
+pub fn checks_pending() -> bool {
+    !interp().annotations.pending.is_empty()
+}
+
 /// Drops the checks of the frame at `depth` whose promises were never forced, so a promise that
 /// escapes its call is no longer checked. Every closure exit calls it, because a frame whose
 /// entry check failed may already have registered some.

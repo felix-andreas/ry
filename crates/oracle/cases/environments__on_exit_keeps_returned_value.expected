@@ -1,0 +1,19 @@
+[stdout]
+| [1] 10 20 30
+| [1]  0 20 30
+| [1] 1 2 3
+| List of 2
+|  $ a: num 1
+|  $ b: chr "two"
+| [1]  0 20 30
+| [1]  0 99 30
+| at exit: 100 2 3 400 
+| [1] 1 2 3 4
+| [1] 0 6
+| [1] 18
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 18

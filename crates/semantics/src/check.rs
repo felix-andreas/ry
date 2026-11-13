@@ -1078,8 +1078,16 @@ fn check_item_in<'db>(
                     },
                 ));
             }
-            list_items(db, crate::types::array_element(db, ty)?)
-                .map(|items| (id, Empty::List(items)))
+            let item = crate::types::array_element(db, ty)?;
+            // A nominal such as `type Tree = :Leaf(I64) | ...` is stored as its representation.
+            let item = match item.kind(db) {
+                TyKind::Named(name, arguments) => context
+                    .table
+                    .representation(db, *name, arguments)
+                    .unwrap_or(item),
+                _ => item,
+            };
+            list_items(db, item).map(|items| (id, Empty::List(items)))
         })
         .collect();
     typed_empties.sort_unstable_by_key(|(id, _)| id.index());
@@ -3475,6 +3483,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     }
                                     ty
                                 }
+                                // A write into a ry list's item or a ry record's field may
+                                // decide the variable's literal (`lookup[[i]] <- j`,
+                                // `r$x <- j`), which the write itself does.
+                                ExpressionKind::NameRef(_)
+                                    if matches!(
+                                        self.module.kind(target),
+                                        ExpressionKind::Index { double: true, .. }
+                                            | ExpressionKind::Field { .. }
+                                    ) =>
+                                {
+                                    let fresh = self.literal_reads.insert(value);
+                                    let ty = self.infer(value);
+                                    if fresh {
+                                        self.literal_reads.remove(&value);
+                                    }
+                                    ty
+                                }
                                 // Literal arithmetic and logic, and an `if` or `{}` whose
                                 // value is a literal, are one literal, so at a top-level
                                 // binding in a typed file they are a ry value too.
@@ -3873,7 +3898,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             ExpressionKind::Break | ExpressionKind::Next => unknown(self.db),
             ExpressionKind::Tuple(items) => {
                 let items = *items;
-                let items = module[items].iter().map(|&item| self.infer(item)).collect();
+                let items = module[items]
+                    .iter()
+                    .map(|&item| self.component(item))
+                    .collect();
                 Ty::new(self.db, TyKind::NativeTuple(items))
             }
             ExpressionKind::Array(items) => self.infer_array_literal(&module[items]),
@@ -3883,14 +3911,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .map(|field| NativeField {
                         name: Name::new(self.db, field.name),
-                        ty: self.infer(field.value),
+                        ty: self.component(field.value),
                     })
                     .collect();
                 native_record(self.db, fields)
             }
             ExpressionKind::Tag { name, payload, .. } => {
                 let (name, payload) = (*name, *payload);
-                let payload = payload.map(|payload| self.infer(payload));
+                // A payload's literals are decided now: tags join by their payload types,
+                // which an open literal would leave undecided.
+                let payload = payload.map(|payload| self.infer_payload(payload));
                 Ty::new(
                     self.db,
                     TyKind::Tag(Name::new(self.db, module.name(name).as_str()), payload),
@@ -4756,6 +4786,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         let prior = self.table.resolve(self.db, prior);
         let value_resolved = self.table.resolve(self.db, value_ty);
         let written = self.replacement_written_type(target, base, value, prior, value_resolved);
+        // Only a ry list decides a literal it is written; any other container gives it R's type.
+        if self.open_literal_var(value_ty) {
+            self.default_literal_var(value_ty, false);
+        }
         if let Some(&slot) = self.naming.resolutions.get(&base) {
             self.environment.set(slot, EnvEntry::Mono(written));
         }
@@ -5069,8 +5103,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .iter()
                         .find(|field| field.name.text(self.db) == field_name)
                     {
+                        // A literal written into the field takes the field's type, as one
+                        // written into a list's item does.
                         Some(field) => {
-                            if !matches!(value.kind(self.db), TyKind::Unknown)
+                            if self.adapt_literal(value_expression, field.ty)
+                                == LiteralFit::NotLiteral
+                                && !(self.open_literal_var(value)
+                                    && self.table.unify(self.db, value, field.ty).is_ok())
+                                && !matches!(value.kind(self.db), TyKind::Unknown)
                                 && !self.table.compatible(self.db, value, field.ty)
                             {
                                 let range = self.blame_range(value_expression);
@@ -5156,6 +5196,23 @@ impl<'db, 'a> Checker<'db, 'a> {
             step,
             ReplacementStep::Position(_) | ReplacementStep::Element
         ) {
+            return prior;
+        }
+        // A ry list's item type is fixed, so the write is checked against it, and it is the use
+        // that decides a literal: `j <- 1; lookup[[i]] <- j` makes `j` an `I64` in a `List<I64>`.
+        if let Some(item) = array_element(self.db, prior) {
+            if self.adapt_literal(value_expression, item) == LiteralFit::NotLiteral
+                && !(self.open_literal_var(value) && self.table.unify(self.db, value, item).is_ok())
+            {
+                let value = self.table.resolve(self.db, value);
+                if !matches!(value.kind(self.db), TyKind::Unknown | TyKind::Any)
+                    && !self.table.compatible(self.db, value, item)
+                {
+                    let range = self.blame_range(value_expression);
+                    let error = self.type_mismatch(range, item, value, Some(value_expression));
+                    self.errors.push(error);
+                }
+            }
             return prior;
         }
         match prior.kind(self.db) {
@@ -5967,6 +6024,67 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.record(item, ty);
         }
         Some(ty)
+    }
+
+    /// A tag's payload, a tuple or a record whose own items are inferred as written.
+    fn infer_payload(&mut self, payload: ExprId) -> Ty<'db> {
+        let module = self.module;
+        let ty = match module.kind(payload) {
+            ExpressionKind::Tuple(items) => {
+                let items = module[*items]
+                    .iter()
+                    .map(|&item| self.infer(item))
+                    .collect();
+                Ty::new(self.db, TyKind::NativeTuple(items))
+            }
+            ExpressionKind::Record(fields) => {
+                let fields = module[*fields]
+                    .iter()
+                    .map(|field| NativeField {
+                        name: Name::new(self.db, field.name),
+                        ty: self.infer(field.value),
+                    })
+                    .collect();
+                native_record(self.db, fields)
+            }
+            _ => return self.infer(payload),
+        };
+        self.record(payload, ty)
+    }
+
+    /// A tuple item or a record field. A literal there is open, as a literal bound
+    /// to a variable is: a later use decides it (`Str.concat(s, pair[[1]])` makes `"a"` in
+    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type.
+    fn component(&mut self, value: ExprId) -> Ty<'db> {
+        let module = self.module;
+        let mut inner = value;
+        while let ExpressionKind::Paren(paren) = module.kind(inner) {
+            inner = *paren;
+        }
+        let ty = if let Some(literal) = number_literal(module, inner) {
+            let constraint = if literal.is_fraction() {
+                Constraint::FracLiteral
+            } else {
+                Constraint::WholeLiteral {
+                    integer: literal.integer,
+                }
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record_literal(inner, ty);
+            ty
+        } else {
+            let constraint = match module.kind(inner) {
+                ExpressionKind::Literal(LiteralKind::String(_)) => Constraint::StrLiteral,
+                ExpressionKind::Literal(LiteralKind::Logical(_)) => Constraint::BoolLiteral,
+                _ => return self.infer(value),
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record(inner, ty)
+        };
+        if inner != value {
+            self.record(value, ty);
+        }
+        ty
     }
 
     /// A `List` holds ry values only. An R value would bring `NA`, attributes and recycling
@@ -8068,6 +8186,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             },
         };
         if !fits {
+            let left = self.settle_literals(left);
+            let right = self.settle_literals(right);
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::NumberOperands {
@@ -14165,7 +14285,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .enumerate()
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                if accumulators.contains(index)
+                                // An accumulator whose initial state is a settled ry value keeps
+                                // that type, because only a tag union widens among ry types. In
+                                // `List.walk(xs, List.repeat(0f64, n), \(sums, x) sums + x)` the
+                                // state is `List<F64>` before the body reads `sums + x`. A state
+                                // with a tag anywhere in it, such as `[:A]`, stays open.
+                                let widening_accumulator =
+                                    accumulators.contains(index)
+                                        && !(is_ry_value_type(self.db, formal)
+                                            && !mentions_tag(self.db, formal)
+                                            && !self.table.contains_unbound_var(self.db, formal));
+                                if widening_accumulator
                                     || (index < declared_count
                                         && matches!(
                                             formal.kind(self.db),
@@ -19327,6 +19457,21 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
         _ if crate::types::is_ry_value_type(db, item) => Some(ListItems::RyValues),
         _ => None,
     }
+}
+
+/// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
+fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    if matches!(
+        ty.kind(db),
+        TyKind::Tag(..) | TyKind::Union(_) | TyKind::OtherTags
+    ) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_tag(db, child)
+    });
+    found
 }
 
 #[cfg(test)]

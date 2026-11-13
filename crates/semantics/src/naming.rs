@@ -934,14 +934,14 @@ impl Context<'_> {
                     self.current_scope().slots.insert(variable, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
-                self.loop_body(*body, true);
+                self.loop_body(*body, None, true);
             }
             ExpressionKind::While { condition, body } => {
                 self.resolve(*condition);
-                self.loop_body(*body, true);
+                self.loop_body(*body, Some(*condition), true);
             }
             ExpressionKind::Repeat { body } => {
-                self.loop_body(*body, false);
+                self.loop_body(*body, None, false);
             }
             ExpressionKind::Local { body } => {
                 let scope_id = self.stable_scope_id(id);
@@ -1195,8 +1195,9 @@ impl Context<'_> {
     }
 
     /// Re-walks to a fixed point (the reach lattice is finite and joins only grow), then
-    /// records effects on one final pass. `may_skip` joins the never-entered path back in.
-    fn loop_body(&mut self, body: ExprId, may_skip: bool) {
+    /// records effects on one final pass. A `while` loop's `condition` runs again after each
+    /// pass, so it reads what the body wrote. `may_skip` joins the never-entered path back in.
+    fn loop_body(&mut self, body: ExprId, condition: Option<ExprId>, may_skip: bool) {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
         let enclosing_exits = mem::take(&mut self.loop_exits);
@@ -1204,6 +1205,9 @@ impl Context<'_> {
         loop {
             let before = self.flow.clone();
             self.resolve(body);
+            if let Some(condition) = condition {
+                self.resolve(condition);
+            }
             join_flow(&mut self.flow, &before);
             if self.flow == before {
                 break;
@@ -1213,6 +1217,13 @@ impl Context<'_> {
         // Only the final pass's `break` states describe the converged loop.
         self.loop_exits.clear();
         self.resolve(body);
+        if let Some(condition) = condition {
+            // The condition's own effects were recorded before the loop; this read only marks
+            // the body's writes it sees as used.
+            self.emit = false;
+            self.resolve(condition);
+            self.emit = saved_emit;
+        }
         let breaks = mem::replace(&mut self.loop_exits, enclosing_exits);
 
         for exit in &breaks {

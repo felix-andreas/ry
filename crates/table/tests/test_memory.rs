@@ -26,8 +26,9 @@ use {
         lazy::{How, Plan, Source, Step, collect},
         polars::prelude::PlSmallStr,
         query::{
-            Aggregate, Expr,
-            build::{aggregate, column},
+            Aggregate, BinaryOp, Expr, Query, Rows, Select,
+            build::{aggregate, binary, column},
+            execute,
         },
     },
 };
@@ -158,6 +159,11 @@ const BUDGETS: &[Budget] = &[
         step: "sum of every row",
         peak: 0.5,
         held: 0.5,
+    },
+    Budget {
+        step: "add one to v1 where id4 is each value",
+        peak: 5.0,
+        held: 5.0,
     },
 ];
 
@@ -292,6 +298,30 @@ fn measure_steps(dir: &Path) -> Result<Vec<Budget>, Box<dyn std::error::Error>> 
             sum("v3"),
         ]));
         Ok(collect(plan)?.table)
+    })?;
+    // The loop of the db-benchmark's "update subset" question. What it holds afterwards is the
+    // row index of id4, and its peak is that index while it is built: the column it writes is
+    // the table's own.
+    let mut table = table;
+    step("add one to v1 where id4 is each value", &mut || {
+        for value in 1..=100 {
+            execute(
+                &mut table,
+                Query {
+                    rows: Rows::Filter(binary(
+                        BinaryOp::Equal,
+                        column("id4"),
+                        Expr::Integer(value),
+                    )),
+                    select: Select::Assign(vec![(
+                        "v1".into(),
+                        Some(binary(BinaryOp::Add, column("v1"), Expr::Integer(1))),
+                    )]),
+                    ..Query::default()
+                },
+            )?;
+        }
+        Ok(table.fork())
     })?;
     Ok(measured)
 }

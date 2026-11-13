@@ -1,0 +1,150 @@
+# A `:=` update of a DataFrame that only one variable refers to writes into that frame, so a loop
+# of small updates costs the rows it touches and not a copy of the frame per pass. The frame's
+# address shows it: the variable holds the same object after the loop. A second variable sharing
+# the frame turns the next update into a copy, which leaves the other variable's rows alone, and
+# so does a function's parameter, which shares the frame with the caller's variable.
+#
+# The second script pins the edges of that rule. Reading the frame (`dim`, `length`, `names`, `$`,
+# `[[`), calling `nrow`, `ncol` or `NROW` on it between updates, and printing it all leave it the
+# sole reference. An active binding whose function returns a frame out of a
+# shared list gets the copy assigned back, and the list keeps its rows. An update that warns is
+# applied before the warning is raised, whether or not the frame was shared. An update nested in
+# a running query of the same frame goes to a copy, so the outer query reads the rows it began
+# with, and an outer update then stores its own result over the nested one. Exit code that
+# updates a frame the function is returning leaves the returned frame alone, and a locked
+# binding raises R's error and keeps its rows. An update of several columns that fails on a
+# later one changes none of them, although the frame it would have written into has no copy.
+
+requires ry-runtime
+
+file update.R
+| address <- function(inspected) {
+|   sink("address.txt")
+|   inspected
+|   sink()
+|   sub(" .*", "", readLines("address.txt")[1])
+| }
+| x <- DataFrame(id = c(1L, 2L, 1L, 2L), v = c(10L, 20L, 30L, 40L))
+| before <- address(.Internal(inspect(x)))
+| for (step in 1:3) x[id == 1L, v := v + 1L]
+| cat("the sole reference keeps its object:", identical(before, address(.Internal(inspect(x)))), "\n")
+| print(x$v)
+| y <- x
+| x[id == 2L, v := 0L]
+| cat("a shared frame is copied:", !identical(before, address(.Internal(inspect(x)))), "\n")
+| cat("the other variable keeps its object:", identical(before, address(.Internal(inspect(y)))), "\n")
+| print(y$v)
+| print(x$v)
+| update <- function(frame) { frame[id == 1L, v := -1L]; frame$v }
+| print(update(x))
+| print(x$v)
+
+run ry run --runtime ry update.R
+expect exit 0
+expect stdout "the sole reference keeps its object: TRUE"
+expect stdout "[1] 13 20 33 40"
+expect stdout "a shared frame is copied: TRUE"
+expect stdout "the other variable keeps its object: TRUE"
+expect stdout "[1] 13  0 33  0"
+expect stdout "[1] -1  0 -1  0"
+
+file rules.R
+| address <- function(inspected) {
+|   sink("address.txt")
+|   inspected
+|   sink()
+|   sub(" .*", "", readLines("address.txt")[1])
+| }
+| make <- function() DataFrame(id = c(1L, 2L, 1L, 2L), v = c(10L, 20L, 30L, 40L))
+| x <- make()
+| before <- address(.Internal(inspect(x)))
+| shape <- dim(x); count <- length(x); column <- x$v; first <- x[["id"]]; header <- names(x)
+| x[id == 1L, v := v + 1L]
+| cat("reading the frame keeps it the sole reference:", identical(before, address(.Internal(inspect(x)))), "\n")
+| x <- make()
+| before <- address(.Internal(inspect(x)))
+| label <- "rows:"
+| for (step in 1:3) {
+|   cat(label, nrow(x), ncol(x), "\n", file = "counts.txt")
+|   text <- paste(label, NROW(x))
+|   x[id == 1L, v := v + 1L]
+| }
+| cat("calls on the frame between updates keep it too:", identical(before, address(.Internal(inspect(x)))), "\n")
+| x <- make()
+| before <- address(.Internal(inspect(x)))
+| sink("printed.txt")
+| x
+| print(x)
+| sink()
+| x[id == 1L, v := v + 1L]
+| cat("and so does printing it:", identical(before, address(.Internal(inspect(x)))), "\n")
+| local_loop <- function() {
+|   frame <- make()
+|   before <- address(.Internal(inspect(frame)))
+|   for (step in 1:3) frame[id == 1L, v := v + 1L]
+|   cat("a function's own frame is updated in place:", identical(before, address(.Internal(inspect(frame)))), "\n")
+|   frame$v
+| }
+| print(local_loop())
+| shared <- list(make())
+| kept <- shared
+| makeActiveBinding("active", function(value) if (missing(value)) shared[[1]] else shared[[1]] <<- value, environment())
+| active[id == 1L, v := 0L]
+| cat("an active binding stores the copy:", shared[[1]]$v, "\n")
+| cat("the list that shared the frame keeps its rows:", kept[[1]]$v, "\n")
+| x <- make()
+| message <- tryCatch(x[id == 1L, v := 1.5], warning = function(caught) conditionMessage(caught))
+| cat(message, "\n")
+| cat("the update is applied before its warning:", x$v, "\n")
+| x <- make()
+| alias <- x
+| message <- tryCatch(x[id == 1L, v := 1.5], warning = function(caught) conditionMessage(caught))
+| cat("and so is the update of a shared frame:", x$v, "while the other variable keeps", alias$v, "\n")
+| x <- make()
+| total <- x[id == 1L, .(total = sum(v), after = { x[id == 2L, v := 100L]; sum(x$v) })]
+| cat("an outer query reads the rows it began with:", total$total, total$after, "\n")
+| print(x$v)
+| x <- make()
+| x[id == 1L, v := { x[id == 2L, v := 0L]; 5L }]
+| cat("an outer update replaces the one nested in it:", x$v, "\n")
+| x <- make()
+| returned <- (function() { on.exit(x[id == 1L, v := 0L]); x })()
+| cat("exit code leaves the returned frame alone:", returned$v, "while the variable holds", x$v, "\n")
+| own <- (function() { frame <- make(); on.exit(frame[id == 1L, v := 0L]); frame })()
+| cat("and a function's own returned frame:", own$v, "\n")
+| x <- make()
+| lockBinding("x", environment())
+| message <- tryCatch(x[id == 1L, v := 0L], error = function(caught) conditionMessage(caught))
+| unlockBinding("x", environment())
+| cat(message, "\n")
+| cat("a locked binding keeps its rows:", x$v, "\n")
+| reversed <- function(values) rev(values) + 1L
+| x <- make()
+| message <- tryCatch(x[, c("v", "zz") := list(reversed(v), NULL)], error = function(caught) conditionMessage(caught))
+| cat(message, "\n")
+| cat("an update that fails on a later target changes nothing:", names(x), x$v, "\n")
+| tryCatch(x[id == 1L, c("v", "id", "zz") := list(reversed(v), NULL, NULL)], error = function(caught) NULL)
+| cat("nor does a filtered one that removes a column first:", names(x), x$v, "\n")
+
+run ry run --runtime ry rules.R
+expect exit 0
+expect stdout "reading the frame keeps it the sole reference: TRUE"
+expect stdout "calls on the frame between updates keep it too: TRUE"
+expect stdout "and so does printing it: TRUE"
+expect stdout "a function's own frame is updated in place: TRUE"
+expect stdout "[1] 13 20 33 40"
+expect stdout "an active binding stores the copy: 0 20 0 40"
+expect stdout "the list that shared the frame keeps its rows: 10 20 30 40"
+expect stdout "column `v` holds integers, so the assigned value 1.5 became 1"
+expect stdout "the update is applied before its warning: 1 20 1 40"
+expect stdout "and so is the update of a shared frame: 1 20 1 40 while the other variable keeps 10 20 30 40"
+expect stdout "an outer query reads the rows it began with: 40 240"
+expect stdout "[1]  10 100  30 100"
+expect stdout "an outer update replaces the one nested in it: 5 20 5 40"
+expect stdout "exit code leaves the returned frame alone: 10 20 30 40 while the variable holds 0 20 0 40"
+expect stdout "and a function's own returned frame: 10 20 30 40"
+expect stdout "cannot change value of locked binding for 'x'"
+expect stdout "a locked binding keeps its rows: 10 20 30 40"
+expect stdout "the frame has no column `zz`"
+expect stdout "an update that fails on a later target changes nothing: id v 10 20 30 40"
+expect stdout "nor does a filtered one that removes a column first: id v 10 20 30 40"
