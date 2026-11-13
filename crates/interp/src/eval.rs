@@ -2160,6 +2160,9 @@ pub unsafe fn apply_closure_owning(
 /// loop can run it in place rather than recursing ([`enter`]). A call that does not get a slot
 /// frame, or that the general path has to run whole, comes back with its value and
 /// [`crate::NO_SLOTS`].
+// Inlined so that the Rust path, which runs the body right after, does not pay for a second
+// function's frame and for passing `Entered` through memory.
+#[inline]
 pub unsafe fn apply_closure_entering(
     call: Sexp,
     function: Sexp,

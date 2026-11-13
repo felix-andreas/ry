@@ -7278,7 +7278,20 @@ unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32)
 /// names there, or nowhere ([`STOP`]) when the activation is the one the loop started with or
 /// no caller takes the unwind. An in-place callee leaves through here on every way out, as it
 /// would leave [`run_at`] and [`eval::leave`] were the call a Rust call.
-unsafe fn finished(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> usize {
+unsafe fn finished(state: &mut Activation<'_, '_>, result: R<Sexp>) -> usize {
+    // Most activations were entered from Rust and have no caller to resume. Testing for that
+    // here keeps their exit free of the frame the resuming path needs.
+    if (*state.interp).bytecode.resumes.len() <= state.resume_base {
+        state.exit = result;
+        return STOP;
+    }
+    resume_caller(state, result)
+}
+
+/// [`finished`] for an activation a call instruction entered in place: pops its resume record
+/// and goes on in the caller, or in the first caller further out that takes the unwind.
+#[inline(never)]
+unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> usize {
     loop {
         let bytecode = &mut (*state.interp).bytecode;
         if bytecode.resumes.len() <= state.resume_base {
