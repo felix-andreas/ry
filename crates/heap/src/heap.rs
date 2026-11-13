@@ -37,7 +37,7 @@ use {
         object::{
             CARD_CLEAN, CARD_ELEMENTS, CARD_UNTENURED, CARD_YOUNG, EnvironmentObject, LARGE_CLASS,
             NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, TripleObject,
-            VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
+            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
@@ -1767,6 +1767,47 @@ impl Heap {
         object.mark_not_mutable();
         self.observe_slots(layout, slots);
         Ok(object)
+    }
+
+    /// A lazy record ([`crate::object::LAZY_RECORD`]) of `layout` with `slot_count` slots, from
+    /// one to [`UNBOXED_SLOTS`], standing for the typed-core value at `value`
+    /// until [`Heap::settle_record`] fills it.
+    pub unsafe fn alloc_lazy_record(
+        &mut self,
+        layout: u32,
+        slot_count: usize,
+        value: u64,
+    ) -> HeapResult<Sexp> {
+        assert!(
+            (1..=UNBOXED_SLOTS).contains(&slot_count),
+            "a lazy record needs one to {} slots, not {slot_count}",
+            UNBOXED_SLOTS
+        );
+        let Some(size) = object_size(SexpType::Record, slot_count) else {
+            return Err(HeapError::TooLong);
+        };
+        let object = self.allocate(SexpType::Record, size, &[])?;
+        object.init_lazy_record(layout, slot_count, value);
+        object.mark_not_mutable();
+        Ok(object)
+    }
+
+    /// Fills the lazy record `record` with `slots`, one per slot, after which it is an ordinary
+    /// record of its layout. Its slots held no handles, so nothing is released.
+    pub unsafe fn settle_record(&mut self, record: Sexp, slots: &[Slot]) {
+        assert!(
+            record.is_lazy_record() && slots.len() == record.record_slot_count(),
+            "only a lazy record settles, with one value per slot"
+        );
+        for slot in slots {
+            if let Slot::Handle(handle) = slot {
+                handle.increment_refcount();
+                self.write_barrier(record, *handle);
+            }
+        }
+        let layout = record.record_layout();
+        record.init_record(layout, slots);
+        self.observe_slots(layout, slots);
     }
 
     /// Adds the kinds of `slots`, a new value of layout `layout`, to the layout's slot profile.
@@ -4024,7 +4065,7 @@ impl Heap {
             }
             Shape::Record => {
                 for index in 0..object.record_slot_count() {
-                    if let Some(handle) = object.record_handle(index) {
+                    if let Some(handle) = object.record_child(index) {
                         has_younger |= self.mark_child::<TENURED>(handle);
                     }
                 }
@@ -4259,7 +4300,7 @@ impl Heap {
                     }
                     Shape::Record => children.extend(
                         (0..parent.record_slot_count())
-                            .filter_map(|slot| parent.record_handle(slot)),
+                            .filter_map(|slot| parent.record_child(slot)),
                     ),
                     _ => {}
                 }
@@ -4652,7 +4693,7 @@ unsafe fn has_younger_child(parent: Sexp) -> bool {
             younger(parent, parent.external_tag()) || younger(parent, parent.external_protected())
         }
         Shape::Record => (0..parent.record_slot_count())
-            .filter_map(|slot| parent.record_handle(slot))
+            .filter_map(|slot| parent.record_child(slot))
             .any(|handle| younger(parent, handle)),
         Shape::WeakRef | Shape::Primitive => false,
     }

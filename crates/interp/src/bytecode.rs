@@ -66,6 +66,7 @@ use {
     std::{
         hash::{Hash, Hasher},
         ops::Range,
+        rc::Rc,
     },
 };
 
@@ -83,7 +84,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
         // code passes constant arguments as values, which native code such as rlang observes.
         if worth_compiling(closure.cdr()) {
-            let code = compile(closure.cdr(), closure)?;
+            let code = compile(closure.cdr(), closure, true)?;
             crate::heap().set_cdr(closure, code);
         }
         Ok(closure)
@@ -91,7 +92,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
     internal("getconst", 2, do_get_constants),
-    internal("enableJIT", 1, |_| unsafe { values::scalar_integer(0) }),
+    internal("enableJIT", 1, |call| unsafe {
+        let previous = interp().bytecode.jit_level;
+        let level = values::as_integer_scalar(call.arg(0));
+        if level >= 0 && level != NA_INTEGER {
+            interp().bytecode.jit_level = level.min(3);
+        }
+        values::scalar_integer(previous)
+    }),
     internal("compilePKGS", 1, |_| unsafe { values::scalar_logical(0) }),
 ];
 
@@ -108,6 +116,11 @@ pub struct State {
     bodies: Bodies,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
+    /// GNU R's JIT level (`compiler::enableJIT`), 3 by default. It decides only what compiled
+    /// code binds at compile time, since ry compiles at every level: at 0 GNU R compiles no
+    /// closure, and below 3 no top-level loop, so such code guards its base functions as GNU R's
+    /// evaluator would look them up.
+    jit_level: i32,
 }
 
 impl Default for State {
@@ -117,6 +130,7 @@ impl Default for State {
             bodies: Bodies::default(),
             tier: None,
             call_plans: CallPlans::default(),
+            jit_level: 3,
         }
     }
 }
@@ -138,8 +152,14 @@ impl State {
 /// The tier of each closure body, keyed by the body expression, which every closure made from
 /// one `function` expression shares, and so does every copy `environment<-` makes, as R6 does
 /// for each object's methods. Code compiled for one closure serves every other closure over the
-/// body whose formals and srcref are the same objects, since compiling reads nothing else of the
-/// closure: the enclosure only resolves names that the code guards at run time. A body counts
+/// body whose formals and srcref are the same objects. Guarded code reads nothing else of the
+/// closure, since the enclosure only resolves names the code looks up at run time. Code that
+/// binds its base functions also depends on which names the enclosure binds when it compiles, so
+/// it serves a closure only under GNU R's `jit_env_match`: the closure's top environment is the
+/// one the code compiled under, and every name its formals and its local frames up to that top
+/// environment bind was bound when the code compiled. A closure that masks a base function
+/// locally therefore never runs code that bound it; it compiles its own, guarded, as GNU R runs
+/// such a closure uncompiled. A body counts
 /// its calls across all its closures until it compiles, and then holds its code while any
 /// closure runs it, so a closure made meanwhile runs the code from its first call instead of
 /// compiling again.
@@ -161,6 +181,14 @@ struct Bodies {
     srcrefs: Vec<Sexp>,
     /// The [`shape`] of the body, formals and srcref when the code compiled.
     shapes: Vec<u64>,
+    /// For code that binds its base functions, the top environment of the closure it compiled
+    /// for, and `NULL` for guarded code. Namespaces and the global environment never die, but
+    /// an environment that only binds `.packageName` can, so the entry goes with it.
+    tops: Vec<Sexp>,
+    /// For code that binds, the names the closure's formals and local frames bound when it
+    /// compiled, sorted by address. Symbols are never collected, so the snapshot holds them
+    /// without tracing them.
+    locals: Vec<Box<[Sexp]>>,
     free: Vec<u32>,
 }
 
@@ -171,9 +199,9 @@ const COMPILED: u32 = 1 << 31;
 enum BodyTier {
     /// Runs the body's code, compiled for another closure over it.
     Shared(Sexp),
-    /// Compiles now: the body runs often enough, or compiled for a closure this one cannot
-    /// share code with.
-    Compile,
+    /// Compiles now, binding its base functions when the flag is set: the body compiled for a
+    /// closure this one cannot share code with.
+    Compile(bool),
     /// Runs on the AST evaluator, after this many earlier calls.
     Counting(u32),
 }
@@ -194,7 +222,19 @@ impl Bodies {
             || srcref != self.srcrefs[entry]
             || shape(body, formals, srcref) != self.shapes[entry]
         {
-            return BodyTier::Compile;
+            return BodyTier::Compile(binds_at_compile(function, body));
+        }
+        let binds = binds_at_compile(function, body);
+        let top = self.tops[entry];
+        let shares = if top == nil() {
+            !binds
+        } else {
+            binds && binds_like(function, top, &self.locals[entry])
+        };
+        if !shares {
+            // A closure that would bind but whose names differ runs guarded code, as GNU R's
+            // JIT marks it never to compile.
+            return BodyTier::Compile(binds && top == nil());
         }
         let code = self.codes[entry];
         crate::heap().set_cdr(function, code);
@@ -223,6 +263,11 @@ impl Bodies {
         let formals = function.car();
         let srcref = values::get_attr(function, symbols().srcref);
         let shape = shape(body, formals, srcref);
+        let (top, locals) = if code.has_gp(gp::BINDING_CODE) {
+            compile_environment(function)
+        } else {
+            (nil(), Box::default())
+        };
         let entry = match self.free.pop() {
             Some(entry) => {
                 let index = entry as usize;
@@ -231,6 +276,8 @@ impl Bodies {
                 self.formals[index] = formals;
                 self.srcrefs[index] = srcref;
                 self.shapes[index] = shape;
+                self.tops[index] = top;
+                self.locals[index] = locals;
                 entry
             }
             None => {
@@ -239,6 +286,8 @@ impl Bodies {
                 self.formals.push(formals);
                 self.srcrefs.push(srcref);
                 self.shapes.push(shape);
+                self.tops.push(top);
+                self.locals.push(locals);
                 (self.keys.len() - 1) as u32
             }
         };
@@ -262,16 +311,74 @@ impl Bodies {
                 || !live(self.codes[entry])
                 || !live(self.formals[entry])
                 || !live(self.srcrefs[entry])
+                || !live(self.tops[entry])
             {
                 self.states.remove(&body);
                 self.keys[entry] = nil();
                 self.codes[entry] = nil();
                 self.formals[entry] = nil();
                 self.srcrefs[entry] = nil();
+                self.tops[entry] = nil();
+                self.locals[entry] = Box::default();
                 self.free.push(entry as u32);
             }
         }
     }
+}
+
+/// The top environment of `function`'s enclosure and the names its formals and the frames from
+/// the enclosure up to that top environment bind, sorted, which is what code that binds its base
+/// functions depends on besides the body (GNU R's `make_cached_cmpenv`).
+unsafe fn compile_environment(function: Sexp) -> (Sexp, Box<[Sexp]>) {
+    let heap = crate::heap();
+    let top = crate::dispatch::top_env(function.tag());
+    let mut names = Vec::new();
+    let mut formal = function.car();
+    while formal != nil() {
+        names.push(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut env = function.tag();
+    while env != top && env != values::empty_env() {
+        names.extend(heap.frame_symbols(env));
+        env = env.enclosure();
+    }
+    names.sort_unstable_by_key(|name| name.as_ptr());
+    names.dedup();
+    (top, names.into_boxed_slice())
+}
+
+/// Whether code compiled under `top` with the local names `locals` serves `function`: its top
+/// environment is `top`, and its formals and local frames bind only names in `locals` (GNU R's
+/// `jit_env_match`). Compiling depends on which names are bound, never on their values.
+unsafe fn binds_like(function: Sexp, top: Sexp, locals: &[Sexp]) -> bool {
+    let env = function.tag();
+    if crate::dispatch::top_env(env) != top {
+        return false;
+    }
+    let mut formal = function.car();
+    while formal != nil() {
+        if !binds_name(locals, formal.tag()) {
+            return false;
+        }
+        formal = formal.cdr();
+    }
+    let mut frame = env;
+    while frame != top && frame != values::empty_env() {
+        let bound = crate::heap().frame_symbols(frame);
+        if bound.iter().any(|&name| !binds_name(locals, name)) {
+            return false;
+        }
+        frame = frame.enclosure();
+    }
+    true
+}
+
+/// Whether the sorted snapshot `locals` holds `name`.
+fn binds_name(locals: &[Sexp], name: Sexp) -> bool {
+    locals
+        .binary_search_by_key(&name.as_ptr(), |local| local.as_ptr())
+        .is_ok()
 }
 
 /// A hash of what compiled code depends on: the structure of `body` and `formals`, and
@@ -556,7 +663,11 @@ fn grow_registers(length: usize) -> R<()> {
         // Every call grows the file past the registers the last call released, so this runs
         // once per call: `fill` stores the `NULL`s as wide writes, where `resize` cloned them
         // one at a time. Clearing is what lets a collection inside the new window free what a
-        // returned call left in these words, as GNU R does.
+        // returned call left in these words, as GNU R does. The collector marks the whole file
+        // up to its length, not each window up to the registers it wrote, so a word left
+        // uncleared would keep a returned call's temporary alive until the new window writes
+        // it, and a finalizer GNU R runs in that collection would run late
+        // (`gc__register_window_frees_returned_temporaries`).
         // SAFETY: the capacity covers `length`, and `Sexp` is a plain pointer the next line
         // initializes before anything reads it.
         unsafe { registers.set_len(length) };
@@ -571,8 +682,8 @@ pub unsafe fn execute(code: Sexp, env: Sexp) -> R<Sexp> {
     eval::eval(source_of(code), env)
 }
 
-/// Runs a closure's body, compiling it on its second call, or running the code another closure
-/// over the same body compiled.
+/// Runs a closure's body, compiling it when [`schedule`] says to, or running the code another
+/// closure over the same body compiled.
 pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
@@ -581,23 +692,84 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     let bodies = &mut interp().bytecode.bodies;
-    match bodies.tier(function, body) {
+    let binds = match bodies.tier(function, body) {
         BodyTier::Shared(code) => return run(function, code, env),
-        BodyTier::Compile => {}
-        // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes,
-        // and so does a typed one, whose signature lets the JIT compile it at that call too.
-        BodyTier::Counting(calls)
-            if calls + 1 < COMPILE_AFTER_CALLS
-                && !contains_loop(body, LOOP_SEARCH_DEPTH)
-                && !crate::annotations::is_typed(function) =>
-        {
-            bodies.count(body, calls + 1);
-            return eval::eval(body, env);
-        }
-        BodyTier::Counting(_) => {}
-    }
-    let code = compile_for(function, body)?;
+        BodyTier::Compile(binds) => binds,
+        BodyTier::Counting(calls) => match schedule(function, body, calls, true) {
+            Some(binds) => binds,
+            None => {
+                bodies.count(body, calls + 1);
+                return eval::eval(body, env);
+            }
+        },
+    };
+    let code = compile_for(function, body, binds)?;
     run(function, code, env)
+}
+
+/// Whether `function`'s body `body`, after `calls` earlier calls on the AST evaluator, compiles
+/// at this call, and if so whether the code binds its base functions at compile time (see
+/// [`Compiler::binding`]). Where GNU R's JIT would compile (`R_CheckJIT`), the code binds, at the
+/// call where GNU R compiles: a closure over the global environment at its first call when its
+/// `JIT_score` reaches [`MIN_JIT_SCORE`] and at its second otherwise, and any other closure at its
+/// second call when its score reaches the minimum. A namespace's closure binds too, since GNU R
+/// installs packages compiled, and compiles at its first call when hot and its second otherwise.
+/// Every other closure, which GNU R never compiles, compiles on its [`COMPILE_AFTER_CALLS`]th
+/// call with guarded base functions, so it looks each name up as it runs as GNU R's AST evaluator
+/// does, and a typed one compiles guarded at its first call. `mark` sets the closure's
+/// `MAYBE_JIT` and `NO_JIT` bits as GNU R's check does; without it this only reports what the
+/// call would do.
+unsafe fn schedule(function: Sexp, body: Sexp, calls: u32, mark: bool) -> Option<bool> {
+    let due = calls + 1 >= COMPILE_AFTER_CALLS;
+    if crate::annotations::is_typed(function) {
+        return Some(false);
+    }
+    if function.has_gp(gp::CLOSURE_NO_JIT) || interp().bytecode.jit_level == 0 {
+        return due.then_some(false);
+    }
+    if function.has_gp(gp::CLOSURE_MAYBE_JIT) {
+        if mark {
+            function.set_gp_bits(gp::CLOSURE_MAYBE_JIT, false);
+        }
+        return Some(true);
+    }
+    let enclosure = function.tag();
+    let global = enclosure == crate::heap().known().global_env;
+    let hot = jit_score(body) >= MIN_JIT_SCORE;
+    if !global && crate::envir::is_namespace(crate::dispatch::top_env(enclosure)) {
+        return (hot || due).then_some(true);
+    }
+    if global && hot {
+        return Some(true);
+    }
+    if global || hot {
+        if mark {
+            function.set_gp_bits(gp::CLOSURE_MAYBE_JIT, true);
+        }
+        return None;
+    }
+    if mark {
+        function.set_gp_bits(gp::CLOSURE_NO_JIT, true);
+    }
+    due.then_some(false)
+}
+
+/// Whether code compiled for `function` binds its base functions, which is whether GNU R would
+/// compile the closure at all. [`schedule`] decides when it compiles; this reads only the
+/// closure's bits and its body's score, never a call count, so a closure that has not reached
+/// its compiling call can still take code another closure compiled.
+unsafe fn binds_at_compile(function: Sexp, body: Sexp) -> bool {
+    if crate::annotations::is_typed(function)
+        || function.has_gp(gp::CLOSURE_NO_JIT)
+        || interp().bytecode.jit_level == 0
+    {
+        return false;
+    }
+    let enclosure = function.tag();
+    function.has_gp(gp::CLOSURE_MAYBE_JIT)
+        || enclosure == crate::heap().known().global_env
+        || crate::envir::is_namespace(crate::dispatch::top_env(enclosure))
+        || jit_score(body) >= MIN_JIT_SCORE
 }
 
 /// Why a closure body runs on the AST evaluator rather than as compiled code. It is a property
@@ -610,14 +782,10 @@ pub enum Uncompilable {
     NotACall,
 }
 
-/// Iterations after which a loop the tree walker runs compiles: a `for` loop over at least this
-/// many elements compiles before its first iteration, and a `while` or `repeat` loop compiles
-/// once it has run this many.
-pub const LOOP_COMPILE_ITERATIONS: usize = 16;
-
 /// Runs `call`, a `for`, `while` or `repeat` loop the tree walker was about to evaluate in `env`,
-/// as compiled code, or returns `None` when the loop stays with the tree walker. GNU R compiles
-/// such loops in the global environment only, which is where they are not inside a function
+/// as compiled code, or returns `None` when the loop stays with the tree walker. The loop compiles
+/// before its first iteration, as GNU R's JIT compiles every top-level loop when it starts, and
+/// only in the global environment, as GNU R's does, which is where they are not inside a function
 /// whose frame semantics (`on.exit`, `missing`, `sys.function`) the compiled loop would have
 /// to reproduce. `sequence` is a `for` loop's evaluated sequence, which the compiled loop steps
 /// through instead of evaluating the expression again.
@@ -643,7 +811,15 @@ pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Optio
         None => call,
     };
     let function = values::triple(SexpType::Closure, nil(), body, env)?;
-    let code = compile_with_locals(body, function, None)?;
+    // GNU R compiles a top-level loop when it starts, binding the base functions the global
+    // environment finds in base then, except those the loop itself assigns (`compile` adds the
+    // expression's `findLocals` as a frame).
+    let binding = if interp().bytecode.jit_level >= 3 {
+        Some(vec![Rc::new(compiler_locals(nil(), body, env)?)])
+    } else {
+        None
+    };
+    let code = compile_with_locals(body, function, None, binding)?;
     heap.set_cdr(function, code);
     let profile = values::ints_mut(code.cdr().element(PROFILE));
     profile[profile::TIER_STATE] = profile::TIER_OFF;
@@ -689,27 +865,27 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return Ok(body);
     }
-    match interp().bytecode.bodies.tier(function, body) {
+    let binds = match interp().bytecode.bodies.tier(function, body) {
         BodyTier::Shared(code) => return Ok(code),
-        BodyTier::Compile => {}
-        BodyTier::Counting(calls) => {
-            if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
-                return Ok(body);
-            }
-        }
-    }
-    compile_for(function, body)
+        BodyTier::Compile(binds) => binds,
+        BodyTier::Counting(calls) => match schedule(function, body, calls, false) {
+            Some(binds) => binds,
+            None => return Ok(body),
+        },
+    };
+    compile_for(function, body, binds)
 }
 
-/// Compiles `body` as `function`'s, or takes its code from the package's code image, installs
-/// the code as the closure's body and records it for other closures over the body.
-unsafe fn compile_for(function: Sexp, body: Sexp) -> R<Sexp> {
+/// Compiles `body` as `function`'s, binding its base functions when `binds`, or takes its code
+/// from the package's code image, installs the code as the closure's body and records it for
+/// other closures over the body.
+unsafe fn compile_for(function: Sexp, body: Sexp, binds: bool) -> R<Sexp> {
     // A package's code image replaces compiling, at the same call, rather than running code from
     // the first call: decoding costs about as much as compiling, and many closures run only once.
     let code = match crate::code_image::take_pending(function, body)? {
         Some(code) => code,
         None => {
-            let code = compile(body, function)?;
+            let code = compile(body, function, binds)?;
             crate::heap().set_cdr(function, code);
             code
         }
@@ -748,7 +924,12 @@ pub(crate) unsafe fn inner_closure(
     let closure = eval::make_closure(formals, shared, srcref, env)?;
     if shared.kind() != SexpType::Bytecode && worth_compiling(shared) {
         heap.root(closure);
-        let code = compile(shared, closure)?;
+        // Code that binds its base functions compiled its nested functions with it, so this
+        // outer code guards them, and binding here would miss its locals; a namespace's code
+        // binds anyway, as its package installs compiled.
+        let binds = crate::envir::is_namespace(crate::dispatch::top_env(env))
+            && env != heap.known().global_env;
+        let code = compile(shared, closure, binds)?;
         heap.set_element(constants, position, code);
         heap.set_cdr(closure, code);
     }
@@ -774,10 +955,12 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Result<Sexp, Uncompilable>> {
     if !worth_compiling(body) {
         return Ok(Err(Uncompilable::NotACall));
     }
-    if let BodyTier::Shared(code) = interp().bytecode.bodies.tier(function, body) {
-        return Ok(Ok(code));
-    }
-    compile_for(function, body).map(Ok)
+    let binds = match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => return Ok(Ok(code)),
+        BodyTier::Compile(binds) => binds,
+        BodyTier::Counting(calls) => schedule(function, body, calls, false).unwrap_or(false),
+    };
+    compile_for(function, body, binds).map(Ok)
 }
 
 /// The body a copy of the closure `function` gets: the code `function` runs, or the code
@@ -792,7 +975,7 @@ pub unsafe fn body_to_copy(function: Sexp) -> R<Sexp> {
     }
     match interp().bytecode.bodies.tier(function, body) {
         BodyTier::Shared(code) => Ok(code),
-        BodyTier::Compile | BodyTier::Counting(_) => Ok(body),
+        BodyTier::Compile(_) | BodyTier::Counting(_) => Ok(body),
     }
 }
 
@@ -841,7 +1024,7 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
         }
         // An error is the compiler's way of rejecting a body (a `break` outside a loop, say), so
         // such a body keeps running on the AST evaluator, as in `run_body`.
-        if let Ok(code) = compile(body, function) {
+        if let Ok(code) = compile(body, function, true) {
             heap.set_cdr(function, code);
             fresh.push(code);
         }
@@ -883,7 +1066,9 @@ pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
                     env,
                 )?;
                 crate::heap().root(closure);
-                let compiled = compile(source, closure)?;
+                // A nested function the outer code had not compiled with it guards its base
+                // functions, since `env` does not hold the outer function's locals.
+                let compiled = compile(source, closure, false)?;
                 crate::heap().set_element(constants, body, compiled);
                 Some(compiled)
             } else {
@@ -998,28 +1183,359 @@ pub unsafe fn source_of(code: Sexp) -> Sexp {
 
 const LOOP_SEARCH_DEPTH: u32 = 32;
 
-unsafe fn contains_loop(expression: Sexp, depth: u32) -> bool {
-    if depth == 0 || expression.kind() != SexpType::Language {
+/// The site a call records where it emits no guard, because the code binds the base function
+/// the guard would have checked.
+const UNGUARDED: u32 = u32::MAX;
+
+/// GNU R's `JIT_score` of `expression`, capped at [`MIN_JIT_SCORE`]: a loop scores the minimum,
+/// any other call one plus its arguments' scores, and an `if` the larger of its condition's and
+/// its consequent's, which leaves out the alternative exactly as GNU R does.
+unsafe fn jit_score(expression: Sexp) -> u32 {
+    if expression.kind() != SexpType::Language {
+        return 1;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol {
+        match &*symbol_name(head) {
+            "if" => {
+                let arguments = expression.cdr();
+                let condition = jit_score(arguments.car());
+                let consequent = jit_score(arguments.cdr().car());
+                return condition.max(consequent);
+            }
+            "for" | "while" | "repeat" => return MIN_JIT_SCORE,
+            _ => {}
+        }
+    }
+    let mut score = 1;
+    let mut cell = expression.cdr();
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) && score < MIN_JIT_SCORE {
+        score += jit_score(cell.car());
+        cell = cell.cdr();
+    }
+    score.min(MIN_JIT_SCORE)
+}
+
+/// GNU R's `MIN_JIT_SCORE`, which is also the score of a loop.
+const MIN_JIT_SCORE: u32 = 50;
+
+/// Where GNU R's compiler finds a name's binding, by its `frameTypes`: a frame below the code's
+/// top environment, a namespace frame (the namespace, its imports and the base namespace), or
+/// the global environment and what is attached to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameKind {
+    Local,
+    Namespace,
+    Global,
+}
+
+/// The frame that binds `symbol` first, looking outward from `enclosure`, and its kind. Any
+/// binding counts, a variable as much as a function, as for GNU R's `exists`.
+unsafe fn compile_time_frame(symbol: Sexp, enclosure: Sexp) -> Option<(Sexp, FrameKind)> {
+    let heap = crate::heap();
+    let top = crate::dispatch::top_env(enclosure);
+    let in_namespace = crate::envir::is_namespace(top);
+    let mut kind = FrameKind::Local;
+    let mut env = enclosure;
+    while env != heap.known().empty_env {
+        if env == top {
+            kind = if in_namespace {
+                FrameKind::Namespace
+            } else {
+                FrameKind::Global
+            };
+        }
+        if env == heap.known().global_env {
+            kind = FrameKind::Global;
+        }
+        if heap.frame_cell(env, symbol).is_some() {
+            return Some((env, kind));
+        }
+        env = env.enclosure();
+    }
+    None
+}
+
+/// The base function GNU R's compiler binds `symbol` to when it compiles code that closes over
+/// `enclosure`, or `None` when it compiles a call of `symbol` that looks the function up as the
+/// code runs (`getInlineInfo` with no run-time guard). Outside a namespace that is a name of
+/// [`LANGUAGE_FUNCTIONS`] whose first binding is base's; inside one, any name with an inline
+/// handler that the namespace's frames find in base, which the namespace cannot rebind.
+unsafe fn base_binding_at_compile(symbol: Sexp, enclosure: Sexp) -> Option<Sexp> {
+    let heap = crate::heap();
+    let name = symbol_name(symbol);
+    if INLINE_HANDLERS.binary_search(&&*name).is_err() || &*name == "standardGeneric" {
+        return None;
+    }
+    let (frame, kind) = compile_time_frame(symbol, enclosure)?;
+    let in_base = frame == heap.known().base_env || frame == heap.known().base_namespace;
+    let bound = match kind {
+        FrameKind::Local => false,
+        FrameKind::Namespace => in_base,
+        FrameKind::Global => {
+            frame == heap.known().base_env && LANGUAGE_FUNCTIONS.binary_search(&&*name).is_ok()
+        }
+    };
+    if !bound {
+        return None;
+    }
+    let value = forced_value(heap.frame_cell(frame, symbol)?.cdr());
+    values::is_function(value).then_some(value)
+}
+
+/// The names GNU R's compiler takes as a function's locals (`funEnv`): its formals, and every
+/// variable that its formals' defaults and its body assign with `<-` or `=`, bind with `for`, or
+/// name as a literal string in a two-argument `assign` or `delayedAssign`. The search skips
+/// nested functions and formulas, and skips `local`, `quote` and `expression` calls unless the
+/// function rebinds those names or they are not base's (`findLocalsList`), which outside a
+/// namespace holds for `quote` and `expression` always.
+unsafe fn compiler_locals(formals: Sexp, body: Sexp, enclosure: Sexp) -> R<FxHashSet<Sexp>> {
+    let quoting = ["expression", "local", "quote"];
+    let mut symbols_of: SmallVec<[Sexp; 3]> = SmallVec::new();
+    for name in quoting {
+        symbols_of.push(values::install(name)?);
+    }
+    let unbound: SmallVec<[&str; 3]> = quoting
+        .into_iter()
+        .zip(symbols_of.iter())
+        .filter(|(_, symbol)| !is_base_variable(**symbol, enclosure))
+        .map(|(name, _)| name)
+        .collect();
+    let mut shadowed: SmallVec<[&str; 3]> = quoting.into_iter().collect();
+    loop {
+        let mut quoted = false;
+        let found = assigned_names(formals, body, &shadowed, &mut quoted)?;
+        let previous = shadowed.len();
+        shadowed = quoting
+            .into_iter()
+            .zip(symbols_of.iter())
+            .filter(|(name, symbol)| {
+                unbound.contains(name) || (shadowed.contains(name) && found.contains(*symbol))
+            })
+            .map(|(name, _)| name)
+            .collect();
+        // GNU R stops when the count of shadowed names repeats, not the names themselves.
+        // Without a `local`, `quote` or `expression` call the next pass would find the same.
+        if shadowed.len() == previous || !quoted {
+            let mut locals = found;
+            let mut formal = formals;
+            while formal.kind() == SexpType::Pairlist {
+                locals.insert(formal.tag());
+                formal = formal.cdr();
+            }
+            return Ok(locals);
+        }
+    }
+}
+
+/// GNU R's `isBaseVar`: whether the compiler finds `symbol`'s binding in base and may inline it.
+unsafe fn is_base_variable(symbol: Sexp, enclosure: Sexp) -> bool {
+    let heap = crate::heap();
+    let name = symbol_name(symbol);
+    match compile_time_frame(symbol, enclosure) {
+        Some((frame, FrameKind::Namespace)) => {
+            frame == heap.known().base_env || frame == heap.known().base_namespace
+        }
+        Some((frame, FrameKind::Global)) => {
+            frame == heap.known().base_env && LANGUAGE_FUNCTIONS.binary_search(&&*name).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// One pass of GNU R's `findLocalsList1` over a function's formals' defaults and body, with the
+/// names in `shadowed` searched inside. Sets `quoting` when it meets a call of one of those
+/// names, without which the result does not depend on `shadowed`.
+unsafe fn assigned_names(
+    formals: Sexp,
+    body: Sexp,
+    shadowed: &[&str],
+    quoting: &mut bool,
+) -> R<FxHashSet<Sexp>> {
+    let mut found = FxHashSet::default();
+    let mut todo: Vec<Sexp> = Vec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        todo.push(formal.car());
+        formal = formal.cdr();
+    }
+    todo.push(body);
+    while let Some(expression) = todo.pop() {
+        if expression.kind() != SexpType::Language {
+            continue;
+        }
+        let head = expression.car();
+        let arguments = expression.cdr();
+        let name = match head.kind() {
+            SexpType::Symbol => Some(symbol_name(head)),
+            SexpType::String if values::length(head) >= 1 => values::first_string(head),
+            _ => None,
+        };
+        let Some(name) = name else {
+            todo.push(head);
+            push_items(arguments, &mut todo);
+            continue;
+        };
+        match &*name {
+            "=" | "<-" => {
+                if let Some(symbol) = assigned_variable(arguments.car()) {
+                    found.insert(symbol);
+                }
+                push_items(arguments, &mut todo);
+            }
+            "for" => {
+                if arguments.car().kind() == SexpType::Symbol {
+                    found.insert(arguments.car());
+                }
+                push_items(arguments.cdr(), &mut todo);
+            }
+            "assign" | "delayedAssign" => {
+                let target = arguments.car();
+                if values::pairlist_length(arguments) == 2
+                    && target.kind() == SexpType::String
+                    && values::length(target) == 1
+                    && let Some(text) = values::first_string(target)
+                {
+                    found.insert(values::install(&text)?);
+                    todo.push(arguments.cdr().car());
+                }
+            }
+            "function" | "~" => {}
+            "local" => {
+                *quoting = true;
+                if shadowed.contains(&"local") || values::pairlist_length(arguments) != 1 {
+                    push_items(arguments, &mut todo);
+                }
+            }
+            "expression" | "quote" => {
+                *quoting = true;
+                if shadowed.contains(&&*name) {
+                    push_items(arguments, &mut todo);
+                }
+            }
+            _ => push_items(arguments, &mut todo),
+        }
+    }
+    Ok(found)
+}
+
+unsafe fn push_items(mut cell: Sexp, todo: &mut Vec<Sexp>) {
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        todo.push(cell.car());
+        cell = cell.cdr();
+    }
+}
+
+/// GNU R's `getAssignedVar`: the variable an assignment to `target` binds, the innermost first
+/// argument of a replacement such as `names(x)[2]`.
+unsafe fn assigned_variable(mut target: Sexp) -> Option<Sexp> {
+    while target.kind() == SexpType::Language {
+        target = target.cdr().car();
+    }
+    match target.kind() {
+        SexpType::Symbol if target != missing_arg() => Some(target),
+        SexpType::String if values::length(target) >= 1 => {
+            values::install(&values::first_string(target)?).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Whether GNU R's compiler, having found `name` bound in base, compiles `call` with its inline
+/// handler rather than as a call that looks the function up when it runs. Every handler for the
+/// names [`LANGUAGE_FUNCTIONS`] lists accepts its call, or falls back to calling base's
+/// function directly, except these.
+unsafe fn handler_binds(name: &str, call: Sexp, enclosure: Sexp) -> bool {
+    match name {
+        // `cmpMultiColon` compiles a call that finds `::` when it runs.
+        "::" | ":::" => false,
+        "local" => values::pairlist_length(call.cdr()) == 1,
+        "function" => !may_call_browser(call.cdr().cdr().car(), enclosure),
+        _ => true,
+    }
+}
+
+/// GNU R's `mayCallBrowser`: whether `expression` calls `browser`, outside the functions it
+/// defines.
+unsafe fn may_call_browser(expression: Sexp, enclosure: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
         return false;
     }
     let head = expression.car();
     if head.kind() == SexpType::Symbol {
-        if matches!(&*symbol_name(head), "for" | "while" | "repeat") {
+        let name = symbol_name(head);
+        if &*name == "browser" {
             return true;
         }
-        // A nested function's loops run when it is called, not when this body runs.
-        if &*symbol_name(head) == "function" {
+        if &*name == "function" && is_base_variable(head, enclosure) {
             return false;
         }
+    } else if may_call_browser(head, enclosure) {
+        return true;
     }
     let mut cell = expression.cdr();
-    while cell.kind() == SexpType::Pairlist {
-        if contains_loop(cell.car(), depth - 1) {
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        if may_call_browser(cell.car(), enclosure) {
             return true;
         }
         cell = cell.cdr();
     }
     false
+}
+
+/// The base functions GNU R's compiler has an inline handler for, in byte order.
+#[rustfmt::skip]
+const INLINE_HANDLERS: [&str; 233] = [
+    "!", "!=", "$", "$<-", "%%", "%*%", "%/%", "&", "&&", "(", "*", "+", "-", "...elt",
+    "...length", "...names", ".C", ".Call", ".Call.graphics", ".External", ".External.graphics",
+    ".External2", ".Fortran", ".Internal", ".Primitive", ".cache_class", ".class2",
+    ".isMethodsDispatchOn", ".primTrace", ".primUntrace", ".subset", ".subset2", "/", ":", "::",
+    ":::", "<", "<-", "<<-", "<=", "=", "==", ">", ">=", "@", "@<-", "Arg", "Conj", "Exec", "Im",
+    "Mod", "Re", "Tailcall", "UseMethod", "[", "[<-", "[[", "[[<-", "^", "abs", "acos", "acosh",
+    "all", "any", "anyNA", "as.call", "as.character", "as.complex", "as.double", "as.environment",
+    "as.integer", "as.logical", "as.numeric", "as.raw", "asin", "asinh", "atan", "atan2", "atanh",
+    "attr", "attr<-", "attributes", "attributes<-", "baseenv", "besselY", "beta", "break",
+    "browser", "c", "call", "ceiling", "choose", "class", "class<-", "cos", "cosh", "cospi",
+    "crossprod", "cummax", "cummin", "cumprod", "cumsum", "declare", "digamma", "dim", "dim<-",
+    "dimnames", "dimnames<-", "drop", "emptyenv", "enc2native", "enc2utf8", "environment<-", "exp",
+    "expm1", "expression", "floor", "for", "forceAndCall", "function", "gamma", "gc.time",
+    "globalenv", "identical", "if", "inherits", "interactive", "invisible", "is.array",
+    "is.atomic", "is.call", "is.character", "is.complex", "is.double", "is.environment",
+    "is.expression", "is.finite", "is.function", "is.infinite", "is.integer", "is.language",
+    "is.list", "is.loaded", "is.logical", "is.matrix", "is.na", "is.name", "is.nan", "is.null",
+    "is.numeric", "is.object", "is.pairlist", "is.raw", "is.recursive", "is.single", "is.symbol",
+    "is.vector", "isS4", "lazyLoadDBfetch", "lbeta", "lchoose", "length", "length<-", "levels<-",
+    "lgamma", "list", "local", "log", "log10", "log1p", "log2", "match", "max", "min", "missing",
+    "names", "names<-", "nargs", "nchar", "next", "nzchar", "oldClass", "oldClass<-", "on.exit",
+    "polyroot", "pos.to.env", "proc.time", "prod", "quote", "range", "rep", "rep.int", "rep_len",
+    "repeat", "require", "retracemem", "return", "round", "seq.int", "seq_along", "seq_len",
+    "sign", "signif", "sin", "sinh", "sinpi", "sqrt", "standardGeneric", "storage.mode<-",
+    "substitute", "sum", "switch", "tan", "tanh", "tanpi", "tcrossprod", "tracemem", "trigamma",
+    "trunc", "typeof", "unCfillPOSIXlt", "unclass", "untracemem", "vector", "which.max",
+    "which.min", "while", "with", "xtfrm", "{", "|", "||", "~",
+];
+
+/// GNU R's `languageFuns`, in byte order: the inline handlers its compiler applies, at the
+/// default optimization level, to code outside a namespace without a run-time check.
+#[rustfmt::skip]
+const LANGUAGE_FUNCTIONS: [&str; 46] = [
+    "!", "!=", "$", "$<-", "%%", "%*%", "%/%", "&", "&&", "(", "*", "+", "-", "/", ":", "::",
+    ":::", "<", "<-", "<<-", "<=", "=", "==", ">", ">=", "@", "@<-", "[", "[<-", "[[", "[[<-", "^",
+    "break", "for", "function", "if", "local", "next", "repeat", "return", "switch", "while", "{",
+    "|", "||", "~",
+];
+
+/// The compile-time frames of promise code made for `function`'s code ([`Compiler::binding`]):
+/// none when that code guards its base functions, and otherwise the function's locals. Promise
+/// code compiles when its call site first runs rather than with the function, so it binds what
+/// the names find then.
+unsafe fn promise_binding(function: Sexp) -> R<Option<Vec<Rc<FxHashSet<Sexp>>>>> {
+    let code = function.cdr();
+    if code.kind() != SexpType::Bytecode || !code.has_gp(gp::BINDING_CODE) {
+        return Ok(None);
+    }
+    let locals = compiler_locals(function.car(), source_of(code), function.tag())?;
+    Ok(Some(vec![Rc::new(locals)]))
 }
 
 /// The arguments a closure called from `function`'s code makes its promises from: each one
@@ -1064,10 +1580,13 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         sites: None,
         hoisted: Vec::new(),
         preguarded: Vec::new(),
+        binding: None,
+        deferred_binding: function,
     };
+    let items = values::pairlist_items(arguments);
     let heap = crate::heap();
     let mut list = nil();
-    for (tag, value) in values::pairlist_items(arguments).iter().rev() {
+    for (tag, value) in items.iter().rev() {
         let value = if compiles_as_promise(*value) {
             compiler.code.clear();
             compiler.constants.clear();
@@ -1464,41 +1983,59 @@ pub const ARITHS: [(Arith, &str); 13] = [
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
 /// length-one vector and a plain vector is any other; both have no attributes and are not
 /// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
-/// it promises what a plain vector does not (no NA, no attributes) and its operators differ.
+/// it promises what a plain vector does not (no NA, no attributes) and its operators differ. A
+/// compact integer or double sequence (`1:n`, `as.double(1:n)`) is its own kind too, because
+/// compiled code computes its elements instead of loading them.
 pub mod feedback {
-    pub const INTEGER_SCALAR: u16 = 1 << 0;
-    pub const DOUBLE_SCALAR: u16 = 1 << 1;
-    pub const LOGICAL_SCALAR: u16 = 1 << 2;
-    pub const INTEGER_VECTOR: u16 = 1 << 3;
-    pub const DOUBLE_VECTOR: u16 = 1 << 4;
-    pub const LOGICAL_VECTOR: u16 = 1 << 5;
-    pub const LIST: u16 = 1 << 6;
-    pub const OTHER: u16 = 1 << 7;
-    pub const INTEGER_ARRAY: u16 = 1 << 8;
-    pub const DOUBLE_ARRAY: u16 = 1 << 9;
-    pub const LOGICAL_ARRAY: u16 = 1 << 10;
+    pub const INTEGER_SCALAR: u32 = 1 << 0;
+    pub const DOUBLE_SCALAR: u32 = 1 << 1;
+    pub const LOGICAL_SCALAR: u32 = 1 << 2;
+    pub const INTEGER_VECTOR: u32 = 1 << 3;
+    pub const DOUBLE_VECTOR: u32 = 1 << 4;
+    pub const LOGICAL_VECTOR: u32 = 1 << 5;
+    pub const LIST: u32 = 1 << 6;
+    pub const OTHER: u32 = 1 << 7;
+    pub const INTEGER_ARRAY: u32 = 1 << 8;
+    pub const DOUBLE_ARRAY: u32 = 1 << 9;
+    pub const LOGICAL_ARRAY: u32 = 1 << 10;
     /// A `JumpUnless` jumped: its condition was `FALSE`.
-    pub const BRANCH_TAKEN: u16 = 1 << 11;
+    pub const BRANCH_TAKEN: u32 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
-    pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    pub const BRANCH_NOT_TAKEN: u32 = 1 << 12;
     /// A `GetVar` read an active binding, so every read there must call the binding again.
     /// Compiled code records it, and the bit says nothing about the value's type.
-    pub const ACTIVE_BINDING: u16 = 1 << 13;
+    pub const ACTIVE_BINDING: u32 = 1 << 13;
+    /// An attribute-free compact integer sequence.
+    pub const INTEGER_SEQUENCE: u32 = 1 << 15;
+    /// An attribute-free compact double sequence, such as `as.double(1:n)`.
+    pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
 /// values a value-producing instruction made, or the branch bits of a `JumpUnless`. Tier 0 only
 /// adds bits, so what it reports never shrinks until the optimizing tier clears the record.
-pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u16 {
+pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u32 {
     values::ints(code.cdr().element(FEEDBACK))
         .get(pc)
-        .map_or(0, |&bits| bits as u16)
+        .map_or(0, |&bits| bits as u32)
 }
 
 /// The [`feedback`] bit for `value`.
-pub unsafe fn value_kind(value: Sexp) -> u16 {
+pub unsafe fn value_kind(value: Sexp) -> u32 {
     if value.is_altrep() {
-        return feedback::OTHER;
+        let Some([integer, double]) = crate::compact_sequence_classes() else {
+            return feedback::OTHER;
+        };
+        let class = value.tag();
+        return if values::has_attributes(value) {
+            feedback::OTHER
+        } else if class == integer {
+            feedback::INTEGER_SEQUENCE
+        } else if class == double {
+            feedback::DOUBLE_SEQUENCE
+        } else {
+            feedback::OTHER
+        };
     }
     if value.is_array() {
         return match value.kind() {
@@ -1591,6 +2128,16 @@ struct Compiler {
     /// The calls of base operators whose name [`Compiler::fused_call`] checked before
     /// evaluating a hoisted operand, each with the function the name was checked to find.
     preguarded: Vec<(Sexp, Sexp)>,
+    /// When the code compiles at a time GNU R's JIT would compile it: GNU R's compile-time
+    /// frames above the enclosure, the function's locals ([`compiler_locals`]) first and then
+    /// each enclosing function's. The code then binds base functions as GNU R's does
+    /// ([`Compiler::bound_base`]) and compiles its nested functions at once. `None` keeps a
+    /// guard on every base function, which looks the name up as the code runs.
+    binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
+    /// For promise code, the function whose frame it runs in, until [`Compiler::force_binding`]
+    /// fills `binding` from that function's locals, and `NULL` otherwise. Finding the locals
+    /// walks the function's whole body, so it waits for a call that could bind.
+    deferred_binding: Sexp,
 }
 
 /// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
@@ -1695,8 +2242,17 @@ mod fusion {
 
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
 /// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
-unsafe fn compile(body: Sexp, function: Sexp) -> R<Sexp> {
-    compile_with_locals(body, function, local_symbols(body, function.car()))
+unsafe fn compile(body: Sexp, function: Sexp, binds: bool) -> R<Sexp> {
+    let binding = if binds {
+        Some(vec![Rc::new(compiler_locals(
+            function.car(),
+            body,
+            function.tag(),
+        )?)])
+    } else {
+        None
+    };
+    compile_with_locals(body, function, local_symbols(body, function.car()), binding)
 }
 
 /// [`compile`] with the symbols the frame can bind given, or `None` for code that reads and
@@ -1705,9 +2261,10 @@ unsafe fn compile_with_locals(
     body: Sexp,
     function: Sexp,
     locals: Option<FxHashSet<Sexp>>,
+    binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
 ) -> R<Sexp> {
     let threshold = crate::heap().swap_report_threshold(usize::MAX);
-    let compiled = compile_unreported(body, function, locals);
+    let compiled = compile_unreported(body, function, locals, binding);
     crate::heap().swap_report_threshold(threshold);
     compiled
 }
@@ -1716,7 +2273,9 @@ unsafe fn compile_unreported(
     body: Sexp,
     function: Sexp,
     locals: Option<FxHashSet<Sexp>>,
+    binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
 ) -> R<Sexp> {
+    let binds = binding.is_some();
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -1748,6 +2307,8 @@ unsafe fn compile_unreported(
         sites: None,
         hoisted: Vec::new(),
         preguarded: Vec::new(),
+        binding,
+        deferred_binding: nil(),
     };
     if compiler.local_symbols.is_some() {
         let mut formals = Vec::new();
@@ -1765,7 +2326,11 @@ unsafe fn compile_unreported(
     let slot = compiler.cache();
     compiler.summary =
         effects::summarize(function.car(), body, compiler.local_symbols.as_ref(), slot)?;
-    compiler.assemble(body)
+    let code = compiler.assemble(body)?;
+    if binds {
+        code.set_gp_bits(gp::BINDING_CODE, true);
+    }
+    Ok(code)
 }
 
 /// The symbols a call frame of a closure with `formals` and `body` can bind, or `None` when the
@@ -2793,11 +3358,70 @@ impl Compiler {
         Ok(())
     }
 
+    /// A guard that `head` still finds `expected`, the base function the call is compiled for,
+    /// with the fallback for when it does not; or no guard when GNU R's compiler binds the name
+    /// to that function here (see [`Compiler::bound_base`]), so the call is compiled for it
+    /// whatever the name finds when the code runs.
+    unsafe fn guard(&mut self, call: Sexp, head: Sexp, expected: Sexp) -> R<Option<usize>> {
+        if self.bound_base(call, head)? == Some(expected) {
+            if let Some(sites) = &mut self.sites {
+                sites.push(UNGUARDED);
+            }
+            return Ok(None);
+        }
+        let symbol = self.constant(head);
+        let expected = self.constant(expected);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        Ok(Some(self.emit_patchable(
+            Op::Guard,
+            &[symbol, expected, cache, probe, 0],
+        )))
+    }
+
+    /// The base function GNU R's compiler binds `head` to in `call`, or `None` when the code
+    /// looks the name up as it runs: always for code compiled at a time GNU R would not have
+    /// compiled it, and otherwise when the name is one of the function's locals or of an
+    /// enclosing function's, or [`base_binding_at_compile`] or [`handler_binds`] says so.
+    unsafe fn bound_base(&mut self, call: Sexp, head: Sexp) -> R<Option<Sexp>> {
+        if head.kind() != SexpType::Symbol
+            || (self.binding.is_none() && self.deferred_binding == nil())
+        {
+            return Ok(None);
+        }
+        let Some(value) = base_binding_at_compile(head, self.enclosure) else {
+            return Ok(None);
+        };
+        if !handler_binds(&symbol_name(head), call, self.enclosure) {
+            return Ok(None);
+        }
+        self.force_binding()?;
+        let Some(frames) = &self.binding else {
+            return Ok(None);
+        };
+        Ok((!frames.iter().any(|frame| frame.contains(&head))).then_some(value))
+    }
+
+    /// Fills `binding` for promise code from its function's locals, the first time a call
+    /// could bind (see `deferred_binding`).
+    unsafe fn force_binding(&mut self) -> R<()> {
+        if self.deferred_binding != nil() {
+            let function = self.deferred_binding;
+            self.deferred_binding = nil();
+            self.binding = promise_binding(function)?;
+        }
+        Ok(())
+    }
+
     /// Compiles what runs when one of `guards` fails: the general evaluation of `call` into
     /// `dst`, after which execution continues here. The fallback goes out of line, so the inline
     /// path runs straight on instead of jumping over it: after the body's `Return`, or inside a
     /// loop after the loop's back edge (see [`Compiler::back_edge`]).
     unsafe fn cold_fallback(&mut self, guards: &[usize], call: Sexp, dst: u32) -> R<()> {
+        // Code that binds its base functions has no guard to fail, so nothing reaches a fallback.
+        if guards.is_empty() {
+            return Ok(());
+        }
         let resume = self.here();
         self.fallback(call, dst)?;
         let words = self.code.drain(resume as usize..).collect();
@@ -2856,15 +3480,10 @@ impl Compiler {
         let mut preguard_sites = Vec::new();
         for step in &plan.steps[..ahead_end] {
             if let FusionStep::Head(operation, symbol, expected) = *step {
-                preguard_sites.push(self.here());
-                let symbol_constant = self.constant(symbol);
-                let expected_constant = self.constant(expected);
-                let cache = self.cache();
-                let probe = self.frame_may_bind(symbol) as u32;
-                guards.push(self.emit_patchable(
-                    Op::Guard,
-                    &[symbol_constant, expected_constant, cache, probe, 0],
-                ));
+                let site = self.here();
+                let guard = self.guard(operation, symbol, expected)?;
+                preguard_sites.push(if guard.is_some() { site } else { UNGUARDED });
+                guards.extend(guard);
                 self.preguarded.push((operation, expected));
             }
         }
@@ -3115,6 +3734,12 @@ impl Compiler {
                     continue;
                 }
                 _ => {}
+            }
+            if site == UNGUARDED {
+                if matches!(step, FusionStep::Head(..)) {
+                    continue;
+                }
+                return None;
             }
             let position = site as usize;
             let op = op_of(*self.code.get(position)?)?;
@@ -3505,11 +4130,7 @@ impl Compiler {
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
         let target = args[0].1;
-        let probe = self.frame_may_bind(head) as u32;
-        let symbol = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let rest = values::pairlist_items(target.cdr().cdr());
         let count = rest.len() as u32 + 2;
         let mark = self.next_register;
@@ -3558,7 +4179,7 @@ impl Compiler {
             ],
         );
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -3690,11 +4311,7 @@ impl Compiler {
         })?;
         let mut guards = Vec::new();
         for (symbol, expected) in [(head, primitive), (replacement_symbol, replacement)] {
-            let probe = self.frame_may_bind(symbol) as u32;
-            let symbol = self.constant(symbol);
-            let expected = self.constant(expected);
-            let cache = self.cache();
-            guards.push(self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]));
+            guards.extend(self.guard(call, symbol, expected)?);
         }
         let mark = self.next_register;
         let value = self.allocate();
@@ -4030,11 +4647,7 @@ impl Compiler {
         inline: InlinedInternal,
         dst: u32,
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(inline.function);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, inline.function)?;
         let mark = self.next_register;
         let first = self.next_register;
         for _ in &inline.arguments {
@@ -4099,7 +4712,7 @@ impl Compiler {
             ],
         );
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     /// The standard library builtin `symbol` names from the closure's enclosure, such as
@@ -4130,14 +4743,11 @@ impl Compiler {
         dst: u32,
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(function);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, function)?;
         let call_constant = self.constant(call);
         let mark = self.next_register;
         let function_register = self.allocate();
+        let expected = self.constant(function);
         self.emit(Op::Constant, &[function_register, expected]);
         if self.tail_updates.0.contains(&call) {
             let target = self.constant(self.tail_updates.1);
@@ -4146,7 +4756,7 @@ impl Compiler {
                 &[dst, function_register, call_constant, target],
             );
             self.release_to(mark);
-            self.cold_fallback(&[guard], call, dst)?;
+            self.cold_fallback(guard.as_slice(), call, dst)?;
             return Ok(());
         }
         let rebinding = match self.rebinding {
@@ -4177,7 +4787,7 @@ impl Compiler {
             ),
         };
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -4199,13 +4809,9 @@ impl Compiler {
         {
             self.inline(call, primitive, dst, name, args)?;
         } else {
-            let symbol = self.constant(head);
-            let expected = self.constant(primitive);
-            let cache = self.cache();
-            let probe = self.frame_may_bind(head) as u32;
-            let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+            let guard = self.guard(call, head, primitive)?;
             self.inline(call, primitive, dst, name, args)?;
-            self.cold_fallback(&[guard], call, dst)?;
+            self.cold_fallback(guard.as_slice(), call, dst)?;
         }
         if ARITHS.iter().any(|(_, operator)| *operator == name) {
             self.temporary = Some((dst, self.here()));
@@ -4223,14 +4829,10 @@ impl Compiler {
         dst: u32,
         symbol: Sexp,
     ) -> R<()> {
-        let name = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let symbol = self.constant(symbol);
         self.emit(Op::Missing, &[dst, symbol]);
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     /// `package::symbol` or `package:::symbol`, guarded by the operator: [`Op::Namespace`].
@@ -4245,11 +4847,7 @@ impl Compiler {
         symbol: Sexp,
         exported: bool,
     ) -> R<()> {
-        let name = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let package = self.constant(package);
         let symbol = self.constant(symbol);
         let lookup = self.cache();
@@ -4257,7 +4855,7 @@ impl Compiler {
             Op::Namespace,
             &[dst, package, symbol, u32::from(exported), lookup],
         );
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     /// `quote(quoted)`, guarded by `quote`: the quoted expression as a constant.
@@ -4269,15 +4867,11 @@ impl Compiler {
         dst: u32,
         quoted: Sexp,
     ) -> R<()> {
-        let name = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let constant = self.constant(quoted);
         self.emit(Op::Constant, &[dst, constant]);
         self.emit(Op::Visible, &[]);
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     unsafe fn inline(
@@ -4519,8 +5113,8 @@ impl Compiler {
                 let immediate_call = values::lcons(function_call, nil())?;
                 let mark = self.next_register;
                 let function = self.allocate();
+                let body = self.nested_body(nil(), expression, nil())?;
                 let formals = self.constant(nil());
-                let body = self.constant(expression);
                 let srcref = self.constant(nil());
                 self.emit(Op::Closure, &[function, formals, body, srcref]);
                 let call_constant = self.call_site(immediate_call)?;
@@ -4528,9 +5122,10 @@ impl Compiler {
                 self.release_to(mark);
             }
             "function" => {
+                let srcref = args.get(2).map_or(nil(), |(_, srcref)| *srcref);
+                let body = self.nested_body(args[0].1, args[1].1, srcref)?;
                 let formals = self.constant(args[0].1);
-                let body = self.constant(args[1].1);
-                let srcref = self.constant(args.get(2).map_or(nil(), |(_, srcref)| *srcref));
+                let srcref = self.constant(srcref);
                 self.emit(Op::Closure, &[dst, formals, body, srcref]);
             }
             operator => {
@@ -4785,11 +5380,7 @@ impl Compiler {
         layout: u32,
         slots: &[usize],
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         if items.is_empty() {
             let value = crate::records::construct(layout, &[])?;
             let constant = self.constant(value);
@@ -4806,7 +5397,7 @@ impl Compiler {
             self.emit(Op::Construct, &[dst, layout, base, items.len() as u32]);
             self.release_to(mark);
         }
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -4822,11 +5413,7 @@ impl Compiler {
         dst: u32,
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let call_constant = self.constant(call);
         let mark = self.next_register;
         let value = self.allocate();
@@ -4885,7 +5472,7 @@ impl Compiler {
             self.patch(position);
         }
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -4981,6 +5568,28 @@ impl Compiler {
         Ok(())
     }
 
+    /// The constant [`Op::Closure`] makes a nested function's closures from: the body, or in
+    /// code that binds its base functions, the body compiled now against this function's
+    /// compile-time frames, as GNU R's compiler compiles a function's nested functions with it.
+    unsafe fn nested_body(&mut self, formals: Sexp, body: Sexp, srcref: Sexp) -> R<u32> {
+        self.force_binding()?;
+        let Some(frames) = &self.binding else {
+            return Ok(self.constant(body));
+        };
+        if !worth_compiling(body) {
+            return Ok(self.constant(body));
+        }
+        let heap = crate::heap();
+        let closure = eval::make_closure(formals, body, srcref, self.enclosure)?;
+        heap.root(closure);
+        let mut nested = Vec::with_capacity(frames.len() + 1);
+        nested.push(Rc::new(compiler_locals(formals, body, self.enclosure)?));
+        nested.extend(frames.iter().cloned());
+        let code = compile_with_locals(body, closure, local_symbols(body, formals), Some(nested))?;
+        heap.root(code);
+        Ok(self.constant(code))
+    }
+
     unsafe fn general_call(&mut self, call: Sexp, head: Sexp, dst: u32) -> R<()> {
         let rebinding = match self.rebinding {
             Some((value, target)) if value == call => {
@@ -5006,7 +5615,16 @@ impl Compiler {
                 let expected = self.constant(expected);
                 self.emit(Op::Constant, &[function, expected]);
             }
-            None => self.emit(Op::GetFun, &[function, symbol, cache, call_constant]),
+            None => match self.bound_base(call, head)? {
+                Some(bound) => {
+                    if let Some(sites) = &mut self.sites {
+                        sites.push(UNGUARDED);
+                    }
+                    let bound = self.constant(bound);
+                    self.emit(Op::Constant, &[function, bound]);
+                }
+                None => self.emit(Op::GetFun, &[function, symbol, cache, call_constant]),
+            },
         }
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
@@ -5525,7 +6143,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (0..length(names))
                             .all(|name| names.element(name).kind() == SexpType::Symbol)
                 }
-                Switch => valid_switch_table(constant(value)?, &constant),
+                Switch => valid_switch_table(constant(value)?, constant),
                 Cache => value < caches,
                 Target => is_start(value),
                 Loop => value < loops,
@@ -5837,11 +6455,14 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 /// Runs the body of `function`, compiled to `code`, in the slot frame whose header register is
-/// `header` and whose slots follow it. The caller truncates the register file to the header.
-pub unsafe fn run_slots(function: Sexp, header: usize) -> R<Sexp> {
-    let code = function.cdr();
-    let slots = length(code.cdr().element(SLOTS).element(1));
-    run_at(function, code, header, header + 1 + slots)
+/// `header` and whose `slots` slots follow it. The caller truncates the register file to the header.
+pub unsafe fn run_slots(function: Sexp, header: usize, slots: usize) -> R<Sexp> {
+    run_at(function, function.cdr(), header, header + 1 + slots)
+}
+
+/// How many slots the frame of `code`, compiled with a slot table, has.
+pub unsafe fn slot_count(code: Sexp) -> usize {
+    length(code.cdr().element(SLOTS).element(1))
 }
 
 /// Runs `code` in the activation whose header register is `header` and whose own registers
@@ -6137,7 +6758,7 @@ pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
 /// Marks the `GetVar` at `pc` as one that called an active binding.
 pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
     if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
-        *bits |= i32::from(feedback::ACTIVE_BINDING);
+        *bits |= feedback::ACTIVE_BINDING as i32;
     }
 }
 
@@ -6275,14 +6896,14 @@ impl Activation<'_, '_> {
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(value_kind(value));
+            *self.feedback.add(pc) |= value_kind(value) as i32;
         }
     }
 
     #[inline(always)]
-    unsafe fn record_kind(&self, pc: usize, kind: u16) {
+    unsafe fn record_kind(&self, pc: usize, kind: u32) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(kind);
+            *self.feedback.add(pc) |= kind as i32;
         }
     }
 }
@@ -7011,8 +7632,10 @@ unsafe fn read_element_call<const STRING: bool>(
     ) else {
         // A tail call, and the subject's kind is tested only out of line: tested here, it joins
         // the kind dispatch above, which then compiles to a jump table that the numeric read pays
-        // for.
-        return if STRING {
+        // for. The ALTREP test is a header bit, not a kind, so it stays out of that dispatch.
+        return if subject.is_altrep() {
+            read_altrep_element_call(state, at)
+        } else if STRING {
             None
         } else {
             read_string_element_call(state, at, double)
@@ -7031,6 +7654,85 @@ unsafe fn read_element_call<const STRING: bool>(
         return None;
     }
     let value = element_access::element_value::<STRING>(heap, subject, position)?;
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::CallBuiltin))
+}
+
+/// The ALTREP branch of [`read_element_call`]: `x[i]` or `x[[i]]` for a plain numeric scalar
+/// within bounds and, without attributes, a compact integer or double sequence, computed from
+/// its first element and increment without expanding it, or a deferred string, converting only
+/// that element. Any other ALTREP vector declines to the builtin, whose `Elt` read may run a
+/// package's R code.
+#[cold]
+#[inline(never)]
+unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let heap = &mut *state.heap;
+    let first = *code.add(at + 4) as usize;
+    let subject = *registers.add(first);
+    let index = *registers.add(first + 1);
+    let kind = subject.kind();
+    if subject.attrib() != heap.known().nil
+        || index.is_altrep()
+        || index.attrib() != heap.known().nil
+        || index.length() != 1
+    {
+        return None;
+    }
+    let sequence = values::compact_sequence(subject);
+    let count = match sequence {
+        Some((count, _, _)) => count,
+        None if kind == SexpType::String
+            && subject.tag() == (*state.interp).deferred_string_class =>
+        {
+            subject.length() as usize
+        }
+        None => return None,
+    };
+    let position = match index.kind() {
+        SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
+    if !(position >= 1.0 && position < count as f64 + 1.0) {
+        return None;
+    }
+    let known = *heap.known();
+    let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
+    let second = arguments.cdr();
+    if arguments.tag() != known.nil
+        || second.tag() != known.nil
+        || arguments.car() == known.missing_arg
+        || second.car() == known.missing_arg
+        || activity::enabled()
+    {
+        return None;
+    }
+    let offset = position as usize - 1;
+    let value = match sequence {
+        Some((_, start, step)) => {
+            let element = start + step * offset as f64;
+            let bits = if kind == SexpType::Integer {
+                element as i32 as u32 as u64
+            } else {
+                element.to_bits()
+            };
+            heap.try_alloc_scalar(kind, [bits, 0])?
+        }
+        None => {
+            // An error converting the element (only running out of memory) declines, and the
+            // builtin then converts it again and raises that error.
+            let element = values::altrep_string_elt(subject, offset).ok()?;
+            let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
+            // The store `Heap::set_element` would count into a fresh vector.
+            element.increment_refcount();
+            scalar
+        }
+    };
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
@@ -7619,28 +8321,29 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && !effects::calling_handler_established()
             && effects::effect_free(function)?;
         let plan = direct_plan(state, instruction, function, call)?;
-        // Copied out of the table, which a nested call may grow.
-        let sources: SmallVec<[i32; 8]> = plan
-            .map(|id| SmallVec::from_slice((*state.interp).bytecode.call_plans.sources(id)))
-            .unwrap_or_default();
-        let per_call = plan.is_some() && sources.as_slice() == [eval::MATCH_PER_CALL];
+        let plans = &(*state.interp).bytecode.call_plans;
+        let generation = plans.generation;
+        let per_call = plan.is_some_and(|id| plans.sources(id) == [eval::MATCH_PER_CALL]);
         if let Some(id) = plan
             && !per_call
-            && let Some(value) = match call_do_call(state, function, call, &sources)? {
+            && (function == (*state.interp).do_call || plans.pins[id as usize] != nil())
+        {
+            // Copied out of the table, which the call may grow.
+            let sources: SmallVec<[i32; 8]> = SmallVec::from_slice(plans.sources(id));
+            if let Some(value) = match call_do_call(state, function, call, &sources)? {
                 Some(value) => Some(value),
                 None => call_wrapper(state, function, call, id, &sources)?,
+            } {
+                state.record(instruction.at, value);
+                instruction.output(0, value);
+                return Ok(Flow::Next);
             }
-        {
-            state.record(instruction.at, value);
-            instruction.output(0, value);
-            return Ok(Flow::Next);
         }
         let references = (*state.interp).references_used;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
         let sys_parent = if state.in_slots()
-            && (slot_args_into(state, arguments, eager, &mut args)?
-                || slot_promises_into(state, arguments, eager, plan.is_some(), &mut args)?)
+            && slot_promises_into(state, arguments, eager, plan.is_some(), &mut args)?
         {
             nil()
         } else {
@@ -7657,7 +8360,25 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         };
         let result = match plan {
             Some(_) if per_call => eval::call_matching(call, function, &args, sys_parent),
-            Some(_) => eval::call_with_plan(call, function, &sources, &args, sys_parent),
+            // The sources are read from the table only once the arguments are collected, and
+            // binding them grows no table.
+            Some(id) => match (*state.interp).bytecode.call_plans.current(
+                id,
+                generation,
+                state.constants,
+                instruction.at,
+                function,
+            ) {
+                Some((shape, sources)) => {
+                    eval::call_with_plan(call, function, shape, sources, &args, sys_parent)
+                }
+                None => match eval::direct_sources(function, call)? {
+                    Some((shape, sources)) if sources[..] != [eval::MATCH_PER_CALL] => {
+                        eval::call_with_plan(call, function, shape, &sources, &args, sys_parent)
+                    }
+                    _ => eval::call_matching(call, function, &args, sys_parent),
+                },
+            },
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {
@@ -7770,16 +8491,16 @@ unsafe fn direct_plan(
         return Ok(None);
     }
     // A closure without formals has nothing to plan.
-    let sources = eval::direct_sources(function, call)?.filter(|sources| !sources.is_empty());
+    let plan = eval::direct_sources(function, call)?.filter(|(_, sources)| !sources.is_empty());
     let plans = &mut (*state.interp).bytecode.call_plans;
     // Matching allocates, and a collection frees a plan whose closure died.
     let existing = existing.and_then(|id| plans.owned(id as u32, owner, instruction.at));
     // Replacing a plan made for another closure counts as a miss, as does a closure the site
     // cannot plan for.
-    let misses = misses + i32::from(existing.is_some() || sources.is_none());
-    let word = match (sources, existing) {
-        (Some(sources), _) => {
-            let id = plans.store(existing, owner, instruction.at, formals, body, &sources);
+    let misses = misses + i32::from(existing.is_some() || plan.is_none());
+    let word = match (plan, existing) {
+        (Some(plan), _) => {
+            let id = plans.store(existing, owner, instruction.at, formals, body, &plan);
             plans.misses[id] = misses as u8;
             values::ints_mut(owner.element(FEEDBACK))[word_at] = id as i32 + 1;
             return Ok(Some(id as u32));
@@ -7814,12 +8535,16 @@ pub struct CallPlans {
     sources_at: Vec<u32>,
     sources_len: Vec<u32>,
     sources_capacity: Vec<u32>,
+    shapes: Vec<eval::CallShape>,
     /// The site's pin of a wrapper's lookups ([`WrapperPin`]): unbound until the site calls the
     /// wrapper, `NULL` for a closure that is not one. The one heap object a plan refers to
     /// strongly.
     pins: Vec<Sexp>,
     pool: Vec<i32>,
     free: Vec<u32>,
+    /// Moves whenever a plan is stored or freed, so a site that read its plan before running
+    /// its arguments knows the plan is unchanged after without checking its keys.
+    generation: u32,
 }
 
 impl CallPlans {
@@ -7837,6 +8562,31 @@ impl CallPlans {
         &self.pool[at..at + self.sources_len[id] as usize]
     }
 
+    /// The plan `id` with its shape and sources, when it is still the site's plan for closures
+    /// with `function`'s formals and body, as it was when the table's generation was
+    /// `generation`. Running the arguments can run R code that replans the site, or frees the
+    /// plan and reuses its id.
+    #[inline]
+    unsafe fn current(
+        &self,
+        id: u32,
+        generation: u32,
+        owner: Sexp,
+        at: usize,
+        function: Sexp,
+    ) -> Option<(eval::CallShape, &[i32])> {
+        let id = if generation == self.generation {
+            id as usize
+        } else {
+            let id = self.owned(id, owner, at)?;
+            if self.formals[id] != function.car() || self.bodies[id] != function.cdr() {
+                return None;
+            }
+            id
+        };
+        Some((self.shapes[id], self.sources(id as u32)))
+    }
+
     /// Stores a plan for the site, in `existing`'s place when it has one.
     fn store(
         &mut self,
@@ -7845,8 +8595,9 @@ impl CallPlans {
         at: usize,
         formals: Sexp,
         body: Sexp,
-        sources: &[i32],
+        (shape, sources): &eval::CallPlan,
     ) -> usize {
+        self.generation = self.generation.wrapping_add(1);
         let id = match existing.or_else(|| self.free.pop().map(|id| id as usize)) {
             Some(id) => id,
             None => {
@@ -7858,6 +8609,7 @@ impl CallPlans {
                 self.sources_at.push(0);
                 self.sources_len.push(0);
                 self.sources_capacity.push(0);
+                self.shapes.push(eval::CallShape::default());
                 self.pins.push(nil());
                 self.owners.len() - 1
             }
@@ -7866,6 +8618,7 @@ impl CallPlans {
         self.sites[id] = at as u32;
         self.formals[id] = formals;
         self.bodies[id] = body;
+        self.shapes[id] = *shape;
         self.pins[id] = unbound();
         let length = sources.len() as u32;
         if length > self.sources_capacity[id] {
@@ -7901,6 +8654,7 @@ impl CallPlans {
                 self.bodies[id] = nil();
                 self.pins[id] = nil();
                 self.free.push(id as u32);
+                self.generation = self.generation.wrapping_add(1);
             } else if liveness.is_major() {
                 self.pins[id] = unbound();
             }
@@ -8968,7 +9722,7 @@ unsafe fn assign_slot_element(
         target
     } else {
         let was_array = target.is_array();
-        let copy = values::shallow_duplicate(target)?;
+        let copy = values::shallow_duplicate_attr(target)?;
         copy.set_array(was_array);
         heap.root(copy);
         copy
@@ -8986,6 +9740,7 @@ unsafe fn assign_slot_element(
     };
     interp().assignment_call = outer;
     let result = result?;
+    let result = values::unwrap_assigned(result, current == result);
     // A warning's calling handler may have looked at the frame, which then holds the variable
     // in its environment instead of the slot.
     if *state.header != nil() {
@@ -9112,50 +9867,10 @@ unsafe fn slot_builtin_args(
     Ok(())
 }
 
-/// The arguments of a closure call made from a slot frame that has no environment: constants as
-/// themselves and, for an `eager` call (see [`eval::eager_args_into`]), variables as their
-/// values. `false` when an argument needs a promise over the frame, and with it the frame's
-/// environment.
-unsafe fn slot_args_into(
-    state: &Activation<'_, '_>,
-    arguments: Sexp,
-    eager: bool,
-    args: &mut eval::Args,
-) -> R<bool> {
-    let missing = missing_arg();
-    let mut cell = arguments;
-    while cell.kind() == SexpType::Pairlist {
-        let expression = cell.car();
-        let value = match expression.kind() {
-            _ if expression == missing => expression,
-            SexpType::Symbol if expression == symbols().dots => {
-                if !slot_dots_into(state, false, args)? {
-                    return Ok(false);
-                }
-                cell = cell.cdr();
-                continue;
-            }
-            SexpType::Symbol if eager => match slot_eager_argument(state, expression) {
-                Some(value) => value,
-                None => return Ok(false),
-            },
-            SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
-                return Ok(false);
-            }
-            _ => expression,
-        };
-        args.push(Arg {
-            tag: cell.tag(),
-            value,
-        });
-        cell = cell.cdr();
-    }
-    Ok(true)
-}
-
-/// [`slot_args_into`] for a call whose arguments need promises: a name or compiled code
-/// becomes a promise over the frame's slots ([`eval::slot_promise`]), and `...` passes on what
-/// it collected. With `references`, for a callee that takes its arguments straight into slots,
+/// The arguments of a closure call made from a slot frame that has no environment: a constant
+/// as itself, for an `eager` call (see [`eval::eager_args_into`]) a variable as its value, a
+/// name or compiled code as a promise over the frame's slots ([`eval::slot_promise`]), and
+/// `...` as what it collected. With `references`, for a callee that takes its arguments straight into slots,
 /// a name becomes an argument reference ([`eval::argument_reference`]) and compiled code a code
 /// reference ([`eval::code_reference`]) instead, which need no allocation and no environment.
 /// `false`, with `args` cleared, when an argument needs the frame's environment itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
@@ -10261,7 +10976,7 @@ unsafe fn fused_pass(
                 (Element::Integer, false) => feedback::INTEGER_VECTOR,
                 (Element::Double, false) => feedback::DOUBLE_VECTOR,
             };
-            *state.feedback.add(node[4] as usize) |= i32::from(kind);
+            *state.feedback.add(node[4] as usize) |= kind as i32;
         }
         if reduction.is_some() {
             state.record(words[fusion::REDUCTION_SITE] as usize, fused.value);
@@ -10304,11 +11019,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     }
     // A compact sequence is stepped through by its first element and increment; expanding
     // `1:n` would allocate all n elements the loop reads one at a time.
-    let steps = if sequence.is_altrep() {
-        (interp().hooks.compact_sequence_steps)(sequence)
-    } else {
-        None
-    };
+    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
     let (first, step) = steps.unwrap_or((0.0, 0.0));
     let sequence = match steps {
         Some(_) => sequence,
@@ -10529,7 +11240,7 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     // every other call. The code depends on the formals and body only: its inline caches and the
     // optimizing tier both check the enclosure they were filled for.
     if body.kind() != SexpType::Bytecode && worth_compiling(body) {
-        let code = compile(body, closure)?;
+        let code = compile(body, closure, false)?;
         (*state.heap).set_element(state.constants, instruction.operand(2), code);
         (*state.heap).set_cdr(closure, code);
     }
@@ -11072,7 +11783,7 @@ unsafe fn replace_variable(
     };
     if shared || args[1..].contains(&target) {
         let was_array = target.is_array();
-        target = values::shallow_duplicate(target)?;
+        target = values::shallow_duplicate_attr(target)?;
         target.set_array(was_array);
     }
     heap.root(target);
@@ -11125,6 +11836,11 @@ unsafe fn replace_variable(
         interp().tmp_values.pop();
     }
     let result = result?;
+    let bound = match home {
+        Home::Cell(cell) => cell.cdr() == result,
+        Home::Slot(slot) => *slot == result,
+    };
+    let result = values::unwrap_assigned(result, bound);
     match home {
         Home::Cell(cell) => eval::assign_local(variable, result, env, Some(cell))?,
         // A warning's calling handler may have looked at the frame, which then holds the
@@ -11301,7 +12017,7 @@ pub(crate) unsafe fn call_builtin(
 
 unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     let feedback = constants.element(FEEDBACK);
-    values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
+    values::ints_mut(feedback)[pc] |= value_kind(value) as i32;
 }
 
 /// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the

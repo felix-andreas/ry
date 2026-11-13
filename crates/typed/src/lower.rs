@@ -168,6 +168,11 @@ const MAX_TYPED_INLINE_DEPTH: usize = 4;
 /// The most calls and operators the body of a typed function may hold and still inline into
 /// its callers.
 const MAX_INLINE_CALLS: usize = 48;
+/// The most calls of itself a function may hold and still lower into itself, and the most
+/// copies of its body those calls may add. Each call is another copy to compile, so a function
+/// that recurses from many places, as an evaluator of a tree with several node kinds does,
+/// would multiply its compile time.
+const MAX_SELF_CALLS: usize = 2;
 /// How deeply expressions nest, which bounds the lowering's own recursion.
 const MAX_NESTING: usize = 256;
 
@@ -236,6 +241,7 @@ unsafe fn lower_calling(
         loops: Vec::new(),
         inlined: Vec::new(),
         inlining: SmallVec::new(),
+        self_inlines: 0,
         called,
         refused,
         speculations: Vec::new(),
@@ -299,11 +305,12 @@ unsafe fn lower_calling(
     })
 }
 
-/// A function passed to another: inlined where it is called, or a typed closure called directly.
+/// A function passed to another: a local function or a literal, inlined where it is called, or
+/// a typed closure and the name that names it.
 #[derive(Clone, Copy, Debug)]
 enum Callable {
     Inline(Sexp, Sexp, usize),
-    Typed(Sexp),
+    Typed(Sexp, Sexp),
 }
 
 /// What a name in scope stands for.
@@ -362,6 +369,8 @@ struct Lowering<'c> {
     /// The typed functions whose bodies are being lowered into this one, outermost first, so a
     /// function that calls itself through another is called, not inlined without end.
     inlining: SmallVec<[Sexp; 4]>,
+    /// How many times the function has been lowered into itself.
+    self_inlines: usize,
     /// The typed functions that are called, never inlined.
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
@@ -1077,27 +1086,7 @@ impl Lowering<'_> {
                 return Err(Refusal::new("a typed call with named arguments"));
             }
             let values = self.call_arguments(&arguments)?;
-            // A small function lowers into its caller, where its records need no allocation
-            // and its arguments no call.
-            let body = interp::bytecode::closure_body(function);
-            if function != self.closure
-                && function.tag() == self.env
-                && !self.inlining.contains(&function)
-                && !self.called.contains(&function)
-                && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
-                && rvalues::pairlist_items(function.car()).len() == values.len()
-                && !tail_invisible(body)
-                && small_body(body, head, &mut 0)
-            {
-                self.inlining.push(function);
-                let value = self.inline(function.car(), body, 0, &values, crate::storage);
-                self.inlining.pop();
-                if value.is_err() {
-                    self.refused.get_or_insert(function);
-                }
-                return value;
-            }
-            return self.typed_call(function, &values).map(Some);
+            return self.typed_function(head, function, &values);
         }
         if let Some(r_use) = r_use {
             self.speculations.push(speculation);
@@ -1305,6 +1294,43 @@ impl Lowering<'_> {
                 function: speculation.function,
             },
         ))
+    }
+
+    /// Calls the typed closure `function`, which `name` names, with `values`.
+    ///
+    /// A small function lowers into its caller, where its records need no allocation and its
+    /// arguments no call. A function that calls itself from a place or two lowers into itself
+    /// at those places, one level deep, so a recursion makes fewer calls, and into no other
+    /// caller. The copies are counted as they are made, because a local function that holds
+    /// the call is itself lowered at each of its calls.
+    unsafe fn typed_function(
+        &mut self,
+        name: Sexp,
+        function: Sexp,
+        values: &[Local],
+    ) -> Result<Option<Local>, Refusal> {
+        let body = interp::bytecode::closure_body(function);
+        let own = function == self.closure;
+        let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
+        if function.tag() == self.env
+            && (!own || self.self_inlines < MAX_SELF_CALLS)
+            && !self.inlining.contains(&function)
+            && !self.called.contains(&function)
+            && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
+            && rvalues::pairlist_items(function.car()).len() == values.len()
+            && !tail_invisible(body)
+            && small_body(body, name, &mut own_calls, &mut 0)
+        {
+            self.self_inlines += own as usize;
+            self.inlining.push(function);
+            let value = self.inline(function.car(), body, 0, values, crate::storage);
+            self.inlining.pop();
+            if value.is_err() {
+                self.refused.get_or_insert(function);
+            }
+            return value;
+        }
+        self.typed_call(function, values).map(Some)
     }
 
     /// A direct call of the compiled typed closure `function`.
@@ -2700,7 +2726,7 @@ impl Lowering<'_> {
                     } => {
                         let total = self
                             .builder
-                            .emit(Type::Dbl, Op::Reduce(Reduce::Sum, Item::Dbl, a));
+                            .emit(Type::Dbl, Op::Reduce(Reduce::ListSum, Item::Dbl, a));
                         self.fail_if_nan(total);
                         Ok(total)
                     }
@@ -3657,13 +3683,7 @@ impl Lowering<'_> {
             && body == name
             && let Some(list) = list
         {
-            return Ok(self.builder.emit(
-                Type::I64,
-                Op::CountTrue {
-                    program: SmallVec::new(),
-                    inputs: SmallVec::from_slice(&[list]),
-                },
-            ));
+            return Ok(self.count_true(list));
         }
         // A predicate that only compares the item with numbers means the same for the whole
         // list as for each item. It is lowered once with its parameter standing for the list,
@@ -3696,13 +3716,7 @@ impl Lowering<'_> {
             let mask = self.expression(body);
             self.scopes.pop();
             let mask = mask?.ok_or(Refusal::new("a predicate that never completes"))?;
-            return Ok(self.builder.emit(
-                Type::I64,
-                Op::CountTrue {
-                    program: SmallVec::new(),
-                    inputs: SmallVec::from_slice(&[mask]),
-                },
-            ));
+            return Ok(self.count_true(mask));
         }
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
@@ -3779,6 +3793,20 @@ impl Lowering<'_> {
         Ok(total)
     }
 
+    /// The count of the true items of `list`, a logical list.
+    fn count_true(&mut self, list: Local) -> Local {
+        let count = self.builder.local(Type::I64);
+        self.builder.push(
+            None,
+            Op::CountTrue {
+                program: SmallVec::new(),
+                inputs: SmallVec::from_slice(&[list]),
+                counts: SmallVec::from_slice(&[(0, count)]),
+            },
+        );
+        count
+    }
+
     /// Whether `body`, a predicate of the one parameter `item` over a `List<F64>`, only compares
     /// the item with `F64` literals and locals, and joins such comparisons with `&`, `|`, `!`
     /// and parentheses.
@@ -3835,7 +3863,7 @@ impl Lowering<'_> {
                 ));
             }
             self.speculations.push(speculation);
-            return Ok(Callable::Typed(found));
+            return Ok(Callable::Typed(function, found));
         }
         if function.kind() == SexpType::Language
             && function.car().kind() == SexpType::Symbol
@@ -3861,7 +3889,7 @@ impl Lowering<'_> {
             Callable::Inline(formals, body, scope) => {
                 self.inline(formals, body, scope + 1, arguments, inline_storage)
             }
-            Callable::Typed(function) => self.typed_call(function, arguments).map(Some),
+            Callable::Typed(name, function) => self.typed_function(name, function, arguments),
         }
     }
 
@@ -4608,7 +4636,7 @@ impl Lowering<'_> {
                 "a `Dict.update` of something other than a dictionary",
             ));
         };
-        if let Callable::Typed(_) = callable {
+        if let Callable::Typed(..) = callable {
             let (current, position) = self.lookup_result(dict, key, "Missing")?;
             let updated = self
                 .store_update(callable, current, dict, key, position, None)?
@@ -4735,7 +4763,14 @@ impl Lowering<'_> {
             ));
         }
         let ty = if i64 { Type::I64 } else { Type::Dbl };
-        let parses = self.builder.emit(Type::Bool, Op::Parses(i64, string));
+        let parses = self.builder.local(Type::Bool);
+        let number = self.builder.emit(
+            ty,
+            Op::Parse {
+                string,
+                parsed: parses,
+            },
+        );
         let (valid, invalid, join) = (
             self.builder.block(),
             self.builder.block(),
@@ -4747,7 +4782,6 @@ impl Lowering<'_> {
             otherwise: invalid,
         });
         self.builder.switch_to(valid);
-        let number = self.builder.emit(ty, Op::Parse(string));
         let ok = self.tag("Ok", &[number])?;
         self.builder.switch_to(invalid);
         let reason = self.tag("InvalidNumStr", &[])?;
@@ -5821,25 +5855,35 @@ unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
     }
 }
 
-/// Whether `expression`, the body of the typed function `name`, is small enough to lower into
-/// a caller: at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which
-/// would leave the caller, or a call of the function itself.
-unsafe fn small_body(expression: Sexp, name: Sexp, calls: &mut usize) -> bool {
+/// Whether `expression`, the body of a typed function, is small enough to lower into a caller:
+/// at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which would
+/// leave the caller, and at most `own_calls` calls of `own`, the function's own name.
+unsafe fn small_body(
+    expression: Sexp,
+    own: Sexp,
+    own_calls: &mut usize,
+    calls: &mut usize,
+) -> bool {
     if expression.kind() != SexpType::Language {
         return true;
     }
     *calls += 1;
     let head = expression.car();
     if *calls > MAX_INLINE_CALLS
-        || head == name
         || head.kind() == SexpType::Symbol && rvalues::symbol_name(head) == "return"
     {
         return false;
     }
-    small_body(head, name, calls)
+    if head == own {
+        if *own_calls == 0 {
+            return false;
+        }
+        *own_calls -= 1;
+    }
+    small_body(head, own, own_calls, calls)
         && rvalues::pairlist_items(expression.cdr())
             .into_iter()
-            .all(|(_, item)| small_body(item, name, calls))
+            .all(|(_, item)| small_body(item, own, own_calls, calls))
 }
 
 /// Whether `expression` calls `return` outside nested function literals.

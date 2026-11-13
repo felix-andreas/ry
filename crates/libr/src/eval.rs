@@ -22,7 +22,7 @@ use {
         strings::Encoding,
     },
     interp::{
-        TaskCallbackRoutine, builtin_libraries,
+        AltrepSummary, TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         graphics_engine,
         native::{Interface, foreign_context},
@@ -90,7 +90,6 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
                 crate::altrep::compact_realseq(length, first, increment)?
             }))
         },
-        compact_sequence_steps: |object| unsafe { crate::altrep::compact_sequence_steps(object) },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         altrep_int_elt: |object, index| unsafe {
             crate::altrep::int_elt(object, index as crate::R_xlen_t)
@@ -98,14 +97,19 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         altrep_real_elt: |object, index| unsafe {
             crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
-        altrep_summary: |object, which, remove_na| unsafe {
-            match which {
-                interp::AltrepSummary::Sum => crate::altrep::sum(object, remove_na),
-                interp::AltrepSummary::Min => crate::altrep::min(object, remove_na),
-                interp::AltrepSummary::Max => crate::altrep::max(object, remove_na),
-            }
+        altrep_string_elt: |object, index| unsafe {
+            crate::altrep::sexp_elt(object, index as crate::R_xlen_t)
         },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
+        altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
+        altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
+        altrep_summary: |object, method, remove_na| unsafe {
+            Ok(match method {
+                AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
+                AltrepSummary::Min => crate::altrep::min(object, remove_na)?,
+                AltrepSummary::Max => crate::altrep::max(object, remove_na)?,
+            })
+        },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {
             crate::boundary::run_pending_finalizers();
@@ -486,9 +490,11 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let state = interp::interp();
         let handlers = state.handlers.take();
         let restarts = state.restarts.take();
+        let saved = interp::conditions::set_aside(handlers.clone(), restarts.clone());
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
         let result = eval(expression, env);
+        drop(saved);
         let state = interp::interp();
         state.handlers = handlers;
         state.restarts = restarts;

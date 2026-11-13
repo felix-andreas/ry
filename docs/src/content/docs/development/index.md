@@ -55,9 +55,10 @@ frees space without forcing a full rebuild: it removes build configurations noth
 days and incremental caches older than an hour, and `just prune --tests` also removes test
 executables.
 
-The nix dev shell (`nix develop`) carries the same toolchain, but its closure is about 6.5 GB, and
-its GNU R is nixpkgs' build rather than the reference one, so the script is the default for cloud
-sessions.
+The flake's dev shells carry the same toolchain and a GNU R built like the reference one, and CI
+runs in them: `nix develop .#ci` holds what `just ci` needs, and `nix develop` adds the editing
+tools. The script stays the default for cloud sessions, because it restores the reference R and
+the oracle's packages from the binary cache in seconds and needs no nix store.
 
 ## Build and test
 

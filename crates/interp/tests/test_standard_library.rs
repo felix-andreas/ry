@@ -180,10 +180,14 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("List.sum(xs)", "[1] 6\n"),
     ("List.sum(list())", "[1] 0\n"),
+    // Doubles are added in order in double precision: each `1e-16` is lost against the `1`,
+    // where R's `sum()` keeps them in its extended-precision total.
+    ("List.sum(list(1, 1e-16, 1e-16)) == 1", "[1] TRUE\n"),
     (
-        "identical(List.sum(List.from_r((0:999999) / 999999 * 2 + 1)), sum((0:999999) / 999999 * 2 + 1))",
+        "List.sum(List.from_r(c(1, 1e-16, 1e-16))) == 1",
         "[1] TRUE\n",
     ),
+    ("sum(c(1, 1e-16, 1e-16)) == 1", "[1] FALSE\n"),
     ("List.product(list(2, 2.5))", "[1] 5\n"),
     ("List.min(xs)", ":Ok(1L)\n"),
     ("List.max(list())", ":Err(:ListWasEmpty)\n"),
