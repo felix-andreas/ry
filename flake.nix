@@ -5,15 +5,13 @@
   inputs = {
     systems.url = "git+https://github.com/nix-systems/default?shallow=1";
     nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable&shallow=1";
-    devshell = {
-      url = "git+https://github.com/numtide/devshell?shallow=1";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     rust-overlay = {
       url = "git+https://github.com/oxalica/rust-overlay?shallow=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "git+https://github.com/ipetkov/crane?shallow=1";
+    # Only for GCC 13.3.0, the compiler of the oracle's recordings (`lib.gnuR`).
+    nixpkgs-gcc13-3.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-24.11&shallow=1";
   };
 
   # .github/workflows/cachix.yml pushes the x86_64-linux package and dev shell here.
@@ -27,9 +25,9 @@
       self,
       systems,
       nixpkgs,
-      devshell,
       rust-overlay,
       crane,
+      nixpkgs-gcc13-3,
     }:
     {
       lib = {
@@ -39,16 +37,159 @@
           import nixpkgs' {
             inherit system;
             config.allowUnsupportedSystem = true;
-            overlays = [
-              devshell.overlays.default
-              (import rust-overlay)
-            ];
+            overlays = [ (import rust-overlay) ];
           };
-        rpkgs =
-          pkgs: with pkgs.rPackages; [
-            renv
-            devtools
-          ];
+        # GNU R's source release that ry's base R is built from, pinned by tools/base-r.
+        baseRVersion = nixpkgs.lib.trim (builtins.readFile ./tools/base-r/VERSION);
+        baseRSource =
+          pkgs:
+          pkgs.fetchurl {
+            url = "https://cran.r-project.org/src/base/R-${pkgs.lib.versions.major self.lib.baseRVersion}/R-${self.lib.baseRVersion}.tar.gz";
+            sha256 = builtins.head (
+              pkgs.lib.splitString " " (builtins.readFile ./tools/base-r/SHA256SUMS)
+            );
+          };
+        # GNU R as the oracle recorded it (crates/oracle/cases/gnu-r.txt): the release ry bundles,
+        # built as tools/reference-r.sh builds it on Ubuntu 24.04, so that every digit matches.
+        # nixpkgs ships another release with another BLAS, compiler and glibc, and each of those
+        # moves digits (.agents/memory/decisions.md, "CI runs in the flake's dev shell").
+        gnuR =
+          pkgs:
+          let
+            inherit (pkgs) lib;
+            # Ubuntu 24.04's GCC is 13.3, and 13.4 no longer pairs up the two halves of a complex
+            # sum into one vector add, which swaps the operands and so whether NA or NaN wins
+            # (kernels__complex_na_nan_sums). The compilers come from an older nixpkgs, wrapped
+            # against this one's glibc and libraries; gfortran compiles R's own BLAS.
+            gcc13-3 = import nixpkgs-gcc13-3 { inherit (pkgs.stdenv.hostPlatform) system; };
+            gcc = pkgs.wrapCC gcc13-3.gcc13.cc;
+            gfortran = pkgs.wrapCC gcc13-3.gfortran13.cc;
+            stdenv = pkgs.overrideCC pkgs.stdenv gcc;
+            # Ubuntu 24.04's reference LAPACK, the very binary the recordings loaded: La_library()
+            # names liblapack.so.3.12.0. It calls BLAS through libblas.so.3, which R's own libRblas
+            # shadows once R has loaded it, as on Ubuntu.
+            lapack = pkgs.stdenv.mkDerivation {
+              pname = "ubuntu-lapack";
+              version = "3.12.0-3build1.1";
+              srcs = [
+                (pkgs.fetchurl {
+                  url = "http://archive.ubuntu.com/ubuntu/pool/main/l/lapack/liblapack3_3.12.0-3build1.1_amd64.deb";
+                  sha256 = "16ymmshvbx4wcyfn96c0bv4d0zn0ww8i5ivdmvh97lsgkl2dbkh5";
+                })
+                (pkgs.fetchurl {
+                  url = "http://archive.ubuntu.com/ubuntu/pool/main/l/lapack/libblas3_3.12.0-3build1.1_amd64.deb";
+                  sha256 = "0n57hdxppb6vazjzs7pa6xhy320pfwimgdssgnzpgzwk12nz03hv";
+                })
+              ];
+              nativeBuildInputs = [
+                pkgs.dpkg
+                pkgs.autoPatchelfHook
+              ];
+              buildInputs = [ gfortran.cc.lib ];
+              unpackPhase = ''
+                for source in $srcs; do dpkg-deb -x "$source" .; done
+              '';
+              installPhase = ''
+                mkdir -p "$out/lib"
+                cp -P usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3* usr/lib/x86_64-linux-gnu/blas/libblas.so.3* "$out/lib/"
+                ln -s liblapack.so.3 "$out/lib/liblapack.so"
+                ln -s libblas.so.3 "$out/lib/libblas.so"
+              '';
+            };
+            # rlang at exactly the release ry's native trace_back follows (FAST_PATHS in
+            # crates/interp/src/package_fast_paths.rs), so the rlang oracle cases, the
+            # native-package-functions scenario and the trace_back fuzz harness run instead of
+            # skipping. It goes into R's own library, as tools/reference-r.sh installs it. Bump it
+            # together with that table.
+            rlang = pkgs.fetchurl {
+              urls = [
+                "https://cloud.r-project.org/src/contrib/rlang_1.3.0.tar.gz"
+                "https://cloud.r-project.org/src/contrib/Archive/rlang/rlang_1.3.0.tar.gz"
+              ];
+              sha256 = "1717ckqcn0xm31jhhwp5lp587xca28v8jpm18gs6a8p795ym7al0";
+            };
+          in
+          stdenv.mkDerivation {
+            pname = "gnu-r";
+            version = self.lib.baseRVersion;
+            src = self.lib.baseRSource pkgs;
+            nativeBuildInputs = [
+              gfortran
+              pkgs.pkg-config
+              pkgs.perl
+              # configure checks date-time conversions against the time zone database.
+              pkgs.tzdata
+              # The tools configure records in Renviron: PAGER for help pages, zip and unzip.
+              pkgs.less
+              pkgs.zip
+              pkgs.unzip
+            ];
+            # tools/dev-setup.sh's libraries for R; png() draws through cairo only with pango.
+            buildInputs = with pkgs; [
+              bzip2
+              cairo
+              curl
+              icu74
+              libdeflate
+              libjpeg
+              libpng
+              libtiff
+              libx11
+              libxt
+              ncurses
+              pango
+              pcre2
+              readline
+              xz
+              zlib
+              zstd
+              lapack
+            ];
+            # tools/reference-r.sh's configure line, which the recordings were made with.
+            configureFlags = [
+              "--enable-R-shlib"
+              "--enable-memory-profiling"
+              "--with-x"
+              "--without-recommended-packages"
+              "--disable-java"
+              # Absolute, so that R CMD INSTALL compiles with them whatever is on PATH.
+              "CC=${gcc}/bin/gcc"
+              "CXX=${gcc}/bin/g++"
+              "FC=${gfortran}/bin/gfortran"
+              # Sys.which() runs the `which` configure found. Debian's prints a match the way PATH
+              # spells it (`./tool`), where GNU which prints an absolute path.
+              "WHICH=${pkgs.debianutils}/bin/which.debianutils"
+              # glibc 2.41 added these, and R calls glibc's where it finds them; the recordings'
+              # glibc 2.39 had none, so R used its own, which round differently.
+              "ac_cv_func_atanpi=no"
+              "ac_cv_func_atan2pi=no"
+              "ac_cv_func_cospi=no"
+              "ac_cv_func_sinpi=no"
+              "ac_cv_func_tanpi=no"
+              "ac_cv_func_pown=no"
+            ];
+            # Ubuntu's GCC hardens by default with exactly these flags; Nix's set adds others
+            # (strict flex arrays, zeroed call-used registers) that move stack layout.
+            hardeningDisable = [ "all" ];
+            env.NIX_CFLAGS_COMPILE = "-D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fcf-protection";
+            # Ubuntu's GCC links position-independent executables by default, this one does not.
+            # A case that reads a pointer as a vector length (base__replacement_promises_and_errors)
+            # sees a long vector only at a PIE's high heap addresses. R itself is libR plus
+            # Rmain.o, which is already compiled with -fpic; configure's own probes must not link
+            # with -pie.
+            postConfigure = ''
+              substituteInPlace Makeconf --replace-fail "MAIN_LDFLAGS = " "MAIN_LDFLAGS = -pie "
+            '';
+            enableParallelBuilding = true;
+            postInstall = ''
+              HOME="$TMPDIR" "$out/bin/R" CMD INSTALL ${rlang}
+            '';
+            passthru = { inherit stdenv gfortran; };
+            meta = {
+              mainProgram = "R";
+              platforms = lib.platforms.linux;
+            };
+          };
         # The compiler rustup builds with, from rust-toolchain.toml, plus what nix alone needs: the
         # release cross targets and rust-analyzer for the dev shell.
         rustToolchain =
@@ -91,14 +232,7 @@
             ];
           };
 
-          # GNU R's source release that ry's base R is built from, pinned by tools/base-r.
-          baseRVersion = pkgs.lib.trim (builtins.readFile ./tools/base-r/VERSION);
-          baseRSource = pkgs.fetchurl {
-            url = "https://cran.r-project.org/src/base/R-${pkgs.lib.versions.major baseRVersion}/R-${baseRVersion}.tar.gz";
-            sha256 = builtins.head (
-              pkgs.lib.splitString " " (builtins.readFile ./tools/base-r/SHA256SUMS)
-            );
-          };
+          baseRSource = self.lib.baseRSource pkgs;
 
           commonArgs = {
             inherit src;
@@ -253,42 +387,70 @@
         }
       );
 
-      devShells = self.lib.eachSystem (system: {
-        default =
-          let
-            pkgs = self.lib.makePkgs system nixpkgs;
-          in
-          pkgs.devshell.mkShell {
-            motd = "";
-            # libR links zlib, bzip2 and xz (crates/libr/build.rs). `packages` only extends PATH,
-            # so the linker finds them through LIBRARY_PATH and the loader through LD_LIBRARY_PATH.
-            env =
-              let
-                compressionLibraries = pkgs.lib.makeLibraryPath [
-                  pkgs.zlib
-                  pkgs.bzip2
-                  pkgs.xz
-                ];
-              in
-              [
-                {
-                  name = "LIBRARY_PATH";
-                  prefix = compressionLibraries;
-                }
-                {
-                  name = "LD_LIBRARY_PATH";
-                  prefix = compressionLibraries;
-                }
+      # `ci` holds everything CI's test job runs on (`nix develop .#ci -c just ci`), and `default`
+      # adds the tools people and agents develop with, so both test against the same GNU R,
+      # compiler, glibc and locales.
+      devShells = self.lib.eachSystem (
+        system:
+        let
+          pkgs = self.lib.makePkgs system nixpkgs;
+          gnuR = self.lib.gnuR pkgs;
+          # GNU R's own compiler, so that C a test compiles orders NA and NaN as GNU R does.
+          makeShell =
+            rustToolchain: packages:
+            (pkgs.mkShell.override { inherit (gnuR) stdenv; }) {
+              # libR links zlib, bzip2 and xz (crates/libr/build.rs).
+              buildInputs = [
+                pkgs.zlib
+                pkgs.bzip2
+                pkgs.xz
               ];
-            packages = with pkgs; [
-              just
+              packages = [
+                rustToolchain
+                gnuR
+                # tools/base-r/lapack.sh compiles LAPACK's Fortran.
+                gnuR.gfortran
+                pkgs.just
+                pkgs.python3
+                pkgs.glibc.bin
+              ]
+              ++ packages;
+              # The Rust toolchain propagates nixpkgs' default GCC, which would come first on PATH.
+              shellHook = ''
+                export PATH="${gnuR.stdenv.cc}/bin:$PATH"
+              '';
+              # Nix's glibc looks for time zones in its own store path, which has none.
+              TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+              # The locales oracle cases switch to (`# oracle: requires locale`), which
+              # tools/oracle-locales.sh checks for.
+              LOCALE_ARCHIVE = "${
+                pkgs.glibcLocales.override {
+                  allLocales = false;
+                  locales = [
+                    "C.UTF-8/UTF-8"
+                    "en_US.UTF-8/UTF-8"
+                    "en_US/ISO-8859-1"
+                  ];
+                }
+              }/lib/locale/locale-archive";
+            };
+        in
+        {
+          ci = makeShell (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) [ ];
+          default = makeShell (self.lib.rustToolchain pkgs) (
+            with pkgs;
+            [
               evcxr
+              # radian runs the shell's GNU R, with renv and devtools built for it on its own
+              # library path, so `R` and `Rscript` stay the ones CI runs.
               (radianWrapper.override {
-                packages = (self.lib.rpkgs pkgs);
-                wrapR = true;
+                R = gnuR;
+                recommendedPackages = [ ];
+                packages = with (rPackages.override { R = gnuR; }); [
+                  renv
+                  devtools
+                ];
               })
-              (self.lib.rustToolchain pkgs)
-              gnumake
               cargo-edit
               cargo-insta
               cargo-nextest
@@ -297,14 +459,15 @@
               tree-sitter
               bun
               zip
-            ];
-          };
-      });
+            ]
+          );
+        }
+      );
 
-      # `nix flake check` builds the package, which runs ry-lang's tests, and the dev shell.
+      # `nix flake check` builds the package, which runs ry-lang's tests, and the dev shells.
       checks = self.lib.eachSystem (system: {
         ry = self.packages.${system}.ry;
-        devshell = self.devShells.${system}.default;
+        dev-shell = self.devShells.${system}.default;
       });
     };
 }

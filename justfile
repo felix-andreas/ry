@@ -61,6 +61,21 @@ test *args:
 # The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
 gate: battery clippy fmt-check (notices "--check") (readme "--check")
 
+# CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
+# in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
+# the CI runner's: `R_HOME` makes the runtime's suites load base R from the reference GNU R.
+ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    just fmt-check
+    just clippy
+    just battery
+
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}

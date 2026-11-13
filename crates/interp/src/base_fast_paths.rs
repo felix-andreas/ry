@@ -69,6 +69,9 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("structure", "ryStructure", 0xe1de236049200229),
     ("Sys.getenv", "rySysGetenv", 0xe91342790fcd5c16),
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
+    // Windows base R has its own `Sys.which` (`base/R/windows/system.R`), and the fast path
+    // implements the Unix one.
+    #[cfg(unix)]
     ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("formatC", "ryFormatC", 0x85c5e0cf394a6e6d),

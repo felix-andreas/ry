@@ -197,8 +197,10 @@ pub struct Toolchain {
 impl Default for Toolchain {
     /// The GNU toolchain with the system's reference BLAS and LAPACK, which is what GNU R's
     /// Linux builds and the package binaries of the corpus link against. On macOS it is Apple's
-    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and on
-    /// Windows it is [`Toolchain::rtools`].
+    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and no Fortran
+    /// runtime: CRAN's gfortran and Homebrew's keep `libgfortran` off the linker's default path,
+    /// so a bare `-lgfortran` in `FLIBS` fails every package that links `$(FLIBS)` after LAPACK,
+    /// Fortran code or not (Matrix does). On Windows it is [`Toolchain::rtools`].
     fn default() -> Toolchain {
         if cfg!(windows) {
             return Toolchain::rtools();
@@ -210,7 +212,7 @@ impl Default for Toolchain {
                 fc: "gfortran".into(),
                 blas_libs: "-framework Accelerate".into(),
                 lapack_libs: "-framework Accelerate".into(),
-                flibs: "-lgfortran -lm".into(),
+                flibs: "-lm".into(),
                 cppflags: String::new(),
                 ldflags: String::new(),
                 openmp: String::new(),
