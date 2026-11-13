@@ -3493,7 +3493,7 @@ fn typed_core_runs_list_programs_without_stopping() {
         (
             "function(n: I64) -> I64 { rows <- List.repeat(List.range(1, n), n)\n \
              List.sum(List.join_map(rows, \\(row) row)) + List.len(rows) }",
-            &["{ k <- 3i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+            &["{ k <- 3i64; FUNCTION(k) }"],
         ),
         (
             "function(n: I64) -> I64 { rows <- List.map(List.range(1, n), \\(k) List.range(1, k))\n \
@@ -3534,10 +3534,18 @@ fn typed_core_runs_list_programs_without_stopping() {
                 let stops = typed::native_stops() - before;
                 let function = lower::parse_text(&name, "<test>")
                     .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
-                (reference, compiled, function.is_ok_and(typed::has_compiled), stops)
+                (
+                    reference,
+                    compiled,
+                    function.is_ok_and(typed::has_compiled),
+                    stops,
+                )
             };
             assert_eq!(reference, compiled, "case {case}: FUNCTION <- {definition}");
-            assert!(typed, "case {case} did not run on the typed core: {definition}");
+            assert!(
+                typed,
+                "case {case} did not run on the typed core: {definition}"
+            );
             assert_eq!(stops, 0, "case {case} stopped in native code: {definition}");
         }
     });
@@ -4049,6 +4057,41 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         (
             "function(x: double) -> double { flag <- x > 0\n if (flag) 1 else 2 }",
             &["{ x <- NaN; FUNCTION(x) }", "{ x <- 1; FUNCTION(x) }"],
+        ),
+        // The interpreter builds an empty mapped, joined or chunked list without an item type,
+        // and the typed core gives the same value for an empty input or result. The empty call
+        // comes second, so it reaches the compiled code.
+        (
+            "function(n: I64) -> List<F64> List.join_map(List.range(1, n), \\(k) [Num.to_f64(k)])",
+            &[
+                "{ k <- 2i64; FUNCTION(k) }",
+                "{ k <- 0i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> List<F64> List.join_map(List.range(1, n), \\(k) List.sublist([Num.to_f64(k)], 1i64, n - 2i64))",
+            &[
+                "{ k <- 3i64; FUNCTION(k) }",
+                "{ k <- 2i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> List<F64> List.map2(List.range(1, n), List.range(1, 3i64), \\(a, b) Num.to_f64(a * b))",
+            &[
+                "{ k <- 5i64; FUNCTION(k) }",
+                "{ k <- 0i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> I64 List.len(List.chunks_of(List.range(1, n), 2i64))",
+            &["{ k <- 5i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> List<List<I64>> List.chunks_of(List.range(1, n), 2i64)",
+            &[
+                "{ k <- 3i64; FUNCTION(k) }",
+                "{ k <- 0i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
         ),
     ];
     with_interpreter(|| {

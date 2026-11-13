@@ -672,9 +672,7 @@ impl Op {
             | DictInsert(a, b, c)
             | Swap(a, b, c)
             | Slice(a, b, c)
-            | ReplaceEach(a, b, c) => {
-                SmallVec::from_slice(&[*a, *b, *c])
-            }
+            | ReplaceEach(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
             Piece {
                 string,
                 start,

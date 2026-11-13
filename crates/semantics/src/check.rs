@@ -3470,12 +3470,14 @@ impl<'db> Checker<'db, '_> {
                                     }
                                     ty
                                 }
-                                // A write into a ry list may decide the variable's literal
-                                // (`lookup[[i]] <- j`), which the write itself does.
+                                // A write into a ry list's item or a ry record's field may
+                                // decide the variable's literal (`lookup[[i]] <- j`,
+                                // `r$x <- j`), which the write itself does.
                                 ExpressionKind::NameRef(_)
                                     if matches!(
                                         self.module.kind(target),
                                         ExpressionKind::Index { double: true, .. }
+                                            | ExpressionKind::Field { .. }
                                     ) =>
                                 {
                                     let fresh = self.literal_reads.insert(value);
@@ -5088,8 +5090,14 @@ impl<'db> Checker<'db, '_> {
                         .iter()
                         .find(|field| field.name.text(self.db) == field_name)
                     {
+                        // A literal written into the field takes the field's type, as one
+                        // written into a list's item does.
                         Some(field) => {
-                            if !matches!(value.kind(self.db), TyKind::Unknown)
+                            if self.adapt_literal(value_expression, field.ty)
+                                == LiteralFit::NotLiteral
+                                && !(self.open_literal_var(value)
+                                    && self.table.unify(self.db, value, field.ty).is_ok())
+                                && !matches!(value.kind(self.db), TyKind::Unknown)
                                 && !self.table.compatible(self.db, value, field.ty)
                             {
                                 let range = self.blame_range(value_expression);
@@ -6010,7 +6018,10 @@ impl<'db> Checker<'db, '_> {
         let module = self.module;
         let ty = match module.kind(payload) {
             ExpressionKind::Tuple(items) => {
-                let items = module[*items].iter().map(|&item| self.infer(item)).collect();
+                let items = module[*items]
+                    .iter()
+                    .map(|&item| self.infer(item))
+                    .collect();
                 Ty::new(self.db, TyKind::NativeTuple(items))
             }
             ExpressionKind::Record(fields) => {
@@ -14238,16 +14249,14 @@ impl<'db> Checker<'db, '_> {
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
                                 // An accumulator whose initial state is a settled ry value keeps
-                                // that type, because only a tag union widens among ry types. In `List.walk(xs,
-                                // List.repeat(0f64, n), \(sums, x) sums + x)` the state is
-                                // `List<F64>` before the body reads `sums + x`.
+                                // that type, because only a tag union widens among ry types. In
+                                // `List.walk(xs, List.repeat(0f64, n), \(sums, x) sums + x)` the
+                                // state is `List<F64>` before the body reads `sums + x`. A state
+                                // with a tag anywhere in it, such as `[:A]`, stays open.
                                 let widening_accumulator =
                                     accumulators.get(index).copied().unwrap_or(false)
                                         && !(is_ry_value_type(self.db, formal)
-                                            && !matches!(
-                                                formal.kind(self.db),
-                                                TyKind::Tag(..) | TyKind::Union(_)
-                                            )
+                                            && !mentions_tag(self.db, formal)
                                             && !self.table.contains_unbound_var(self.db, formal));
                                 if widening_accumulator
                                     || (index < declared_count
@@ -19418,6 +19427,21 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
         _ if crate::types::is_ry_value_type(db, item) => Some(ListItems::RyValues),
         _ => None,
     }
+}
+
+/// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
+fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    if matches!(
+        ty.kind(db),
+        TyKind::Tag(..) | TyKind::Union(_) | TyKind::OtherTags
+    ) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_tag(db, child)
+    });
+    found
 }
 
 #[cfg(test)]

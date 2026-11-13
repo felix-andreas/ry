@@ -2603,7 +2603,9 @@ impl Lowering<'_> {
                 };
                 let a = self.value(a)?;
                 if self.builder.ty(a) != Type::Dbl {
-                    return Err(Refusal::new("a `Num.truncate` of something other than an F64"));
+                    return Err(Refusal::new(
+                        "a `Num.truncate` of something other than an F64",
+                    ));
                 }
                 let whole = self
                     .builder
@@ -3493,7 +3495,9 @@ impl Lowering<'_> {
         } else {
             value_ty.item()
         }
-        .ok_or(Refusal::new("a mapped function whose value is not a scalar"))?;
+        .ok_or(Refusal::new(
+            "a mapped function whose value is not a scalar",
+        ))?;
         let result_item = declared.unwrap_or(value_item);
         let settled = value_ty == Type::Bool && result_item == Item::Lgl;
         let value = if settled {
@@ -3905,9 +3909,9 @@ impl Lowering<'_> {
             return Err(Refusal::new("a malformed `List.keep_if`"));
         };
         let (list, ty) = self.known_list(list, "List.keep_if")?;
-        let item = ty
-            .items()
-            .ok_or(Refusal::new("a `List.keep_if` of something other than a ry list"))?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.keep_if` of something other than a ry list",
+        ))?;
         let callable = self.function_argument(predicate)?;
         let kept = self.empty_list(item);
         let held = self.builder.emit(ty, Op::Copy(list));
@@ -3997,11 +4001,13 @@ impl Lowering<'_> {
             return Err(Refusal::new("a malformed `List.contains`"));
         };
         let (list, ty) = self.known_list(list, "List.contains")?;
-        let item = ty
-            .items()
-            .ok_or(Refusal::new("a `List.contains` of something other than a ry list"))?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.contains` of something other than a ry list",
+        ))?;
         if !matches!(item, Item::I64 | Item::Dbl | Item::Str | Item::Lgl) {
-            return Err(Refusal::new("a `List.contains` of items that are not scalars"));
+            return Err(Refusal::new(
+                "a `List.contains` of items that are not scalars",
+            ));
         }
         let value = self.value(value)?;
         let result = self.builder.local(Type::Lgl);
@@ -4039,9 +4045,9 @@ impl Lowering<'_> {
             return Err(Refusal::new("a malformed `List.reverse`"));
         };
         let (list, ty) = self.known_list(list, "List.reverse")?;
-        let item = ty
-            .items()
-            .ok_or(Refusal::new("a `List.reverse` of something other than a ry list"))?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.reverse` of something other than a ry list",
+        ))?;
         let held = self.builder.emit(ty, Op::Copy(list));
         let count = self.builder.emit(Type::Int, Op::Length(held));
         let total = self.builder.emit(Type::I64, Op::Length(held));
@@ -4055,10 +4061,9 @@ impl Lowering<'_> {
             .builder
             .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
         let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
-        let after = self.builder.emit(
-            Type::I64,
-            Op::Arith(Arith::Add, Item::I64, total, one),
-        );
+        let after = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, total, one));
         let slot = self.builder.emit(
             Type::I64,
             Op::Arith(Arith::Sub, Item::I64, after, positions.counter),
@@ -4078,9 +4083,9 @@ impl Lowering<'_> {
             return Err(Refusal::new("a malformed `List.max`"));
         };
         let (list, ty) = self.known_list(list, name)?;
-        let item = ty
-            .items()
-            .ok_or(Refusal::new("a `List.max` of something other than a ry list"))?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.max` of something other than a ry list",
+        ))?;
         if !matches!(item, Item::I64 | Item::Dbl) {
             return Err(Refusal::new("a `List.max` of something other than numbers"));
         }
@@ -4136,15 +4141,16 @@ impl Lowering<'_> {
     }
 
     /// `List.join_map(list, f)`: the lists `f` gives for each item, concatenated in a loop with
-    /// `f` inlined.
+    /// `f` inlined. An empty result stops the native code, because the interpreter builds it
+    /// without an item type, as for `List.map`.
     unsafe fn join_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
         let [list, function] = arguments.exactly(2)?[..] else {
             return Err(Refusal::new("a malformed `List.join_map`"));
         };
         let (list, ty) = self.known_list(list, "List.join_map")?;
-        let item = ty
-            .items()
-            .ok_or(Refusal::new("a `List.join_map` of something other than a ry list"))?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.join_map` of something other than a ry list",
+        ))?;
         let callable = self.function_argument(function)?;
         let held = self.builder.emit(ty, Op::Copy(list));
         let preheader = self.builder.current;
@@ -4164,7 +4170,9 @@ impl Lowering<'_> {
             array: true,
         } = output_ty
         else {
-            return Err(Refusal::new("a `List.join_map` whose function gives no ry list"));
+            return Err(Refusal::new(
+                "a `List.join_map` whose function gives no ry list",
+            ));
         };
         self.builder.function.locals[output.0 as usize] = output_ty;
         let grown = self.builder.emit(output_ty, Op::Extend(output, piece));
@@ -4175,12 +4183,16 @@ impl Lowering<'_> {
         let empty = self.empty_list(output_item);
         self.builder.push(Some(output), Op::Copy(empty));
         self.builder.switch_to(exit);
+        let length = self.builder.emit(Type::Int, Op::Length(output));
+        let zero = self.int(0);
+        let nothing = self.builder.emit(Type::Bool, Op::Same(length, zero));
+        self.fail_if(nothing);
         Ok(output)
     }
 
     /// `List.chunks_of(list, size)`: slices of `size` items, the last one shorter. A size below
-    /// one runs in the interpreter, which gives no chunks for zero and raises the error for a
-    /// negative size.
+    /// one and an empty list run in the interpreter, which gives no chunks for zero, raises the
+    /// error for a negative size, and builds an empty result without an item type.
     unsafe fn chunks_of(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
         let [list, size] = arguments.exactly(2)?[..] else {
             return Err(Refusal::new("a malformed `List.chunks_of`"));
@@ -4193,13 +4205,18 @@ impl Lowering<'_> {
             .builder
             .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::I64, size, one));
         self.fail_if(below);
-        let item = ty
-            .held_item()
-            .ok_or(Refusal::new("a `List.chunks_of` of something a list cannot hold"))?;
+        let item = ty.held_item().ok_or(Refusal::new(
+            "a `List.chunks_of` of something a list cannot hold",
+        ))?;
         let chunks = self.empty_list(item);
         let chunks_ty = self.builder.ty(chunks);
         let held = self.builder.emit(ty, Op::Copy(list));
         let total = self.builder.emit(Type::I64, Op::Length(held));
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let empty = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
+        self.fail_if(empty);
         let arith = |lower: &mut Self, op: Arith, a: Local, b: Local| {
             lower
                 .builder
@@ -4221,7 +4238,8 @@ impl Lowering<'_> {
     }
 
     /// `List.map2(a, b, f)` and `List.map3(a, b, c, f)`: `f` of the items at each position up
-    /// to the shortest list's length, in a loop with `f` inlined.
+    /// to the shortest list's length, in a loop with `f` inlined. An empty result stops the native
+    /// code, because the interpreter builds it without an item type, as for `List.map`.
     unsafe fn map_many(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let parameters = arguments.exactly(if name == "List.map3" { 4 } else { 3 })?;
         let Some((&function, lists)) = parameters.split_last() else {
@@ -4244,6 +4262,11 @@ impl Lowering<'_> {
                 .emit(Type::I64, Op::Arith(Arith::Min, Item::I64, total, length));
             self.builder.push(Some(total), Op::Copy(shorter));
         }
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let empty = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
+        self.fail_if(empty);
         let count = self.builder.emit(Type::Int, Op::CountOfI64(total));
         let preheader = self.builder.current;
         let output = self.builder.local(Type::Null);
@@ -4290,7 +4313,8 @@ impl Lowering<'_> {
         let fresh = self
             .builder
             .emit(Type::vector(result_item), Op::NewVector(result_item, count));
-        self.builder.push(Some(output), Op::Relabel(fresh, output_ty));
+        self.builder
+            .push(Some(output), Op::Relabel(fresh, output_ty));
         self.builder.switch_to(exit);
         Ok(output)
     }

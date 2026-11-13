@@ -253,6 +253,23 @@ f: fn(n: I64) -> List<I64>
 101..105 error[type-mismatch] expected `I64`, found `double`
 123..126 error[type-mismatch] expected `I64`, found `character`
 
+#---- field_write_decides_a_literal_variable
+f <- function(k: I64) {
+  j <- 1
+  r <- (x = 0i64, y = 2i64)
+  r$x <- j
+  j + k
+}
+g <- function() {
+  j <- 1
+  r <- list(x = 2)
+  r$x <- j
+  j
+}
+#++++
+f: fn(k: I64) -> I64
+g: fn() -> double
+
 #==== iteration
 #---- for_binds_the_item_type
 f <- function() {
