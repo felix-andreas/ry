@@ -53,6 +53,8 @@ export type Measurement = {
   peakMib?: Record<string, number>;
   // What each engine spent compiling the program, where the suite records it.
   compileSeconds?: Record<string, number>;
+  // The first run of the program in its process, where the harness times one.
+  firstSeconds?: Record<string, number>;
   tests?: Record<string, TestCounts>;
   flags: Flag[];
   failures: Failure[];
@@ -124,6 +126,25 @@ export function gnuRSuites(): Suite[] {
 // The engines a suite compares against its baseline, in the order of its results file.
 export function comparedEngines(suite: Suite): string[] {
   return (suite.results?.engines ?? []).filter((engine) => engine !== baselineOf(suite));
+}
+
+// Typed ry compiled before the program starts (`ry run --aot`). It runs the code that typed ry
+// compiles at a first call, so its bar would repeat the typed one: the charts leave it out, and
+// the tables show it.
+const typedAhead = 'ry_typed_aot';
+
+function chartedEngines(suite: Suite): string[] {
+  return comparedEngines(suite).filter((engine) => engine !== typedAhead);
+}
+
+// What the time of typed ry compiled ahead holds. A program that times a warm run has no compile
+// in it on any engine. A program that times its whole run would leave out the compile that ran
+// before it started, so the runner adds that compile to the program's clock.
+function aheadNote(programs: (Program & { measurement: Measurement })[]): string {
+  const label = engineLabel(typedAhead);
+  return programs.some((program) => program.measurement.firstSeconds !== undefined)
+    ? `${label} compiles each typed function before the program starts, which the First run table shows.`
+    : `${label} compiles each typed function before the program starts. Its time is the program's clock plus that compile, so it counts the same work as the other columns.`;
 }
 
 export function measuredPrograms(suite: Suite): (Program & { measurement: Measurement })[] {
@@ -336,7 +357,7 @@ export type Chart = { caption: string; measure: string; axisNote: string; engine
 
 // One chart per group, or one for the whole suite when it has no groups.
 export function suiteCharts(suite: Suite): Chart[] {
-  const engines = comparedEngines(suite);
+  const engines = chartedEngines(suite);
   const programs = measuredPrograms(suite);
   const groups = suite.groups.length === 0 ? [undefined] : suite.groups;
   const baseline = engineLabel(baselineOf(suite));
@@ -466,10 +487,27 @@ export function tableViews(suite: Suite): TableView[] {
         return `${ratio === undefined ? 'n/a' : formatInterval(ratio)}${flags.length === 0 ? '' : ` (${flags.join(', ')})`}`;
       }),
     ]),
-    note: slowdown
+    note: (slowdown
       ? `Each time is the median over the rounds. Each ratio is the median of the per-round ratios of the engine's time over ${engineLabel(baseline)}'s, with its 95% interval in parentheses.`
-      : 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.',
+      : 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.')
+      + (engines.includes(typedAhead) ? ` ${aheadNote(programs)}` : ''),
   }];
+  const first = programs.filter((program) => program.measurement.firstSeconds !== undefined);
+  if (first.length > 0) {
+    views.push({
+      label: 'First run',
+      columns: ['program', ...engines.map(engineLabel)],
+      rows: first.map((program) => [
+        name(program),
+        ...engines.map((engine) => {
+          const value = program.measurement.firstSeconds?.[engine];
+          return value === undefined ? 'n/a' : time(value);
+        }),
+      ]),
+      note: 'The first run of the program in its process, as the median over the rounds. It holds whatever compiles at a first call, which the warm runs of the Time table do not.'
+        + (engines.includes(typedAhead) ? ` ${engineLabel(typedAhead)} compiled the program before it started, so its first run compiles nothing.` : ''),
+    });
+  }
   if (programs.some((program) => program.measurement.peakMib !== undefined)) {
     views.push({
       label: 'Memory',
@@ -662,6 +700,7 @@ type RawResults = {
     ratio: Record<string, Interval>;
     peak_mib?: Record<string, number>;
     compile_seconds?: Record<string, number>;
+    first_seconds?: Record<string, number>;
     tests?: Record<string, TestCounts>;
     flags?: Flag[];
     failures?: Failure[];
@@ -723,7 +762,7 @@ function loadSuites(): Suite[] {
 
 function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
   if (program === undefined) return undefined;
-  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, firstSeconds: program.first_seconds, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
 }
 
 function meta(raw: RawResults['meta']): Meta {

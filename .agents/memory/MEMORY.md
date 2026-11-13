@@ -13,6 +13,7 @@ The specs live in the docs site under `docs/src/content/docs/`. `reference/type-
 ## Short-term
 
 - **Vector kernels.** Toward 10x on element-wise code, the next steps are fusing `sum`/`mean` consumers into the fused pass and an AVX-512 `exp` (`crates/interp/src/kernels.rs`, `vector_math.rs`; `backlog.md`, "Open: untyped R against GNU R").
+- **Ahead-of-time compilation.** `ry run --aot` compiles a script's top-level typed functions before it starts. Next is the package code file for `ry build --aot` and `ry install`: the design is `development/design/typed-code-file.md`, and `backlog.md`, "Open: ahead-of-time compilation", lists the steps in order with files, tests, target numbers and stop rules.
 - **Typed core.** Next are non-constant defaults and box conversion at the boundary (`backlog.md`, "Open: the typed core", with its parts "Gaps the typed public ports found" and "What the `native` check pins and over-reports"). Every program of the public suite has a typed port that runs natively; `typed_benchmarks_run_natively` covers only the kernels and applications, because the public ports run full-size inputs, so check a public port with `RY_TYPED_LOG=1` on a release build. `RY_TYPED_LOG=1` names every typed closure whose call fell back to the interpreter, and `RY_JIT_LOG=1` names each compiled body, each native function, and the instructions left to tier 0.
 
 ## Mid-term
@@ -90,6 +91,8 @@ Most important first. Each line names the open item, and the detail is at its po
 
 ### Runtime: interpreter, bytecode and JIT
 
+- **A checked `List.from_r` gives the checker's type in every tier, by widening or by an error.** The preflight passes the checker's item type to the runtime (`.ry_items`), which lets typed code compile before any call ran. The checker's R types are coarser than run-time storage (`abs(-3:3)` is typed `double` and holds integers), so `arrays::checked_conversion` widens `Bool` and `I64` items as R coerces and raises one error for anything else, and the interpreter and compiled code both go through it. Never compare a checker's R type with run-time storage for equality, and give any new checker fact that compiled code relies on one shared run-time function for both tiers (`decisions.md`, "`ry run --aot` compiles a script's typed code before it starts").
+- **Tier switches for typed code:** `RY_JIT=off|on|force`, `--aot`, and `RY_AHEAD_MISS=1`, which drops the closures `--aot` created up front so every sibling guess fails. `typed_scripts_agree_however_they_compile` runs a script every way and compares output.
 - **Read a closure's body through `bytecode::closure_body`, never `function.cdr()`**: a body that ran twice is replaced by its compiled `BCODESXP` (`decisions.md`, "Closures over one body expression share its compiled code").
 - **A tier-0 fast path makes no calls, and the generic handlers and `jump` stay `#[inline(never)]`** (`bytecode.rs`). Any call makes the handler save registers on every instruction. Use `Heap::try_alloc_scalar`, `become` the generic handler, and check with `objdump -d` that the handler starts without `push`.
 - **A quickened opcode is visible only to tier 0's dispatch**: every other reader of code words goes through `op_of`, never a comparison with `op_word`.

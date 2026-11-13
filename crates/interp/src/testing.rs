@@ -247,6 +247,7 @@ pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
                 back_edge: |_, _| None,
                 back_edge_threshold: bytecode::NEVER,
                 call: |_| None,
+                ahead: |_| {},
             }));
             let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
             run(&reset);
