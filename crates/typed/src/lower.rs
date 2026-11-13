@@ -168,9 +168,10 @@ const MAX_TYPED_INLINE_DEPTH: usize = 4;
 /// The most calls and operators the body of a typed function may hold and still inline into
 /// its callers.
 const MAX_INLINE_CALLS: usize = 48;
-/// The most calls of itself a function may hold and still lower into itself once. Each call
-/// is another copy of the body to compile, so a function that recurses from many places, as an
-/// evaluator of a tree with several node kinds does, would multiply its compile time.
+/// The most calls of itself a function may hold and still lower into itself, and the most
+/// copies of its body those calls may add. Each call is another copy to compile, so a function
+/// that recurses from many places, as an evaluator of a tree with several node kinds does,
+/// would multiply its compile time.
 const MAX_SELF_CALLS: usize = 2;
 /// How deeply expressions nest, which bounds the lowering's own recursion.
 const MAX_NESTING: usize = 256;
@@ -240,6 +241,7 @@ unsafe fn lower_calling(
         loops: Vec::new(),
         inlined: Vec::new(),
         inlining: SmallVec::new(),
+        self_inlines: 0,
         called,
         refused,
         speculations: Vec::new(),
@@ -366,6 +368,8 @@ struct Lowering<'c> {
     /// The typed functions whose bodies are being lowered into this one, outermost first, so a
     /// function that calls itself through another is called, not inlined without end.
     inlining: SmallVec<[Sexp; 4]>,
+    /// How many times the function has been lowered into itself.
+    self_inlines: usize,
     /// The typed functions that are called, never inlined.
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
@@ -1083,15 +1087,15 @@ impl Lowering<'_> {
             let values = self.call_arguments(&arguments)?;
             // A small function lowers into its caller, where its records need no allocation
             // and its arguments no call. A function that calls itself from a place or two
-            // lowers into itself once, which halves the calls a recursion makes, and into no
-            // other caller.
+            // lowers into itself at those places, one level deep, so a recursion makes fewer
+            // calls, and into no other caller. The copies are counted as they are made,
+            // because a local function that holds the call is itself lowered at each of its
+            // calls.
             let body = interp::bytecode::closure_body(function);
-            let mut own_calls = if function == self.closure {
-                MAX_SELF_CALLS
-            } else {
-                0
-            };
+            let own = function == self.closure;
+            let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
             if function.tag() == self.env
+                && (!own || self.self_inlines < MAX_SELF_CALLS)
                 && !self.inlining.contains(&function)
                 && !self.called.contains(&function)
                 && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
@@ -1099,6 +1103,7 @@ impl Lowering<'_> {
                 && !tail_invisible(body)
                 && small_body(body, head, &mut own_calls, &mut 0)
             {
+                self.self_inlines += own as usize;
                 self.inlining.push(function);
                 let value = self.inline(function.car(), body, 0, &values, crate::storage);
                 self.inlining.pop();

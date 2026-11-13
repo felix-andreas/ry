@@ -223,7 +223,10 @@ pub fn replace_split_lists(function: &mut Function) {
                 (&Op::Get(list, index), dest) if replaced(list) => {
                     let first = first[list.0 as usize];
                     let reads = reads[groups.find(list) as usize];
-                    let position = constants[index.0 as usize].unwrap_or(0) as u32;
+                    let Some(position) = constants[index.0 as usize] else {
+                        panic!("a replaced split list is read at a position that is not constant");
+                    };
+                    let position = position as u32;
                     let start = start_of(first, reads, position);
                     let piece = Op::Piece {
                         string: Local(first),

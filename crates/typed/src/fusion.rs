@@ -92,7 +92,7 @@ fn merge_counts(function: &mut Function, predecessors: &[Option<BlockId>]) {
                 earlier_count(function, predecessors, block, index).and_then(|(at, earlier)| {
                     let earlier_op = &function.blocks[at].insts[earlier].op;
                     let later_op = &function.blocks[block].insts[index].op;
-                    Some((at, earlier, merged(earlier_op, later_op)?))
+                    Some((at, earlier, merged(function, earlier_op, later_op)?))
                 });
             match merged {
                 Some((at, earlier, op)) => {
@@ -151,9 +151,9 @@ fn earlier_count(
     None
 }
 
-/// One count that computes what the counts `earlier` and `later` compute, if a pass has room
-/// for the inputs, steps and results of both.
-fn merged(earlier: &Op, later: &Op) -> Option<Op> {
+/// One count that computes what the counts `earlier` and `later` compute, if they read a list
+/// in common and a pass has room for the inputs, steps and results of both.
+fn merged(function: &Function, earlier: &Op, later: &Op) -> Option<Op> {
     let (
         Op::CountTrue {
             program,
@@ -169,6 +169,15 @@ fn merged(earlier: &Op, later: &Op) -> Option<Op> {
     else {
         return None;
     };
+    // A pass fails unless all its lists have one length. A shared list ties the lengths of
+    // the two counts together, so the pass fails only where one of them would have failed
+    // alone; counts over unrelated lists of different lengths each succeed alone.
+    let shares_a_list = later_inputs
+        .iter()
+        .any(|&input| matches!(function.ty(input), Type::Vector { .. }) && inputs.contains(&input));
+    if !shares_a_list {
+        return None;
+    }
     let mut all = Program::decoded(program, inputs);
     let mut all_counts: SmallVec<[(Operand, Local); 8]> = counts
         .iter()
