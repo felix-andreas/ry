@@ -2979,6 +2979,11 @@ The end-to-end guard rests on the corpus suites.
     then stops.
   - A function that updates its parameter, `function(a) { a[id == 1L, v := 5L]; NULL }`: the
     parameter's update goes to a fork, as it must, and the caller's frame keeps one count.
+- **Releasing `...` lists and detached references at frame exit costs 0.6% of the testthat
+  workload's warm instructions** (`decisions.md`, "A filtered `:=` reads a row index and writes
+  in place", cost of the exact counts). The part that is not release work is the test
+  `release_slots` (`heap.rs`) makes on every slot for a `...` list. A compiled body knows which
+  slot can hold one, so the release could take that slot's index and test nothing else.
 - **A chained `:=` is an error.** `x[id == 1L, v := 5L][id == 2L, v := 6L]` applies the first
   update and then fails with "`:=` updates a DataFrame stored in a variable", because the second
   bracket's subject is a call. data.table code chains updates this way, and

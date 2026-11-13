@@ -4908,6 +4908,14 @@ check` releases its trees once, and memoized records are compact" below).
   index took 0.26 s at 1e7 rows and 3.0 s at 1e8, against 0.40 s and 4.1 s for data.table's
   first run. The whole 1e7 suite's peak from R fell from 8.4 GB to 4.5 GB; which loop held the
   difference was not isolated.
+- **Cost of the exact counts in the interpreter.** The testthat workload under callgrind runs
+  0.6% more instructions per warm repeat (548.3M to 551.7M, `RY_BENCH_REPEAT` 3 minus 1,
+  halved), with the same number of collections and the same resident memory. A per-function
+  comparison of the two builds puts it in the releases that were skipped before. Over a run of
+  three repeats, about 31,000 `...` lists are emptied (`release_dots`), about 120,000 more
+  values reach a count of zero when their frame returns instead of waiting for a collection
+  (`note_zero`), and `release_slots` makes one more comparison per slot, because it looks for a
+  `...` list beside a promise.
 - **Known limit of the count.** A holder the counts do not see, such as native code that keeps
   the frame through `R_PreserveObject` or the protect stack, does not stop an in-place write.
   No DataFrame builtin keeps a frame that way.
