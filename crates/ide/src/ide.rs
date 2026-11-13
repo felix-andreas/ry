@@ -7601,12 +7601,12 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                 }
             }
         }
-        // Every occurrence spells the name, so a text search skips nearly all of a large
-        // project before any item is lowered or named.
+        // An occurrence spells the name, so a text search skips nearly all of a large project
+        // before any item is lowered or named.
         Target::Global(name) => {
             for &file in files.files(db) {
                 let text = file.text(db);
-                if !text.contains(name.as_str()) {
+                if !may_spell(text, name.as_str()) {
                     continue;
                 }
                 result.extend(s4_occurrences(db, file, name, S4Kind::Generic));
@@ -7616,7 +7616,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     };
                     let spells_name = text
                         .get(std::ops::Range::<usize>::from(node.text_range()))
-                        .is_some_and(|source| source.contains(name.as_str()));
+                        .is_some_and(|source| may_spell(source, name.as_str()));
                     if !spells_name {
                         continue;
                     }
@@ -7722,6 +7722,13 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
     });
     result.dedup_by_key(|occurrence| (occurrence.file, occurrence.range));
     result
+}
+
+/// Whether `text` can spell `name`. A backticked name may spell a character as an escape
+/// (`` `a\\b` `` is the name `a\b`), and then the text does not contain the name, so text that
+/// holds a backtick and a backslash is searched instead of skipped.
+fn may_spell(text: &str, name: &str) -> bool {
+    text.contains(name) || (text.contains('`') && text.contains('\\'))
 }
 
 fn s4_occurrences(

@@ -24,8 +24,13 @@ const SEEDS: &[&str] = &[
 ];
 
 /// Inputs the coverage-guided `ide` target has broken; only the invariants must hold.
-const REGRESSIONS: &[&str] =
-    &["make <- function() {\n  a\ntotal <- 0\n  add <- <unction(n) total <<- total + n\n  add\n}?"];
+const REGRESSIONS: &[&str] = &[
+    "make <- function() {\n  a\ntotal <- 0\n  add <- <unction(n) total <<- total + n\n  add\n}?",
+    "`a\\\\b` <- 1\n",
+    "match (p) {\n  (a, ..rest) => a\n}\n",
+    "\"na.rm.default\" <- TRUE\nprint(na.rm.default)\n",
+    "pick <- function(dt) {\n  columns <- c(\"a\", \"b\")\n  dt[, ..columns]\n}\n",
+];
 
 #[test]
 fn seeds_never_panic() {

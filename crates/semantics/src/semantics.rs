@@ -1636,46 +1636,19 @@ pub struct PackageName<'db> {
     pub conditional_writers: Vec<Item<'db>>,
 }
 
-/// [`PackageName`] for the package namespace, and whether any project file binds the name.
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-pub struct ProjectName<'db> {
-    pub layer: PackageName<'db>,
-    /// Whether some project file of any kind binds the name at top level. A check asks this
-    /// about a name it constructs before it asks its own file for the binder.
-    pub bound: bool,
-}
-
 #[salsa::tracked(returns(ref))]
-pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> ProjectName<'db> {
+pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageName<'db> {
     let Some(files) = ProjectFiles::try_get(db) else {
-        return ProjectName::default();
+        return PackageName::default();
     };
     let text = name.name(db).symbol();
-    ProjectName {
-        layer: PackageName {
-            winner: package_definitions(db, files).get(&text).copied(),
-            conditional_writers: conditional_slot_items(db, files)
-                .get(&text)
-                .cloned()
-                .unwrap_or_default(),
-        },
-        bound: bit(project_bound_names(db, files), text.index() as usize),
+    PackageName {
+        winner: package_definitions(db, files).get(&text).copied(),
+        conditional_writers: conditional_slot_items(db, files)
+            .get(&text)
+            .cloned()
+            .unwrap_or_default(),
     }
-}
-
-/// The names some project file binds at top level, one bit per symbol index. A name a check
-/// constructs for itself (the S3 method `Ops.Date` of an operand's class) is bound almost
-/// nowhere, and an item asks for dozens of them, so this answers them through [`package_name`]
-/// where a query per item and name would keep a memo for each.
-#[salsa::tracked(returns(ref))]
-fn project_bound_names(db: &dyn Db, files: ProjectFiles) -> Box<[u64]> {
-    let mut names: Vec<u64> = Vec::new();
-    for &file in files.files(db) {
-        for &(name, _, _) in file_binders(db, file) {
-            set_bit(&mut names, name.index() as usize);
-        }
-    }
-    names.into_boxed_slice()
 }
 
 /// The project's files, one bit per file id. It reads the file list alone, so a reader does not
@@ -1722,7 +1695,7 @@ pub fn name_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLayer<'
     let name = types::QueryName::new(db, types::Name::new(db, name));
     let projection = match test {
         true => test_name(db, name),
-        false => &package_name(db, name).layer,
+        false => package_name(db, name),
     };
     NameLayer {
         winner: projection.winner,
@@ -2131,8 +2104,8 @@ pub struct ItemLinks<'db> {
     items: Box<[Item<'db>]>,
     /// [`item_interface_edges`].
     edges: ThinVec<Item<'db>>,
-    /// Whether the item's file is one of the project's, so that a name no project file binds
-    /// has no binder in it either.
+    /// Whether the item's file is one of the project's, so that the package layer holds every
+    /// top-level name a package file binds, and the helper layer every one a helper file binds.
     file_in_project: bool,
 }
 
@@ -3202,13 +3175,29 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                 deferred,
             )
         };
-        let query_name = types::QueryName::new(self.db, types::Name::new(self.db, name));
-        let unbound = self.links.file_in_project && !package_name(self.db, query_name).bound;
+        let package = layer(false);
+        let test = match self.kind {
+            DocumentKind::Test | DocumentKind::TestHelper => layer(true),
+            _ => NameLayer::default(),
+        };
+        // A name a check constructs for itself (the S3 method `Ops.Date` of an operand's
+        // class) is bound almost nowhere, and an item asks for dozens of them, so a
+        // `frame_binder` memo for each would outnumber every other memo. A package file
+        // needs none: each top-level name it binds is a definition or a conditional write of
+        // the package layer, so a name that layer does not bind has no binder in the file.
+        // The helper files' layer holds a helper file's names the same way. A test file or a
+        // script has no layer over its own names and asks.
+        let unbound = self.links.file_in_project
+            && match self.kind {
+                DocumentKind::Package => !package.binds(),
+                DocumentKind::TestHelper => !test.binds(),
+                _ => false,
+            };
         if unbound && syntax::testing::invariants_enabled() {
             assert_eq!(
                 frame_binder(),
                 None,
-                "no project file binds `{name}`, yet the item's file does"
+                "the layer of the item's file does not bind `{name}`, yet the file does"
             );
         }
         NameBindings {
@@ -3220,11 +3209,8 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                 true => *sourced_name_definition(self.db, self.file, name),
                 false => None,
             },
-            test: match self.kind {
-                DocumentKind::Test | DocumentKind::TestHelper => layer(true),
-                _ => NameLayer::default(),
-            },
-            package: layer(false),
+            test,
+            package,
         }
     }
 

@@ -96,13 +96,16 @@ the host's store", has the shape and the measurements behind this list.
   contain inference variables. Three caches exist only because of the current shape and go with
   it: the per-thread recent-entry cache in front of the interner's shards (`types.rs`), and
   `InferenceTable`'s `resolve_cache` and `definition_cache` (`infer.rs`).
-- **Opening a file settles its diagnostics 8 ms later than with the two paths** (24 ms against
-  16 ms on an idle server on the finance bench, and 100 to 130 ms against 41 to 44 ms for the
-  file open at start-up; `tools/bench/tooling/lsp_latency.py`). Keystroke latency is equal.
-  Not profiled. The likely cause is that opening lowers the file's durability, which makes
-  salsa verify every memo's inputs once, and `project_bound_names` reads a memo of every file
-  where the two-path lookup read only the names the file uses. At start-up the same query is
-  computed for the whole project before the first file's check can finish.
+- **A whole-project check costs about 1.5% more CPU and 11 MB more than with the two paths**
+  (2.61 s against 2.57 s and 248 MB against 237 MB on the finance bench; wall time is equal
+  within run-to-run noise). `item_links` keeps one memo per item, 50,815 on that project, and
+  resolves every name the item's naming lists, where the command's old path resolved a name
+  when the check asked for it and kept no memo. Under callgrind `item_links` is 4.8% of a
+  check's instructions, a quarter of it the lazily built `file_binders`.
+- **The file open at start-up settles about 6 ms later than with the two paths** (44 ms against
+  38 ms at the median of six runs on the finance bench, `tools/bench/tooling/lsp_latency.py`).
+  Not profiled. The opened file's check is not the cause: it runs the same 313 per-item
+  queries on both builds and fewer per-name ones (`crates/ry/examples/cold_open_probe.rs`).
 - **Every item of an edited file lowers again before `item_hir` backdates**, because no memo
   holds the item's syntax. It does not show in request latency after an edit. Lowering only
   the items whose window of the tree changed needs the splice to report which top-level runs
@@ -442,6 +445,7 @@ Each item removes a reason a function is not in the file or not compiled by `ry 
 
 - **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 - **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 308,000 lines each; `oracle bench` through `just bench-compare`). ry matches GNU R on all of finbench's 10,452 tests, dsbench's 10,562 and biobench's 9,757. With the JIT on, the suite times are 1.30x, 1.35x and 1.21x GNU R's (312 s against 240 s, 157 s against 116 s, 168 s against 139 s). The JIT's own cost on the suites' cold code is within about 2% of `RY_JIT=off` (finbench 199.8 s against 195.9 s; dsbench 94.9 s against 89.6 s in suite time but 128 s against 131 s in process wall; single runs with about 4% of noise), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). Each suite compiles about 60 bodies in 0.65 s of Cranelift time and 1 MiB of code. Process wall times are about 0.97x, 0.78x and 0.75x GNU R's, because GNU R spends minutes in testthat's per-file `gc()`.
+- **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the corpus library). A one-round run on a library missing 37 of the 72 dependencies puts finbench at 74.6 s on ry (69.9 s with the JIT off) against 109.9 s on GNU R, so the 1.2x to 1.35x slowdown above needs the full dependency closure (`just corpus`, which installs `.corpus/library`; `just bench-compare` reads that path, while the suite reads the package corpus library) before it can be compared. `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits.
 - **Next.** Close the per-test gap, then run `ry check` over the generated code and treat every finding as a possible false report.
 
 ## Open: the CRAN package corpus
@@ -1950,12 +1954,40 @@ replacing or inserting one statement at a boundary.
   clean, only 89 distinct shapes appear, and 60 steps lex to two tokens because an inserted `"`
   swallows the buffer. Yet `reparse.rs` sits at 96.12% against a grammar-directed stream's 96.44%.
   Reset the buffer every 20 steps or so and skip a near-empty one. Do not rewrite it.
-- **Coverage-guided fuzzing has never run.** `cargo fuzz` is not installed, `fuzz/corpus/` does not
-  exist, no CI job invokes it, and the root `cargo test` resolves to the product crate so
-  `fuzz_deep` never runs either. Meanwhile the `REGRESSIONS` arrays, 21 in `format` and 2 in
-  `semantics`, are documented finds from exactly that mechanism. `fuzz/` does still compile, in 83 s
-  under `cargo +nightly check`. Judging coverage costs one component, because
-  `rustup component add llvm-tools-preview` produced every number in this review.
+- **Coverage-guided fuzzing covers 15 of 17 targets, shallowly on the slow ones.**
+  `just fuzz-all 60 runtime` runs them, locally or in the staged `test.yml` once it is accepted and
+  someone starts it or tags a release. What it leaves open:
+  - `csv` and `unserialize` (libR's reader) run nowhere. Their build instruments Polars, which is
+    killed for memory in a 15 GB container with four build jobs.
+  - `ide` runs four to seven inputs a second, so 60 seconds read about 300 of its 5,300 seeds and
+    never reach mutation. An optimized build without instrumentation replays all of them in 147
+    seconds, so the cost is the instrumented build and not the harness. Seven targets share those
+    seeds (`scripts/seed-fuzz-corpus.rs`), and a smaller seed set would bound the replay.
+  - Leak detection is off for every target that links `heap` (`__lsan_default_options` in
+    `crates/heap/src/space.rs`), because LeakSanitizer does not scan the mapped object space.
+    Registering the space as a root region should restore it (not tried).
+  - `reload` and `load_index` also run without leak detection, and they break the rule that no
+    harness reads the machine or starts a thread it cannot step: `Loader` reads a load index from
+    the user's cache directory when one is there and then parses ahead on a detached thread
+    (`loader::parse_detached`). LeakSanitizer reported that thread's own bookkeeping as leaked
+    when the process exited while it ran (seen once on `reload`; inferred for `load_index`, which
+    shares the path). The fix is a cache directory and a parse-ahead that the harness controls.
+  - `interp`'s reader checks a vector's length against the rest of the input only for a slice
+    (`Reader::expect_elements` in `crates/interp/src/serialize.rs`). Read from a connection, a
+    made-up length is allocated before the read fails (from reading the code, not from a run).
+  - The same reader returns a `CHARSXP`, a byte-code object and a primitive without reading the
+    attributes their flags announce, and ignores an ALTREP object's flag bits. An old stream with
+    attributes on a `CHARSXP` would fall out of step (from reading the code; libR's reader
+    handles it). `crates/rdb` and `crates/libr` have their own readers, which got none of the
+    kind checks.
+  - A compact sequence is materialized when read, so three numbers ask for any amount of memory.
+    `check_unserialize_input` lowers the heap's allocation ceiling for that reason. The product has
+    no total vector limit (GNU R's `mem.maxVSize`), and keeping the sequence compact needs the
+    ALTREP classes that live in `libr`.
+  - Find-references skips a file or item whose text does not contain the name. `may_spell` in
+    `crates/ide/src/ide.rs` covers a backticked name with an escape for a global, and the S4
+    target and the own-package `pkg::name` branch have the same text test without it (not
+    reproduced).
 - **Two arms silently contribute no inputs.** `corpus/` does not exist and nothing in CI or the
   justfile fetches it, so `fuzz_corpus_seeded` in `syntax` and in `format` returns early. That is
   about 1,050 budgeted inputs that never run, behind a skip line `cargo test` hides. It is the same

@@ -60,6 +60,9 @@ struct Samples {
     closures: FxHashMap<(u32, usize), Attribution>,
     /// Samples by package label.
     packages: FxHashMap<u32, PackageTime>,
+    /// Samples by the body of the innermost closure and by category; body 0 is time outside any
+    /// closure. The entry count that decides a body's bucket is known only when the run ends.
+    bodies: FxHashMap<usize, [u64; Activity::ALL.len()]>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -85,8 +88,18 @@ struct PackageTime {
 }
 
 impl Samples {
-    fn record(&mut self, word: u32, owners: &[u32], names: &[usize], global: u32) {
+    fn record(
+        &mut self,
+        word: u32,
+        owners: &[u32],
+        names: &[usize],
+        bodies: &[usize],
+        global: u32,
+    ) {
         *self.words.entry(word).or_insert(0) += 1;
+        self.bodies
+            .entry(bodies.last().copied().unwrap_or(0))
+            .or_insert([0; Activity::ALL.len()])[category(word) as usize] += 1;
         let innermost_owner = owners.last().copied().unwrap_or(global);
         let innermost_name = names.last().copied().unwrap_or(0);
         if !owners.is_empty() {
@@ -177,12 +190,13 @@ pub fn start_from_environment() {
         let mut samples = Samples::default();
         let mut owners = Vec::with_capacity(activity::FRAME_SLOTS);
         let mut names = Vec::with_capacity(activity::FRAME_SLOTS);
+        let mut bodies = Vec::with_capacity(activity::FRAME_SLOTS);
         while !STOP.load(Ordering::Relaxed) {
             std::thread::sleep(INTERVAL);
             if READY.load(Ordering::Relaxed) {
                 let word = activity::current();
-                activity::read_frames(&mut owners, &mut names);
-                samples.record(word, &owners, &names, global);
+                activity::read_frames(&mut owners, &mut names, &mut bodies);
+                samples.record(word, &owners, &names, &bodies, global);
             } else {
                 samples.startup += 1;
             }
@@ -207,9 +221,11 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope 
         return activity::no_frame();
     }
     let owner = crate::dispatch::top_env(function.tag());
+    let body = crate::bytecode::closure_body(function).as_ptr() as usize;
     let owner = {
         let mut labels = lock(&OWNER_LABELS);
-        match labels.get(&(owner.as_ptr() as usize)) {
+        *labels.entries.entry(body).or_insert(0) += 1;
+        match labels.owners.get(&(owner.as_ptr() as usize)) {
             Some(&label) => label,
             None => {
                 let name = if owner == values::global_env() {
@@ -218,7 +234,7 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope 
                     crate::envir::namespace_name(owner).unwrap_or_else(|| "other".to_owned())
                 };
                 let label = activity::label(&name);
-                labels.insert(owner.as_ptr() as usize, label);
+                labels.owners.insert(owner.as_ptr() as usize, label);
                 label
             }
         }
@@ -235,14 +251,25 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope 
     } else {
         0
     };
-    activity::push_frame(owner, name)
+    activity::push_frame(owner, name, body)
 }
 
-/// Owner labels by environment address. Namespaces and the global environment live for the whole
-/// session, so an address names one owner; another top level (an environment `sys.source` used)
-/// can be freed and its address reused, which at worst merges two such owners under "other".
-static OWNER_LABELS: Mutex<FxHashMap<usize, u32>> =
-    Mutex::new(FxHashMap::with_hasher(rustc_hash::FxBuildHasher));
+/// What closure calls record while a summary is collected.
+struct Calls {
+    /// Owner labels by environment address. Namespaces and the global environment live for the
+    /// whole session, so an address names one owner; another top level (an environment
+    /// `sys.source` used) can be freed and its address reused, which at worst merges two such
+    /// owners under "other".
+    owners: FxHashMap<usize, u32>,
+    /// Entries by closure body address. A body freed and reallocated elsewhere merges with the
+    /// new one, which only matters for closures built and dropped at run time.
+    entries: FxHashMap<usize, u64>,
+}
+
+static OWNER_LABELS: Mutex<Calls> = Mutex::new(Calls {
+    owners: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
+    entries: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
+});
 
 /// Marks the end of start-up: samples after this count toward the time split.
 pub fn mark_ready() {
@@ -614,6 +641,77 @@ fn report(
                 seconds(count)
             )?;
         }
+    }
+
+    // The tier-up threshold, so the last bucket is the bodies that compile.
+    const BUCKETS: [(&str, u64); 4] = [
+        ("under 10", 10),
+        ("10 to 99", 100),
+        ("100 to 2,999", 3000),
+        ("3,000 or more", u64::MAX),
+    ];
+    let mut bucketed = [[0u64; Activity::ALL.len()]; BUCKETS.len() + 1];
+    let mut bodies_in = [0u64; BUCKETS.len()];
+    let entries = std::mem::take(&mut lock(&OWNER_LABELS).entries);
+    for &entered in entries.values() {
+        if let Some(index) = BUCKETS.iter().position(|&(_, below)| entered < below) {
+            bodies_in[index] += 1;
+        }
+    }
+    for (&body, counts) in &samples.bodies {
+        let bucket = match entries.get(&body) {
+            Some(&entered) if body != 0 => BUCKETS
+                .iter()
+                .position(|&(_, below)| entered < below)
+                .unwrap_or(BUCKETS.len() - 1),
+            _ => BUCKETS.len(),
+        };
+        for (slot, count) in bucketed[bucket].iter_mut().zip(counts) {
+            *slot += count;
+        }
+    }
+    writeln!(
+        out,
+        "\n## Time by how often the innermost closure body was entered\n"
+    )?;
+    writeln!(
+        out,
+        "A sample counts toward the closure it is running in, whatever it does there. Entries are \
+         totals for the whole run, counted per body.\n"
+    )?;
+    writeln!(
+        out,
+        "| entries | bodies | share | tier 0 | tier 1 | AST evaluator | builtins | call setup | \
+         native | collector | other |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    )?;
+    for (index, counts) in bucketed.iter().enumerate() {
+        let sum: u64 = counts.iter().sum();
+        let part = |activities: &[Activity]| -> u64 {
+            activities
+                .iter()
+                .map(|&activity| counts[activity as usize])
+                .sum()
+        };
+        let named = [
+            Activity::Interpreter,
+            Activity::Compiled,
+            Activity::Evaluator,
+            Activity::Builtin,
+            Activity::CallSetup,
+            Activity::Native,
+            Activity::Collector,
+        ];
+        let label = BUCKETS
+            .get(index)
+            .map_or("outside closures", |&(label, _)| label);
+        let bodies = bodies_in
+            .get(index)
+            .map_or_else(String::new, u64::to_string);
+        write!(out, "| {label} | {bodies} | {:.1}% |", percent(sum))?;
+        for activity in named {
+            write!(out, " {:.1}% |", percent(part(&[activity])))?;
+        }
+        writeln!(out, " {:.1}% |", percent(sum - part(&named)))?;
     }
 
     writeln!(out, "\n## Builtins by time (top 30)\n")?;

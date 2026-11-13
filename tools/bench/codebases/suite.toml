@@ -1,0 +1,32 @@
+id = "codebases"
+name = "Benchmark code bases"
+summary = "the three 300,000-line synthetic code bases (finance, data science, biostatistics), each running its own testthat suite"
+description = """
+`tools/bench/tooling/generate.py --lines 300000 --files 500 --seed 1` writes three R packages of about
+305,000 lines in 500 files each, with the dependency set that AGENTS.md lists and about 10,000
+`test_that()` blocks each. A program here is one code base. A run loads the package and runs every
+block one at a time (`oracle bench`, which loads it through `ry load` on both engines), and the time
+is the sum of the blocks' own times, so loading the package and testthat's per-file `gc()` stay out.
+Both engines run in the same rounds, and ry runs with and without the JIT. Every block's time is also
+kept: a row records the geometric mean over blocks of GNU R's median time over ry's, for blocks GNU R
+runs in 1 ms or more. The result is checked by the number of passing blocks, which must agree.
+"""
+generator = { lines = 300000, files = 500, seed = 1 }
+
+[[programs]]
+id = "finbench"
+display = "Finance"
+domain = "finance"
+summary = "pricing, portfolio construction, risk and market-data adapters"
+
+[[programs]]
+id = "dsbench"
+display = "Data science"
+domain = "datascience"
+summary = "table pipelines, features, models and serving"
+
+[[programs]]
+id = "biobench"
+display = "Biostatistics"
+domain = "biostatistics"
+summary = "trials, survival, genetics and assay analysis"

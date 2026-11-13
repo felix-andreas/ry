@@ -157,6 +157,51 @@ private 300,000-line code base as about 3% slower. The block times above are the
 first figure and point the other way, and nothing in the repository says which describes the
 current tree ("Blind spots" below).
 
+### Where the full-size code bases spend their time
+
+`tools/bench/codebases/` times the three 300,000-line code bases as a suite (`just bench codebases`):
+per code base the sum of the test blocks' times on GNU R, on ry and on ry with `RY_JIT=off`, and per
+block the geometric mean of GNU R's time over ry's. `oracle bench --ry-only` with `RY_PROFILE_SUMMARY`
+gives one profile per code base. The runs used a library without 37 of the 72 dependencies (finbench
+lacks `httr`, `rugarch`, `rmgarch` and others; the generator moves them to `Suggests`), so the shares
+are indicative, and the profiler's sampling costs about 2% of the time.
+
+| Share of ry's time | finbench | dsbench | biobench |
+| --- | ---: | ---: | ---: |
+| **By namespace (self time)** | | | |
+| base | 47.6% | 42.9% | 48.6% |
+| rlang | 7.5% | 13.5% | 11.4% |
+| the code base itself | 3.9% | 5.5% | 7.4% |
+| stats | 2.6% | 8.4% | 2.5% |
+| xts | 16.1% | | |
+| data.table | 2.9% | 7.0% | 2.5% |
+| testthat and waldo | 5.6% | 8.0% | 7.9% |
+| methods and utils | 2.5% | 2.7% | 2.5% |
+| **By activity** | | | |
+| tier 0 bytecode | 35.4% | 36.8% | 35.4% |
+| builtins | 33.3% | 29.8% | 32.3% |
+| closure call setup | 12.4% | 13.5% | 13.5% |
+| native code | 6.2% | 8.8% | 5.0% |
+| S3 method lookup | 3.4% | 2.1% | 3.0% |
+| AST evaluator | 2.6% | 3.2% | 4.3% |
+| garbage collection | 1.9% | 2.0% | 2.6% |
+| tier 1 (JIT code) | 1.2% | 0.1% | 0.1% |
+| **By entries of the innermost closure body** | | | |
+| under 10 | 4.4% | 6.4% | 7.5% |
+| 10 to 99 | 0.6% | 0.2% | 0.4% |
+| 100 to 2,999 | 6.4% | 11.8% | 11.1% |
+| 3,000 or more (the tier-up threshold) | 88.6% | 81.6% | 80.9% |
+
+Cold bodies hold little of the time: bodies entered fewer than 100 times, the ones an install-time
+optimizer would compile ahead of use, hold 5% to 8%, and every body below the threshold together
+11% to 19%. The hot bodies (500 to 580 per code base) hold 81% to 89%, but their time stays in
+tier 0 (28% to 31% of all time), builtins (23% to 29%) and call setup (12%), and tier 1 runs 0.1%
+to 1.2% of the total, because the profitability gates leave nearly all of those bodies in tier 0
+(`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). More
+compilation of hot bodies is therefore where the time is, and it needs call setup and builtin
+dispatch to get cheaper, since bodies full of calls into `base` are what is hot. Counting entries
+per body is `--profile-summary`'s "Time by how often the innermost closure body was entered".
+
 ### Typed ry against Rust
 
 The typed runtime's bar is 1.5 to 2 times the time of equivalent Rust (`typed-runtime.md`). The
@@ -200,11 +245,11 @@ published record for application-shaped code is far from that:
 
 | System | What it does | Result | Source |
 | --- | --- | --- | --- |
-| Ř | Speculative inlining, deoptimization, environment and promise elision, contextual dispatch, on GNU R's runtime and builtins | 1.80x over GNU R 4.1 on real programs (0.74x to 18.3x), 3.23x on are-we-fast-yet, 1.70x on shootout; the first in-process iteration runs at 0.37x to 0.50x | [Flückiger's thesis, 2022](https://janvitek.org/pubs/fluckiger-phd-22.pdf) |
+| [Ř](https://github.com/reactorlabs/rir) | Speculative inlining, deoptimization, environment and promise elision, contextual dispatch, on GNU R's runtime and builtins | 1.80x over GNU R 4.1 on real programs (0.74x to 18.3x), 3.23x on are-we-fast-yet, 1.70x on shootout; the first in-process iteration runs at 0.37x to 0.50x | [Flückiger's thesis, 2022](https://janvitek.org/pubs/fluckiger-phd-22.pdf) |
 | Ř | The same, measured earlier | "ranges from a 0.7× slowdown to a 46× speedup, with the overall speedup being 1.7×" over 59 programs | [OOPSLA 2020](https://janvitek.org/pubs/oopsla20-cd.pdf) |
-| rcp | Copy-and-patch compilation of GNU R's bytecode | 1.26x geometric mean, 1.23x on its real programs | [VMIL 2025](https://ch-rigid.github.io/publications/kocourek_copyandpatch_2025.pdf) |
+| [rcp](https://github.com/PRL-PRG/r-compile-server) | Copy-and-patch compilation of GNU R's bytecode | 1.26x geometric mean, 1.23x on its real programs | [VMIL 2025](https://ch-rigid.github.io/publications/kocourek_copyandpatch_2025.pdf) |
 | GNU R's own compiler | Bytecode over the AST interpreter | 5.7x to 7.1x on scalar loops, but "Function calls use the (slow) interpreter mechanism" | [Tierney, 2019](https://stat.uiowa.edu/~luke/talks/Riot-2019.pdf) |
-| Purdue FastR | A Java AST interpreter with specialization | 8.5x on shootout, 1.7x on Benchmark 25, "explained by the preponderance of native calls" | [VEE 2014](https://janvitek.org/pubs/vee14.pdf) |
+| Purdue [FastR](https://github.com/oracle/fastr) | A Java AST interpreter with specialization | 8.5x on shootout, 1.7x on Benchmark 25, "explained by the preponderance of native calls" | [VEE 2014](https://janvitek.org/pubs/vee14.pdf) |
 | HHVM | A region JIT with profile-guided inlining, on a warm server whose code carries type hints | The interpreter runs facebook.com at 12.8% of the JIT's speed, so the JIT is worth 7.8x | [PLDI 2018](https://research.facebook.com/file/529018501538081/hhvm-jit-a-profile-guided-region-based-compiler-for-php-and-hack.pdf) |
 | V8 | TurboFan over the Ignition interpreter | 4.35x on JetStream, "over 1.5x" on Speedometer, the suite shaped like application code | [v8.dev, Maglev](https://v8.dev/blog/maglev) |
 | YJIT | A production JIT for Ruby, which also keeps a C extension API | 15% on Shopify's storefront in production, against about 65% on railsbench for the same release | [Rails at Scale, September 2023](https://railsatscale.com/2023-09-18-ruby-3-3-s-yjit-runs-shopify-s-production-code-15-faster/), [December 2023](https://railsatscale.com/2023-12-04-ruby-3-3-s-yjit-faster-while-using-less-memory/) |
@@ -865,6 +910,59 @@ Each lever has one cheap measurement that could kill it.
 One more measurement comes before all of them: run the three full-size code bases on a release
 build and publish the result as a suite. It is the benchmark `AGENTS.md` defines, and
 `benchmarks.mdx` has no number for it.
+
+## Is the benchmark suite right?
+
+The mandate's workload is three code bases of about 300,000 lines each, whose tests are mostly cold
+code, package calls and data frames. Measured against that, the published suites lean toward hot
+numeric loops.
+
+**What the suites hold.** Of the public suite's 54 programs, 33 are variants of 11 Benchmarks Game
+algorithms, 16 are the rcp micro-benchmarks and convolutions (each a single tight loop), and 5 are
+Are We Fast Yet ports. The 16 kernels are numeric by definition. Only the 15 application workloads
+and the 26 package test suites resemble the mandate's code, and the package suites are the only ones
+that load real packages. The evidence that the loop suites mislead is in this page's own figures:
+the public suite and the kernels sit at 2.66x and 4.8x over GNU R, while package test suites and
+application workloads sit near 2x ("The ceiling on untyped R"), and the Ř and rcp papers report the
+same gap between their loop programs and their real programs.
+
+**Well-known programs ry does not run.**
+
+- **Ř's real-program set.** The OOPSLA 2020 evaluation measured 59 programs, and the
+  [rbenchmarking](https://github.com/reactorlabs/rbenchmarking) repository holds Ř's harness. The
+  vendored suite carries the loop programs but not the larger real programs, which are the part of
+  that evaluation closest to application code. Unverified: which of them are redistributable.
+- **R Benchmark 2.5**, the [matrix and linear-algebra script](https://mac.r-project.org/benchmarks/R-benchmark-25.R)
+  that FastR's VEE 2014 paper reports (1.7x there, "explained by the preponderance of native calls").
+  It measures BLAS and LAPACK, so it says little about the interpreter, but other R implementations
+  quote it, and it is one file.
+- **FastR's own benchmark programs** (a ray tracer and similar). Unverified: their contents and
+  licences; the FastR repository is the place to check.
+- **Data-frame and `dplyr`-style workloads**, and `data.table` against `DataFrame` on the public
+  db-benchmark groupings. `tables` is one application program, and `data.table` is the only
+  data-frame package in the package suites. The mandate's finance and data-science code bases are
+  dominated by this code.
+- **Package load and cold start**: `library()` of the mandate's heavy imports (`devtools`, `httr2`,
+  `rlang`, `cli`) and the first call of each. The suites run warm, so they cannot see it.
+
+pqR, Renjin, Riposte and TERR publish no suite of their own beyond R Benchmark 2.5 and the
+Benchmarks Game (unverified), so there is nothing further to import from them.
+
+**Recommendation.**
+
+1. Make the three code bases the headline suite, as the first item after "What to measure first"
+   already asks. A suite that does not run the mandate's workload cannot stand for it.
+2. Report the package test suites and application workloads as the primary public pair, and name them
+   first on `benchmarks.mdx`.
+3. Keep the public JIT suite as a compiler-research comparison: report it by group (Are We Fast Yet,
+   Benchmarks Game, micro-benchmarks) and weight each Benchmarks Game algorithm once, not once per
+   variant, so the 33 variants do not outvote everything else.
+4. Keep the kernels as a diagnostic for the JIT tiers, not as a headline.
+5. Add R Benchmark 2.5, a data-frame suite, and a cold-start suite that times `library()` and the
+   first call.
+6. Take the headline as the geometric mean over the code-base suites, with the package and
+   application suites beside it, and show the worst program of each suite next to its mean, because
+   a mean over many programs hides the slow ones.
 
 ## Blind spots
 

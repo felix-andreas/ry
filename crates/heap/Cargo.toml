@@ -21,3 +21,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 syntax = { path = "../syntax" }
+
+# cargo-fuzz builds with `--cfg fuzzing`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

@@ -63,6 +63,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - After each release, append rows to the progress dashboard (`releasing.md`, "The progress dashboard"). Its `cran_popular` dataset is empty ("Open: the CRAN package corpus").
 - The Zed extension is not in Zed's registry, and the `VSCE_PAT` fallback for the VS Code Marketplace stops working on December 1, 2026 (`releasing.md`).
 - CI runs only on manual dispatch (user decision), and the orchestrator starts it on main when main has new commits (`decisions.md`, "CI runs in the flake's dev shell").
+- `.github/pending/test.yml` (the tests that need no GNU R and a 60-second pass of every fuzz target that builds without Polars, started by hand or by a release, never on a push) and the release workflow's dependency on it wait for the user's `git pull && just accept` (`decisions.md`, "The tests that need no GNU R run by hand and gate a release, never on push").
 
 ## Long-term
 
@@ -133,7 +134,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - **A composite type past `TYPE_SIZE_CEILING` records as `Unknown`** (`Checker::record`), or a record whose fields return that record grows tenfold per level. `types::type_size` counts paths, not nodes.
 - **A query that reads a syntax tree keeps a small memoized result and is warmed in `diagnostics::derive_from_syntax`**, or it walks other files' trees on the checking threads (`decisions.md`, "Syntax trees are evicted, and only small syntax facts are memoized").
 - **Every host runs the same queries; never add a lookup that only the command or only the server takes.** A host chooses the capacity of its `TreeStore` and `Db::editor_facts`, nothing else. Syntax trees live in that store, so no query may memoize a file's tree or an `ItemSyntax` window (the detached subtree of an annotation is the one syntax a memo keeps), and a command's pass that derives from a file's tree holds the file (`TreeStore::hold`) (`decisions.md`, "Decision record: every host resolves names through one path, and trees live in the host's store").
-- **A check reaches other items through `item_links`, the per-name queries and `file_interface_groups`.** A new per-(item, name) memo for names nothing binds costs about 100,000 memos on a 300,000-line project, so filter by `package_name(..).bound` first.
+- **A check reaches other items through `item_links`, the per-name queries and `file_interface_groups`.** A new per-(item, name) memo for names nothing binds costs about 100,000 memos on a 300,000-line project, so answer from the layer of the item's file first (`package_name`, `test_name`), as `SalsaGlobals::unlinked_bindings` does, and never from a fold over every file.
 - **Server inputs are `Durability::MEDIUM`, except open documents and `ProjectFiles` (`LOW`), and every setter names its durability.** One `LOW` input that most memos read turns each keystroke into a project-wide verification (`decisions.md`, "Decision record: editor responsiveness at 300,000 lines").
 - **Salsa clears a handle's cancellation flag whenever a top-level query returns**, so background work that must yield polls `CancelHandle::has_queued_jobs` between units (`Worker::in_parallel`).
 - **Editor budget: keystroke-to-diagnostics p50 at most 30 ms and p95 at most 100 ms at 300K lines** (`test_perf.rs`, `just perf`).
@@ -244,6 +245,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - **A new dev-dependency feature goes into `crates/features`**, or building and testing compile two dependency trees (`decisions.md`, "Workspace-wide feature unification").
 - **A full disk shows up as a test-build failure** (ENOSPC, or a Bus error at link). Run `just prune` first; a cloud container's quota is about 40 GB whatever `df` says.
 - **CI is `nix develop .#ci -c just ci`.** Reproduce a failure in that shell, and change CI in the `ci` recipe or `flake.nix` (`decisions.md`, "CI runs in the flake's dev shell").
+- **A crash is never a known failure.** The oracle counts a case whose engine was killed by a signal as new under every engine, even when `known_failures.toml` lists it, and the file has no intermittent mark (`decisions.md`, "A crash is never a known failure").
 - **Agent containers are provisioned by `tools/dev-setup.sh`, and `flake.nix` inputs stay `git+https`** (`decisions.md`, "Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell", "Flake inputs are git URLs").
 - **Nightly releases are GitHub pre-releases with `--latest=false`, and the Zed extension reads full releases only** (`pre_release: false`, `editors/zed/src/lib.rs`). Zed matches the flag exactly, so the two move together.
 - **BOLT's `-use-gnu-stack` overwrites libR's `PT_GNU_STACK` header, and glibc 2.41+ refuses a library without it.** `tools/layout/optimize.sh` restores it (`gnu_stack.py`), and `just package` checks.

@@ -288,7 +288,7 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | `just gc-torture [young]` | Every oracle case under collection stress, or under `RY_GC_STRESS=young`. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |
-| `just fuzz-all SECONDS` | Every `cargo fuzz` target for `SECONDS` each, after seeding the corpora. |
+| `just fuzz-all SECONDS [FEATURES]` | Every `cargo fuzz` target for `SECONDS` of wall clock each, after seeding the corpora and building the targets. `FEATURES` limits the targets: `runtime` leaves out the two that link Polars. |
 | `just docs-test [PAGE]` / `just docs-bless [PAGE]` | The docs examples, or a rewrite of their exact output from the real tool. |
 
 ### The deep campaign

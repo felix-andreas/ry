@@ -7919,7 +7919,19 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
 - **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R is installed because the runtime's suites skip without an installation, which would leave the runtime untested. It is 4.6.2, the release the oracle's expectations are recorded with and ry bundles as its base R (the live `ci.yml` still installs 4.3.3 until `.github/pending/ci.yml` is accepted). The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
 - **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits.
+- **The tests that need no GNU R follow the same rule.** The staged `test.yml` starts by hand or from a release, never on a push ("The tests that need no GNU R run by hand and gate a release, never on push").
 - **Impact.** CI covers every crate except `zed_ry` (wasm), at most once an hour on main, or on any ref when started by hand.
+
+## The tests that need no GNU R run by hand and gate a release, never on push
+
+**Status:** planned. Both workflow files are staged in `.github/pending/` and run nothing until the user runs `just accept`.
+
+- **Triggers (user decision).** CI stays manual-only, to avoid flooding GitHub's infrastructure with runs: agents commit to main many times an hour. `test.yml` triggers on `workflow_dispatch` and `workflow_call`, and a `push` trigger is ruled out. Between releases the tests run locally (`just gate`, or `just test-fast` and `just fuzz-all 60 runtime` for the part that needs no GNU R) or when someone starts the workflow.
+- **Previous source of truth.** `ci.yml` is the only workflow that runs a test, and it starts by hand. `release.yml` builds and publishes with no test, and the libFuzzer targets in `fuzz/` run only when someone types `just fuzz-all`.
+- **What was weak.** Nothing stood between a push and a release. A regression in the fixture suites reached a tag unless someone had started the gate on that commit, and a fuzz target could stop building without anyone noticing.
+- **Target shape.** `test.yml` has two jobs, each one `just` recipe, so each also runs locally. `tests` runs `just test-fast`: every test of the crates that build without the interpreter, libR and Polars (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `oracle`, `rcmd`, `repl`, `ry-lang`). The job first checks that the runner has no `R`, so a test that compares with GNU R or runs ry's runtime skips instead of running against whatever R the image ships. `fuzz` runs `just fuzz-all 60 runtime`, every libFuzzer target that builds without Polars (15 of 17) for 60 seconds of wall clock each, and uploads a failing input. The bound is `timeout`, and a target interrupted at the bound has passed: libFuzzer's `-max_total_time` counts only after the whole corpus is replayed, which takes `ide` about 15 minutes for its 5,300 seeds, so it cannot bound a run. Seeds replay in random order, so a slow target reads a different sample on each run. Every target runs before the job fails. The fuzz crate's features are split for this: `runtime` is the interpreter's targets, and `polars` is `csv` (through `table`) and `unserialize` (through `libr`). Built with coverage instrumentation, Polars does not fit a 15 GB container with four build jobs (the compiler is killed on `polars-core` past 7 GB), so those two targets run only where someone builds them by hand. The file triggers by hand and as a called workflow: the staged `release.yml` calls it and `publish` needs it, so a tag whose tests fail publishes nothing. `nightly.yml` is not gated, because a nightly is a hand-started build of any ref and main may be broken.
+- **Why a second workflow and not a job in `ci.yml`.** The full gate builds GNU R in the flake's shell and runs the oracle. `test.yml` needs neither Nix nor R, so it is the part a release can afford to wait for on a hosted runner, and the part a maintainer can start for a quick answer.
+- **Impact.** A release cannot publish while a fixture suite, a test of those crates or a fuzz target fails. Nothing in CI catches a regression between releases unless someone starts a workflow, so the local gate is the check that runs on every change. `test.yml` does not replace the gate, because the runtime, the oracle and everything else that compares ry with GNU R are tested only there.
 
 ## Alias cycles are reported at the declaration, and short names get narrow suggestions
 
@@ -8485,41 +8497,59 @@ Each one trades a narrow class of missed errors for a class of false reports see
     maps, in parallel arrays (one row per name, one per binding), and holds the item's interface
     edges and whether its file belongs to the project. It is the item's projection of the
     project-wide maps and backdates unless one of the item's names moved.
-  - A name the check constructs (mostly S3 method names) goes through `package_name`,
-    `test_name` and `frame_binder`. `package_name` also carries whether any project file binds
-    the name, from a symbol-indexed bitset (`project_binders`), and an unbound name skips the
-    `frame_binder` query.
+  - A name the check constructs (mostly S3 method names such as `+.Date`) goes through
+    `package_name`, `test_name` and `frame_binder`. An item of a package file in the project
+    skips `frame_binder` for a name the package layer does not bind. Every named item is a
+    definition, and every other top-level write is a conditional write, so the package layer
+    lists each top-level name a package file binds, and a name it does not list has no binder
+    in the file. The verdict costs no query beyond `package_name`. The helper files' layer
+    (`test_name`) holds a helper file's names the same way, so an item of a helper file skips
+    `frame_binder` on the same test. A test file or a script has no layer over its own names
+    and asks `frame_binder`, which reads the binders of its own file.
   - `file_interface_groups(file)` is one Tarjan walk from the file's items, and an item finds its
     group by its position in the item tree.
   - `SalsaGlobals` keeps one column of resolved schemes indexed by link position, because
     resolving a scheme copies it. The other three caches are gone.
-- **Rejected.** A per-file name-set dependency instead of the bound bit was coarser (any new name
-  in the file re-checks its items). Keeping the edges in their own query cost a second memo per
+- **Rejected.** A project-wide set of bound names, folded from the binders of every file and
+  read by `package_name`, answered "bound anywhere?" for every kind of file, and it was built
+  first. A file's binders need the top-level names of every item that writes a name besides
+  its own, so the fold lowered and named those items in all 1,006 files of the finance bench
+  before the first file's check could finish: one package file's cold diagnostics ran
+  `file_binders` 1,006 times and `item_hir` 9,905 times, most of them for test and script files
+  a package file never sees. It also broke the rule that a check reads a per-name or per-item
+  projection, never a fold over the project. A per-file name set read by the check was coarser
+  (any new name in the file re-checks its items). A `frame_binder` memo per constructed name
+  costs about 100,000 memos (18 MB) on the finance bench, nearly all for names nothing binds.
+  Keeping the edges in their own query cost a second memo per
   item for a value derived from the same inputs. One per-file query for all items' links would
   remove the per-item firewall that keeps a body edit to one item.
 - **Correctness.** Under `enable_invariants()` every linked lookup is compared with the per-name
   answer, every unbound verdict with `frame_binder`, and every item's group with a walk from the
-  item alone. `test_incremental.rs` pins the query counts and that a diagnostics-only host
-  reports what an editor host reports.
+  item alone. `test_incremental.rs` runs that comparison, for a package file and for a helper
+  file, over each way a file binds a name its own check constructs: a definition, a
+  conditional write, a chained write, a write inside a call's argument and a write in a loop.
+  Each of those cases fails when the verdict ignores the winner or the conditional writers.
+  The test also pins the query counts, that a package file's check
+  reads the binders of its own file alone and lowers no item of another file, and that a
+  diagnostics-only host reports what an editor host reports.
 - **Simplicity.** `Db::one_shot`, `NameLookup`, `projected_name_layer`, `project_interface_groups`,
   `interface_group`, `item_interface_reads`, `item_frame_binders`, `parse_memo`,
   `item_syntax_memo`, `with_held_tree` and the `SpliceCache` type are gone.
 - **Performance.** On the finance bench (4 cores, `ry check --no-cache`, seven interleaved
-  runs of each build), wall time is 0.76 to 0.80 s against 0.72 to 0.77 s with the two paths,
-  CPU time is 2.8 to 2.9 s against 2.6 to 2.8 s, and peak RSS is 252 MB against 244 MB. The
-  first single-path build peaked at 276 MB: about 100,000 per-item `frame_binder` memos for
-  constructed names that nothing binds, which the bound bit removes. In the server, a body edit
-  and a signature edit settle in 3 to 4 ms and a new top-level definition in 6 to 7 ms at the
-  median on both builds, and a request right after an edit takes the same time on both (hover
-  1.5 to 2.0 ms). Opening a file costs more: its diagnostics settle in 24 ms against 16 ms on
-  an idle server, and in 100 to 130 ms against 41 to 44 ms for the file open at start-up
-  (`backlog.md`, "Open: the analysis core after the single lookup path").
+  runs of each build), the median wall time is 0.71 s (0.68 to 0.74) against 0.70 s (0.66 to
+  0.72) with the two paths, CPU time is 2.61 s against 2.57 s, and peak RSS is 248 MB against
+  237 MB. The extra memory is the per-item `item_links` memos. In the server
+  (`tools/bench/tooling/lsp_latency.py`, six runs of each build), a body edit and a signature
+  edit settle in 3 ms and a new top-level definition in 5 to 6 ms at the median on both builds.
+  A file opened on an idle server settles its diagnostics in 13 ms at the median on both
+  builds. The file open at start-up settles in 44 ms at the median (38 to 46) against 38 ms
+  (35 to 52) (`backlog.md`, "Open: the analysis core after the single lookup path").
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
   so the re-check stays with the readers of the name. A file's groups list items, not positions
   in the file, so the value stays equal when a statement is added beside a recursive function.
-  An item's links read the project's file list for "is my file in the project", never the
-  bound-names bitset, so a name a test or script adds re-runs no package item's links.
+  An item's links read the project's file list for "is my file in the project" and no fold
+  over the project's names, so a name a test or script adds re-runs no package item's links.
 
 ## The standard library is the `std` namespace, with an optional prelude
 
@@ -10552,13 +10582,23 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Previous shape.** Each track learned which oracle failures main already had from messages between sessions, so a branch could not tell an inherited failure from its own regression without rerunning main, and a fixed case stayed "known" in people's heads.
 - **Target shape.** `crates/oracle/known_failures.toml` lists each case and engine main fails, with the area of ry the bug lives in and a one-line reason (`provisional` while it is seen only on a branch). `oracle compare` (which takes a comma-separated engine list and prints one summary line per engine) and `second_engine_matches_gnu_r` report a listed failure as known and fail on an unlisted failure or on a listed case that passes, so the fix and the entry's deletion land together. The oracle refuses an entry with an unknown engine, a missing case or a duplicate. `ry-jit-gctorture` (`RY_JIT=force` plus `RY_GC_STRESS=1`) is a named engine because compiled code that drops a root shows up only with both on.
 
-## A known oracle failure may be intermittent under a gctorture engine
+## A crash is never a known failure
 
 **Status:** built.
 
-- **Previous shape.** Every listed case that passed failed the run as a stale entry. `print__deparse_undefined_s4_class` under `ry-jit-gctorture` segfaults when the engine loads base R from GNU R's home and passes with ry's own home, so the same main was red on some hosts and green on others whether or not it was listed.
-- **Target shape.** `intermittent = true` on an entry in `crates/oracle/known_failures.toml` makes a passing case count as passed, on its own summary line (`<engine>: intermittent, passed here: N`), instead of failing the run. `verdict` and `fails_run` in `crates/oracle/src/oracle.rs` are the one place `oracle compare` and `second_engine_matches_gnu_r` decide this. `parse_known_failures` refuses the mark outside `GC_TORTURE_ENGINES`, because only a collector-stress crash depends on where the collector runs. `provisional` is a separate property.
-- **Limit.** A beta release still needs the file empty, intermittent entries included (`development/releasing.md`, checklist), so the mark postpones a fix but cannot hide one at a release.
+- **Previous source of truth.** `intermittent = true` on an entry in `crates/oracle/known_failures.toml` let a listed case under a gctorture engine pass on some hosts without failing the run, and a listed case that crashed counted as known like any other failure. Two segfaults under `ry-jit-gctorture` carried the mark: `print__deparse_undefined_s4_class`, which crashed when the engine loaded base R from GNU R's home, and `s4__native_definitions`, which crashed with ry's own home.
+- **What was weak.** The mark recorded a memory-safety bug as host noise. The fix for the crashes traced both to one cause: a compiled body hands tier 0 an unwind by parking it in its activation, and the collector did not trace activations, so the value a `return()` carried was freed by a collection during the deoptimization exit that followed. Which home supplied base R only moved where the collections fell.
+- **Target shape.** The collector traces every running activation's parked unwind (`Interp::held_unwinds`, pinned by `a_parked_return_value_survives_its_exit` in `crates/jit/tests/test_tiers.rs`). `KnownFailure` has no `intermittent` field, and `parse_known_failures` refuses an entry that carries the key. The oracle tells a crash from a failure (`CaseRun` in `crates/oracle/src/oracle.rs`): a case whose engine was killed by a signal prints as `CRASHED` and gets the verdict `New` under every engine, listed or not.
+- **Impact.** A crash fails the run on every host until it is fixed, however rarely it reproduces, and no entry can excuse it. A known failure that is not a crash fails the run when the listed case passes, so a fix and its entry's deletion land together.
+
+## The serialize reader checks what a stream claims before it stores it
+
+**Status:** built.
+
+- **Previous shape.** `Reader` in `crates/interp/src/serialize.rs` trusted the stream, as GNU R's reader does. It allocated a vector of the length the stream gave, indexed the byte-code reference table with the stream's index, recursed once per nesting level, and stored whatever item came next as a symbol's name, a string's element, an attribute list, an environment or a binding's name.
+- **What was weak.** The heap takes an object's kind from the position that holds it, so a stream with another kind there left objects the collector and the accessors misread, and the damage outlived the read: one stream corrupted a collection during a later one. A made-up length asked for gigabytes, a reference index read and wrote outside the table, and deep nesting overflowed the stack. The libFuzzer target `interp_unserialize` found each of these in its first minutes of running.
+- **Target shape.** The reader refuses the stream with an R error at the first claim it cannot back. A length must fit in the rest of the input (`Reader::expect_elements`, for a read from memory), a reference must name a slot of its table (`reference_slot`), and each level of nesting runs through `on_large_stack`. An item read for a position that implies a kind is checked: `Reader::character` (a symbol's name, a string's element), `environment`, `attributes` (`NULL`, or a pairlist that ends in `NULL` and whose cells are named by symbols), `tag` (a cell's tag is `NULL` or a symbol, because calls and argument lists are read by tag without a check), `named_cells` for a closure's formals and `fill_frame` for an environment's bindings. `named_symbol` guards every read of a symbol's name, because the marker for an unbound value is a symbol without one. Three rules keep a stream out of runtime state: a promise keeps only the two bits GNU R writes (ry's other promise bits name a slot of a live frame), a promise without a value needs an environment, and a `wrap_*` ALTREP object must wrap a vector of its type, since the stream's attributes are set on the result and `NULL` or an environment is shared by the session. A byte-code reference table slot is filled after its cell is read, not before as in GNU R, so a cell cannot contain itself and every list a stream builds ends. A closure without an environment gets the base environment, as in GNU R. `crates/rdb` and `crates/libr` have their own readers of the format, which this record does not cover.
+- **Impact.** `unserialize()` and `readRDS()` on a damaged or hostile file fail with an error. GNU R reads a cell whose tag is not a symbol and fails later or never, so such a stream, which only C code can write, is refused here where GNU R accepts it. `crates/interp/tests/test_fuzz.rs` pins a stream for each check: `unserialize_refuses_an_object_of_the_wrong_kind` asserts that each is refused and that every stream GNU R wrote for libR's conformance cases reads (all but the two that need base R), under collection stress, where the pair of streams the fuzzer found aborts the test without the checks. `unserialize_keeps_a_stream_out_of_the_runtime_state` pins the promise bits and the reference table. Each check is a comparison per item, which a lazy-load fetch also pays.
 
 ## The oracle refuses a partial run and finds the corpus library itself
 

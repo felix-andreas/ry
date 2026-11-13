@@ -213,6 +213,66 @@ fn a_new_name_in_a_script_links_no_package_item_again() {
     );
 }
 
+/// A check constructs names no naming lists, such as the S3 method of an operand's class. In a
+/// package file the package layer answers whether the file can bind one, so the check reads the
+/// binders of its own file alone and lowers no item of a file it cannot see.
+#[test]
+fn a_package_check_reads_the_binders_of_its_own_file_alone() {
+    let db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let package = SourceFile::new(
+        &db,
+        "stamp <- function() Sys.Date() + 1L\n".to_owned(),
+        DocumentKind::Package,
+    );
+    let neighbour = SourceFile::new(
+        &db,
+        "width <- function() 3L\n".to_owned(),
+        DocumentKind::Package,
+    );
+    let test = SourceFile::new(
+        &db,
+        "test_that(\"it adds\", {\n  value <- 1L\n  expect_equal(value, 1L)\n})\n".to_owned(),
+        DocumentKind::Test,
+    );
+    ProjectFiles::new(&db, vec![package, neighbour, test]);
+    file_diagnostics(&db, package);
+    let [names, file_binders, frame_binders, lowered] =
+        db.executions_since(&["package_name", "file_binders", "frame_binder", "item_hir"])[..]
+    else {
+        panic!("four counts");
+    };
+    assert!(
+        names > 0,
+        "the check constructs a name and asks the package layer"
+    );
+    assert_eq!(
+        (file_binders, frame_binders, lowered),
+        (1, 0, 1),
+        "the check reads its own file's binders, keeps no memo for a name the package layer \
+         does not bind, and lowers its own item alone"
+    );
+}
+
+/// A test file has no layer over its own top-level names, so a name its check constructs is
+/// answered by the file's binders.
+#[test]
+fn a_test_file_asks_its_own_binders_for_a_constructed_name() {
+    let db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let test = SourceFile::new(
+        &db,
+        "stamp <- function() Sys.Date() + 1L\n".to_owned(),
+        DocumentKind::Test,
+    );
+    ProjectFiles::new(&db, vec![test]);
+    file_diagnostics(&db, test);
+    assert!(
+        db.executions_since(&["frame_binder"])[0] > 0,
+        "the file's binders answer a constructed name"
+    );
+}
+
 #[test]
 fn defining_a_missing_name_rechecks_its_readers() {
     let mut db = ProbeDatabase::default();
@@ -996,6 +1056,28 @@ fn link_invariants_child() {
         db.executions_since(&["package_name"])[0] > 0,
         "the cross-check consulted the per-name projections"
     );
+
+    // Each way a file binds a method name that a check of the same file constructs. Its layer
+    // must list the name, or the cross-check in the constructed-name lookup panics. The last
+    // source binds none of the names it constructs.
+    let sources = [
+        "`+.Date` <- function(e1, e2) e1\nstamp <- function() Sys.Date() + 1L\n",
+        "if (interactive()) sum.matrix <- function(x, ...) 1L\ntotal <- function() sum(matrix(1:4, 2))\n",
+        "Summary.matrix <- Arith.matrix <- function(...) 1L\nshifted <- function() matrix(1:4, 2) + sum(matrix(1:4, 2))\n",
+        "tryCatch(`-.POSIXct` <- function(e1, e2) 1L, error = identity)\nelapsed <- function() Sys.time() - Sys.time()\n",
+        "for (step in 1:2) `+.matrix` <- function(e1, e2) e1\nadded <- function() matrix(1:4, 2) + 1L\n",
+        "unbound <- function() Sys.time() - Sys.time() + sum(matrix(1:4, 2))\n",
+    ];
+    for kind in [DocumentKind::Package, DocumentKind::TestHelper] {
+        let db = ProbeDatabase::default();
+        install_shipped_stubs(&db);
+        let files: Vec<SourceFile> = sources
+            .iter()
+            .map(|&source| SourceFile::new(&db, source.to_owned(), kind))
+            .collect();
+        ProjectFiles::new(&db, files.clone());
+        settle(&db, &files);
+    }
 }
 
 #[test]
