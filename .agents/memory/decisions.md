@@ -4848,12 +4848,25 @@ check` releases its trees once, and memoized records are compact" below).
   by one per call: twenty `nrow(p)` calls on a classed list read a count of 20, and a loop that
   called `nrow(x)` between updates copied the column in every pass (100 passes over 4e6 rows:
   1.04 s, against 0.077 s with the count dropped at the detach and 0.071 s without the call).
-  The same promise had a second stale count when an earlier call had collected the reference
-  into its `...` (`cat(a)`, `paste(a)`, `list(...)`): that list counts the reference until a
-  reconcile frees it, which is after the pool reuses the reference. `pooled_reference` therefore
-  replaces a reference whose count is above the pool's own. The replacement costs one promise
-  and one three-integer target after a call that collected a variable into `...`, which already
-  allocated a list cell per argument.
+  `pooled_reference` also replaces a reference whose count is above the pool's own, which is one
+  that the `...` list of an unreleased frame still counts (next entry). The replacement costs
+  one promise and one three-integer target, and it is rare: only a frame whose call failed, or
+  one whose release waits for a reconcile, leaves such a count.
+- **A released frame empties its `...` list.** Previous shape: `clear_frame` and
+  `release_slots` (`heap.rs`) released a frame's promises but only read its `...` list to
+  release the promises inside, so the list kept its count on every argument. Weakness: the list
+  is garbage once its frame is released, and the collection that frees it lowers no count, so
+  the counts never came back. A pooled argument reference that `cat(a)`, `paste(a)` or
+  `list(...)` had collected stayed counted, and the next call that got the same reference from
+  the pool and detached it kept a promise no frame could release, with the argument's value
+  counted for good. Replacing every such reference in the pool hid that, at the price of a
+  promise and a target allocated on every call that followed a `...` call. Target shape:
+  `Heap::release_dots` walks the list of a frame being released, drops each cell's count on its
+  argument and empties the cell, and stops at a cell something else counts. Impact: a `...`
+  call returns the counts it took, so the pool reuses its references (a loop of 1e6 passes that
+  calls a `...` function and then a two-argument closure runs 26 collections, the same as
+  before the pool replaced anything), and a `:=` subject passed through `...` stays the sole
+  reference.
 - **Printing a value at top level rebinds it to `NULL` afterwards.** `print_value_top` and
   `print_dispatch` (`print.rs`) bind the value as `x` in an environment made for the one
   `print(x)` call. The collection that frees that environment lowers no count, so each printed

@@ -90,8 +90,9 @@ pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
         let print_env = values::new_env(env)?;
         crate::eval::define(x, value, print_env)?;
         let printed = eval::eval(call, print_env);
-        release_printed(print_env, x)?;
+        let released = release_printed(print_env, x);
         printed?;
+        released?;
         return Ok(());
     }
     let options = PrintOptions::defaults(env);
@@ -124,8 +125,9 @@ unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) 
         }
         let call = values::pairlist(&items, SexpType::Language)?;
         let printed = eval::eval(call, env);
-        release_printed(env, x)?;
+        let released = release_printed(env, x);
         printed?;
+        released?;
         return Ok(());
     }
     print_value(value, options, tag)

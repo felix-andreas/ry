@@ -723,10 +723,11 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
             heap.set_cdr(reference, symbol);
             reference
         }
-        // The list that collected this reference as the `...` of an earlier call counts it
-        // until a reconcile frees the list. Handed out with that count, the reference would
-        // not look held by its frame alone once a frame detached it ([`detach_reference`]), so
-        // the pool gives it up and makes another.
+        // A `...` list counts the references it collected until its frame is released
+        // (`Heap::release_frame`), which happens late for a frame that waits for a reconcile
+        // and never for the frame of a call that failed. Handed out with that count, the
+        // reference would not look held by its frame alone once a frame detached it
+        // ([`detach_reference`]), so the pool gives it up and makes another.
         Some(&counted) => {
             let (reference, target) = new_reference(symbol)?;
             counted.decrement_refcount();

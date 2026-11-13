@@ -37,7 +37,8 @@ use {
         object::{
             CARD_CLEAN, CARD_ELEMENTS, CARD_UNTENURED, CARD_YOUNG, EnvironmentObject, LARGE_CLASS,
             NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, TripleObject,
-            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
+            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size,
+            slot_for,
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
@@ -2527,16 +2528,7 @@ impl Heap {
             let value = cell.cdr();
             match value.kind() {
                 SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
-                SexpType::Dots if value.refcount() == 1 => {
-                    let mut dots = value;
-                    while matches!(dots.kind(), SexpType::Dots | SexpType::Pairlist) {
-                        let promise = dots.car();
-                        if promise.kind() == SexpType::Promise && promise.refcount() == 1 {
-                            self.release_promise(promise);
-                        }
-                        dots = dots.cdr();
-                    }
-                }
+                SexpType::Dots if value.refcount() == 1 => self.release_dots(value),
                 _ => {}
             }
             if value.release_reference() {
@@ -2584,13 +2576,34 @@ impl Heap {
         let nil = self.known.nil;
         for slot in slots {
             let value = *slot;
-            if value.kind() == SexpType::Promise && value.refcount() == 1 {
-                self.release_promise(value);
+            match value.kind() {
+                SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
+                SexpType::Dots if value.refcount() == 1 => self.release_dots(value),
+                _ => {}
             }
             if value.release_reference() {
                 self.note_zero(value);
             }
             *slot = nil;
+        }
+    }
+
+    /// Empties a `...` list that only a released frame held: every argument loses the list's
+    /// reference, and a promise nothing else holds gives up its value and environment too. The
+    /// list is garbage from here on, and the collection that frees it lowers no count, so an
+    /// argument left in it would look held for the rest of its life. A cell something else
+    /// counts ends the walk, because the rest of the list is not this frame's alone.
+    unsafe fn release_dots(&mut self, dots: Sexp) {
+        let nil = self.known.nil;
+        let mut cell = dots;
+        while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) && cell.refcount() <= 1 {
+            let argument = cell.car();
+            if argument.kind() == SexpType::Promise && argument.refcount() == 1 {
+                self.release_promise(argument);
+            }
+            self.release_field(cell, argument);
+            cell.set_car_unbarriered(nil);
+            cell = cell.cdr();
         }
     }
 
