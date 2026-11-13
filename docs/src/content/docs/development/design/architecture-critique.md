@@ -56,6 +56,16 @@ the right shape, but only a restart or a much later rewrite justifies it.
 | 11 | No workflow runs a test on push, the release workflow runs none, and 17 libFuzzer targets run nowhere. A segfault under GC torture was handled by marking it intermittent | A release job that fails on the fixture suites and a bounded fuzz pass. Treat a GC-torture crash as a blocker | S | When the broken-main phase ends. The segfault now |
 | 12 | `decisions.md` is 9,832 lines and mixes built shapes with planned ones. `MEMORY.md` is about 52,000 tokens with duplicated bullets | Mark each decision built or planned, mark superseded ones, and cut `MEMORY.md` to what one read can hold | S | Now. Every agent session pays for it |
 
+### Status
+
+A finding listed here is closed, and the text below it in this page describes the tree as the
+review found it.
+
+| # | Status |
+|-:|---|
+| 4 | Built. `interp` is the engine (126,000 lines) between `numeric` below it and the leaf crates `stats`, `graphics`, `frames` and `services` above it, and it links no Polars, reqwest, rustls or tiny-skia. An edit to `eval()` costs 82 s on `iterate` (95 s before) and 11 s on `dev`. Cargo recompiles every crate above an edited one, so the engine and its leaves still rebuild after an evaluator edit. The cut that shortens that loop puts the evaluator core above base's builtins, and `backlog.md` holds it under "Open: the evaluator's edit loop" |
+| 7 | Built. The loader's backend for ry's runtime is a module of `libr`, `loader` has no `runtime` feature, and `cargo tree -p ry-lang -i interp` finds nothing |
+
 ## The runtime
 
 ### One operation, many implementations

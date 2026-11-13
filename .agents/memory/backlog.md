@@ -48,16 +48,19 @@ The quality bar is four things.
 `decisions.md`, "The interpreter is an engine crate between a numeric crate and four leaf
 crates", has the shape and the measurements behind this list.
 
-- **Split the evaluator core from base's builtins.** The engine crate is 126,000 lines, and
-  optimizing it is 76 s of the 90 s that an edit to `eval()` costs on a non-incremental `iterate`
-  build (29 to 41 s incrementally). The evaluator core (`eval`, `bytecode`, `unwind`,
-  `conditions`, `dispatch`, `envir`) is about 30,000 of them. Calls cross that line in both
-  directions on hot paths: builtins call the evaluator (the apply family, `do.call`, dispatch),
-  and tier 0 calls builtin kernels directly (arithmetic, subsetting, coercion). Whichever crate
-  sits below reaches the other through `fn` pointers, and `iterate` inlines nothing across
-  crates, so measure the kernels on `iterate` and on release before choosing the direction.
-  This is also the natural place to start passing the interpreter state as an argument instead
-  of reading the global.
+- **Put the evaluator core in a crate above base's builtins.** Cargo recompiles every crate
+  above an edited one, so an edit to `eval()` rebuilds the engine's 126,000 lines (76 s of the
+  82 s loop on `iterate`) and then every leaf, `typed`, `jit` and `libr`. The evaluator core
+  (`eval`, `bytecode`, dispatch, closure application) is about 30,000 of those lines. Move it
+  into a crate that sits above the rest of the engine: the lower crate keeps values, coercion,
+  the unwinding types, environments, builtin registration and the builtins, and calls `eval`
+  and closure application through `fn` pointers (the apply family, `do.call`, dispatch). Tier 0
+  sits above and keeps calling builtin kernels directly, so no hot kernel call goes through a
+  pointer. The top crate re-exports the lower one so `interp::` paths keep working, and the
+  leaves depend on the lower crate, which takes them out of the loop. Measure `eval` reached
+  through a pointer from `lapply` and `do.call` on release before landing. This is also the
+  natural place to start passing the interpreter state as an argument instead of reading the
+  global.
 - **The regex engines and compression libraries stay engine dependencies.** They cost a cold
   build only, since a dependency compiles once. A leaf for base's string builtins would shorten
   the cold build of `jit` and `typed`, and nothing else.

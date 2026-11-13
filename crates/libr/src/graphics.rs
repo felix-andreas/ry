@@ -12,11 +12,11 @@ use {
         strings::{c_bytes, utf8_text},
         vectors::{int_elt, real_elt, sexp_elt, xlength},
     },
-    heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real},
     ::graphics::{
         engine::{self, DevDesc, GEContext, GEDevDesc, SystemCallback, Unit},
         routines,
     },
+    heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real},
     interp::values,
     std::ffi::{c_char, c_int, c_uint, c_void},
 };
@@ -1561,9 +1561,7 @@ pub extern "C" fn R_GE_getVersion() -> c_int {
 /// every device description from version 14 on, so packages built against R 4.1 to 4.6 run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GE_checkVersionOrDie(version: c_int) {
-    if !(engine::OLDEST_ENGINE_VERSION..=engine::NEWEST_ENGINE_VERSION)
-        .contains(&version)
-    {
+    if !(engine::OLDEST_ENGINE_VERSION..=engine::NEWEST_ENGINE_VERSION).contains(&version) {
         raise(error(format!(
             "Graphics API version mismatch: the device expects version {version}, ry provides \
              versions {} to {}",
