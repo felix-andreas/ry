@@ -1875,9 +1875,12 @@ impl Heap {
             encoding.gp_bits()
         };
         let hash = strings::hash(&scan, bits & gp::ENCODING);
-        match self.strings.find(hash, bytes, bits & gp::ENCODING) {
-            Some(found) => Ok(found),
-            None => self.intern_new(bytes, bits, hash),
+        match self
+            .strings
+            .find_or_vacancy(hash, bytes, bits & gp::ENCODING)
+        {
+            Ok(found) => Ok(found),
+            Err(vacancy) => self.intern_new(bytes, bits, hash, Some(vacancy)),
         }
     }
 
@@ -1885,14 +1888,25 @@ impl Heap {
     /// re-interning an existing string, the common case, runs without its register pressure.
     #[cold]
     #[inline(never)]
-    unsafe fn intern_new(&mut self, bytes: &[u8], bits: u16, hash: u32) -> HeapResult<Sexp> {
+    unsafe fn intern_new(
+        &mut self,
+        bytes: &[u8],
+        bits: u16,
+        hash: u32,
+        vacancy: Option<strings::Vacancy>,
+    ) -> HeapResult<Sexp> {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
         if bits & gp::ASCII != 0 || std::str::from_utf8(bytes).is_ok() {
             object.set_flag(flag_bits::VALID_UTF8, true);
         }
-        self.strings.insert(hash, object, &mut self.space);
+        match vacancy {
+            Some(vacancy) => self
+                .strings
+                .insert_at(vacancy, hash, object, &mut self.space),
+            None => self.strings.insert(hash, object, &mut self.space),
+        }
         Ok(object)
     }
 

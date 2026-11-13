@@ -459,10 +459,10 @@ a `2`.
 `ry check`, `ry fmt` and `ry server` run no R. The other commands except `ry R` run on ry's runtime,
 which needs base R (the R code of the base and default packages):
 
-- **Built in.** The 0.4.3-beta Linux release and a build from source carry base R 4.6.2 inside `ry` and extracts it into
-  `~/.cache/ry/base/` on first use, once per release. `R.version`, `getRversion()` and `R.home()`
-  then describe that copy. The 0.4.1-beta release does not have it and needs `R_HOME` or a GNU R on
-  `PATH`.
+- **Built in.** Linux releases from 0.4.3-beta, macOS releases from 0.4.4 and a build from source
+  carry base R 4.6.2 inside `ry`, which extracts it into `~/.cache/ry/base/` on first use, once per
+  release. `R.version`, `getRversion()` and `R.home()` then describe that copy. The 0.4.1-beta
+  release does not have it and needs `R_HOME` or a GNU R on `PATH`.
 - **`R_HOME`.** When set to a GNU R installation (4.3 or newer, built as a shared library), ry's
   runtime loads base R from it and behaves like that release where R changed between releases.
   An `R_HOME` that holds no base R is an error, not a fallback.
