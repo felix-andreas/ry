@@ -464,6 +464,17 @@ pub(crate) unsafe fn register_own(definitions: &[BuiltinDef]) {
     register_in(definitions, env);
 }
 
+pub(crate) unsafe fn assert_undefined(definitions: &[BuiltinDef]) {
+    for definition in definitions {
+        let key = index_key(definition.name, definition.is_internal());
+        assert!(
+            !interp().builtin_index.contains_key(key),
+            "`{}` is defined twice in the builtin tables",
+            definition.name
+        );
+    }
+}
+
 /// Registers `definitions`, binding the primitives in `env`.
 unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
     let heap = crate::heap();

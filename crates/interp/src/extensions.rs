@@ -1,8 +1,9 @@
 //! What the crates above the interpreter provide to it. The graphics system, ry's tables, the
-//! data viewer and the HTTP client are implemented in their own crates, which depend on this one, so the interpreter
-//! reaches them through the function tables here. Each crate's `install` fills its table after
-//! [`crate::install`]; until then every entry is a default that does nothing, which is what a
-//! host without that crate runs with.
+//! data viewer and the HTTP client are implemented in their own crates, which depend on this
+//! one, so the interpreter reaches them through the function tables here. Each crate's `install`
+//! fills its table after [`crate::install`]. Until then every entry is the default a host
+//! without that crate runs with: a question answers that nothing is there (no device is open,
+//! no object is a table), and an operation that needs the crate is an error.
 
 use {
     crate::{

@@ -753,7 +753,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     }
     state.heap = heap_pointer;
     heap::set_pending_resolver(crate::eval::resolve_pending_read);
-    numeric::set_emulated_r_provider(system::emulated_r);
+    system::provide_emulated_r();
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
@@ -838,15 +838,23 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     heap.allow_collection();
 }
 
-/// Adds builtins the host implements, such as the foreign-function interface. A name that is
-/// already registered is replaced, so the host's version wins.
+/// Replaces builtins with the host's versions, such as the foreign-function interface, whose
+/// engine definitions report that the host has none.
 pub unsafe fn register_builtins(definitions: &[BuiltinDef]) {
+    builtins::register(definitions);
+}
+
+/// Adds the builtins of a crate above the interpreter. A name the interpreter already defines
+/// would silently replace its builtin, so it is a bug to catch at start-up.
+pub unsafe fn define_builtins(definitions: &[BuiltinDef]) {
+    builtins::assert_undefined(definitions);
     builtins::register(definitions);
 }
 
 /// Adds builtins that belong to ry's own values, which `package:ry` binds instead of base, so
 /// that plain R code which never names them sees exactly GNU R's base namespace.
-pub unsafe fn register_own_builtins(definitions: &[BuiltinDef]) {
+pub unsafe fn define_own_builtins(definitions: &[BuiltinDef]) {
+    builtins::assert_undefined(definitions);
     builtins::register_own(definitions);
 }
 

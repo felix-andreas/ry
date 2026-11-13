@@ -37,17 +37,17 @@ pub mod testing;
 use interp::{
     builtin_libraries::register_routines,
     builtins::{BuiltinDef, builtin},
+    define_builtins,
     extensions::Graphics,
     interp,
     native::{foreign_call, foreign_context},
-    register_builtins,
 };
 
 /// Registers the graphics builtins and the routines of grDevices and graphics with the
 /// interpreter, which must be installed, and hands it the engine.
 pub unsafe fn install() {
-    register_builtins(engine::BUILTINS);
-    register_builtins(FOREIGN_BUILTINS);
+    define_builtins(engine::BUILTINS);
+    define_builtins(FOREIGN_BUILTINS);
     register_routines("grDevices", routines::GRDEVICES_ROUTINES);
     register_routines("graphics", routines::GRAPHICS_ROUTINES);
     interp().extensions.graphics = Graphics {

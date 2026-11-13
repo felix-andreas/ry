@@ -3371,11 +3371,16 @@ pub const MINIMUM_SVN_REVISION: u32 = 89194;
 /// with argument lists ry does not implement.
 pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
 
-/// The release of the R in [`r_home`], for the numeric kernels whose results GNU R changed
-/// between releases.
-pub(crate) fn emulated_r() -> (u32, u32, u32) {
-    let version = r_version();
-    (version.major, version.minor, version.patch)
+/// Tells the numeric kernels whose results GNU R changed between releases where to read the
+/// release of the R in [`r_home`]. The interpreter does it when it is installed, and a host that
+/// exports the kernels does it before each call, because C code may call one before anything
+/// has installed the interpreter.
+#[inline]
+pub fn provide_emulated_r() {
+    numeric::set_emulated_r_provider(|| {
+        let version = r_version();
+        (version.major, version.minor, version.patch)
+    });
 }
 
 /// The version of the R in [`r_home`], read once. With no base R found no session can start, so

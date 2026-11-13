@@ -67,9 +67,10 @@ pub fn set_emulated_r_provider(provider: fn() -> (u32, u32, u32)) {
 static PROVIDER: OnceLock<fn() -> (u32, u32, u32)> = OnceLock::new();
 static EMULATED_R: OnceLock<(u32, u32, u32)> = OnceLock::new();
 
-/// The emulated release. Code that runs with no interpreter installed, such as a unit test of a
-/// kernel, sees the newest release, and that answer is not kept, so a later installation still
-/// gets asked.
+/// The emulated release. Code that runs before any provider is named, such as a unit test of a
+/// kernel, sees the newest release, and that answer is not kept, so a provider named later still
+/// gets asked. A host that exports the kernels names the provider before it calls one, so its
+/// callers never see the answer change.
 #[inline]
 fn emulated_r() -> (u32, u32, u32) {
     if let Some(version) = EMULATED_R.get() {

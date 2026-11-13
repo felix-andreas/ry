@@ -35,7 +35,7 @@ release archive carries it. The source code of a release is its git tag.
 | the fuzz targets in `fuzz/` | GPL-2.0-or-later |
 | the C headers in `crates/libr/include` | LGPL-2.1-or-later |
 | `syntax`, `semantics`, `format`, `ide` | UPL-1.0 |
-| `heap`, `table`, `sniff`, `rdb` | UPL-1.0 |
+| `heap`, `ssa`, `table`, `sniff`, `rdb`, `crash` | UPL-1.0 |
 | `rcmd`, with its `install.R`, and `repl` | UPL-1.0 |
 | `loader`, the package loader, with its R scripts | UPL-1.0 |
 | `ry-lang` (`crates/ry`), the sources of the `ry` program, with its R scripts | UPL-1.0 |

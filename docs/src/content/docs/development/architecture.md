@@ -58,13 +58,14 @@ illegal dependency unrepresentable.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
   `heap`, `interp`, the interpreter's leaf crates (`stats`, `graphics`, `frames`, `services`),
-  `jit`, `table` and `loader`, and it is the host that installs them all. Its design is the draft at
+  `jit`, `table`, `loader`, `rcmd`, `semantics` and `syntax`, and it is the host that installs the
+  runtime crates. Its design is the draft at
   [`development/design/r-runtime.md`](/development/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
-  `heap`, `numeric` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows
+  `heap`, `numeric`, `rcmd` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List` and the
   standard library. A `for`, `while` or `repeat` loop in the global
   environment compiles to tier 0 before its first iteration, as GNU R's JIT compiles it, because

@@ -64,7 +64,7 @@ crates", has the shape and the measurements behind this list.
 - **The regex engines and compression libraries stay engine dependencies.** They cost a cold
   build only, since a dependency compiles once. A leaf for base's string builtins would shorten
   the cold build of `jit` and `typed`, and nothing else.
-- **`libr` has 23 test binaries, each linked against the whole runtime**, and no fast linker is
+- **`libr` has 24 test binaries, each linked against the whole runtime**, and no fast linker is
   configured. Both show in `cargo test-release`, not in the edit loop measured above.
 
 ## Open: one switch for every fast path

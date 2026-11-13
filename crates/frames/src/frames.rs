@@ -20,14 +20,14 @@ pub mod viewer;
 
 use interp::{
     extensions::{Tables, Viewer},
-    interp, register_builtins, register_own_builtins,
+    define_builtins, define_own_builtins, interp,
 };
 
 /// Registers the tables' builtins with the interpreter, which must be installed, and hands it
 /// the table operations and the viewer.
 pub unsafe fn install() {
-    register_own_builtins(frame::BUILTINS);
-    register_builtins(dataframe::BUILTINS);
+    define_own_builtins(frame::BUILTINS);
+    define_builtins(dataframe::BUILTINS);
     let extensions = &mut interp().extensions;
     extensions.tables = Tables {
         is_frame: frame::is_frame,

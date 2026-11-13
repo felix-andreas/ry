@@ -9,6 +9,7 @@ use {
         distributions::{self, SessionDeviates},
         format::format_g,
         rmath::*,
+        system::provide_emulated_r,
     },
     std::ffi::c_int,
 };
@@ -28,6 +29,7 @@ macro_rules! export {
         $(
             #[unsafe(no_mangle)]
             pub extern "C" fn $name($($argument: export!(@type $kind)),*) -> f64 {
+                provide_emulated_r();
                 let value = $target($(export!(@value $kind $argument)),*);
                 raise_warnings();
                 value

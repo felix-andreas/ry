@@ -233,8 +233,8 @@ the engine's table of function pointers for the few calls the engine makes into 
 - **`native.rs`**: the foreign-function builtins for a session without libR, and base's routines.
   **`builtin_libraries.rs`**: the default packages' routine tables, which `dyn.load` hands out
   instead of loading their shared libraries, and `register_routines`, through which a crate
-  above the engine adds a package's table; **`utils.rs`** and **`tools.rs`** implement the two
-  the engine keeps.
+  above the engine adds a package's table. The engine keeps five tables itself: methods, the
+  distributions of stats, utils (**`utils.rs`**), tools (**`tools.rs`**) and parallel.
 - **`extensions.rs`**: the function-pointer tables (`Graphics`, `Tables`, `Viewer`, `Transport`)
   the engine calls into the crates above it through. Each entry defaults to what a session
   without that crate does. **`http.rs`**: the request and error types of the HTTP transport, and

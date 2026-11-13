@@ -3,7 +3,7 @@ name = "ssa"
 description = "ry's one mid-level SSA IR, shared by the optimizing tier and the typed core, and its lowering to machine code"
 edition = "2024"
 version.workspace = true
-license = "GPL-2.0-or-later"
+license = "UPL-1.0"
 publish = false
 
 [lib]
