@@ -342,26 +342,6 @@ fn load_failure_hint(error: &str, extracted: bool, library_path: &Path) -> Strin
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_stack_header_is_not_blamed_on_a_mount() {
-        let path = Path::new("/cache/libR.so");
-        let error = "cannot enable executable stack as shared object requires: Invalid argument";
-        let hint = load_failure_hint(error, true, path);
-        assert!(
-            hint.contains("PT_GNU_STACK") && hint.contains("GLIBC_TUNABLES"),
-            "{hint}"
-        );
-        assert!(!hint.contains("noexec"), "{hint}");
-        let hint = load_failure_hint("failed to map segment from shared object", true, path);
-        assert!(hint.contains("noexec") && hint.contains("/cache"), "{hint}");
-        assert_eq!(load_failure_hint("other", false, path), "");
-    }
-}
-
 #[cfg(unix)]
 type RuntimeLibrary = libloading::os::unix::Library;
 #[cfg(not(unix))]
@@ -745,4 +725,24 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
         }
     }
     Ok(library_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_stack_header_is_not_blamed_on_a_mount() {
+        let path = Path::new("/cache/libR.so");
+        let error = "cannot enable executable stack as shared object requires: Invalid argument";
+        let hint = load_failure_hint(error, true, path);
+        assert!(
+            hint.contains("PT_GNU_STACK") && hint.contains("GLIBC_TUNABLES"),
+            "{hint}"
+        );
+        assert!(!hint.contains("noexec"), "{hint}");
+        let hint = load_failure_hint("failed to map segment from shared object", true, path);
+        assert!(hint.contains("noexec") && hint.contains("/cache"), "{hint}");
+        assert_eq!(load_failure_hint("other", false, path), "");
+    }
 }
