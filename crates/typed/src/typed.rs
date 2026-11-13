@@ -430,13 +430,25 @@ unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Lin
         let mut guess = first;
         for _ in 0..=MAX_REVISIONS {
             let mut linker = Linker::default();
-            let lowered = match lower::lower(function, params, guess, declared, &mut linker) {
-                Ok(lowered) => lowered,
-                Err(why) => {
-                    refusal = why;
-                    break;
-                }
-            };
+            let mut returned = None;
+            let lowered =
+                match lower::lower(function, params, guess, declared, &mut linker, &mut returned) {
+                    Ok(lowered) => lowered,
+                    // A recursive call's guessed result the body cannot use, as a number where
+                    // the body reads a record's field, is revised to what a `return` before the
+                    // refusal gave.
+                    Err(why) => match returned {
+                        Some(ty) if ty != guess => {
+                            refusal = why;
+                            guess = ty;
+                            continue;
+                        }
+                        _ => {
+                            refusal = why;
+                            break;
+                        }
+                    },
+                };
             let result = lowered.function.result;
             if result == guess || !calls_itself(&lowered.function) {
                 return Ok((lowered, linker));

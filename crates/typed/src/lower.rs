@@ -176,13 +176,16 @@ const MAX_SELF_CALLS: usize = 2;
 /// How deeply expressions nest, which bounds the lowering's own recursion.
 const MAX_NESTING: usize = 256;
 
-/// Lowers `closure` for arguments of `params`, assuming a recursive call returns `guess`.
+/// Lowers `closure` for arguments of `params`, assuming a recursive call returns `guess`. A
+/// refused lowering sets `returned` to the type of the `return`s it lowered before the refusal,
+/// which is a better guess when the guess itself was what the body could not use.
 pub unsafe fn lower(
     closure: Sexp,
     params: &[Type],
     guess: Type,
     declared: Option<Type>,
     callees: &mut dyn Callees,
+    returned: &mut Option<Type>,
 ) -> Result<Lowered, Refusal> {
     // A typed function whose body is refused where it would inline is called instead, so one
     // function the typed core cannot compile does not keep its callers off native code. The
@@ -198,6 +201,7 @@ pub unsafe fn lower(
             &mut *callees,
             &called,
             &mut refused,
+            returned,
         );
         match (result, refused) {
             (Err(_), Some(function)) => called.push(function),
@@ -216,6 +220,7 @@ unsafe fn lower_calling(
     callees: &mut dyn Callees,
     called: &[Sexp],
     refused: &mut Option<Sexp>,
+    returned: &mut Option<Type>,
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
     if formals.len() != params.len() {
@@ -273,7 +278,13 @@ unsafe fn lower_calling(
         };
         lowering.bind(symbol, Binding::Value(variable));
     }
-    let value = lowering.expression(body)?;
+    let value = match lowering.expression(body) {
+        Ok(value) => value,
+        Err(why) => {
+            *returned = lowering.returned;
+            return Err(why);
+        }
+    };
     if let Some(value) = value {
         lowering.usable(value)?;
         // `-> I64` converts a whole R number, as the interpreter's return check does.

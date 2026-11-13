@@ -1068,8 +1068,16 @@ fn check_item_in<'db>(
                     },
                 ));
             }
-            list_items(db, crate::types::array_element(db, ty)?)
-                .map(|items| (id, Empty::List(items)))
+            let item = crate::types::array_element(db, ty)?;
+            // A nominal such as `type Tree = :Leaf(I64) | ...` is stored as its representation.
+            let item = match item.kind(db) {
+                TyKind::Named(name, arguments) => context
+                    .table
+                    .representation(db, *name, arguments)
+                    .unwrap_or(item),
+                _ => item,
+            };
+            list_items(db, item).map(|items| (id, Empty::List(items)))
         })
         .collect();
     typed_empties.sort_unstable_by_key(|(id, _)| id.index());

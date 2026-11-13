@@ -1,6 +1,6 @@
 # The R program counts each k-mer in an attribute of an integer vector, and attr() searches
-# the attributes in order, so the port keeps the counts in an association list it searches the
-# same way.
+# the attributes in order, so the port keeps the attribute names and their counts in two lists
+# and searches the names the same way.
 # Beside the attributes, the R program grows the vector itself by doubling, one slot per
 # distinct k-mer, and never reads it; the port grows a list the same way.
 execute <- function(lines: List<Str>) -> List<Str> {
@@ -23,9 +23,9 @@ execute <- function(lines: List<Str>) -> List<Str> {
 }
 
 sort_seq <- function(sequence: List<I64>, frame: I64) -> Str {
-  entries <- gen_freq(sequence, frame)$freqs
-  total <- Num.to_f64(List.sum(List.map(entries, \(entry) entry[[2]])))
-  upper <- List.map(entries, \(entry) (Str.with_ascii_uppercased(entry[[1]]), entry[[2]]))
+  freqs <- gen_freq(sequence, frame)
+  total <- Num.to_f64(List.sum(freqs$counts))
+  upper <- List.map2(freqs$names, freqs$counts, \(name, count) (Str.with_ascii_uppercased(name), count))
   sorted <- List.sort_with(upper, \(a, b) {
     match (Num.compare(b[[2]], a[[2]])) {
       :EQ => if (a[[1]] < b[[1]]) :LT else :GT
@@ -37,23 +37,24 @@ sort_seq <- function(sequence: List<I64>, frame: I64) -> Str {
 }
 
 find_seq <- function(sequence: List<I64>, s: Str) -> I64 {
-  freqs <- gen_freq(sequence, List.len(Str.to_utf8(s)))$freqs
-  match (List.find_first_index(freqs, \(entry) entry[[1]] == s)) {
-    :Ok(index) => freqs[[index]][[2]]
+  freqs <- gen_freq(sequence, List.len(Str.to_utf8(s)))
+  match (List.find_first_index(freqs$names, \(name) name == s)) {
+    :Ok(index) => freqs$counts[[index]]
     :Err(_) => 0i64
   }
 }
 
-gen_freq <- function(sequence: List<I64>, frame: I64) -> Record{freqs: List<Tuple{Str, I64}>, slots: List<I64>} {
-  freqs <- []
+gen_freq <- function(sequence: List<I64>, frame: I64) -> Record{names: List<Str>, counts: List<I64>, slots: List<I64>} {
+  names <- []
+  counts <- []
   n <- 0i64
   cap <- 16i64
   slots <- List.repeat(0i64, cap)
   for (i in List.range(1, List.len(sequence) - frame + 1)) {
     subseq <- Str.from_utf8_lossy(List.sublist(sequence, i, frame))
-    match (List.find_first_index(freqs, \(entry) entry[[1]] == subseq)) {
+    match (List.find_first_index(names, \(name) name == subseq)) {
       :Ok(index) => {
-        freqs[[index]] <- (subseq, freqs[[index]][[2]] + 1)
+        counts[[index]] <- counts[[index]] + 1
       }
       :Err(_) => {
         n <- n + 1
@@ -62,11 +63,12 @@ gen_freq <- function(sequence: List<I64>, frame: I64) -> Record{freqs: List<Tupl
           slots <- List.concat(slots, List.repeat(0i64, cap - List.len(slots)))
         }
         slots[[cap]] <- 0i64
-        freqs <- List.append(freqs, (subseq, 1i64))
+        names <- List.append(names, subseq)
+        counts <- List.append(counts, 1i64)
       }
     }
   }
-  (freqs = freqs, slots = slots)
+  (names = names, counts = counts, slots = slots)
 }
 
 # ---------------------------------------------------------------------------
