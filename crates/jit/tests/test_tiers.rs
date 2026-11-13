@@ -8,7 +8,7 @@
 //! `FUZZ_ITERS` raises the budget.
 
 use {
-    heap::{GcStress, Heap, object::Sexp},
+    heap::{Collection, GcStress, Heap, object::Sexp},
     interp::{
         deparse, eval, lower,
         unwind::{Jump, Unwind},
@@ -38,7 +38,14 @@ fn with_interpreter<T>(body: impl FnOnce() -> T) -> T {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     install();
-    body()
+    let result = body();
+    // Each test runs on a thread of its own, and the typed core counts and pools its values
+    // per thread. A typed record R drops is released at the collection that finds it dead, so
+    // that collection runs here, on the thread that made the record, rather than in a later
+    // test whose count it would throw off.
+    // SAFETY: the interpreter is installed and this thread holds it.
+    unsafe { interp::heap().collect(Collection::Major) };
+    result
 }
 
 const ARGUMENTS: &[&str] = &[
@@ -3395,8 +3402,14 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 typed,
                 "case {case} did not run on the typed core: {definition}"
             );
-            // SAFETY: the typed core's counters are thread-local and only read.
-            let live = unsafe { typed::values::ry_live_objects() };
+            // A record R holds may stand for a native value until a collection finds it dead,
+            // so the count is taken after one.
+            // SAFETY: the interpreter is installed, and the typed core's counters are
+            // thread-local and only read.
+            let live = unsafe {
+                interp::heap().collect(Collection::Major);
+                typed::values::ry_live_objects()
+            };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
         }
         // A case that fails for a value too large to build, such as the repeated string past
@@ -3893,8 +3906,14 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 typed,
                 "case {case} did not run on the typed core: {definition}"
             );
-            // SAFETY: the typed core's counters are thread-local and only read.
-            let live = unsafe { typed::values::ry_live_objects() };
+            // A record R holds may stand for a native value until a collection finds it dead,
+            // so the count is taken after one.
+            // SAFETY: the interpreter is installed, and the typed core's counters are
+            // thread-local and only read.
+            let live = unsafe {
+                interp::heap().collect(Collection::Major);
+                typed::values::ry_live_objects()
+            };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
         }
         // A `-> List<I64>` result converts a list literal, which the typed core leaves to the

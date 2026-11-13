@@ -2566,6 +2566,15 @@ impl Emitter {
             let classed = self.builder.ins().icmp_imm_s(IntCC::NotEqual, object, 0);
             let unusable = self.builder.ins().bor(other, classed);
             self.fail_if(unusable);
+            // A lazy record has no slots to read until the interpreter fills it.
+            let layout = self.builder.ins().load(
+                I32,
+                MemFlagsData::trusted(),
+                raw,
+                RECORD_LAYOUT_OFFSET as i32,
+            );
+            let lazy = self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, layout, 0);
+            self.fail_if(lazy);
             return Ok(raw);
         }
         let upper = self.builder.ins().ushr_imm_u(raw, 32);
@@ -3418,7 +3427,9 @@ unsafe fn argument_word(value: Sexp) -> Option<(Ty, u64)> {
         SexpType::Integer if plain => (Ty::IntVec, value.as_ptr() as u64),
         SexpType::Logical if plain => (Ty::LglVec, value.as_ptr() as u64),
         SexpType::Real if plain => (Ty::DblVec, value.as_ptr() as u64),
-        SexpType::Record if value.attrib() == values::nil() && !value.is_object() => {
+        SexpType::Record
+            if value.attrib() == values::nil() && !value.is_object() && !value.is_lazy_record() =>
+        {
             (Ty::Rec(value.record_layout()), value.as_ptr() as u64)
         }
         _ => return None,
