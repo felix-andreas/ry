@@ -27,7 +27,6 @@ use {
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, builtin},
         conditions,
         eval::{self, CallFrame},
-        long_double::{self, LongDouble},
         numbers::{self, Overflow, Rounding},
         records, scope,
         sort::{IdenticalFlags, identical},
@@ -2070,14 +2069,15 @@ unsafe fn fold_numbers(
     number_value(Number::Integer(total))
 }
 
-// R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
-// with `sum(xs)` to the last bit.
+// Doubles are added in order in double precision, which is what a loop written in ry over the
+// list computes and what compiled code does. R's `sum()` accumulates in x87 long double, so the
+// two can differ in the last bits.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     if let Some(items) = native_numbers(call)? {
         return fold_native(call, Op::Add, 0, &items);
     }
     fold_numbers(call, 0, i32::checked_add, |start, items| {
-        long_double::add_all(LongDouble::from(start), items).to_f64()
+        items.iter().fold(start, |total, &item| total + item)
     })
 }
 

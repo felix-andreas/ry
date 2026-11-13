@@ -4815,7 +4815,6 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     let kind = sequence.kind();
     if kind.is_vector()
         && kind != SexpType::I64
-        && values::length(sequence) >= bytecode::LOOP_COMPILE_ITERATIONS
         && let Some(value) = bytecode::run_loop(call.call, Some(sequence), env)?
     {
         return Ok(value);
@@ -4902,16 +4901,10 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
     let env = call.env()?;
-    let mut iterations = 0;
+    if let Some(value) = bytecode::run_loop(call.call, None, env)? {
+        return Ok(value);
+    }
     loop {
-        // All of the loop's state is in `env`, so the compiled loop starts over at the condition
-        // exactly where the tree walker stands between two iterations.
-        if iterations == bytecode::LOOP_COMPILE_ITERATIONS
-            && let Some(value) = bytecode::run_loop(call.call, None, env)?
-        {
-            return Ok(value);
-        }
-        iterations += 1;
         let condition = scope(|| eval(call.arg(0), env))?;
         if !as_condition(condition, call.call)? {
             break;
@@ -4925,15 +4918,10 @@ unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
     let env = call.env()?;
-    let mut iterations = 0;
-    while loop_body(call.arg(0), env)? {
-        iterations += 1;
-        if iterations == bytecode::LOOP_COMPILE_ITERATIONS
-            && let Some(value) = bytecode::run_loop(call.call, None, env)?
-        {
-            return Ok(value);
-        }
+    if let Some(value) = bytecode::run_loop(call.call, None, env)? {
+        return Ok(value);
     }
+    while loop_body(call.arg(0), env)? {}
     Ok(nil())
 }
 

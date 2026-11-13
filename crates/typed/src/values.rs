@@ -819,7 +819,7 @@ unsafe fn elementwise_dbl(
     }
     let mut buffers = Rows::<f64, ELEMENTWISE_STEPS>::new();
     let buffers = buffers.cleared(program.len());
-    let mut total = LongDouble::ZERO;
+    let mut total = 0.0;
     let last = program.len() - 1;
     let mut start = 0;
     while start < length {
@@ -855,12 +855,12 @@ unsafe fn elementwise_dbl(
             }
         }
         if result.is_null() {
-            total = add_all(total, &buffers[last][..chunk]);
+            total = add_in_order(total, &buffers[last][..chunk]);
         }
         start += chunk;
     }
     if result.is_null() {
-        *out = (0.0 + total.to_f64()).to_bits();
+        *out = total.to_bits();
     }
     0
 }
@@ -1035,6 +1035,9 @@ pub const MASK_AND: u32 = 16;
 pub const MASK_OR: u32 = 17;
 pub const MASK_NOT: u32 = 18;
 
+/// The most lists one [`ry_count_true`] pass counts.
+pub const COUNTED_LISTS: usize = 8;
+
 /// A logical item as a lane of a [`ry_count_true`] chunk. `NA` sits between false and true, so
 /// `&` is the minimum, `|` the maximum and `!` the reflection, as R's three-valued logic has it.
 const LANE_FALSE: u8 = 0;
@@ -1050,34 +1053,56 @@ enum MaskRole {
     Logical,
 }
 
-/// Counts the true items of a logical ry list in one pass, a chunk at a time, with no list for
-/// any intermediate result. With no steps, input 0 is the list. Otherwise `program` has `steps`
-/// steps, each `code | left << 8 | right << 16` over operands numbered inputs first and earlier
-/// steps after them (`MASK_NOT` ignores `right`), and the last step is the list. A comparison
-/// reads two inputs, a list or a scalar of its type; a logical step reads logical inputs or
-/// steps. `inputs` holds each input's word: a list pointer where bit `k` of `lists` is set, else
-/// a scalar's bits. The lists must have one length, as ry lists never recycle.
+/// Counts the true items of logical ry lists in one pass over their inputs, a chunk at a time,
+/// with no list for any intermediate result. `program` has `steps` steps, each
+/// `code | left << 8 | right << 16` over operands numbered inputs first and earlier steps after
+/// them (`MASK_NOT` ignores `right`). A comparison reads two inputs, a list or a scalar of its
+/// type; a logical step reads logical inputs or steps. `inputs` holds each input's word: a list
+/// pointer where bit `k` of `lists` is set, else a scalar's bits. The lists must have one length,
+/// as ry lists never recycle. `counted` names the `counts` lists to count, each a step or a
+/// logical list input by its operand number, and `out` receives their counts in that order.
 ///
-/// Status 0 leaves the count in `out`. Status 1 gives up, for the interpreter to raise the
-/// error an `NA` item is, or to handle the case.
+/// Status 0 leaves the counts in `out`. Status 1 gives up, for the interpreter to raise the
+/// error an `NA` item of a counted list is, or to handle the case.
 pub unsafe extern "C" fn ry_count_true(
     program: *const u32,
     steps: u32,
     inputs: *const u64,
     input_count: u32,
     lists: u32,
+    counted: *const u32,
+    counts: u32,
     out: *mut i64,
 ) -> u32 {
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx2") {
-        return count_true_avx2(program, steps, inputs, input_count, lists, out);
+        return count_true_avx2(
+            program,
+            steps,
+            inputs,
+            input_count,
+            lists,
+            counted,
+            counts,
+            out,
+        );
     }
-    count_true(program, steps, inputs, input_count, lists, out)
+    count_true(
+        program,
+        steps,
+        inputs,
+        input_count,
+        lists,
+        counted,
+        counts,
+        out,
+    )
 }
 
 /// [`count_true`] compiled for AVX2, whose 256-bit integer compares and byte operations the
 /// chunk loops vectorize with. The baseline x86-64 instruction set has no 64-bit integer
 /// compare, so there the loops over `I64` items stay scalar.
+#[allow(clippy::too_many_arguments)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn count_true_avx2(
@@ -1086,12 +1111,25 @@ unsafe fn count_true_avx2(
     inputs: *const u64,
     input_count: u32,
     lists: u32,
+    counted: *const u32,
+    counts: u32,
     out: *mut i64,
 ) -> u32 {
-    count_true(program, steps, inputs, input_count, lists, out)
+    count_true(
+        program,
+        steps,
+        inputs,
+        input_count,
+        lists,
+        counted,
+        counts,
+        out,
+    )
 }
 
-/// The body of [`ry_count_true`], inlined into one copy per instruction set.
+/// The body of [`ry_count_true`], inlined into one copy per instruction set. Both copies take
+/// the C entry point's arguments unchanged, which is why they have as many.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 unsafe fn count_true(
     program: *const u32,
@@ -1099,17 +1137,36 @@ unsafe fn count_true(
     inputs: *const u64,
     input_count: u32,
     lists: u32,
+    counted: *const u32,
+    counts: u32,
     out: *mut i64,
 ) -> u32 {
-    let (steps, input_count) = (steps as usize, input_count as usize);
-    if steps > ELEMENTWISE_STEPS || input_count == 0 || input_count > ELEMENTWISE_INPUTS {
+    let (steps, input_count, counts) = (steps as usize, input_count as usize, counts as usize);
+    if steps > ELEMENTWISE_STEPS
+        || input_count == 0
+        || input_count > ELEMENTWISE_INPUTS
+        || counts == 0
+        || counts > COUNTED_LISTS
+    {
         return 1;
     }
     let program = raw_slice(program, steps);
     let inputs = raw_slice(inputs, input_count);
+    let counted = raw_slice(counted, counts);
+    let out = std::slice::from_raw_parts_mut(out, counts);
     let mut roles = [MaskRole::Unused; ELEMENTWISE_INPUTS];
-    if steps == 0 {
-        roles[0] = MaskRole::Logical;
+    for &operand in counted {
+        let operand = operand as usize;
+        if operand >= input_count + steps {
+            return 1;
+        }
+        // A counted input is a logical list; a scalar has no items to count.
+        if operand < input_count {
+            if lists & (1 << operand) == 0 {
+                return 1;
+            }
+            roles[operand] = MaskRole::Logical;
+        }
     }
     for (step, &encoded) in program.iter().enumerate() {
         let code = encoded & 0xFF;
@@ -1184,7 +1241,7 @@ unsafe fn count_true(
     }
     let mut buffers = Rows::<u8, ELEMENTWISE_STEPS>::new();
     let buffers = buffers.cleared(program.len());
-    let mut count: i64 = 0;
+    out.fill(0);
     let mut start = 0;
     while start < length {
         let chunk = CHUNK.min(length - start);
@@ -1203,6 +1260,8 @@ unsafe fn count_true(
         // which vectorizes to a compare and a subtraction with no lane written per item.
         if let [encoded] = *program
             && encoded & 0xFF <= MASK_DBL + GE
+            && counted.len() == 1
+            && counted[0] as usize == input_count
         {
             let code = encoded & 0xFF;
             let (left, right) = (encoded as usize >> 8 & 0xFF, encoded as usize >> 16 & 0xFF);
@@ -1218,7 +1277,7 @@ unsafe fn count_true(
             if missing {
                 return 1;
             }
-            count += trues;
+            out[0] += trues;
             start += chunk;
             continue;
         }
@@ -1263,26 +1322,29 @@ unsafe fn count_true(
                 }
             }
         }
-        let result = match program.len() {
-            0 => &lanes.row(0)[..chunk],
-            steps => &buffers[steps - 1][..chunk],
-        };
         // A chunk's lanes are tallied in a byte, which a chunk cannot overflow, so the loop
         // adds whole vectors of lanes where a 64-bit tally widens every lane first.
         const { assert!(CHUNK <= u8::MAX as usize && LANE_TRUE == 2 && LANE_NA == 1) };
-        let mut trues: u8 = 0;
-        let mut missing: u8 = 0;
-        for &item in result {
-            trues += item >> 1;
-            missing |= item & 1;
+        for (count, &operand) in out.iter_mut().zip(counted) {
+            let operand = operand as usize;
+            let result = if operand >= input_count {
+                &buffers[operand - input_count][..chunk]
+            } else {
+                &lanes.row(operand)[..chunk]
+            };
+            let mut trues: u8 = 0;
+            let mut missing: u8 = 0;
+            for &item in result {
+                trues += item >> 1;
+                missing |= item & 1;
+            }
+            if missing != 0 {
+                return 1;
+            }
+            *count += i64::from(trues);
         }
-        if missing != 0 {
-            return 1;
-        }
-        count += i64::from(trues);
         start += chunk;
     }
-    *out = count;
     0
 }
 
@@ -1533,6 +1595,18 @@ pub unsafe extern "C" fn ry_sum_dbl(a: *mut List) -> f64 {
         None => add_all(LongDouble::ZERO, data).to_f64(),
     };
     if is_na_real(sum) { NA_REAL } else { 0.0 + sum }
+}
+
+/// `List.sum` of an `F64` list: the items added in order in double precision, which is what a
+/// loop written in ry over the same list computes.
+pub unsafe extern "C" fn ry_list_sum_dbl(a: *mut List) -> f64 {
+    add_in_order(0.0, items::<f64>(a))
+}
+
+/// `total` plus every value in order. The compiler may not reorder the additions, so the result
+/// is the same on every machine, and the loop runs at the speed of one addition after another.
+fn add_in_order(total: f64, values: &[f64]) -> f64 {
+    values.iter().fold(total, |total, &value| total + value)
 }
 
 /// `sum` of an integer or logical list. Status 0 with the total, 1 with `NA` for an `NA` item,
@@ -2065,6 +2139,70 @@ pub unsafe extern "C" fn ry_str_split(
     list
 }
 
+/// Where the first `pieces` pieces of `Str.split_on` lie in a borrowed string, for a caller
+/// that reads pieces at known positions and needs no list. The byte offsets of each piece's
+/// start and end are written to `bounds`, which has room for `pieces` pairs, and the result is
+/// how many pairs were written. The scan stops at the end of the last piece asked for.
+pub unsafe extern "C" fn ry_str_split_bounds(
+    lo: u64,
+    hi: u64,
+    separator_lo: u64,
+    separator_hi: u64,
+    pieces: u64,
+    bounds: *mut u64,
+) -> u64 {
+    let string = Str { lo, hi };
+    let separator = Str {
+        lo: separator_lo,
+        hi: separator_hi,
+    };
+    let separator = separator.as_str();
+    let pieces = pieces as usize;
+    if pieces == 0 {
+        return 0;
+    }
+    let bounds = bounds as *mut [u64; 2];
+    let text = string.bytes();
+    let mut found = 0;
+    let mut start = 0;
+    if let [byte] = *separator.as_bytes() {
+        let pattern = u64::from(byte) * 0x0101_0101_0101_0101;
+        let mut index = 0;
+        while index < text.len() {
+            let mut matches = separators_in_word(text, index, pattern);
+            while matches != 0 {
+                let at = index + (matches.trailing_zeros() / 8) as usize;
+                bounds.add(found).write([start as u64, at as u64]);
+                found += 1;
+                if found == pieces {
+                    return found as u64;
+                }
+                start = at + 1;
+                matches &= matches - 1;
+            }
+            index += 8;
+        }
+    } else if !separator.is_empty() {
+        for (at, _) in string.as_str().match_indices(separator) {
+            bounds.add(found).write([start as u64, at as u64]);
+            found += 1;
+            if found == pieces {
+                return found as u64;
+            }
+            start = at + separator.len();
+        }
+    }
+    bounds.add(found).write([start as u64, text.len() as u64]);
+    found as u64 + 1
+}
+
+/// The bytes of a borrowed string from `start` to `end`, which [`ry_str_split_bounds`] gave for
+/// the same string, as a string of their own.
+pub unsafe extern "C" fn ry_str_piece(lo: u64, hi: u64, start: u64, end: u64) -> Str {
+    let string = Str { lo, hi };
+    str_from_bytes(string.bytes().get_unchecked(start as usize..end as usize))
+}
+
 /// The top bit of every byte, among the eight of `text` from `index` on, that equals the byte
 /// `pattern` repeats. Bytes past the end of the text never match.
 #[inline]
@@ -2074,6 +2212,11 @@ unsafe fn separators_in_word(text: &[u8], index: usize, pattern: u64) -> u64 {
     let (word, inside) = if remaining >= 8 {
         let word = (text.as_ptr().add(index) as *const u64).read_unaligned();
         (word, u64::MAX)
+    } else if text.len() >= 8 {
+        // The last eight bytes of the text end with the ones wanted, and the shift moves those
+        // to the low end, which is one read where assembling them is several.
+        let word = (text.as_ptr().add(text.len() - 8) as *const u64).read_unaligned();
+        (word >> (8 * (8 - remaining)), (1 << (8 * remaining)) - 1)
     } else {
         // An inline string of up to eight bytes holds them in its first word, zero-padded.
         let word = str_from_bytes(text.get_unchecked(index..)).lo;

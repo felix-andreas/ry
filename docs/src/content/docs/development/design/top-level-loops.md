@@ -16,11 +16,12 @@ A `for`, `while` or `repeat` that the tree walker evaluates compiles when all of
   (`R_GlobalEnv == rho` in `eval.c`'s `do_for`, `do_while` and `do_repeat`);
 - no debugger session is active;
 - the loop does not call `return` outside a function it defines;
-- a `for` loop's sequence is a vector (not a record or `I64`) with at least
-  `LOOP_COMPILE_ITERATIONS` elements, or a `while` or `repeat` loop has run that many iterations
-  in the tree walker.
+- a `for` loop's sequence is a vector (not a record or `I64`).
 
-Otherwise the tree walker runs it.
+Otherwise the tree walker runs it. The loop compiles before its first iteration, as GNU R's does,
+because the compiled code binds the base functions it inlines when it compiles (see "When code
+compiles and what it binds" in `r-runtime.md`): a loop compiled later would bind at another
+moment than GNU R's.
 
 ## How the compiled loop runs
 
@@ -31,9 +32,6 @@ Otherwise the tree walker runs it.
   sequence without expanding it, as in a closure.
 - A `for` loop that stays in the tree walker steps through a compact sequence the same way, in
   `do_for` after `run_loop` declines it, so no loop expands `1:n`.
-- `while` and `repeat` keep all their state in the environment, so after
-  `LOOP_COMPILE_ITERATIONS` iterations the compiled loop starts again from the condition (`while`)
-  or the body (`repeat`), which is exactly where the tree walker stands between two iterations.
 - The loop compiles with no local symbols, so every variable read and write goes to the
   environment's bindings. Code called from the loop, `get()`, `exists()` and active bindings see
   every assignment at once, and the loop variable keeps its last value afterwards.
