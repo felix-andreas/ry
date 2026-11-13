@@ -305,11 +305,12 @@ unsafe fn lower_calling(
     })
 }
 
-/// A function passed to another: inlined where it is called, or a typed closure called directly.
+/// A function passed to another: a local function or a literal, inlined where it is called, or
+/// a typed closure and the name that names it.
 #[derive(Clone, Copy, Debug)]
 enum Callable {
     Inline(Sexp, Sexp, usize),
-    Typed(Sexp),
+    Typed(Sexp, Sexp),
 }
 
 /// What a name in scope stands for.
@@ -1085,34 +1086,7 @@ impl Lowering<'_> {
                 return Err(Refusal::new("a typed call with named arguments"));
             }
             let values = self.call_arguments(&arguments)?;
-            // A small function lowers into its caller, where its records need no allocation
-            // and its arguments no call. A function that calls itself from a place or two
-            // lowers into itself at those places, one level deep, so a recursion makes fewer
-            // calls, and into no other caller. The copies are counted as they are made,
-            // because a local function that holds the call is itself lowered at each of its
-            // calls.
-            let body = interp::bytecode::closure_body(function);
-            let own = function == self.closure;
-            let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
-            if function.tag() == self.env
-                && (!own || self.self_inlines < MAX_SELF_CALLS)
-                && !self.inlining.contains(&function)
-                && !self.called.contains(&function)
-                && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
-                && rvalues::pairlist_items(function.car()).len() == values.len()
-                && !tail_invisible(body)
-                && small_body(body, head, &mut own_calls, &mut 0)
-            {
-                self.self_inlines += own as usize;
-                self.inlining.push(function);
-                let value = self.inline(function.car(), body, 0, &values, crate::storage);
-                self.inlining.pop();
-                if value.is_err() {
-                    self.refused.get_or_insert(function);
-                }
-                return value;
-            }
-            return self.typed_call(function, &values).map(Some);
+            return self.typed_function(head, function, &values);
         }
         if let Some(r_use) = r_use {
             self.speculations.push(speculation);
@@ -1323,6 +1297,43 @@ impl Lowering<'_> {
     }
 
     /// A direct call of the compiled typed closure `function`.
+    /// Calls the typed closure `function`, which `name` names, with `values`.
+    ///
+    /// A small function lowers into its caller, where its records need no allocation and its
+    /// arguments no call. A function that calls itself from a place or two lowers into itself
+    /// at those places, one level deep, so a recursion makes fewer calls, and into no other
+    /// caller. The copies are counted as they are made, because a local function that holds
+    /// the call is itself lowered at each of its calls.
+    unsafe fn typed_function(
+        &mut self,
+        name: Sexp,
+        function: Sexp,
+        values: &[Local],
+    ) -> Result<Option<Local>, Refusal> {
+        let body = interp::bytecode::closure_body(function);
+        let own = function == self.closure;
+        let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
+        if function.tag() == self.env
+            && (!own || self.self_inlines < MAX_SELF_CALLS)
+            && !self.inlining.contains(&function)
+            && !self.called.contains(&function)
+            && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
+            && rvalues::pairlist_items(function.car()).len() == values.len()
+            && !tail_invisible(body)
+            && small_body(body, name, &mut own_calls, &mut 0)
+        {
+            self.self_inlines += own as usize;
+            self.inlining.push(function);
+            let value = self.inline(function.car(), body, 0, values, crate::storage);
+            self.inlining.pop();
+            if value.is_err() {
+                self.refused.get_or_insert(function);
+            }
+            return value;
+        }
+        self.typed_call(function, values).map(Some)
+    }
+
     unsafe fn typed_call(&mut self, function: Sexp, values: &[Local]) -> Result<Local, Refusal> {
         let types: SmallVec<[Type; 4]> =
             values.iter().map(|&value| self.builder.ty(value)).collect();
@@ -3852,7 +3863,7 @@ impl Lowering<'_> {
                 ));
             }
             self.speculations.push(speculation);
-            return Ok(Callable::Typed(found));
+            return Ok(Callable::Typed(function, found));
         }
         if function.kind() == SexpType::Language
             && function.car().kind() == SexpType::Symbol
@@ -3878,7 +3889,7 @@ impl Lowering<'_> {
             Callable::Inline(formals, body, scope) => {
                 self.inline(formals, body, scope + 1, arguments, inline_storage)
             }
-            Callable::Typed(function) => self.typed_call(function, arguments).map(Some),
+            Callable::Typed(name, function) => self.typed_function(name, function, arguments),
         }
     }
 
@@ -4625,7 +4636,7 @@ impl Lowering<'_> {
                 "a `Dict.update` of something other than a dictionary",
             ));
         };
-        if let Callable::Typed(_) = callable {
+        if let Callable::Typed(..) = callable {
             let (current, position) = self.lookup_result(dict, key, "Missing")?;
             let updated = self
                 .store_update(callable, current, dict, key, position, None)?

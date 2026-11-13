@@ -758,6 +758,8 @@ impl Op {
             | DictLen(_)
             | DictKeys(_)
             | DictValues(_) => false,
+            // A split string has at least one piece, so only a later piece can be missing.
+            Piece { index, .. } => *index != 1,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

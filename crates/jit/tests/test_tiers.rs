@@ -3021,6 +3021,9 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
         "tier_area <- function(r: Record{w: F64, h: F64}) -> F64 r$w * r$h",
         "tier_bump <- function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
          match (found) { :Ok(v) => if (v >= 2) :Err(:Missing) else :Ok(v + 1)\n :Err(_) => :Ok(1) }",
+        "tier_person <- function(row: Str) -> Result<Record{team: Str, score: F64}, :Bad | :Low> { \
+         parts <- Str.split_on(row, \",\")\n match (Str.to_f64(parts[[2]])) { :Err(_) => :Err(:Bad)\n \
+         :Ok(score) => if (score < 0) :Err(:Low) else :Ok((team = parts[[1]], score = score)) } }",
     ];
     let cases: &[(&str, &[&str])] = &[
         // A record's fields sit in name order, whatever order the literal gives them in, and a
@@ -3276,6 +3279,68 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
         (
             "function(xs: List<Str>, s: Str) -> List<Bool> xs <= s",
             &["{ a <- List.from_r(c(\"B\", \"a\", \"b\", \"\")); b <- \"b\"; FUNCTION(a, b) }"],
+        ),
+        // A map, a filter and a walk in a row run as one loop that builds neither list, and the
+        // lists' lengths are still known after it. The call is left to tier 0 where a row lacks
+        // a piece and where no row is kept, as it is with the lists built.
+        (
+            "function(rows: List<Str>) -> F64 { parsed <- List.map(rows, tier_person)\n \
+             people <- List.keep_oks(parsed, function(p: Result<Record{team: Str, score: F64}, :Bad | :Low>) \
+             -> Result<Record{team: Str, score: F64}, :Bad | :Low> p)\n \
+             totals <- List.walk(people, Dict.empty(), function(seen: Dict<Str, F64>, \
+             person: Record{team: Str, score: F64}) -> Dict<Str, F64> Dict.update(seen, person$team, \
+             function(found: Result<F64, :Missing>) -> Result<F64, :Missing> \
+             :Ok(Result.with_default(found, 0) + person$score)))\n \
+             Result.with_default(Dict.get(totals, \"a\"), -1) + 10 * Result.with_default(Dict.get(totals, \"b\"), -1) \
+             + 100 * Num.to_f64(List.len(parsed) - List.len(people)) + 1000 * Num.to_f64(List.len(people)) }",
+            &[
+                "{ x <- List.from_r(c(\"a,1.5\", \"b,2\", \"a,3\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"a,1.5\", \"b,x\", \"a,-3\", \"c,4\", \"a,0.25\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"a,x\", \"b,-1\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"a,1\", \"b\", \"a,2\")); FUNCTION(x) }",
+                "{ x <- List.from_r(character(0)); FUNCTION(x) }",
+            ],
+        ),
+        // The loop a list is fused into makes the list the loop after it builds, and that list
+        // is returned.
+        (
+            "function(rows: List<Str>) -> List<I64> { parsed <- List.map(rows, tier_parse)\n \
+             kept <- List.keep_oks(parsed, function(p: Result<I64, :Bad>) -> Result<I64, :Bad> p)\n \
+             List.map(kept, \\(v) v + 1i64) }",
+            &[
+                "{ x <- List.from_r(c(\"1\", \"x\", \"20\", \"300\")); FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
+        // Two maps and a walk, whose state starts at the length of the first mapped list and
+        // whose function reads it. A product that overflows gives up the fused loop as it does
+        // the loop on its own.
+        (
+            "function(xs: List<I64>) -> I64 { a <- List.map(xs, \\(x) x * 2i64)\n n <- List.len(a)\n \
+             b <- List.map(a, \\(x) x + n)\n List.walk(b, n, \\(acc, v) acc + v * n) + List.len(b) }",
+            &[
+                "{ x <- [1i64, 2i64, 39i64]; FUNCTION(x) }",
+                "{ x <- [7i64]; FUNCTION(x) }",
+                "{ x <- [1i64, 9007199254740993i64 * 1024i64, 3i64]; FUNCTION(x) }",
+            ],
+        ),
+        // A `for` loop that appends and leaves early feeds the walk after it.
+        (
+            "function(n: I64) -> I64 { kept <- .ry_items(List.with_capacity(n), \"I64\")\n \
+             for (i in List.range(1, n)) { if (i %% 3i64 != 0i64) kept <- List.append(kept, i * i)\n \
+             if (i > 7i64) break }\n List.walk(kept, 0i64, \\(acc, v) acc + v) + List.len(kept) }",
+            &[
+                "{ n <- 5i64; FUNCTION(n) }",
+                "{ n <- 20i64; FUNCTION(n) }",
+                "{ n <- 0i64; FUNCTION(n) }",
+                "{ n <- -1i64; FUNCTION(n) }",
+            ],
+        ),
+        // A walk that assigns what the loop before it reads is not moved into it.
+        (
+            "function(xs: List<I64>) -> I64 { seen <- 0i64\n a <- List.map(xs, \\(x) x + seen)\n \
+             for (v in a) seen <- seen + v\n seen + List.len(a) }",
+            &["{ x <- [1i64, 2i64, 39i64]; FUNCTION(x) }"],
         ),
     ];
     with_interpreter(|| {
