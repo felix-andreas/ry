@@ -744,6 +744,15 @@ impl<'a> Builder<'a> {
             &self.root.join("etc/Renviron"),
             &substitute(&renviron, &self.renviron_values()),
         )?;
+        // `Rcmd.exe` reads `etc/Rcmd_environ` before every `R CMD` command, and the R homes
+        // assembled over this tree link it.
+        if self.platform == Platform::Windows {
+            let environ = read_text(&source.join("src/gnuwin32/fixed/etc/Rcmd_environ"))?;
+            write(
+                &self.root.join("etc/Rcmd_environ"),
+                &self.installer_build(&environ),
+            )?;
+        }
         if self.platform != Platform::Windows {
             for name in SCRIPTS {
                 let from = source.join("src/scripts").join(name);
@@ -836,7 +845,24 @@ impl<'a> Builder<'a> {
         )?);
         let directory = self.library("base").join("R");
         fs::create_dir_all(&directory).map_err(io_error(&directory))?;
-        write(&directory.join("Rprofile"), &text)
+        write(&directory.join("Rprofile"), &self.installer_build(&text))
+    }
+
+    /// `text` as GNU R's Windows installer edits `etc/Rcmd_environ` and base's `Rprofile`
+    /// (`src/gnuwin32/installer/Makefile`): it uncomments the `# INSTALLER-BUILD:` lines and those
+    /// for its architecture, which put the matching Rtools first on `PATH` for `R CMD` and for
+    /// the session. Other platforms have no such lines.
+    fn installer_build(&self, text: &str) -> String {
+        if self.platform != Platform::Windows {
+            return text.to_owned();
+        }
+        let architecture = if std::env::consts::ARCH == "aarch64" {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        text.replace("# INSTALLER-BUILD:", "")
+            .replace(&format!("# INSTALLER-BUILD-{architecture}:"), "")
     }
 
     /// base's R code concatenated into `R/base`, which the session sources directly until

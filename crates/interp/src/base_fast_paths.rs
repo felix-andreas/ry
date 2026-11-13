@@ -1507,12 +1507,12 @@ unsafe fn is_ascii(text: Sexp) -> bool {
 /// choices themselves. With `choices` missing it evaluates the caller's default for `arg` in
 /// the caller's frame, as the R body does through `sys.function(sys.parent())`.
 unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env()?;
-    if !is_default(ClosureFrame::Env(frame), symbols().several_ok)? {
+    let frame = ClosureFrame::of(call);
+    if !is_default(frame, symbols().several_ok)? {
         return decline();
     }
     // The R body evaluates a missing `choices` before it forces `arg`, and a supplied one after.
-    let defaulted = if is_supplied(ClosureFrame::Env(frame), symbols().choices)? {
+    let defaulted = if is_supplied(frame, symbols().choices)? {
         None
     } else {
         let Some(choices) = default_choices(frame)? else {
@@ -1520,7 +1520,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         };
         Some(choices)
     };
-    let Some(arg) = argument(ClosureFrame::Env(frame), symbols().arg)? else {
+    let Some(arg) = argument(frame, symbols().arg)? else {
         return decline();
     };
     if arg.kind() != SexpType::String || arg.attrib() != nil() {
@@ -1528,7 +1528,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     }
     let choices = match defaulted {
         Some(choices) => choices,
-        None => match argument(ClosureFrame::Env(frame), symbols().choices)? {
+        None => match argument(frame, symbols().choices)? {
             Some(choices) => choices,
             None => return decline(),
         },
@@ -1539,7 +1539,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     let result = values::alloc(SexpType::String, 1)?;
     if length(arg) >= 1 && sort::identical(arg, choices, &IdenticalFlags::default()) {
         crate::heap().set_element(result, 0, arg.element(0));
-        return finish(ClosureFrame::Env(frame), result, true);
+        return finish(frame, result, true);
     }
     if length(arg) != 1 {
         return decline();
@@ -1571,24 +1571,39 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         return decline();
     };
     crate::heap().set_element(result, 0, choices.element(index));
-    finish(ClosureFrame::Env(frame), result, true)
+    finish(frame, result, true)
 }
 
-/// The default of the caller's formal that `arg` names, evaluated in the caller's frame, when
-/// that default is a character constant or a `c()` of character constants. It binds `choices`
-/// in the frame as the R body does, so a declined fast path does not evaluate it a second time.
-unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
-    let Some(cell) = crate::heap().frame_cell(frame, symbols().arg) else {
-        return Ok(None);
+/// The default of the caller's formal that `arg` names, when that default is a character
+/// constant or a `c()` of character constants and `c` is base's in the caller's frame. Neither
+/// frame needs an environment for it: the constant is built as evaluating it would build it,
+/// and a declined fast path lets the R body evaluate it again, which is safe for a constant.
+unsafe fn default_choices(frame: ClosureFrame) -> R<Option<Sexp>> {
+    let (own, promise) = match frame.resolve() {
+        Ok(index) => match eval::slot_formal(index, symbols().arg) {
+            Some((value, _)) => (index, value),
+            None => return Ok(None),
+        },
+        Err(env) => {
+            let (Some(index), Some(cell)) = (
+                crate::envir::frame_of(env),
+                crate::heap().frame_cell(env, symbols().arg),
+            ) else {
+                return Ok(None);
+            };
+            (index, cell.cdr())
+        }
     };
-    let promise = cell.cdr();
     if promise.kind() != SexpType::Promise || promise.cdr().kind() != SexpType::Symbol {
         return Ok(None);
     }
     let name = promise.cdr();
-    let Some((function, caller)) = crate::envir::sys_parent_of(frame)? else {
+    let parent = crate::envir::sys_parent_number(1, Some(own));
+    if parent == 0 {
         return Ok(None);
-    };
+    }
+    let caller = parent as usize - 1;
+    let function = interp().frames[caller].function;
     if function.kind() != SexpType::Closure {
         return Ok(None);
     }
@@ -1601,23 +1616,71 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
     }
     let default = formal.car();
     let is_text = |value: Sexp| value.kind() == SexpType::String && value.attrib() == nil();
-    let constant = is_text(default)
-        || (default.kind() == SexpType::Language && default.car() == symbols().c && {
-            let mut item = default.cdr();
-            let mut all = true;
-            while item.kind() == SexpType::Pairlist {
-                all &= item.tag() == nil() && is_text(item.car());
-                item = item.cdr();
-            }
-            all
-        });
-    if !constant {
+    if is_text(default) {
+        return Ok(Some(default));
+    }
+    if default.kind() != SexpType::Language || default.car() != symbols().c {
         return Ok(None);
     }
-    let choices = eval::eval(default, caller)?;
+    let mut count = 0;
+    let mut item = default.cdr();
+    while item.kind() == SexpType::Pairlist {
+        if item.tag() != nil() || !is_text(item.car()) {
+            return Ok(None);
+        }
+        count += length(item.car());
+        item = item.cdr();
+    }
+    if !calls_base_c(caller)? {
+        return Ok(None);
+    }
+    let choices = values::alloc(SexpType::String, count)?;
     crate::heap().root(choices);
-    eval::define(symbols().choices, choices, frame)?;
+    let mut position = 0;
+    let mut item = default.cdr();
+    while item.kind() == SexpType::Pairlist {
+        let text = item.car();
+        for index in 0..length(text) {
+            crate::heap().set_element(choices, position, text.element(index));
+            position += 1;
+        }
+        item = item.cdr();
+    }
     Ok(Some(choices))
+}
+
+/// Whether `c` names base's `c` in the frame at `index`, found without making the frame's
+/// environment. A slot frame that has any local `c` declines, whatever the binding holds.
+unsafe fn calls_base_c(index: usize) -> R<bool> {
+    let heap = crate::heap();
+    let symbol = symbols().c;
+    let frame = &interp().frames[index];
+    let scope = if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        frame.env
+    } else {
+        let names = frame
+            .function
+            .cdr()
+            .cdr()
+            .element(crate::bytecode::SLOTS)
+            .element(1);
+        let header = frame.slots as usize;
+        for slot in 0..length(names) {
+            if names.element(slot) == symbol
+                && *crate::bytecode::register_address(header + 1 + slot) != values::unbound()
+            {
+                return Ok(false);
+            }
+        }
+        frame.function.tag()
+    };
+    if scope == nil() {
+        return Ok(false);
+    }
+    let Some(base) = heap.frame_cell(heap.known().base_env, symbol) else {
+        return Ok(false);
+    };
+    Ok(eval::find_fun(symbol, scope)? == base.cdr())
 }
 
 /// `stopifnot(...)` when every expression is all `TRUE`. The first that is not leaves the R body
