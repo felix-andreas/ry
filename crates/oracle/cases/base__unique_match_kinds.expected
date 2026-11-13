@@ -1,0 +1,106 @@
+[stdout]
+|  int [1:6] 3 NA 1 2 100000000 -5
+|  [1] FALSE FALSE FALSE  TRUE FALSE  TRUE  TRUE FALSE FALSE  TRUE
+|  [1]  TRUE  TRUE  TRUE FALSE FALSE FALSE FALSE  TRUE FALSE FALSE
+| [1] 4
+| [1] 8
+|  int [1:6] 3 2 NA 1 -5 100000000
+|  num [1:6] 1 NA NaN 0 Inf ...
+|  [1] FALSE FALSE FALSE FALSE  TRUE  TRUE  TRUE FALSE FALSE  TRUE
+|  [1]  TRUE  TRUE  TRUE  TRUE FALSE FALSE FALSE FALSE FALSE FALSE
+| [1] 5
+| [1] 4
+|  num [1:6] 0 NA NaN Inf -Inf ...
+|  chr [1:4] "b" NA "a" "c"
+| [1] FALSE FALSE FALSE  TRUE  TRUE FALSE
+| [1]  TRUE  TRUE FALSE FALSE FALSE FALSE
+| [1] 4
+| [1] 2
+|  chr [1:4] "a" "b" NA "c"
+|  logi [1:3] TRUE NA FALSE
+| [1] FALSE FALSE FALSE  TRUE
+| [1]  TRUE FALSE FALSE FALSE
+| [1] 4
+| [1] 1
+|  logi [1:3] NA FALSE TRUE
+|  cplx [1:3] 1+0i NA 2+0i
+| [1] FALSE FALSE  TRUE FALSE
+| [1]  TRUE FALSE FALSE FALSE
+| [1] 3
+| [1] 1
+|  cplx [1:3] NA 1+0i 2+0i
+|  raw [1:2] 01 02
+| [1] FALSE FALSE  TRUE
+| [1]  TRUE FALSE FALSE
+| [1] 3
+| [1] 1
+|  raw [1:2] 02 01
+| List of 4
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 1 2
+|  $ : NULL
+| [1] FALSE FALSE  TRUE FALSE  TRUE FALSE  TRUE
+| [1]  TRUE  TRUE FALSE FALSE FALSE  TRUE FALSE
+| [1] 3
+| [1] 6
+| List of 4
+|  $ : num 1
+|  $ : num [1:2] 1 2
+|  $ : chr "a"
+|  $ : NULL
+| [1]         3        NA         1         2        NA 100000000        -5
+|  [1] FALSE FALSE FALSE FALSE FALSE FALSE  TRUE FALSE FALSE  TRUE
+| [1] 0
+| [1]  5  2 NA  1
+| [1] 3 2 4 4
+| [1]  3  2 NA
+| [1]  3 NA  1
+| [1] 1 2
+| [1] 0 2 1
+| [1] NA  1 NA
+| [1] FALSE  TRUE
+| [1] 0
+| [1] 131
+|   [1]  71  72  73  74  75  76  77  78  79  80  81  82  83  84  85  86  87  88
+|  [19]  89  90  91  92  93  94  95  96  97  98  99 100 101 102 103 104 105 106
+|  [37] 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124
+|  [55] 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142
+|  [73] 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160
+|  [91] 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178
+| [109] 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196
+| [127] 197 198 199 200
+| [1] 70
+| [1] 146
+| [1] "south" "east"  "west"  "north"
+| 
+|     1     2  <NA> 
+| 25000 25000 50000 
+| [1] "east"  "north" "south" "west" 
+| [1] 0
+| [1] "latin1" "UTF-8" 
+| [1] "café" "cafe"
+| [1] 2
+| [1] FALSE  TRUE
+| [1] 2 1
+| [1] 0
+| [1] NA   "NA"
+| [1] b a
+| Levels: a b
+| [1] 2
+| [1] 201
+| [1] 150
+| [1] 201 202
+| [1]  70 150
+| [1] 300
+| [1] 201
+| [1] 150
+| [1] 201 202
+| [1]  70 150
+| [1] 300
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
