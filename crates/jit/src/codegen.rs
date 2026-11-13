@@ -1415,7 +1415,8 @@ impl<'p> Translator<'p> {
 
     /// Runs the instruction at `position` in tier 0; returns whether it emitted the block's
     /// terminator. In an inlined call, which has no frame, an instruction that may run R code
-    /// always leaves for tier 0, which gives the call its frame first.
+    /// or that captures the call's environment always leaves for tier 0, which gives the call
+    /// its frame first.
     unsafe fn step(
         &mut self,
         position: usize,
@@ -1425,9 +1426,10 @@ impl<'p> Translator<'p> {
         dst: Option<(usize, Ty)>,
         fast: Fast,
     ) -> Result<bool, Refusal> {
-        let pc = self.frame.plan.insts[position].pc;
+        let instruction = &self.frame.plan.insts[position];
+        let (pc, op) = (instruction.pc, instruction.op);
         let inlined = self.frame.call.is_some();
-        if inlined && effect == Effect::Opaque {
+        if inlined && (effect == Effect::Opaque || op == Op::Closure) {
             self.hand_off(position, before);
             return Ok(true);
         }

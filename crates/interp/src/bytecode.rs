@@ -12266,6 +12266,9 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
         (*state.heap).set_element(state.constants, instruction.operand(2), code);
         (*state.heap).set_cdr(closure, code);
     }
+    // A site that has run is one the optimizing tier does not inline without a frame, since a
+    // closure captures the environment of the call that creates it.
+    record_feedback(state.constants, instruction.at, closure);
     instruction.output(0, closure);
     (*state.interp).visible = true;
     Ok(Flow::Next)

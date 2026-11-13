@@ -3804,16 +3804,12 @@ impl<'a> Builder<'a> {
                     effect: Effect::Pure | Effect::PureUnlessObserved,
                     fast,
                     ..
-                } => !matches!(fast, Fast::Store(_)),
-                // An instruction that may run R code leaves for tier 0 every time, which is
-                // only worth compiling where the instruction has never run. One with no
-                // destination records nothing that would say so.
-                Action::Step {
-                    effect: Effect::Opaque,
-                    dst,
-                    fast,
-                    ..
-                } => {
+                } if plan.insts[position].op != Op::Closure => !matches!(fast, Fast::Store(_)),
+                // An instruction that may run R code leaves for tier 0 every time, and so does
+                // one that creates a closure, which captures the environment only a frame has.
+                // Leaving every time is only worth compiling where the instruction has never
+                // run, and one with no destination records nothing that would say so.
+                Action::Step { dst, fast, .. } => {
                     dst.is_some()
                         && fast == Fast::No
                         && feedback.get(plan.insts[position].pc).copied().unwrap_or(0) == 0
@@ -3854,6 +3850,9 @@ impl<'a> Builder<'a> {
                 return Err(match *action {
                     Action::GetVar { .. } => "the callee reads a variable that may run code",
                     Action::SetVar { .. } => "the callee assigns a formal",
+                    Action::Step { .. } if plan.insts[position].op == Op::Closure => {
+                        "the callee creates a closure"
+                    }
                     Action::Step {
                         effect: Effect::Opaque,
                         ..
