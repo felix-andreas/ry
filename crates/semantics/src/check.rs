@@ -3470,6 +3470,21 @@ impl<'db> Checker<'db, '_> {
                                     }
                                     ty
                                 }
+                                // A write into a ry list may decide the variable's literal
+                                // (`lookup[[i]] <- j`), which the write itself does.
+                                ExpressionKind::NameRef(_)
+                                    if matches!(
+                                        self.module.kind(target),
+                                        ExpressionKind::Index { double: true, .. }
+                                    ) =>
+                                {
+                                    let fresh = self.literal_reads.insert(value);
+                                    let ty = self.infer(value);
+                                    if fresh {
+                                        self.literal_reads.remove(&value);
+                                    }
+                                    ty
+                                }
                                 // Literal arithmetic and logic, and an `if` or `{}` whose
                                 // value is a literal, are one literal, so at a top-level
                                 // binding in a typed file they are a ry value too.
@@ -4756,6 +4771,10 @@ impl<'db> Checker<'db, '_> {
         let prior = self.table.resolve(self.db, prior);
         let value_resolved = self.table.resolve(self.db, value_ty);
         let written = self.replacement_written_type(target, base, value, prior, value_resolved);
+        // Only a ry list decides a literal it is written; any other container gives it R's type.
+        if self.open_literal_var(value_ty) {
+            self.default_literal_var(value_ty, false);
+        }
         if let Some(&slot) = self.naming.resolutions.get(&base) {
             self.environment.set(slot, EnvEntry::Mono(written));
         }
@@ -5156,6 +5175,23 @@ impl<'db> Checker<'db, '_> {
             step,
             ReplacementStep::Position(_) | ReplacementStep::Element
         ) {
+            return prior;
+        }
+        // A ry list's item type is fixed, so the write is checked against it, and it is the use
+        // that decides a literal: `j <- 1; lookup[[i]] <- j` makes `j` an `I64` in a `List<I64>`.
+        if let Some(item) = array_element(self.db, prior) {
+            if self.adapt_literal(value_expression, item) == LiteralFit::NotLiteral
+                && !(self.open_literal_var(value) && self.table.unify(self.db, value, item).is_ok())
+            {
+                let value = self.table.resolve(self.db, value);
+                if !matches!(value.kind(self.db), TyKind::Unknown | TyKind::Any)
+                    && !self.table.compatible(self.db, value, item)
+                {
+                    let range = self.blame_range(value_expression);
+                    let error = self.type_mismatch(range, item, value, Some(value_expression));
+                    self.errors.push(error);
+                }
+            }
             return prior;
         }
         match prior.kind(self.db) {

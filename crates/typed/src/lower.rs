@@ -2669,11 +2669,14 @@ impl Lowering<'_> {
                 let value = self.value(value)?;
                 let times = self.value(times)?;
                 let times = self.integer_count(times)?;
-                let item = self
-                    .builder
-                    .ty(value)
-                    .item()
-                    .ok_or(Refusal::new("a `rep` of a vector"))?;
+                // `List.repeat` of a list builds a list of lists, which base R's `rep` cannot.
+                let ty = self.builder.ty(value);
+                let item = if name == "List.repeat" {
+                    ty.held_item()
+                } else {
+                    ty.item()
+                }
+                .ok_or(Refusal::new("a `rep` of a vector"))?;
                 let value = self.convert_scalar(value, item)?;
                 // `List.repeat` builds an Array, as the standard library does, except of R
                 // integers, which no Array holds.

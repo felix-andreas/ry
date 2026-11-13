@@ -1182,8 +1182,8 @@ A ry type asks in three places:
 - **The other operand.** In arithmetic or a comparison with an operand of a ry number type, the
   literal takes that type, so `n + 1` with `n: I64` is an `I64`.
 - **A later use.** `total <- 0` gives `total` a literal type that its first use in the same
-  function decides: an operand beside a ry number, an argument to a typed parameter, or an annotated
-  binding. In `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
+  function decides: an operand beside a ry number, an argument to a typed parameter, an annotated
+  binding, or an item written into a `List` (`lookup[[i]] <- j` with `lookup: List<I64>`). In `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
   `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Any other read gives the
   variable R's type, as does a function that never decides it. A literal written as a tuple item
   or a record field is decided the same way: in `pair <- ("a", 1)`, the read

@@ -1,5 +1,7 @@
 # The plane is two flat column-major lists of F64, the real and the imaginary parts, because
-# typed ry has no complex numbers, and the 3-d output array is a list of its 20 planes.
+# typed ry has no complex numbers, and the 3-d output array is a list of its 20 planes. A list of
+# F64 cannot hold the NaN that R's escaping points reach (Inf - Inf), so a point stops moving once
+# |z| > 2; the program prints nothing that depends on the planes.
 execute <- function(n: I64) -> List<Str> {
   fn <- Num.to_f64(n)
   output <- ["P4\n", f"{n} {n} \n"]
@@ -20,8 +22,8 @@ execute <- function(n: I64) -> List<Str> {
   zi <- List.repeat(0f64, m * m)
   planes <- List.repeat(List.repeat(0f64, m * m), 20)
   for (k in List.range(1, 20)) {
-    next_zr <- zr * zr - zi * zi + cr
-    zi <- zr * zi * 2 + ci
+    next_zr <- List.map3(zr, zi, cr, \(r, im, c) if (r * r + im * im > 4) r else r * r - im * im + c)
+    zi <- List.map3(zr, zi, ci, \(r, im, c) if (r * r + im * im > 4) im else r * im * 2 + c)
     zr <- next_zr
     planes[[k]] <- List.map2(zr, zi, \(r, im) Num.exp(0 - Num.sqrt(r * r + im * im)))
   }

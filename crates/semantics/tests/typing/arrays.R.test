@@ -230,6 +230,29 @@ xs: List<I64>
 a: Unknown
 20..30 error[type-mismatch] `x[[i]]` on a `List` takes one position, an `I64`. A `List` has one dimension and no names
 
+#---- element_write_decides_a_literal_variable
+f <- function(n: I64) {
+  lookup <- List.repeat(0i64, n)
+  j <- 1
+  lookup[[1]] <- j
+  j
+}
+#++++
+f: fn(n: I64) -> I64
+
+#---- element_write_checks_the_item_type
+f <- function(n: I64) -> List<I64> {
+  lookup <- List.repeat(0i64, n)
+  rate <- 1.5
+  lookup[[1]] <- rate
+  lookup[[2]] <- "a"
+  lookup
+}
+#++++
+f: fn(n: I64) -> List<I64>
+101..105 error[type-mismatch] expected `I64`, found `double`
+123..126 error[type-mismatch] expected `I64`, found `character`
+
 #==== iteration
 #---- for_binds_the_item_type
 f <- function() {

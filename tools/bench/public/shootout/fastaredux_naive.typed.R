@@ -69,7 +69,7 @@ random_fasta <- function(lines: List<Str>, genes: List<Gene>, count: I64, seed: 
   cprob_lookup[[n]] <- Num.to_f64(lookup_size - 1)
 
   lookup <- List.repeat(0, lookup_size)
-  j <- 1
+  j <- 1i64
   for (i in List.range(1, lookup_size)) {
     while (cprob_lookup[[j]] + 1 < Num.to_f64(i)) j <- j + 1
     lookup[[i]] <- j

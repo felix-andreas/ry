@@ -1090,7 +1090,7 @@ impl Emitter<'_> {
             }
             Op::Repeat(value, times) => {
                 let item = ty(*value)
-                    .item()
+                    .held_item()
                     .ok_or(Refusal::new("a `rep` of a non-scalar"))?;
                 let times = self.one(*times)?;
                 let negative = self
