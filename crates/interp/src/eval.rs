@@ -27,6 +27,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
+    std::mem::MaybeUninit,
     thin_vec::ThinVec,
 };
 
@@ -6670,6 +6671,41 @@ pub unsafe fn eval_all(expressions: Sexp, env: Sexp) -> R<Sexp> {
         }
     }
     Ok(value)
+}
+
+/// The most arguments [`with_positional_args`] keeps on the stack.
+pub const INLINE_POSITIONAL_ARGS: usize = 8;
+
+/// Runs `body` on `count` untagged arguments, the `index`th of which is `value(index)`, called in
+/// order. Up to [`INLINE_POSITIONAL_ARGS`] of them are written straight into an uninitialized
+/// stack array, because collecting into [`Args`] costs about sixty instructions a call in its
+/// capacity checks alone. The caller keeps every value alive until `body` returns.
+#[inline(always)]
+pub fn with_positional_args<T>(
+    count: usize,
+    mut value: impl FnMut(usize) -> R<Sexp>,
+    body: impl FnOnce(&[Arg]) -> R<T>,
+) -> R<T> {
+    if count > INLINE_POSITIONAL_ARGS {
+        let args = (0..count)
+            .map(|index| {
+                Ok(Arg {
+                    tag: nil(),
+                    value: value(index)?,
+                })
+            })
+            .collect::<R<Args>>()?;
+        return body(&args);
+    }
+    let mut buffer = [const { MaybeUninit::<Arg>::uninit() }; INLINE_POSITIONAL_ARGS];
+    for (index, slot) in buffer.iter_mut().take(count).enumerate() {
+        slot.write(Arg {
+            tag: nil(),
+            value: value(index)?,
+        });
+    }
+    // SAFETY: the loop above wrote the first `count` slots, and `count` fits the buffer.
+    body(unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<Arg>(), count) })
 }
 
 /// Makes a fresh, empty `DOTSXP`-free argument list from evaluated values.

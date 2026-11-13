@@ -65,7 +65,6 @@ use {
     smallvec::{SmallVec, smallvec},
     std::{
         hash::{Hash, Hasher},
-        mem::MaybeUninit,
         ops::Range,
     },
 };
@@ -5601,7 +5600,9 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
         if words[pc] as u32 == POSITIONAL_CALL_BUILTIN_WORD
             && !positional_call(constant(operand(2))?, operand(4))
         {
-            return Err(format!("a positional builtin call with other arguments at {pc}"));
+            return Err(format!(
+                "a positional builtin call with other arguments at {pc}"
+            ));
         }
         pc += 1 + operand_count(op);
     }
@@ -7728,9 +7729,6 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     Ok(Flow::Next)
 }
 
-/// The longest argument list [`op_call_builtin_positional`] builds on the stack.
-const POSITIONAL_INLINE_ARGS: usize = 8;
-
 /// [`op_call_builtin`] at a [`POSITIONAL_CALL_BUILTIN`] site, whose arguments need neither their
 /// tags read nor an empty one rejected.
 #[inline(always)]
@@ -7762,35 +7760,34 @@ unsafe fn op_call_builtin_positional(
         instruction.output(0, value);
         return Ok(Flow::Next);
     }
-    // `args` copies the registers `first..first + count`, which keep the same values, rooted,
-    // until this instruction writes its result: a nested call's registers start above this
-    // frame's, and growing the register file carries them over. So `args` needs no root of its own.
-    // A short list is written straight into an uninitialized stack array: collecting into
-    // `eval::Args` costs about sixty instructions a call in the capacity checks alone.
-    let mut buffer = [const { MaybeUninit::<Arg>::uninit() }; POSITIONAL_INLINE_ARGS];
-    let spilled: eval::Args;
-    let args: &[Arg] = if values.len() <= POSITIONAL_INLINE_ARGS {
-        for (slot, &value) in buffer.iter_mut().zip(values) {
-            slot.write(Arg { tag: nil(), value });
-        }
-        std::slice::from_raw_parts(buffer.as_ptr().cast::<Arg>(), values.len())
-    } else {
-        spilled = eval::value_args(values);
-        &spilled
-    };
+    // The arguments copy the registers `first..first + count`, which keep the same values,
+    // rooted, until this instruction writes its result: a nested call's registers start above
+    // this frame's, and growing the register file carries them over. So they need no root of
+    // their own.
     let env = *state.header;
     // Every dispatch needs an object (or an S4 value, for `c`) among the arguments, except the
     // matrix products' argument count error.
-    let value = if definition.generic != Generic::None
+    let dispatches = definition.generic != Generic::None
         && (definition.generic == Generic::MatrixOps
             || values
                 .iter()
-                .any(|value| value.is_object() || value.has_gp(gp::S4_OBJECT)))
-    {
-        call_builtin(definition, call, function, args, env)?
-    } else {
-        eval::call_builtin_positional(definition, call, function, args, env)?
-    };
+                .any(|value| value.is_object() || value.has_gp(gp::S4_OBJECT)));
+    let value = eval::with_positional_args(
+        values.len(),
+        |index| {
+            values
+                .get(index)
+                .copied()
+                .ok_or_else(|| error("a register is out of range"))
+        },
+        |args| {
+            if dispatches {
+                call_builtin(definition, call, function, args, env)
+            } else {
+                eval::call_builtin_positional(definition, call, function, args, env)
+            }
+        },
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)

@@ -1237,7 +1237,8 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ### Argument lists collected into `eval::Args`
 
-- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. The quickened positional builtin path writes a stack array instead (`decisions.md`, "Positional builtin calls read their arguments from the registers"), which is most of its 6% on bond_book_full. The same collect remains on other hot paths: on bond_book_full `jit::runtime::jit_call` spends 0.66% of all instructions and `bytecode::slot_subject_call` 0.42% in SmallVec code alone. They belong to the JIT and call-path owners.
+- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler and `jit::runtime::jit_call` use it (`decisions.md`, "Positional builtin calls read their arguments from the registers").
+- `bytecode::slot_subject_call` still collects into `eval::Args` (0.42% of bond_book_full in SmallVec code). It needs a different shape: its arguments carry tags, their count is known only after walking the call, and it stops early and drops the refcounts it took. Owned by the call path.
 
 ### Queued with measured ceilings
 
