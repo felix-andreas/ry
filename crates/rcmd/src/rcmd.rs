@@ -2620,6 +2620,17 @@ pub fn shlib(
     );
     let mut command = Command::new("make");
     command.current_dir(directory);
+    // On Windows `R CMD SHLIB` runs in the environment `Rcmd.exe` sets from `etc/Rcmd_environ`,
+    // which puts Rtools ahead of other toolchains on `PATH`. Building base R calls this without
+    // the front end, and another toolchain's `as` rejects the flags Rtools' GCC passes it.
+    let r_home = home.display().to_string().replace('\\', "/");
+    command.envs(command_environment(home, |name| {
+        if name == "R_HOME" {
+            Some(r_home.clone())
+        } else {
+            std::env::var(name).ok()
+        }
+    })?);
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
