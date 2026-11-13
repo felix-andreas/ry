@@ -468,6 +468,9 @@ struct Worker {
     /// whose durability drops, so the first LOW write to a file re-derives everything that
     /// depends on it. Idle time pays that once, so the first keystroke does not.
     pending_lowering: Vec<PathBuf>,
+    /// Whether the last walk over the `source()` literals met one that names no file on disk.
+    /// Such a literal starts to resolve when the file appears, which no edit announces.
+    source_literal_unresolved: bool,
     /// Non-empty sets only. Kept current per synced or primed file, never by a
     /// whole-project sweep, so keystroke work stays O(open documents).
     attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
@@ -604,6 +607,7 @@ impl Worker {
             prime_queue: Vec::new(),
             editor_folds_stale: false,
             pending_lowering: Vec::new(),
+            source_literal_unresolved: false,
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
             published_fixes: HashMap::new(),
@@ -1587,13 +1591,17 @@ impl Worker {
             updated = analysed;
         }
         self.pending_lowering.retain(|owed| owed != &path);
-        // The loaded scripts are a function of each file's `source()` literals, and an edit can
-        // change only the edited file's, so the walk over every file runs only when they did.
+        // The loaded scripts are a function of each file's `source()` literals and of which of
+        // them name a file on disk. An edit can change only the edited file's literals, so the
+        // walk over every file runs when they changed, or while some literal names no file,
+        // because that file can appear without the client reporting it.
         let sourced_before = self.source_calls(file);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
-        if self.source_calls(file) != sourced_before && self.sync_sourced_files() {
+        if (self.source_literal_unresolved || self.source_calls(file) != sourced_before)
+            && self.sync_sourced_files()
+        {
             self.rebuild_project_files();
         }
         self.refresh_attached(&path);
@@ -1623,6 +1631,7 @@ impl Worker {
             .map(|(path, _)| path.clone())
             .collect();
         let mut changed = false;
+        self.source_literal_unresolved = false;
         while let Some(path) = pending.pop() {
             let Some(&file) = self.files.get(&path) else {
                 continue;
@@ -1642,6 +1651,7 @@ impl Worker {
                             .map(|relative| self.workspace_root.join(relative))
                     })
                 else {
+                    self.source_literal_unresolved = true;
                     continue;
                 };
                 if self.open_documents.contains(&target) || !reachable.insert(target.clone()) {

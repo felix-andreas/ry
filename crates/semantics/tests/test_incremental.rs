@@ -10,7 +10,7 @@ use {
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
-        package_definitions, session,
+        package_definitions, parse, session,
         stubs::install_shipped_stubs,
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar, unknown},
@@ -170,6 +170,46 @@ fn a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item() {
         [5, 1, 1, 1, 1],
         "each item projects the maps again and only the new one is checked; the edited file \
          walks its groups again, and the fold runs once and its duplicates backdate"
+    );
+}
+
+/// A file's cyclic groups name items rather than positions in the file, so a statement added
+/// before or after a recursive function leaves the function's check alone.
+#[test]
+fn a_new_statement_beside_a_recursive_function_checks_only_itself() {
+    let mut db = ProbeDatabase::default();
+    let recursive =
+        "count <- function(n) if (n > 0L) count(n - 1L) else 0L\nplain <- function() 1L\n";
+    let files = db.project(&[recursive, "other <- function() count(2L)\n"]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(files[0], format!("first <- 1L\n{recursive}last <- 2L\n"));
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["first", "last"]);
+}
+
+/// An item's links ask whether its file belongs to the project, which reads the file list and
+/// not what the project's files bind, so a name a script adds reaches no package item.
+#[test]
+fn a_new_name_in_a_script_links_no_package_item_again() {
+    let mut db = ProbeDatabase::default();
+    let package = SourceFile::new(
+        &db,
+        "x <- function() 1L\nuse_x <- function() x()\n".to_owned(),
+        DocumentKind::Package,
+    );
+    let script = SourceFile::new(&db, "result <- x()\n".to_owned(), DocumentKind::Script);
+    ProjectFiles::new(&db, vec![package, script]);
+    settle(&db, &[package, script]);
+    db.executions_since(&[]);
+
+    db.edit(script, "result <- x()\nfresh <- 2L\n".to_owned());
+    settle(&db, &[package, script]);
+    assert_eq!(
+        db.executions_since(&["item_links"]),
+        [2],
+        "the script's two items resolve their names, and neither package item does"
     );
 }
 
@@ -508,9 +548,11 @@ fn wide_project(db: &ProbeDatabase) -> Vec<SourceFile> {
     files
 }
 
-/// The order `ry check` runs in: derive from each tree, name every item, then report.
+/// The order `ry check` runs in: derive from each tree while holding it, name every item, then
+/// report.
 fn cold_check(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     for &file in files {
+        let _held = db.trees().hold(file);
         derive_from_syntax(db, file, lints);
     }
     // `ry check` writes the attached namespaces here, so later passes verify memos instead of
@@ -562,25 +604,47 @@ fn a_cold_check_parses_each_file_once() {
     );
 }
 
-/// A diagnostics-only host keeps a few trees per worker, never one per file, and a file whose
-/// tree it dropped still reports what a host that keeps every tree reports.
+/// A diagnostics-only host keeps two trees here, never one per file. Its check still parses
+/// each file once, because the pass that derives from a tree holds it and no later pass reads
+/// one, and it reports what a host that keeps every tree reports.
 #[test]
-fn a_diagnostics_only_check_keeps_a_bounded_number_of_trees() {
-    let mut db = ProbeDatabase::diagnostics_only();
-    let files = wide_project(&db);
+fn a_diagnostics_only_check_parses_each_file_once_with_two_trees() {
+    let mut bounded = ProbeDatabase::diagnostics_only();
+    let files = wide_project(&bounded);
     let lints = LintConfig::default();
-    cold_check(&mut db, &files, &lints);
+    cold_check(&mut bounded, &files, &lints);
+    assert!(bounded.trees().stored() <= 2);
+    assert_eq!(bounded.trees().parses(), files.len() as u64);
+
+    let keeping = ProbeDatabase::default();
+    let kept_files = wide_project(&keeping);
+    let expected = diagnostics_of(&keeping, &kept_files);
+    assert!(!expected.is_empty(), "the project has findings to compare");
+    assert_eq!(diagnostics_of(&bounded, &files), expected);
+}
+
+/// A held file's tree survives the reads of more files than the store keeps, and is dropped like
+/// any other once the hold ends.
+#[test]
+fn a_held_tree_outlives_the_reads_of_other_files() {
+    let db = ProbeDatabase::diagnostics_only();
+    let files = db.project(&["a <- 1L\n", "b <- 2L\n", "c <- 3L\n", "d <- 4L\n"]);
     let trees = db.trees();
-    assert!(
-        trees.capacity() < files.len(),
-        "the project outgrows the store"
-    );
-    assert!(trees.stored() <= trees.capacity());
-    let codes: Vec<&str> = file_diagnostics(&db, files[200])
-        .iter()
-        .map(|diagnostic| diagnostic.code)
-        .collect();
-    assert!(codes.contains(&"unused"), "{codes:?}");
+    {
+        let _held = trees.hold(files[0]);
+        for &file in &files {
+            parse(&db, file);
+        }
+        let parses = trees.parses();
+        parse(&db, files[0]);
+        assert_eq!(trees.parses(), parses, "the held file is not parsed again");
+    }
+    for &file in &files[1..] {
+        parse(&db, file);
+    }
+    let parses = trees.parses();
+    parse(&db, files[0]);
+    assert_eq!(trees.parses(), parses + 1, "the released file was dropped");
 }
 
 #[test]

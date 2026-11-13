@@ -286,10 +286,11 @@ impl Db for ProbeDatabase {
 
 impl ProbeDatabase {
     /// A probe for a host that only reports diagnostics, like
-    /// `RootDatabase::for_command(false)`.
+    /// `RootDatabase::for_command(false)`, with a store so small that any project of three
+    /// files drops trees.
     pub fn diagnostics_only() -> ProbeDatabase {
         ProbeDatabase {
-            trees: Arc::new(TreeStore::bounded()),
+            trees: Arc::new(TreeStore::bounded(2)),
             diagnostics_only: true,
             ..ProbeDatabase::default()
         }

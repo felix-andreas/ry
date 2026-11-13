@@ -21,7 +21,7 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::{Durability, Setter},
     semantics::{
-        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        AnalysisSettings, DataFiles, Db, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         SourcePaths,
         diagnostics::{
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
@@ -827,6 +827,7 @@ fn analyze_project_with(
     let mut surfaces: Vec<Option<Fingerprint>> = vec![None; files.len()];
     for (index, (tokens, surface)) in in_parallel(&db, workers, &checked_order, |db, index| {
         let file = files[index];
+        let _held = db.trees().hold(file);
         // A file that is not checked contributes only its share of the project-wide maps.
         if checked(index) {
             derive_from_syntax(db, file, &config.lint);

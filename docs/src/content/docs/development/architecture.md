@@ -187,7 +187,8 @@ reparse is compared with a parse from scratch.
 text differs from the stored tree's, the store works out the edit as the longest common prefix and
 suffix, and `syntax::reparse` reparses only the statements the edit touched and copies the
 untouched top-level runs of the old tree around them. A query that reads a tree records its read of
-the file's text and keeps only what it derives, so no memo holds a tree.
+the file's text and keeps only what it derives, so no memo holds a file's tree. The one syntax a
+memo keeps is the detached copy of an annotation's subtree, described below.
 
 The spliced tree is byte-identical and error-identical to a parse from scratch. The edit-stream
 fuzzer pins that equivalence, and the splice refuses and falls back to a full parse whenever the
@@ -203,12 +204,17 @@ equal, and salsa's early cutoff prunes all the work downstream of them.
 
 Every host runs the same queries, and the only thing it chooses about trees is the store's
 capacity. The server's store keeps every tree (`TreeStore::default`), because an edit reparses one
-file by splicing its previous tree and a position request can read any tree at any time. A command
-that checks once and exits (`RootDatabase::for_command`, which `ry check` uses) reads each tree
-in its first pass and afterwards mostly what was derived from it, so its store keeps the most
-recently read trees, four per worker thread (`TreeStore::bounded`). A tree read after it was
-dropped is parsed again, which costs time and changes no result. `test_incremental.rs` pins that a
-cold check parses each file once and that a command's store stays within its capacity.
+file by splicing its previous tree and a position request can read any tree at any time.
+
+A command that checks once and exits (`RootDatabase::for_command`, which `ry check` uses) reads
+each tree in its first pass and afterwards mostly what was derived from it. Its store is bounded
+(`TreeStore::bounded`) at four trees per core. The worker that runs a file's first pass holds the
+file (`TreeStore::hold`), and a held tree is never dropped, so the pass parses the file once
+however many trees the other workers read meanwhile. The rest of the capacity keeps the most
+recently read trees, which serves a pass that reads an item of a file it does not hold without a
+parse per read. A tree read after it was dropped is parsed again, which costs time and changes no
+result. `test_incremental.rs` pins that a cold check parses each file once on a store of two
+trees, and that it reports what a store that keeps every tree reports.
 
 `item_syntax` is a plain function that returns the item's window of the stored tree, so an item's
 syntax has no memo of its own to keep the file's tree alive. After an edit, each item of the
@@ -449,7 +455,7 @@ costs one memo per item instead of two.
 A constructed name is usually bound nowhere, and a per-item `frame_binder` memo for each such
 lookup comes to about 100,000 memos (about 18 MB) on the finance bench. `package_name` therefore
 also says whether any project file binds the name at top level, from a bitset over symbol indices
-that `project_binders` folds from each file's binders. When none does, the item's file has no
+that `project_bound_names` folds from each file's binders. When none does, the item's file has no
 binder for it either, and the lookup stops there without a query.
 
 `crates/semantics/tests/test_incremental.rs` pins these contracts: the queries an edit re-runs, the

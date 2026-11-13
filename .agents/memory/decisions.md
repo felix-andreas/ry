@@ -8473,7 +8473,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.**
   - `TreeStore` (`Db::trees`) is the one home of syntax trees, and `parse` is a plain function
     that reads it. It splices on a changed text, and its capacity is the host's only choice:
-    every tree for the server, four per worker for a command (`RootDatabase::for_command`).
+    every tree for the server, four per core for a command (`RootDatabase::for_command`). A
+    command's worker holds the file whose first pass it runs (`TreeStore::hold`), and a held
+    tree is never dropped, so the pass parses once whatever the other workers read. The rest of
+    the capacity keeps the most recently read trees. Holds alone were rejected: a read of a
+    file nobody holds (an item of another file, a rewrite after the check) would parse the
+    whole file on every read.
   - `item_syntax` is a plain window of the stored tree. An edited file's items lower again and
     backdate on `item_hir` equality.
   - `item_links(item)` resolves every name the item's naming lists against the project name
@@ -8504,11 +8509,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
   to 3.0 s), and peak RSS is 253 MB against 243 MB. The first single-path build peaked at
   276 MB: about 100,000 per-item `frame_binder` memos for constructed names that nothing binds,
   which the bound bit removes. In the server, a body edit and a signature edit settle in 3 ms
-  and a new top-level definition in 6 ms at the median, the same as before; a request right
+  and a new top-level definition in 6 ms at the median on both builds; a request right
   after an edit costs about 0.3 ms more, because the edited file's items lower again.
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
-  so the re-check stays with the readers of the name.
+  so the re-check stays with the readers of the name. A file's groups list items, not positions
+  in the file, so the value stays equal when a statement is added beside a recursive function.
+  An item's links read the project's file list for "is my file in the project", never the
+  bound-names bitset, so a name a test or script adds re-runs no package item's links.
 
 ## The standard library is the `std` namespace, with an optional prelude
 

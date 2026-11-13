@@ -70,12 +70,15 @@ pub struct RootDatabase {
 
 impl RootDatabase {
     /// For a command that analyses a project once and exits, such as `ry check`. It reads each
-    /// file's tree in one pass and afterwards mostly what was derived from it, so it keeps a
-    /// few trees per worker rather than one per file. `editor_facts` is [`Db::editor_facts`].
+    /// file's tree in one pass, which holds the tree, and afterwards mostly what was derived
+    /// from it, so it keeps a few trees per core rather than one per file. `editor_facts` is
+    /// [`Db::editor_facts`].
     pub fn for_command(editor_facts: bool) -> RootDatabase {
         RootDatabase {
             storage: salsa::Storage::default(),
-            trees: Arc::new(TreeStore::bounded()),
+            trees: Arc::new(TreeStore::bounded(
+                std::thread::available_parallelism().map_or(1, NonZero::get) * 4,
+            )),
             without_editor_facts: !editor_facts,
         }
     }
@@ -141,8 +144,9 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
 /// memos for two reasons. An edit reparses by splicing the file's previous tree, which a memo
 /// has already dropped by the time the query runs again. And how long a tree stays is the
 /// host's choice, not the analysis's: an editor session keeps every tree, because position
-/// requests read them at any time, while a command that checks once keeps only the trees its
-/// workers are reading, which bounds its memory by its thread count instead of the project.
+/// requests read them at any time, while a command that checks once keeps the tree of each file
+/// a worker holds ([`TreeStore::hold`]) and a few more, which bounds its memory by its thread
+/// count instead of the project.
 ///
 /// A dropped tree is parsed again on the next read, so capacity changes time and memory only:
 /// a spliced or repeated parse is byte- and error-identical to a fresh one.
@@ -154,9 +158,31 @@ pub struct TreeStore {
 #[derive(Default)]
 struct StoredTrees {
     entries: FxHashMap<SourceFile, StoredTree>,
+    /// How many [`TreeHold`]s are open on a file. A held file's tree is never dropped.
+    holds: FxHashMap<SourceFile, u32>,
     /// Counts reads, so the entry with the smallest stamp is the least recently read.
     clock: u64,
     parses: u64,
+}
+
+/// Keeps one file's tree in a bounded store until dropped. A worker that derives everything it
+/// needs from a file in one pass holds the file for that pass, so the pass parses once however
+/// many trees other workers read meanwhile.
+pub struct TreeHold<'a> {
+    store: &'a TreeStore,
+    file: SourceFile,
+}
+
+impl Drop for TreeHold<'_> {
+    fn drop(&mut self) {
+        let mut trees = self.store.trees.lock().expect("tree store lock");
+        if let Some(count) = trees.holds.get_mut(&self.file) {
+            *count -= 1;
+            if *count == 0 {
+                trees.holds.remove(&self.file);
+            }
+        }
+    }
 }
 
 struct StoredTree {
@@ -178,25 +204,26 @@ impl Default for TreeStore {
 }
 
 impl TreeStore {
-    /// A store for a host that reads each file's tree in one pass per worker: it keeps the
-    /// most recently read trees, a few per worker, so that a worker's tree survives the reads
-    /// other workers make meanwhile.
-    pub fn bounded() -> TreeStore {
-        let workers = std::thread::available_parallelism().map_or(1, NonZero::get);
+    /// A store for a host that reads each file's tree in one pass per worker. It keeps every
+    /// held tree and, up to `capacity` in total, the most recently read others, which serve
+    /// the reads a pass makes of a file it does not hold without a parse for each.
+    pub fn bounded(capacity: usize) -> TreeStore {
         TreeStore {
             trees: Mutex::default(),
-            capacity: workers * 4,
+            capacity,
         }
+    }
+
+    /// Keeps `file`'s tree until the hold is dropped.
+    pub fn hold(&self, file: SourceFile) -> TreeHold<'_> {
+        let mut trees = self.trees.lock().expect("tree store lock");
+        *trees.holds.entry(file).or_default() += 1;
+        TreeHold { store: self, file }
     }
 
     /// How many trees the store holds.
     pub fn stored(&self) -> usize {
         self.trees.lock().expect("tree store lock").entries.len()
-    }
-
-    /// The most trees the store holds at once.
-    pub fn capacity(&self) -> usize {
-        self.capacity
     }
 
     /// How many texts the store has parsed, which pins that an edit parses one file.
@@ -229,15 +256,17 @@ impl TreeStore {
         };
         let mut trees = self.trees.lock().expect("tree store lock");
         trees.parses += 1;
-        if trees.entries.len() >= self.capacity && !trees.entries.contains_key(&file) {
+        while trees.entries.len() >= self.capacity && !trees.entries.contains_key(&file) {
             let oldest = trees
                 .entries
                 .iter()
+                .filter(|(stored_file, _)| !trees.holds.contains_key(stored_file))
                 .min_by_key(|(_, stored)| stored.last_read)
                 .map(|(&file, _)| file);
-            if let Some(oldest) = oldest {
-                trees.entries.remove(&oldest);
-            }
+            let Some(oldest) = oldest else {
+                break;
+            };
+            trees.entries.remove(&oldest);
         }
         let last_read = trees.clock;
         trees.entries.insert(
@@ -604,8 +633,8 @@ impl ItemSyntax {
     }
 }
 
-/// Derived from the item's subtree only, so it cuts off across edits
-/// elsewhere in the file.
+/// Derived from the item's subtree only. An edit elsewhere in the file lowers the item again,
+/// the module comes out equal, and everything downstream of it cuts off.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
     let syntax = item_syntax(db, item)?;
@@ -1630,35 +1659,34 @@ pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> Projec
                 .cloned()
                 .unwrap_or_default(),
         },
-        bound: bit(&project_binders(db, files).names, text.index() as usize),
+        bound: bit(project_bound_names(db, files), text.index() as usize),
     }
 }
 
-/// What the project binds at top level, one bit per id: the names some project file binds, by
-/// symbol index, and those files, by their id. A name a check constructs for itself (the S3
-/// method `Ops.Date` of an operand's class) is bound almost nowhere, and an item asks for
-/// dozens of them, so this answers them through [`package_name`] where a query per item and
-/// name would keep a memo for each.
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-struct ProjectBinders {
-    names: Box<[u64]>,
-    files: Box<[u64]>,
-}
-
+/// The names some project file binds at top level, one bit per symbol index. A name a check
+/// constructs for itself (the S3 method `Ops.Date` of an operand's class) is bound almost
+/// nowhere, and an item asks for dozens of them, so this answers them through [`package_name`]
+/// where a query per item and name would keep a memo for each.
 #[salsa::tracked(returns(ref))]
-fn project_binders(db: &dyn Db, files: ProjectFiles) -> ProjectBinders {
+fn project_bound_names(db: &dyn Db, files: ProjectFiles) -> Box<[u64]> {
     let mut names: Vec<u64> = Vec::new();
-    let mut members: Vec<u64> = Vec::new();
     for &file in files.files(db) {
-        set_bit(&mut members, file.as_id().index() as usize);
         for &(name, _, _) in file_binders(db, file) {
             set_bit(&mut names, name.index() as usize);
         }
     }
-    ProjectBinders {
-        names: names.into_boxed_slice(),
-        files: members.into_boxed_slice(),
+    names.into_boxed_slice()
+}
+
+/// The project's files, one bit per file id. It reads the file list alone, so a reader does not
+/// depend on what any file binds.
+#[salsa::tracked(returns(ref))]
+fn project_file_set(db: &dyn Db, files: ProjectFiles) -> Box<[u64]> {
+    let mut members: Vec<u64> = Vec::new();
+    for &file in files.files(db) {
+        set_bit(&mut members, file.as_id().index() as usize);
     }
+    members.into_boxed_slice()
 }
 
 fn bit(words: &[u64], index: usize) -> bool {
@@ -2226,12 +2254,8 @@ fn item_links<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLinks<'db> {
         kinds: kinds.into_boxed_slice(),
         items: items.into_boxed_slice(),
         edges: ThinVec::new(),
-        file_in_project: project.is_some_and(|files| {
-            bit(
-                &project_binders(db, files).files,
-                file.as_id().index() as usize,
-            )
-        }),
+        file_in_project: project
+            .is_some_and(|files| bit(project_file_set(db, files), file.as_id().index() as usize)),
     };
     links.edges = interface_edges(db, item, naming, &links);
     links
@@ -2432,9 +2456,9 @@ pub fn item_group<'db>(
     let group = file_group(db, files, item);
     if syntax::testing::invariants_enabled() {
         assert_eq!(
-            group,
-            item_group_from_scratch(db, files, item).as_deref(),
-            "the file's cyclic groups disagree with the item's own walk"
+            group.map(|members| members.iter().copied().collect::<FxHashSet<_>>()),
+            item_group_from_scratch(db, item),
+            "the file's cyclic groups disagree with the item's own reachability"
         );
     }
     group
@@ -2445,37 +2469,52 @@ fn file_group<'db>(
     files: ProjectFiles,
     item: Item<'db>,
 ) -> Option<&'db [Item<'db>]> {
-    let file = *item.file(db);
-    let groups = file_interface_groups(db, files, file);
-    if groups.members.is_empty() {
+    file_interface_groups(db, files, *item.file(db))
+        .members
+        .iter()
+        .find(|members| members.contains(&item))
+        .map(|members| &**members)
+}
+
+/// The members of the item's cyclic group from reachability alone: every item the item reaches
+/// that reaches it back. It shares only the edges with [`file_interface_groups`], so it checks
+/// the component walk as well as the per-file bookkeeping.
+fn item_group_from_scratch<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<FxHashSet<Item<'db>>> {
+    let mut reached: FxHashSet<Item<'db>> = FxHashSet::default();
+    let mut readers: FxHashMap<Item<'db>, Vec<Item<'db>>> = FxHashMap::default();
+    let mut expanded: FxHashSet<Item<'db>> = FxHashSet::from_iter([item]);
+    let mut stack = vec![item];
+    while let Some(reader) = stack.pop() {
+        for &target in item_interface_edges(db, reader) {
+            readers.entry(target).or_default().push(reader);
+            reached.insert(target);
+            if expanded.insert(target) {
+                stack.push(target);
+            }
+        }
+    }
+    if !reached.contains(&item) {
         return None;
     }
-    let position = *item_tree_positions(db, file).get(&item)?;
-    let group = *groups.group_of.get(position)?;
-    groups.members.get(group as usize).map(|members| &**members)
-}
-
-/// [`item_group`] from a walk of the item's own reach, to check the file's walk against.
-fn item_group_from_scratch<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    item: Item<'db>,
-) -> Option<Box<[Item<'db>]>> {
-    let mut group = None;
-    strongly_connected(db, [item], |members| {
-        if members.contains(&item) && cyclic(db, members) {
-            group = Some(canonical_order(db, &file_order(db, files), members));
+    // Every reader recorded above is reachable from the item, so walking the reversed edges
+    // from the item collects exactly the items on a cycle through it.
+    let mut members: FxHashSet<Item<'db>> = FxHashSet::from_iter([item]);
+    let mut stack = vec![item];
+    while let Some(target) = stack.pop() {
+        for &reader in readers.get(&target).into_iter().flatten() {
+            if members.insert(reader) {
+                stack.push(reader);
+            }
         }
-    });
-    group
+    }
+    Some(members)
 }
 
-/// The cyclic groups the items of one file belong to.
+/// The cyclic groups the items of one file belong to, in the canonical order of their first
+/// members. Most files have none. The value names items and no positions, so a check that reads
+/// it is unaffected by an edit that moves the file's items without changing a cycle.
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct FileGroups<'db> {
-    /// Per position in the file's item tree, the item's index into `members`, or `u32::MAX`
-    /// for an item on no cycle. Empty when the file has no cyclic item, which is most files.
-    group_of: Box<[u32]>,
     members: Vec<Box<[Item<'db>]>>,
 }
 
@@ -2490,32 +2529,25 @@ pub fn file_interface_groups<'db>(
     files: ProjectFiles,
     file: SourceFile,
 ) -> FileGroups<'db> {
-    let items = item_tree(db, file);
-    let mut groups = FileGroups::default();
-    strongly_connected(db, items.iter().copied(), |members| {
+    let mut order: Option<FxHashMap<SourceFile, usize>> = None;
+    let mut keyed: Vec<(CanonicalPosition, Box<[Item<'db>]>)> = Vec::new();
+    strongly_connected(db, item_tree(db, file).iter().copied(), |members| {
         if !members.iter().any(|member| *member.file(db) == file) || !cyclic(db, members) {
             return;
         }
-        let Ok(index) = u32::try_from(groups.members.len()) else {
-            panic!("file_interface_groups: more than u32::MAX cyclic groups");
-        };
-        if groups.group_of.is_empty() {
-            groups.group_of = vec![u32::MAX; items.len()].into_boxed_slice();
-        }
-        let positions = item_tree_positions(db, file);
-        for member in members {
-            if let Some(slot) = positions
-                .get(member)
-                .and_then(|&position| groups.group_of.get_mut(position))
-            {
-                *slot = index;
-            }
-        }
-        groups
-            .members
-            .push(canonical_order(db, &file_order(db, files), members));
+        let order = order.get_or_insert_with(|| file_order(db, files));
+        let group = canonical_order(db, order, members);
+        let first = group
+            .first()
+            .map(|&member| canonical_position(db, order, member));
+        keyed.push((first.unwrap_or_default(), group));
     });
-    groups
+    // Components arrive in discovery order, which a new item elsewhere in the file can change,
+    // and sorting keeps the value equal across such an edit.
+    keyed.sort_by_key(|&(first, _)| first);
+    FileGroups {
+        members: keyed.into_iter().map(|(_, group)| group).collect(),
+    }
 }
 
 /// Tarjan's algorithm over the interface edges reachable from `roots`, reporting each strongly
@@ -2607,14 +2639,23 @@ fn canonical_order<'db>(
     members: &[Item<'db>],
 ) -> Box<[Item<'db>]> {
     let mut group = members.to_vec();
-    group.sort_by_cached_key(|&member| {
-        let file = *member.file(db);
-        let item_order = item_tree(db, file)
-            .iter()
-            .position(|&candidate| candidate == member);
-        (file_order.get(&file).copied(), item_order)
-    });
+    group.sort_by_cached_key(|&member| canonical_position(db, file_order, member));
     group.into_boxed_slice()
+}
+
+/// Project file order, then item order, with an item outside the project first.
+type CanonicalPosition = (Option<usize>, Option<usize>);
+
+fn canonical_position<'db>(
+    db: &'db dyn Db,
+    file_order: &FxHashMap<SourceFile, usize>,
+    member: Item<'db>,
+) -> CanonicalPosition {
+    let file = *member.file(db);
+    let item_order = item_tree(db, file)
+        .iter()
+        .position(|&candidate| candidate == member);
+    (file_order.get(&file).copied(), item_order)
 }
 
 /// What a cyclic-group member exports to its readers: the scheme `global_scheme` serves and

@@ -870,13 +870,15 @@ pin these contracts:
 - An inserted statement re-checks only the reads it intercepts.
 - A body edit re-derives one item's load facts and its own file's index layer, a `NAMESPACE` edit
   re-derives no item, and a statement that only moved keeps its load facts.
-- An edit parses one file, a cold check parses each file once, and a diagnostics-only host
-  (`ProbeDatabase::diagnostics_only`) keeps a bounded number of trees and reports exactly what an
-  editor host reports.
+- An edit parses one file. A cold check parses each file once, also on a diagnostics-only host
+  whose store keeps two trees (`ProbeDatabase::diagnostics_only`), and that host reports exactly
+  what an editor host reports.
+- A statement added beside a recursive function checks only itself, and a name a script adds
+  resolves no package item's names again.
 - A check resolves the names it spells through `item_links` without a `frame_binder` query, and
   finds its cyclic groups with one `file_interface_groups` walk per file.
-- Under invariants, the links agree with the per-name answers and each file's groups with a walk
-  from the item alone (checked in a child process, because invariants are process-wide and would
+- Under invariants, the links agree with the per-name answers, and each file's groups agree with
+  plain reachability from the item, which shares only the edges with the component walk (checked in a child process, because invariants are process-wide and would
   perturb the counting tests).
 
 The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to

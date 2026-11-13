@@ -14290,11 +14290,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 // `List.walk(xs, List.repeat(0f64, n), \(sums, x) sums + x)` the
                                 // state is `List<F64>` before the body reads `sums + x`. A state
                                 // with a tag anywhere in it, such as `[:A]`, stays open.
-                                let widening_accumulator =
-                                    accumulators.contains(index)
-                                        && !(is_ry_value_type(self.db, formal)
-                                            && !mentions_tag(self.db, formal)
-                                            && !self.table.contains_unbound_var(self.db, formal));
+                                let widening_accumulator = accumulators.contains(index)
+                                    && !(is_ry_value_type(self.db, formal)
+                                        && !mentions_tag(self.db, formal)
+                                        && !self.table.contains_unbound_var(self.db, formal));
                                 if widening_accumulator
                                     || (index < declared_count
                                         && matches!(
