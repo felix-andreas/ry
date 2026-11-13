@@ -29,6 +29,7 @@ pub mod ir;
 pub mod loops;
 pub mod lower;
 pub mod ownership;
+pub mod ranges;
 pub mod shapes;
 pub mod unbox;
 pub mod values;

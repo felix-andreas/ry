@@ -20,6 +20,7 @@ use {
             Op, Reduce, Terminator, Text, Type,
         },
         lower::SELF,
+        ranges::{self, Range, Ranges, exact_bounds, ranges},
         shapes, values,
     },
     heap::object::NA_REAL_BITS,
@@ -123,6 +124,8 @@ pub fn compile(
             blocks: Vec::new(),
             signatures: FxHashMap::default(),
             budget: None,
+            ranges: ranges(function),
+            current: 0,
         };
         emitter.emit_function()?;
         emitter.builder.seal_all_blocks();
@@ -267,6 +270,9 @@ struct Emitter<'a> {
     blocks: Vec<Block>,
     signatures: FxHashMap<SignatureKey, SigRef>,
     budget: Option<Variable>,
+    ranges: Ranges,
+    /// The block being emitted, as its index in the function.
+    current: usize,
 }
 
 impl Emitter<'_> {
@@ -318,6 +324,7 @@ impl Emitter<'_> {
         let function = self.function;
         for (index, block) in function.blocks.iter().enumerate() {
             self.builder.switch_to_block(self.blocks[index]);
+            self.current = index;
             self.emit_block(block)?;
         }
         Ok(())
@@ -483,6 +490,11 @@ impl Emitter<'_> {
             .iter()
             .map(|&variable| self.builder.use_var(variable))
             .collect())
+    }
+
+    /// The range of `local` where the block being emitted reads it.
+    fn range(&self, local: Local) -> Range {
+        self.ranges.of(self.current, local)
     }
 
     /// The single machine word of `local`.
@@ -744,7 +756,10 @@ impl Emitter<'_> {
                         }
                         self.real_arith(*op, x, y)
                     }
-                    Item::I64 => self.i64_arith(*op, x, y, inst)?,
+                    Item::I64 => {
+                        let ranges = (self.range(*a), self.range(*b));
+                        self.i64_arith(*op, x, y, ranges, inst)?
+                    }
                     _ => self.integer_arith(*op, x, y, inst)?,
                 };
                 SmallVec::from_slice(&[value])
@@ -892,7 +907,7 @@ impl Emitter<'_> {
             Op::ToDbl(a) => {
                 let x = self.one(*a)?;
                 let converted = self.builder.ins().fcvt_from_sint(F64, x);
-                let value = if matches!(ty(*a), Type::Bool | Type::I64) {
+                let value = if ty(*a) == Type::I64 || self.range(*a).lo > ranges::NA {
                     converted
                 } else {
                     let na = self.is_na_integer(x);
@@ -941,8 +956,10 @@ impl Emitter<'_> {
             }
             Op::Truth(a) => {
                 let x = self.one(*a)?;
-                let na = self.is_na_integer(x);
-                self.fail_if(na, &inst.fail_drops)?;
+                if self.range(*a).lo <= ranges::NA {
+                    let na = self.is_na_integer(x);
+                    self.fail_if(na, &inst.fail_drops)?;
+                }
                 SmallVec::from_slice(&[x])
             }
             Op::Same(a, b) => {
@@ -1993,9 +2010,27 @@ impl Emitter<'_> {
 
     /// `I64` arithmetic as the standard library does it: an overflow, a division by zero and a
     /// negative power give up, so the interpreter raises the error.
-    fn i64_arith(&mut self, op: Arith, x: Value, y: Value, inst: &Inst) -> Result<Value, Refusal> {
+    /// Arithmetic on two `I64`s, which lie in the two ranges.
+    fn i64_arith(
+        &mut self,
+        op: Arith,
+        x: Value,
+        y: Value,
+        (x_range, y_range): (Range, Range),
+        inst: &Inst,
+    ) -> Result<Value, Refusal> {
         Ok(match op {
             Arith::Add | Arith::Sub | Arith::Mul => {
+                let fits = exact_bounds(op, x_range, y_range).is_some_and(|(lo, hi)| {
+                    lo >= i128::from(i64::MIN) && hi <= i128::from(i64::MAX)
+                });
+                if fits {
+                    return Ok(match op {
+                        Arith::Add => self.builder.ins().iadd(x, y),
+                        Arith::Sub => self.builder.ins().isub(x, y),
+                        _ => self.builder.ins().imul(x, y),
+                    });
+                }
                 let (value, overflow) = match op {
                     Arith::Add => self.builder.ins().sadd_overflow(x, y),
                     Arith::Sub => self.builder.ins().ssub_overflow(x, y),
@@ -2005,28 +2040,37 @@ impl Emitter<'_> {
                 value
             }
             Arith::Mod | Arith::IntDiv => {
-                // A positive constant divisor is neither zero nor -1, and the remainder needs
-                // moving only when it is negative, which its sign bit says. A power of two
-                // needs no division: the low bits are the floored remainder of a negative
-                // number too, and an arithmetic shift rounds down.
-                if let Some(divisor) = self.builder.constant(y).filter(|&divisor| divisor > 0) {
-                    if divisor & (divisor - 1) == 0 {
-                        return Ok(if op == Arith::Mod {
-                            self.builder.ins().band_imm_u(x, divisor - 1)
-                        } else {
-                            let bits = self.iconst(i64::from(divisor.trailing_zeros()));
-                            self.builder.ins().sshr(x, bits)
-                        });
-                    }
+                // A positive divisor is neither zero nor -1. A power of two needs no division:
+                // the low bits are the floored remainder of a negative number too, and an
+                // arithmetic shift rounds down.
+                if let Some(divisor) = self.builder.constant(y).filter(|&divisor| divisor > 0)
+                    && divisor & (divisor - 1) == 0
+                {
+                    return Ok(if op == Arith::Mod {
+                        self.builder.ins().band_imm_u(x, divisor - 1)
+                    } else {
+                        let bits = self.iconst(i64::from(divisor.trailing_zeros()));
+                        self.builder.ins().sshr(x, bits)
+                    });
+                }
+                if y_range.lo > 0 {
+                    // The machine's division rounds toward zero, which is the floor unless
+                    // the dividend is negative. Then the remainder is negative or zero, which
+                    // its sign bit says, and a negative one moves up by the divisor while the
+                    // quotient moves down by one.
                     let remainder = self.builder.ins().srem(x, y);
+                    let quotient = (op == Arith::IntDiv).then(|| self.builder.ins().sdiv(x, y));
+                    if x_range.lo >= 0 {
+                        return Ok(quotient.unwrap_or(remainder));
+                    }
                     let sign = self.iconst(63);
                     let negative = self.builder.ins().sshr(remainder, sign);
-                    return Ok(if op == Arith::Mod {
-                        let moved = self.builder.ins().band(negative, y);
-                        self.builder.ins().iadd(remainder, moved)
-                    } else {
-                        let quotient = self.builder.ins().sdiv(x, y);
-                        self.builder.ins().iadd(quotient, negative)
+                    return Ok(match quotient {
+                        None => {
+                            let moved = self.builder.ins().band(negative, y);
+                            self.builder.ins().iadd(remainder, moved)
+                        }
+                        Some(quotient) => self.builder.ins().iadd(quotient, negative),
                     });
                 }
                 let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, y, 0);

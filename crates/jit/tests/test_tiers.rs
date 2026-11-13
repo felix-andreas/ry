@@ -3776,6 +3776,93 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ x <- -1i64; FUNCTION(x) }",
             ],
         ),
+        // A loop counter that starts at 1 is never negative, so its remainders and quotients
+        // need no correction and the small sums of them no overflow test. The argument can be
+        // negative, so its remainder by a divisor that is only known to be positive is still
+        // corrected.
+        (
+            "function(n: I64, a: I64) -> I64 { s <- 0i64\n for (i in List.range(1, n)) \
+             s <- s + (i %% 7i64 + 1i64) * 100i64 + i %/% 3i64 + a %% (i %% 5i64 + 1i64) \
+             + a %/% (i %% 4i64 + 2i64)\n s }",
+            &[
+                "{ n <- 20i64; a <- 17i64; FUNCTION(n, a) }",
+                "{ n <- 20i64; a <- -17i64; FUNCTION(n, a) }",
+                "{ n <- 20i64; a <- Num.min_i64; FUNCTION(n, a) }",
+                "{ n <- 0i64; a <- 5i64; FUNCTION(n, a) }",
+                "{ n <- -3i64; a <- 5i64; FUNCTION(n, a) }",
+            ],
+        ),
+        // A test bounds what it guards: past `n < 2`, neither subtraction can overflow, and
+        // the sum of the two still can.
+        (
+            "function(n: I64) -> I64 if (n < 2i64) n else (n - 1i64) + (n - 2i64)",
+            &[
+                "{ x <- Num.min_i64; FUNCTION(x) }",
+                "{ x <- 1i64; FUNCTION(x) }",
+                "{ x <- 2i64; FUNCTION(x) }",
+                "{ x <- Num.max_i64; FUNCTION(x) }",
+            ],
+        ),
+        // The other side of a test is bounded the other way, so its subtraction overflows for
+        // the lowest values.
+        (
+            "function(n: I64) -> I64 if (n > 2i64) n else n - 2i64",
+            &[
+                "{ x <- Num.min_i64; FUNCTION(x) }",
+                "{ x <- Num.min_i64 + 1i64; FUNCTION(x) }",
+                "{ x <- Num.min_i64 + 2i64; FUNCTION(x) }",
+                "{ x <- 2i64; FUNCTION(x) }",
+                "{ x <- 3i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> I64 if (n == 5i64) n * 1000i64 else if (n != 7i64) n * 2i64 else n + Num.max_i64",
+            &[
+                "{ x <- 5i64; FUNCTION(x) }",
+                "{ x <- 7i64; FUNCTION(x) }",
+                "{ x <- Num.max_i64; FUNCTION(x) }",
+                "{ x <- -4i64; FUNCTION(x) }",
+            ],
+        ),
+        // A test of two variables says nothing about either one's own bounds.
+        (
+            "function(n: I64, m: I64) -> I64 if (n >= m) { if (m > 0i64) n - 1i64 else n - m } else m - n",
+            &[
+                "{ n <- Num.min_i64; m <- Num.min_i64; FUNCTION(n, m) }",
+                "{ n <- Num.max_i64; m <- Num.min_i64; FUNCTION(n, m) }",
+                "{ n <- Num.min_i64; m <- Num.max_i64; FUNCTION(n, m) }",
+                "{ n <- 9i64; m <- 4i64; FUNCTION(n, m) }",
+            ],
+        ),
+        // A variable assigned again after a test is no longer bounded by it.
+        (
+            "function(n: I64, big: I64) -> I64 { x <- n\n if (x >= 2i64) { x <- x - big\n x <- x - big\n \
+             x <- x - 1i64 }\n x }",
+            &[
+                "{ n <- Num.max_i64; big <- Num.max_i64; FUNCTION(n, big) }",
+                "{ n <- 5i64; big <- Num.max_i64; FUNCTION(n, big) }",
+                "{ n <- 1i64; big <- Num.max_i64; FUNCTION(n, big) }",
+            ],
+        ),
+        // A test inside a loop bounds the counter for the rest of the iteration only.
+        (
+            "function(n: I64, big: I64) -> I64 { s <- 0i64\n for (i in List.range(n, n + 3i64)) \
+             { if (i < 0i64) s <- s + (i - big) else s <- s + (i + big) %/% 2i64 }\n s }",
+            &[
+                "{ n <- -2i64; big <- Num.max_i64; FUNCTION(n, big) }",
+                "{ n <- -2i64; big <- 10i64; FUNCTION(n, big) }",
+                "{ n <- -9i64; big <- Num.max_i64; FUNCTION(n, big) }",
+            ],
+        ),
+        // A field that holds a comparison is a logical that is never `NA`, and a count of
+        // such fields a small number.
+        (
+            "function(n: I64) -> F64 { total <- 0\n for (i in List.range(1, n)) \
+             { order <- (quantity = i %% 7i64 + 1i64, loyal = i %% 3i64 == 0i64)\n \
+             net <- Num.to_f64(order$quantity) * 1.5\n if (order$loyal) net <- net * 0.95\n \
+             if (order$quantity > 5i64) net <- net - 1\n total <- total + net }\n total }",
+            &["{ x <- 30i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
+        ),
     ];
     with_interpreter(|| {
         for (case, &(definition, calls)) in cases.iter().enumerate() {
