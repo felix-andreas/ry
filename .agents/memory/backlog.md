@@ -1428,11 +1428,16 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ### Tier-0 call entry and dispatch
 
-- On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine`. The register clear is about 16 of `grow_registers`' 57 and must stay.
+- A tier-0 closure call to a compiled body no longer enters `run_at`: it continues in the dispatch loop through `enter_in_place` and `finished` (`decisions.md`, "Closure call setup: the 10x end shape"). A call entered from a builtin, from `Rf_eval`, from `UseMethod` or from the general binding path still nests through Rust and still pays `run_at`, about 167 instructions, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine`. The register clear is about 16 of `grow_registers`' 57 and must stay.
 - Superinstructions and guard dedup were measured and do not pay (`decisions.md`, "Tier-0 superinstructions do not pay"). Trimming `Activation` saves about 2 instructions per call, because the fields the baseline JIT reads sit at fixed offsets.
 - Leaf code (a closure body that makes no call) could skip saving and restoring the environment flags and pushing and releasing the handle.
-- The closure frame push and pop (`eval::enter` and `eval::leave`) are about 5.9% of a testthat_full iteration, about 460 instructions per call against GNU R's `begincontext` plus `endcontext`, partly two copies of `Frame` into `state.frames`. Building the frame in place and trimming the handle release and `on.exit` checks in `leave` has a ceiling of about 3%.
-- What remains beyond that is a thinner call path (the AOT track's call plans).
+- **The cost left in a call is frame setup, not re-entry.** A planned `h -> f` pair costs about 2,725 instructions against the goal's 300 of setup, so about 1,070 per framed call. The parts of the end shape that would take it there are unbuilt, in the order their measured cost suggests:
+  1. **The frame as depth-indexed columns.** `push_frame` still writes the whole 21-field `Frame` (about 112 bytes) per call, including an `on_exit: ThinVec`, two `Rc` clones of the handler and restart stacks, and a `srcref` found by walking the closure's attributes. The target is a 40-byte hot record plus cold columns, one `Interp.on_exit` stack, and handler and restart arenas with a parent index.
+  2. **Arguments written once.** The caller still builds an `Arg` buffer that `push_frame` copies into `Interp.frame_args`.
+  3. **Pooled promises with `u32` reference columns.** A reference's target (frame, slot, header) is a heap integer vector read on every use.
+  4. **The packed code header**, which removes the `pool_ints` reads of the register and slot counts per call.
+  5. **One `slow_calls` word** in place of the separate observer tests.
+- **In-loop promise forcing waits for item 3.** Running a promise's code in the dispatch loop instead of a Rust frame was built and measured as a net loss on every program tried (`decisions.md`, same entry), because its per-force overhead (a forcing record, a resume record, two heap roots, a walk of the caller's live registers, and the heap read of the reference target) costs about what the Rust frame did. Three of those five go away with pooled promises, so build it again then, not before.
 
 ### Argument lists collected into `eval::Args`
 
