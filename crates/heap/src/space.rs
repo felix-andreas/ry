@@ -1663,6 +1663,16 @@ fn set_bits(mut bits: u64) -> impl Iterator<Item = usize> {
     })
 }
 
+/// LeakSanitizer finds live memory by scanning globals, stacks and `malloc` blocks, and it does
+/// not scan mapped memory, which is where objects live. Whatever an object owns outside the
+/// space (a frame's spilled bindings, its slot index, its hash table) therefore reads as leaked
+/// while the heap is alive, so a fuzz build that links the heap runs without leak detection.
+#[cfg(fuzzing)]
+#[unsafe(no_mangle)]
+pub extern "C" fn __lsan_default_options() -> *const std::ffi::c_char {
+    c"detect_leaks=0".as_ptr()
+}
+
 /// Address-space reservation, the one place the heap talks to the operating system. Memory is
 /// reserved inaccessible up front and committed a run of pages at a time, so the heap's pages
 /// stay contiguous without claiming physical memory before they are used.

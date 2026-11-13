@@ -80,12 +80,12 @@ ci:
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
 
-# What every push runs (.github/workflows/test.yml, job `tests`): the suites of the crates that
-# build without the runtime, so it needs no GNU R and no base R. The language server's suites are
-# named one by one because `ry-lang`'s other test targets start an R.
+# What a push runs (test.yml, job `tests`): every test of the crates that build without the
+# interpreter, libR and Polars. A test that compares with GNU R or runs ry's runtime skips when
+# there is no `R` on the PATH and no built base R, so the recipe needs neither. `table` and the
+# runtime crates are left to `just battery`: their builds link Polars or the interpreter.
 test-push:
-    cargo test -p syntax -p format -p semantics -p ide -p sniff -p loader -p heap -p numeric -p ssa -p rdb -p crash -p features
-    cargo test -p ry-lang --lib --bins --test test_cli --test test_command_line --test test_debug_framing --test test_docs --test test_fuzz --test test_lsp --test test_release_metadata --test test_scenarios --test test_simulation
+    cargo test --no-fail-fast -p syntax -p format -p semantics -p ide -p sniff -p loader -p heap -p numeric -p ssa -p rdb -p crash -p oracle -p rcmd -p repl -p ry-lang
 
 clippy:
     cargo clippy --workspace --exclude zed_ry --all-targets -- -D warnings
@@ -124,15 +124,26 @@ fuzz-deep minutes="120" base="1000000" depth="10" *args:
 fuzz-run target="semantics" *args:
     cargo fuzz run {{ target }} {{ args }}
 
-# Every libFuzzer target for `seconds` each, after seeding the corpora. The lockfile is seeded
-# from the workspace's, because a fresh resolution can pick a salsa-macro-rules that does not
-# match the pinned salsa. Stops at the first target that finds a failure.
-fuzz-all seconds="120":
+# Every libFuzzer target for `seconds` each, after seeding the corpora. `features` picks the
+# targets by the features of fuzz/Cargo.toml: `just fuzz-all 20 runtime` leaves out the two whose
+# build links Polars. The lockfile is seeded from the workspace's, because a fresh resolution can
+# pick a salsa-macro-rules that does not match the pinned salsa. Stops at the first target that
+# finds a failure.
+fuzz-all seconds="120" features="runtime,polars":
+    #!/usr/bin/env bash
+    set -euo pipefail
     cp Cargo.lock fuzz/Cargo.lock
     cargo -Zscript scripts/seed-fuzz-corpus.rs
-    for target in $(cargo fuzz list); do \
-        echo "== $target"; \
-        cargo fuzz run -O "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096 || exit 1; \
+    targets=$(cargo metadata --manifest-path fuzz/Cargo.toml --no-deps --format-version 1 | python3 -I -c '
+    import json, sys
+    enabled = set(sys.argv[1].split(","))
+    for target in json.load(sys.stdin)["packages"][0]["targets"]:
+        if set(target.get("required-features", [])) <= enabled:
+            print(target["name"])
+    ' "{{ features }}")
+    for target in $targets; do
+        echo "== $target"
+        cargo fuzz run -O --no-default-features --features "{{ features }}" "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096
     done
 
 # Phase timings, memory and typing bursts for a workspace.

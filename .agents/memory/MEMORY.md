@@ -62,7 +62,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - After each release, append rows to the progress dashboard (`releasing.md`, "The progress dashboard"). Its `cran_popular` dataset is empty ("Open: the CRAN package corpus").
 - The Zed extension is not in Zed's registry, and the `VSCE_PAT` fallback for the VS Code Marketplace stops working on December 1, 2026 (`releasing.md`).
 - CI runs only on manual dispatch (user decision), and the orchestrator starts it on main when main has new commits (`decisions.md`, "CI runs in the flake's dev shell").
-- `.github/pending/test.yml` (the tests that need no GNU R and a 20-second pass of every fuzz target, on each push to main) and the release workflow's dependency on it wait for the user's `git pull && just accept`. The push trigger sits beside the user's decision that the full gate starts by hand, so accepting it is the user's call (`decisions.md`, "A push to main runs the tests that need no GNU R, and a release fails on them").
+- `.github/pending/test.yml` (the tests that need no GNU R and a 20-second pass of every fuzz target that builds without Polars, on each push to main) and the release workflow's dependency on it wait for the user's `git pull && just accept`. Accepting `test.yml` as staged overrides the user's decision that CI never runs on push, for those tests only; deleting its `push:` block first keeps the decision and still gates releases (`decisions.md`, "A push to main runs the tests that need no GNU R, and a release fails on them").
 
 ## Long-term
 
@@ -240,7 +240,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - **A new dev-dependency feature goes into `crates/features`**, or building and testing compile two dependency trees (`decisions.md`, "Workspace-wide feature unification").
 - **A full disk shows up as a test-build failure** (ENOSPC, or a Bus error at link). Run `just prune` first; a cloud container's quota is about 40 GB whatever `df` says.
 - **CI is `nix develop .#ci -c just ci`.** Reproduce a failure in that shell, and change CI in the `ci` recipe or `flake.nix` (`decisions.md`, "CI runs in the flake's dev shell").
-- **A crash under a gctorture engine is never a known failure.** `known_failures.toml` has no intermittent mark, so a collector-stress crash fails the oracle on every host until it is fixed (`decisions.md`, "A gctorture crash is never a known failure").
+- **A crash is never a known failure.** The oracle counts a case whose engine was killed by a signal as new under every engine, even when `known_failures.toml` lists it, and the file has no intermittent mark (`decisions.md`, "A crash is never a known failure").
 - **Agent containers are provisioned by `tools/dev-setup.sh`, and `flake.nix` inputs stay `git+https`** (`decisions.md`, "Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell", "Flake inputs are git URLs").
 - **Nightly releases are GitHub pre-releases with `--latest=false`, and the Zed extension reads full releases only** (`pre_release: false`, `editors/zed/src/lib.rs`). Zed matches the flag exactly, so the two move together.
 - **BOLT's `-use-gnu-stack` overwrites libR's `PT_GNU_STACK` header, and glibc 2.41+ refuses a library without it.** `tools/layout/optimize.sh` restores it (`gnu_stack.py`), and `just package` checks.

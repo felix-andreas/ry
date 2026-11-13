@@ -10,8 +10,8 @@
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine, Verdict,
-        check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
+        BUILD_FILE, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
+        Verdict, check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
         gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
         libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, render,
         runnable_cases, ry_runtime_available, verdict, write_build,
@@ -129,9 +129,16 @@ fn second_engine_matches_gnu_r() {
     let name = second.name();
     let mut failures = Vec::new();
     for case in cases() {
-        let failure = match second.run(&case) {
+        let (run, failure) = match second.run(&case) {
             Err(EngineError::Unavailable(_)) => return,
-            Err(error) => Some(format!("{}: {error}", case.display())),
+            Err(EngineError::Crashed(error)) => (
+                CaseRun::Crashed,
+                Some(format!("{} crashed: {error}", case.display())),
+            ),
+            Err(error) => (
+                CaseRun::Failed,
+                Some(format!("{}: {error}", case.display())),
+            ),
             Ok(actual) => {
                 let expected = match gnu_r.run(&case) {
                     Ok(expected) => expected,
@@ -141,12 +148,17 @@ fn second_engine_matches_gnu_r() {
                     }
                     Err(error) => panic!("{}: {error}", case.display()),
                 };
-                diff("GNU R", &expected, &name, &actual)
-                    .map(|difference| format!("{}\n{difference}", case.display()))
+                match diff("GNU R", &expected, &name, &actual) {
+                    Some(difference) => (
+                        CaseRun::Failed,
+                        Some(format!("{}\n{difference}", case.display())),
+                    ),
+                    None => (CaseRun::Passed, None),
+                }
             }
         };
         let entry = known_failure(&known, &case, &name);
-        match verdict(failure.is_some(), entry) {
+        match verdict(run, entry) {
             Verdict::Known => {
                 if let Some(entry) = entry {
                     eprintln!("known {}: {}", case.display(), entry.reason);
@@ -171,27 +183,58 @@ fn known_failures_are_valid() {
     }
 }
 
-/// A listed case that passes fails the run, so its fix deletes its entry, and no mark exempts a
-/// crash under a collector-stress engine from that.
+/// A listed case that passes fails the run, so its fix deletes its entry. A listed case that
+/// crashes fails it too, and no mark turns either into a pass.
 #[test]
-fn a_passing_listed_case_fails_the_run() {
+fn a_listed_case_fails_the_run_when_it_passes_or_crashes() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
     let entry = "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"ry-jit-gctorture\"\n\
-                 area = \"gc\"\nreason = \"aborts under the collector\"\n";
+                 area = \"jit\"\nreason = \"prints one warning GNU R does not\"\n";
     let known = parse_known_failures(entry, directory).unwrap_or_else(|error| panic!("{error}"));
     let case = case_directory().join("base__match_arg_native.R");
     let listed = known_failure(&known, &case, "ry-jit-gctorture");
+    assert!(listed.is_some());
 
-    assert_eq!(verdict(false, listed), Verdict::ListedButPassing);
-    assert!(fails_run(verdict(false, listed)));
-    assert_eq!(verdict(true, listed), Verdict::Known);
-    assert!(!fails_run(verdict(true, listed)));
+    assert_eq!(verdict(CaseRun::Passed, listed), Verdict::ListedButPassing);
+    assert!(fails_run(verdict(CaseRun::Passed, listed)));
+    assert_eq!(verdict(CaseRun::Failed, listed), Verdict::Known);
+    assert!(!fails_run(verdict(CaseRun::Failed, listed)));
+    assert_eq!(verdict(CaseRun::Crashed, listed), Verdict::New);
+    assert!(fails_run(verdict(CaseRun::Crashed, listed)));
 
-    assert!(fails_run(verdict(true, None)));
-    assert!(!fails_run(verdict(false, None)));
+    assert!(fails_run(verdict(CaseRun::Failed, None)));
+    assert!(fails_run(verdict(CaseRun::Crashed, None)));
+    assert!(!fails_run(verdict(CaseRun::Passed, None)));
 
-    let marked = parse_known_failures(&format!("{entry}intermittent = true\n"), directory);
-    assert!(marked.is_err(), "an entry marked intermittent must be refused");
+    match parse_known_failures(&format!("{entry}intermittent = true\n"), directory) {
+        Ok(_) => panic!("an entry marked intermittent must be refused"),
+        Err(error) => assert!(error.contains("intermittent"), "{error}"),
+    }
+}
+
+/// An entry that names an unknown engine, a case that does not exist, or the same case and engine
+/// twice is refused.
+#[test]
+fn a_mistyped_or_repeated_known_failure_is_refused() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = |case: &str, engine: &str| {
+        format!(
+            "[[failure]]\ncase = \"{case}\"\nengine = \"{engine}\"\narea = \"jit\"\n\
+             reason = \"differs\"\n"
+        )
+    };
+    let valid = entry("base__match_arg_native", "ry-jit");
+    assert!(parse_known_failures(&valid, directory).is_ok());
+    for refused in [
+        entry("base__match_arg_native", "ry-turbo"),
+        entry("base__no_such_case", "ry-jit"),
+        format!("{valid}{valid}"),
+    ] {
+        assert!(
+            parse_known_failures(&refused, directory).is_err(),
+            "{refused}"
+        );
+    }
 }
 
 /// An explicit `R_LIBS` comes before the corpus library, the corpus library fills in when

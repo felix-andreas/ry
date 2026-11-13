@@ -126,19 +126,31 @@ pub enum Verdict {
     Passed,
     /// A failure the file lists.
     Known,
-    /// A failure the file does not list.
+    /// A failure the file does not list, or a crash, which the file cannot excuse.
     New,
     /// A listed case that passes, so its entry is stale.
     ListedButPassing,
 }
 
-/// The verdict for a case that `failed` or passed, given its entry in the known failures.
-pub fn verdict(failed: bool, entry: Option<&KnownFailure>) -> Verdict {
-    match (failed, entry) {
-        (false, None) => Verdict::Passed,
-        (false, Some(_)) => Verdict::ListedButPassing,
-        (true, Some(_)) => Verdict::Known,
-        (true, None) => Verdict::New,
+/// How one case ran under one engine, as far as the known failures tell results apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseRun {
+    Passed,
+    /// The engine reported something GNU R does not, or wrote no usable report.
+    Failed,
+    /// The engine was killed by a signal ([`EngineError::Crashed`]).
+    Crashed,
+}
+
+/// The verdict for a case that ran as `run`, given its entry in the known failures. A crash is
+/// new even when the case is listed: a signal means memory was misused, and where it shows
+/// depends on where the collector happens to run, so a listed crash would pass on some hosts.
+pub fn verdict(run: CaseRun, entry: Option<&KnownFailure>) -> Verdict {
+    match (run, entry) {
+        (CaseRun::Passed, None) => Verdict::Passed,
+        (CaseRun::Passed, Some(_)) => Verdict::ListedButPassing,
+        (CaseRun::Failed, Some(_)) => Verdict::Known,
+        (CaseRun::Failed, None) | (CaseRun::Crashed, _) => Verdict::New,
     }
 }
 

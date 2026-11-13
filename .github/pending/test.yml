@@ -1,8 +1,10 @@
 # Every push to main runs what needs no GNU R: the fixture suites and the other tests of the crates
-# that build without the runtime, and a bounded libFuzzer pass over every target. The release
-# workflow calls this file, so a release fails on the same checks. Each job runs one `just` recipe,
-# so each one also runs locally; to change what a job runs, edit its recipe in the justfile. The
-# full gate, which compares ry with GNU R, is ci.yml.
+# that build without the interpreter, libR and Polars, and a bounded libFuzzer pass over every
+# target that builds without Polars. The release workflow calls this file, so a release fails on
+# the same checks. Each job runs one `just` recipe, so each one also runs locally; to change what a
+# job runs, edit its recipe in the justfile. The full gate, which compares ry with GNU R, is
+# ci.yml, and it starts by hand. Without the `push` trigger below, this file runs only inside a
+# release and when started by hand.
 name: Tests
 
 on:
@@ -12,7 +14,7 @@ on:
   workflow_dispatch:
 
 # A push while a run is in flight waits for it and replaces any older waiting push, so main always
-# gets a finished run however often it moves.
+# gets a finished run however often it moves, and one run can cover several pushes.
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -36,6 +38,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+      # A test that compares with GNU R runs when it finds `R` on the PATH, against whatever
+      # version the runner image ships. The gate pins GNU R; this job runs with none.
+      - name: remove any R from the runner
+        run: |
+          for program in R Rscript; do
+            while path=$(command -v "$program"); do sudo rm "$path"; done
+          done
       - name: just test-push
         run: just test-push
 
@@ -46,14 +55,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
+      # `cargo fuzz` builds into fuzz/target, which the action caches only when told about it.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-      # The runtime targets link libR, which links zlib, bzip2 and xz (crates/libr/build.rs).
-      - name: link libraries
-        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+          cache-workspaces: |
+            . -> target
+            fuzz -> target
+      - name: install cargo-fuzz
+        run: command -v cargo-fuzz || cargo install cargo-fuzz --locked --version 0.13.2
+      # `runtime` leaves out the two targets that link Polars (`csv` and `unserialize`): built
+      # with coverage instrumentation, Polars needs more memory than a hosted runner has.
       - name: just fuzz-all
-        run: just fuzz-all 20
+        run: just fuzz-all 20 runtime
+      - name: upload the failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

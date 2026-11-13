@@ -2,7 +2,8 @@
 # or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
 # and smoke-tests every archive without publishing anything. A run started by hand can also limit
 # the release to Linux, or to Linux and macOS (`platforms`), and leave out the VS Code extension
-# (`vscode`). The checklist and the one-time Marketplace setup are in
+# (`vscode`). Every run also runs the tests of test.yml, and nothing is published unless they pass.
+# The checklist and the one-time Marketplace setup are in
 # docs/src/content/docs/development/releasing.md. Past runner setup, every step runs a `just`
 # recipe or tools/smoke-test.sh, so each one also runs locally.
 name: Release
@@ -37,7 +38,7 @@ env:
   VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
-  # The checks every push runs: the fixture suites, the fast crates' tests and a bounded fuzz pass.
+  # The checks of test.yml: the fixture suites, the tests that need no GNU R and a bounded fuzz pass.
   # `publish` needs them, so a release with a failing test builds its archives and publishes
   # nothing.
   tests:
