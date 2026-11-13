@@ -2743,11 +2743,11 @@ The end-to-end guard rests on the corpus suites.
   data.table's sums is worth the scan. Group-by q10 at 1e7 rows (0.64 to 0.78 s against 0.54 s) pays the
   same scan. Join q3 (the left join) takes 1.29 s against 1.07 s.
 - **A query's large buffers are faulted in afresh each time.** The global allocator maps every
-  block of 1 MB or more and unmaps it when freed (`heap::large::Mapped`), on huge pages, so a
-  query pays one fault per 2 MiB instead of per 4 KiB. A pool of freed mappings would reuse
+  block of 1 MB or more and unmaps it when freed (`heap::large::Mapped`), on huge pages while a
+  table operation runs, so a query pays one fault per 2 MiB instead of per 4 KiB. A pool of freed mappings would reuse
   touched pages (group-by q10 at 1e7 rows without LTO: 0.43 s against 0.73 s) but keeps memory
-  resident between queries, and the 1e8 joins have about 3 GB to spare (`decisions.md`, "The
-  global allocator's large blocks ask for huge pages"). Keeping scratch small (the grouped
+  resident between queries, and the 1e8 joins have about 3 GB to spare (`decisions.md`, "Table
+  operations map their large blocks on huge pages"). Keeping scratch small (the grouped
   median) and a per-query arena are the alternatives. Fresh huge pages also make a query's
   time depend on the kernel's compaction: the 1e8 joins took 8.1 s in one run and 11.1 s in
   another on the same build.

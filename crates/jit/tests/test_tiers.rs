@@ -1057,7 +1057,12 @@ fn active_bindings_are_called_at_every_compiled_read() {
         jit::install_mode(Mode::Off);
     });
     for (call, &(before, after, value, _, _)) in calls.iter().enumerate() {
-        assert_eq!(after - before, 51, "call {call} read the binding {} times", after - before);
+        assert_eq!(
+            after - before,
+            51,
+            "call {call} read the binding {} times",
+            after - before
+        );
         assert_eq!(value, (before + 1..=after).sum::<i64>(), "call {call}");
     }
     let compiles: u64 = calls.iter().map(|call| call.3).sum();
@@ -1068,7 +1073,11 @@ fn active_bindings_are_called_at_every_compiled_read() {
         "{deoptimizations} deoptimizations over five calls: {calls:?}"
     );
     for (call, row) in calls.iter().enumerate().skip(1) {
-        assert_eq!((row.3, row.4), (0, 0), "call {call} compiled or deoptimized: {calls:?}");
+        assert_eq!(
+            (row.3, row.4),
+            (0, 0),
+            "call {call} compiled or deoptimized: {calls:?}"
+        );
     }
 }
 

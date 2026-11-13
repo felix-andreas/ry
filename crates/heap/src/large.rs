@@ -12,6 +12,7 @@
 use std::{
     alloc::{GlobalAlloc, Layout},
     ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 /// The smallest vector, in bytes with its header, that gets its own mapping. Smaller large
@@ -214,32 +215,36 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
     }
 }
 
-/// Keeps the pages of the block of `layout` at `address` small. [`Mapped`] asks for huge pages
-/// on its large blocks, which suits a buffer that is filled at once. A block that is reserved in
-/// full and touched only as far as it is used, such as a stack, would commit 2 MiB at its first
-/// touch and at every 2 MiB after, so its owner calls this before the first touch.
+/// Asks the kernel for huge pages on the blocks [`Mapped`] maps while the returned guard lives,
+/// on every thread. A table operation holds one: it fills buffers as long as its columns and
+/// frees them when it returns, so every operation maps them afresh. With 4 KiB pages a 400 MB
+/// buffer takes a hundred thousand page faults before it is full, and with 2 MiB pages two
+/// hundred. A gather through random row indices also stops missing the TLB on every read.
 ///
-/// The advice covers the block's whole mapping. Advice on a part of it would split the mapping
-/// in two, and a split mapping cannot be resized in place. A block that is reallocated
-/// afterwards gets the allocator's advice again.
+/// The advice is scoped to the operation because the block's size cannot tell such a buffer from
+/// one that is reserved and filled only in part, which is what the interpreter's large blocks
+/// are: a hash table that doubled, a list that grows, a stack. On huge pages each of those
+/// commits its last, partly used 2 MiB in full. Outside a guard a block gets small pages.
 ///
-/// The call is advice and changes no contents. A block that did not come from [`Mapped`] has no
-/// mapping of its own, and the kernel then refuses the call or applies it to pages that were
-/// small anyway, so the result is not checked.
-pub fn keep_small_pages(address: *mut u8, layout: Layout) {
-    #[cfg(target_os = "linux")]
-    if let (true, Some(length)) = (is_mapped(layout), page_rounded(layout.size())) {
-        // SAFETY: `madvise` with `MADV_NOHUGEPAGE` reads and writes no memory, and it fails
-        // without effect on a range that is not mapped.
-        unsafe {
-            libc::madvise(address.cast(), length, libc::MADV_NOHUGEPAGE);
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _unused = (address, layout);
+/// Guards nest, and a block keeps the pages it was mapped with after its guard is gone. Growing
+/// it inside a later guard advises the whole block.
+pub fn huge_pages() -> HugePages {
+    HUGE_PAGE_SCOPES.fetch_add(1, Ordering::Relaxed);
+    HugePages(())
+}
+
+/// The guard of [`huge_pages`].
+pub struct HugePages(());
+
+impl Drop for HugePages {
+    fn drop(&mut self) {
+        HUGE_PAGE_SCOPES.fetch_sub(1, Ordering::Relaxed);
     }
 }
+
+/// The number of live [`HugePages`] guards. It is one counter for the process, not one per
+/// thread, because an operation's buffers are mapped on the worker threads it hands its work to.
+static HUGE_PAGE_SCOPES: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether a block of `layout` gets a mapping. A mapping is aligned to a page, so a block that
 /// needs more alignment than that comes from the inner allocator.
@@ -305,24 +310,18 @@ unsafe fn remap(address: NonNull<u8>, length: usize, new_length: usize) -> Optio
 #[cfg(target_os = "linux")]
 const HUGE_PAGE_BYTES: usize = 2 << 20;
 
-/// Asks the kernel to back one of the global allocator's blocks with huge pages. A table query
-/// fills buffers as long as its columns and frees them when it returns, so every query maps them
-/// afresh: with 4 KiB pages a 400 MB buffer takes a hundred thousand page faults before it is
-/// full, and with 2 MiB pages two hundred. A gather through random row indices also stops missing
-/// the TLB on every read.
+/// Asks the kernel to back one of the global allocator's blocks with huge pages if a
+/// [`huge_pages`] guard is alive.
 ///
-/// Large vectors do not ask for huge pages. [`MappedPool`] resizes a kept mapping to each new
+/// Large vectors never ask for huge pages. [`MappedPool`] resizes a kept mapping to each new
 /// vector's length, and with huge pages a loop of subsets of differing lengths spent several
 /// times the system time on zeroing and compaction.
-///
-/// A block that is reserved in full and touched only as it fills opts out with
-/// [`keep_small_pages`].
 ///
 /// The call is advice: a kernel without transparent huge pages refuses it and the block keeps
 /// small pages, so its result is not checked.
 #[cfg(target_os = "linux")]
 unsafe fn advise_huge(address: NonNull<u8>, length: usize) -> NonNull<u8> {
-    if length >= HUGE_PAGE_BYTES {
+    if length >= HUGE_PAGE_BYTES && HUGE_PAGE_SCOPES.load(Ordering::Relaxed) > 0 {
         libc::madvise(address.as_ptr().cast(), length, libc::MADV_HUGEPAGE);
     }
     address

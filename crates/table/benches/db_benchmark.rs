@@ -39,6 +39,8 @@ use {
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> ExitCode {
+    // Every call below is table work, which `ry run` does inside this guard too.
+    let _pages = heap::large::huge_pages();
     let Some(dir) = env::args()
         .skip(1)
         .find(|argument| !argument.starts_with("--"))

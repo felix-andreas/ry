@@ -30,7 +30,10 @@ pub fn run(dir: &Path, only: Option<Only>) -> Result<()> {
     );
     if only != Some(Only::Joins) {
         let x = codes(read(dir, "groupby.csv", true)?)?.lazy();
-        let by = |names: &[&str]| x.clone().group_by(names.iter().map(|&name| col(name)).collect::<Vec<_>>());
+        let by = |names: &[&str]| {
+            x.clone()
+                .group_by(names.iter().map(|&name| col(name)).collect::<Vec<_>>())
+        };
         let questions = [
             ("groupby q1", by(&["id1"]).agg([col("v1").sum()])),
             ("groupby q2", by(&["id1", "id2"]).agg([col("v1").sum()])),

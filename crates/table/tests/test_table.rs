@@ -3904,7 +3904,9 @@ fn a_factor_without_rows_reads_as_text() {
 #[test]
 fn a_factor_reads_back_at_every_code_width() {
     for count in [1_i32, 2, 255, 256, 257, 65_535, 65_536, 65_537] {
-        let levels: Vec<String> = (0..count).map(|level| format!("level {level:05}")).collect();
+        let levels: Vec<String> = (0..count)
+            .map(|level| format!("level {level:05}"))
+            .collect();
         let codes: Vec<i32> = vec![1, count, NA_INTEGER, 1 + count / 2, count];
         let label_of =
             |code: &i32| (*code != NA_INTEGER).then(|| levels[*code as usize - 1].clone());
@@ -3925,8 +3927,8 @@ fn a_factor_reads_back_at_every_code_width() {
         let reversed_levels = std::sync::Arc::new(factor::Levels::from_labels(
             reversed.iter().map(String::as_str),
         ));
-        let recoded = factor::recode(&column, &reversed_levels)
-            .unwrap_or_else(|error| panic!("{error}"));
+        let recoded =
+            factor::recode(&column, &reversed_levels).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             to_r(&recoded).unwrap_or_else(|error| panic!("{error}")),
             RVector::Factor {
@@ -3950,7 +3952,9 @@ fn a_factor_reads_back_at_every_code_width() {
 /// width of the length.
 #[test]
 fn a_level_table_holds_labels_of_every_length() {
-    let lengths = [0, 1, 13, 14, 15, 16, 17, 141, 142, 143, 144, 145, 300, 16_500, 70_000];
+    let lengths = [
+        0, 1, 13, 14, 15, 16, 17, 141, 142, 143, 144, 145, 300, 16_500, 70_000,
+    ];
     let mut labels: Vec<String> = Vec::new();
     for shared in lengths {
         for rest in lengths {

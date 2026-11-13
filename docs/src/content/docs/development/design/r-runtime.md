@@ -1644,8 +1644,10 @@ Three choices keep the joins inside the machine:
   answer's columns are gathered one side at a time.
 - **A block of a megabyte or more has a mapping of its own**, which returns to the kernel when
   the block is freed (`heap::large::Mapped`), so the reader's and a join's scratch memory does
-  not stay resident beside the next answer. A mapping of 2 MiB or more asks for huge pages,
-  because a query maps its buffers afresh and would otherwise take a page fault per 4 KiB.
+  not stay resident beside the next answer. While a table operation runs, a mapping of 2 MiB or
+  more asks for huge pages, because a query maps its buffers afresh and would otherwise take a
+  page fault per 4 KiB. Outside a table operation a block gets small pages, so a session that
+  uses no table commits only the memory it touches.
 
 `tests/test_memory.rs` in `crates/table` pins the bytes per row that the reader, each join
 question and the grouped sums allocate at their peak and hold afterwards, on four threads and

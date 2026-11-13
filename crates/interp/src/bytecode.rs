@@ -59,7 +59,6 @@ use {
     heap::{
         Heap, Liveness, Marker,
         activity::{self, Activity, Counter},
-        large::keep_small_pages,
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -120,14 +119,8 @@ pub struct State {
 
 impl Default for State {
     fn default() -> State {
-        let mut registers: Vec<Sexp> = Vec::with_capacity(REGISTER_FILE_CAPACITY);
-        // The file is touched only as deep as calls nest, so on huge pages a session that uses
-        // a few kilobytes of it would hold 2 MiB.
-        if let Ok(layout) = std::alloc::Layout::array::<Sexp>(registers.capacity()) {
-            keep_small_pages(registers.as_mut_ptr().cast(), layout);
-        }
         State {
-            registers,
+            registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
             bodies: FxHashMap::default(),
             tier: None,
             call_plans: CallPlans::default(),
