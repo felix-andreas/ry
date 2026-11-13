@@ -1,0 +1,76 @@
+# After an upgrade of ry, or a rebuild of its runtime, the packages a user installed carry the
+# code images of the build that installed them, which this build cannot load, so their functions
+# compile as they run. ry says so once per library and session and names every such package, so
+# the user knows to reinstall them instead of finding the slowdown on their own.
+
+requires ry-runtime
+
+file one/DESCRIPTION
+| Package: one
+| Version: 1.0.0
+| Title: Returns one
+| Description: A package whose code image another build wrote.
+| License: MIT
+file one/NAMESPACE
+| export(one)
+file one/R/one.R
+| one <- function() 1
+file two/DESCRIPTION
+| Package: two
+| Version: 1.0.0
+| Title: Returns two
+| Description: Another package whose code image another build wrote.
+| License: MIT
+file two/NAMESPACE
+| export(two)
+file two/R/two.R
+| two <- function() 2
+
+run ry install one -l library
+expect exit 0
+run ry install two -l library
+expect exit 0
+
+file use.R
+| library(one, lib.loc = "library")
+| library(two, lib.loc = "library")
+| print(one() + two())
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 3"
+expect stderr lacks "another build of ry installed"
+
+# Renaming each package's code image to another build's name is what an upgrade leaves behind.
+file foreign.R
+| for (package in c("one", "two")) {
+|     code <- file.path("library", package, "R")
+|     image <- list.files(code, "\\.ryc$", full.names = TRUE)
+|     stopifnot(length(image) == 1L)
+|     stopifnot(file.rename(image, file.path(code, paste0(package, ".0123456789abcdef.ryc"))))
+| }
+
+run ry run --runtime ry foreign.R
+expect exit 0
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 3"
+expect stderr "so their functions compile as they run, which is slower, until you reinstall them: one, two"
+
+env RY_IMAGE_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr "ry: image unused: the code image of"
+expect stderr "was written by another build of the runtime"
+
+# Reinstalling writes this build's image beside the other build's, and the note goes away.
+env RY_IMAGE_LOG 0
+run ry install one -l library
+expect exit 0
+run ry install two -l library
+expect exit 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 3"
+expect stderr lacks "another build of ry installed"

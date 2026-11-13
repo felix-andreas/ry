@@ -1,9 +1,8 @@
 use {
     crate::{
-        AnnotationTarget, Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile,
-        TypeDefinitions,
+        Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile, TypeDefinitions,
         annotations::{
-            Annotation, Slot, comment_slots, inline_slots, is_type_kind, lower_inline_annotation,
+            Annotation, Slot, comment_slots, inline_slots, lower_inline_annotation,
             statement_inline_site,
         },
         check::{
@@ -24,8 +23,7 @@ use {
             native_symbol,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        native::{NativeBlockerKind, Uncompiled},
-        parse, prelude_enabled, project_type_definitions, statement_annotations,
+        parse, prelude_enabled, project_type_definitions,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
             namespace_exports, namespace_known, outside_prelude, stubs,
@@ -40,8 +38,10 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
-        SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
-        node_text, paired_comment_definition,
+        SyntaxKind, SyntaxNode, TextRange, TextSize,
+        annotation::{AnnotationTarget, is_type_kind, statement_annotations},
+        ast::is_expression_kind,
+        is_syntactic_name, node_text, paired_comment_definition,
     },
 };
 
@@ -2708,14 +2708,6 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         for blocker in &check.native_blockers {
-            // With inline annotations turned off no signature can be written inline, and the
-            // warning about the setting already says so. The setting is read here, not in the
-            // item check, so changing it rechecks no item.
-            if blocker.kind == NativeBlockerKind::Uncompiled(Uncompiled::DetachedSignature)
-                && !inline_annotations_enabled(db)
-            {
-                continue;
-            }
             let range = blocker.range + offset;
             let source = file
                 .text(db)

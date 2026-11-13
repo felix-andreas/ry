@@ -6149,21 +6149,142 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - Pinned by `crates/libr/tests/test_interrupts.rs`, which runs in its own process because it loads
     base R, and the oracle cases `conditions__suspended_interrupts` and
     `conditions__interrupt_handlers`.
-- **Long integer sequences are compact; short ones are plain vectors.** `:` and `seq_len` build
-  sequences of 2^20 or more elements through the `compact_intseq` host hook, which libr answers
-  with its `compact_intseq` ALTREP class (the interpreter cannot name libr, so a host without
-  ALTREP gets `None` and allocates). Previously every sequence was expanded, so vctrs's
-  `seq_len(2^31 - 1)`, built only to read its length, allocated 8 GB and the parallel package run
-  was killed for memory. Short sequences stay plain because reading one through ALTREP dispatch
-  costs more than filling it once, and the evaluator's and the JIT's fast paths read plain
-  integer data directly. Pinned by `base__long_sequences`.
-- **Indexing a compact sequence reads elements, never the whole vector.** A compact sequence's
-  `DATAPTR` expands it, so `x[[i]]` and a sparse `x[i]` read through `values::int_elt` and
-  `real_elt`, which call the `altrep_int_elt`/`altrep_real_elt` host hooks that libr answers with
-  the class's `Elt` method. `x[i]` takes the sparse path when the vector has at least 2^16
-  elements and the index selects at most an eighth of them; a denser index materializes once,
-  which is cheaper than one dispatch per element. `x <- seq_len(2^31 - 1); x[c(1, 2^31 - 1)]`
-  peaked at 8.4 GB before; `base__long_sequences` asserts the peak resident set stays under 1 GB.
+- **ALTREP vectors are first-class at GNU R's thresholds.** Every `1:n`, `seq_len` and
+  `seq_along` of two or more elements is a compact sequence (`sequence` in
+  `crates/interp/src/arith.rs`, through the `compact_sequence` host hook), `as.numeric` of one
+  stays compact, `as.character` of any number vector without attributes is a deferred string, and
+  `duplicate` of a vector of 64 or more elements that changes only attributes (`unclass`,
+  `names<-`, `attr<-`, `structure`, `dimnames<-`) makes a wrapper over the shared data
+  (`values::shallow_duplicate_attr`, `WRAP_THRESHOLD`). `.Internal(inspect())` and data.table's
+  ALTREP checks (754.07, .08, .10) therefore see what GNU R produces. The earlier thresholds
+  (2^20 for sequences, 256 for deferred strings, no wrappers) existed because tier 0 and the JIT
+  read plain data in place; the placement rule below removes that cost instead.
+  - *Placement rule.* A plain read pays one ALTREP bit test and nothing else; every ALTREP branch
+    is `#[cold] #[inline(never)]` and out of line. Tier 0's in-handler fast paths must not run R
+    code or collect, which a package class's `Elt` method may do, so tier 0 reads only compact
+    sequences in the handler (pure arithmetic via `values::compact_sequence`,
+    `read_altrep_element_call` in `crates/interp/src/bytecode.rs`). Any other ALTREP read
+    declines to the `[`/`[[` builtin, whose `element_access::altrep_element` reads one element
+    through the class's `Elt` method. The JIT reads attribute-free compact integer and double
+    sequences inline: the `INTEGER_SEQUENCE` and `DOUBLE_SEQUENCE` feedback bits type such a value
+    as `Ty::IntSeq` or `Ty::DblSeq`, whose guard tests the ALTREP flag, the class pointer and nil
+    attributes, and a `for` loop, `x[i]`, `x[[i]]` or `length(x)` on it computes from the class's
+    `c(n, n1, inc)` info vector (`sequence_info` in `crates/jit/src/codegen.rs`). The double form
+    matters because `as.double(1:n)` stays compact; without it `x[i]` ran as a boxed builtin call
+    at 1,273 Ir per iteration. Feedback words are u32 because the two sequence kinds and the
+    string kinds do not fit in 16 bits. Compiled code embeds the class pointer, so it is valid
+    only in the process that compiled it. Every other ALTREP value side exits on `OBJECT|ALTREP`.
+  - *Sequence speculation never mixes with a plain vector.* `a:b` with `a == b` is a plain
+    scalar, so the `IntSeq`/`DblSeq` guard also accepts a non-ALTREP length-one vector of the
+    same kind, and feedback that saw only that scalar at a `:`, `seq_len` or `seq_along` site
+    still types the result as a sequence. A sequence joined with a plain vector is `Boxed`, never
+    `IntVec`: the slot join keeps a sequence a path forgot (`inds <- 1:n` on one path, `inds <-
+    which(...)` on the other), and a partly loaded sequence variable joins with its load
+    feedback. Load feedback that saw only one kind (sequence, scalar or vector of integers, or of
+    doubles) types the variable as the plain vector, so `perm1 <- 0:(n-1)` followed by element
+    stores stays `IntVec`. A variable the body assigns into (`x[i] <- v`, `x[[i]] <- v`, a
+    replacement call) is never a sequence: `SetVar` of a sequence into it stores an expanded copy
+    (`jit_sequence_contents`, a side exit when the value is some other ALTREP), and a load that
+    still finds a compact value copies it and marks the slot as an outer variable, so the first
+    element store copies again and writes the result back instead of losing the store in a
+    temporary. Converting on a join edge was rejected: an edge has no side exit and the copy
+    would need its own reference ownership. `for` normalizes its
+    sequence register to the plain vector type, so a loop header that joins a compact pass with a
+    materialized one stays typed and the loop step branches on the info vector. Without these,
+    fannkuchredux and fasta_3 deoptimized and recompiled their main body up to four times
+    (`jit__sequence_speculation` pins the shapes).
+  - *Reads leave a sequence compact.* GNU R's `print`, `[`, `[[` and `for` read through `*_ELT`,
+    so a compact sequence stays compact after them; only a data-pointer read (`format`, most
+    arithmetic) expands it. ry matches: printing reads an unexpanded sequence into a fresh vector
+    (`values::read_contents`), `[` on a compact sequence always takes the element path and
+    computes each element, `[[` reads numbers through `Elt`, and the tree-walking `for` (top-level
+    code) reads numbers element by element, which keeps `for (i in 1:1e9)` at top level at 43 MB
+    instead of 3.9 GB. `altrep__reads_keep_compact` pins the `inspect` state.
+  - *Arithmetic reads a sequence unexpanded.* The vector kernels (`crates/interp/src/kernels.rs`)
+    read a compact sequence operand as a `Sequence` reader that computes each element from its
+    first element and increment, so `flows * exp(-rate * seq_len(n))` pays only the sequence's
+    creation and allocates no expansion. Only C code asking for `DATAPTR`/`INTEGER_RO` expands.
+    This deliberately differs from GNU R, whose arithmetic reads through `INTEGER_RO`/`REAL_RO`
+    and so leaves the operand `(expanded)` in `inspect`. The values are the same
+    (`altrep__sequence_arithmetic`), and keeping the operand compact saves the expansion's memory,
+    so no oracle case pins the inspect state after arithmetic. `abs` and the accuracy check of
+    `%%` still expand through `values::ints`/`arith::real_at`.
+  - *Summaries ask the class, then read without expanding.* `sum`, `min` and `max` of a lone
+    integer or double ALTREP argument call its class's `Sum`, `Min` or `Max` method first (the
+    `altrep_summary` host hook), as GNU R does, so `sum(1:n)` reads no elements. When the class
+    has no answer, a compact sequence is still not expanded, because GNU R reads it by region:
+    `min` and `max` read its two ends, and `sum`, `prod`, `all`, `any` and `mean` read it into a
+    fresh rooted vector (`SequenceRead` in `crates/interp/src/arith.rs`). `range` expands it,
+    since GNU R's `range.default` combines its arguments with `c()`. Each case was checked against
+    GNU R's `inspect` one process at a time, because Rscript compiles a top-level loop and folds a
+    `3:12` in its body into one shared constant, which pollutes a looped comparison.
+  - *Assignment unwraps.* Storing a wrapper into a variable or slot keeps its data when the
+    wrapper is the only owner (`values::unwrap_assigned`), so a hot loop sees a plain vector.
+  - *Wrappers share data as GNU R's do.* A shallow duplicate of a wrapper shares the wrapped
+    data; only a deep copy copies it. Every ALTREP instance is marked not mutable (refcount
+    65535 in `new_altrep`), so the interpreter copies before any write, and a write through the
+    data pointer of a shared wrapper copies first.
+  - *Materialize keeps attributes and skips attributed slots.* A wrapper's data keeps the
+    attributes it had when wrapped (GNU R's `DUPLICATE_ATTRIBUTES`), so `materialize_contents`
+    returns a stored slot for the object only when that slot has no attributes. Otherwise xts's
+    `unclass(x) - 1` dispatched `-.yearmon` on the unclassed result.
+  - *`duplicate` returns fresh storage.* `memory::duplicate` of an ALTREP object without a
+    `Duplicate` method materializes it and copies again when the result is storage the object
+    keeps (a compact sequence's expansion), because C code writes into duplicates: data.table's
+    `frev` and `setkey` reversed or sorted the source `1:n` otherwise.
+  - *Sparse reads.* `x[[i]]` and a sparse `x[i]` read through `values::int_elt`/`real_elt`; `x[i]`
+    on another ALTREP number vector reads element by element when the vector has 2^16 or more
+    elements and the index selects at most an eighth of them (`reads_sparsely`,
+    `crates/interp/src/subset.rs`), and expands once otherwise. `base__long_sequences` keeps `seq_len(2^31 - 1)` under 1 GB peak.
+  - *Representation differences that remain.* `inspect` prints the refcount of a wrapper or
+    deferred string as `REF(65535)` (ry's not-mutable mark; GNU R prints the real count) and a
+    compact sequence a data-pointer read expanded as `(expanded)`, as GNU R does. Lists have a `wrap_list` class, as in GNU R
+    4.6.
+  - *Cost.* A plain read costs no more than before (measured with callgrind on a tier-0 loop
+    `acc <- acc + x[i]`). A compact read in tier 0 costs about 110 to 190 Ir more per iteration than a
+    plain one, against about 1,000 to 1,900 more when it declined to the builtin. Tier 0 reads the
+    class and the `c(n, n1, inc)` state inline (`values::compact_sequence`, with the class
+    identities in `Interp::compact_sequence_classes`), not through a host call. A deferred string
+    read converts only that element through `values::altrep_string_elt`, gated on
+    `Interp::deferred_string_class` because that class runs no R code; other ALTREP strings decline
+    to the builtin, since tier 0 must not re-enter R mid-instruction.
+  - *Follow-up.* The compact read in tier 0 is not yet within 20 Ir of a plain one, and the JIT
+    side exits on deferred strings, wrappers and package classes until an extern element reader
+    (`ry_altrep_int_elt` and the real and string forms) lands behind its `OBJECT|ALTREP` guard. Arithmetic on a wrapper over attributed data materializes and therefore
+    copies, where GNU R reads through the data pointer.
+  - *The JIT reads a sequence's info from the object on every read.* `sequence_info` in
+    `crates/jit/src/codegen.rs` loads the info pointer and `(count, first, step)` from the
+    instance, with the scalar path of the representation check marked cold. Per-slot SSA
+    variables for the info were measured and rejected: slot status can be not-loaded at a loop
+    head (on-stack-replacement entry), so the variables become block parameters that cost more
+    than the reload. Speculating the representation in the slot guard and folding the bound check
+    into the index compare saved nothing measurable either. Within a chain of fall-through blocks
+    (`Plan::continues` in `crates/jit/src/analysis.rs`, a block whose only predecessor is the
+    fall-through from the block before it and which is not a loop head) `known_object` reuses a
+    sequence read already checked. The floor: a compact read is a flag test and branch, the info
+    pointer, three loads, a conversion, a multiply and an add, about 8 to 10 instructions more
+    than a plain load, and Cranelift does not hoist loop-invariant work. Convolution
+    (two reads per 157-instruction iteration) therefore runs at about 1.06 to 1.08x main's Ir and
+    nbody at about 1.01x. Expanding a compact sequence on its first compiled element read would
+    close the gap but diverges from GNU R, which keeps a sequence `(compact)` in `inspect` after a
+    compiled `a[i]` loop.
+  - *Only the user-visible `as.double` keeps a sequence compact.* The compact-preserving branch
+    sits in `as_type` (`crates/interp/src/coerce.rs`), not in `coerce_vector_quiet`. A builtin's
+    own coercion reads the elements immediately, and an expansion on that read allocates while the
+    builtin holds unrooted results: `complex(real = 1:2, imaginary = 3:4)` crashed under GC stress
+    when the branch sat in the shared coercion.
+  - *A new compact sequence is not rooted.* The interpreter makes one for every `a:b` it
+    evaluates, and a handle per sequence would pin each one until the enclosing call returned.
+    `new_sequence` (`crates/libr/src/altrep.rs`) relies on the ALTREP allocation keeping its info
+    vector alive, and a native caller roots the result on its way out of `boundary::enter`.
+  - *`a:b` compiles without the builtin call.* `Intrinsic::Colon` calls `jit_colon`, which
+    builds the integer result through `interp::arith::colon` and returns NULL for doubles, a
+    missing or out-of-range bound, or a heap error (parked), so tier 0 makes those results and
+    raises those errors. A site whose feedback shows doubles keeps the builtin call. The tier 0
+    builtin call cost about 1,250 Ir per `a:b`, more than the compact sequence's whole creation,
+    which is why the sequence's second allocation was not folded into the instance.
+  - Pinned by the oracle cases `altrep__wrappers` and `datatable__compact_columns` and by data.table's
+    own suite.
 
 ## utils' sockets, internal downloads and allocation profiling
 
@@ -6589,11 +6710,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`rmultinom` carries the remaining probability as a double-double.** GNU R uses a `long double`; in plain `f64` ten probabilities of 0.1 leave a conditional probability just above 0.5, `rbinom` then draws the complement, and the counts differ from GNU R's for the same seed. RcppArmadillo compares R's draws with its own (`crates/interp/src/distributions.rs`, `rmultinom`).
 - **`[` subsets a parsed expression's `srcref` list.** plumber locates each endpoint's comment block with `attr(exprs[i], "srcref")` (`crates/interp/src/subset.rs`, `subset`).
 - **`Rf_setAttrib(R_NilValue, name, R_NilValue)` succeeds.** GNU R checks for removal before it rejects a `NULL` target, and data.table's `C_unlock` runs on a `j` result that is often `NULL` (`crates/libr/src/attributes.rs`, `set_attrib`).
-- **Integer sequences of at least 2^20 elements are compact ALTREP objects** (`colon`, `seq_len`, `seq_along` in `crates/interp/src/arith.rs`, through the `compact_intseq` interpreter hook). GNU R compacts every `1:n`; ry keeps short ones ordinary because the evaluator reads them without an indirection, and only long ones matter for memory. vctrs' tests build `seq_len(2^31 - 1)` twice and ran out of memory when it was materialized.
-- **Known representation differences from these thresholds.** data.table's tests 754.07, 754.08 and 754.10 fail on ry, and the packages row keeps showing them as `tests_differ` rather than hiding them. The values match: 754.09 and 754.11, which check the results of the same assignments, pass. No package gets a special case.
-  - What they pin. 754.07 reads GNU R's `.Internal(inspect())` output and expects `1:10` to be a compact integer sequence and `as.character(1:10)` a deferred string. 754.08 and 754.10 expect the verbose message "RHS for item 1 has been duplicated", which data.table prints only when the right-hand side is ALTREP: a deferred string, or the wrapper GNU R's `duplicate` makes for a vector of 64 or more elements.
-  - Why ry differs. A `1:n` is compact only from 2^20 elements (`COMPACT_SEQUENCE_MIN`, `crates/interp/src/arith.rs`), `as.character` of a number vector is deferred only from 256 elements (`DEFERRED_STRINGS_MINIMUM`, `crates/interp/src/coerce.rs`), and `duplicate` never makes a wrapper. Tier 0 and the JIT read plain vectors in place, and their loop type guards reject an ALTREP vector, so a small compact or deferred vector in a hot loop would leave compiled code or materialize on every read; below the thresholds the plain vector is cheaper.
-  - A generic match is feasible: compact sequences and deferred strings become first-class in tier 0 and the JIT (read in place, accepted by the guards), `duplicate` makes wrappers, and the thresholds go. The cost is a representation check on every vector read the guards cover, plus the guard work in the JIT, so it is measured before it is built. That work is planned; until it lands, these three tests are a documented difference.
+- **ALTREP vectors match GNU R's thresholds**: see "ALTREP vectors are first-class at GNU R's thresholds" for the placement rule, wrappers and the remaining `inspect` differences.
 - **`row.names<-` stores a real compact form `c(NA, n)` as integers**, as GNU R's `row_names_gets` does. cpp11's `data_frame::nrow` reads only the integer form, and readr's chunked reader loops forever on the real one.
 - **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
 
@@ -9222,6 +9339,16 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why refuse instead of failing at the end.** The missing packages are known before any case runs, and a full pass takes up to 80 minutes, so a run that would be rejected anyway should stop in seconds.
 - **Not changed.** `cargo test -p oracle` still drops cases whose packages are missing, because CI runs it in environments without the corpus; the merge gate is `oracle compare`.
 
+## Start-up and code images are keyed by build inside a base R tree
+
+- **Previous shape.** The start-up image (`library/base/R/ry-start.image`) and each package's code image (`R/<package>.ryc`) had one name per tree, and an image loads only into the build whose identity (`RY_RUNTIME_ID`) its header carries. Assembling a build's R home rewrote the shared tree's start-up and base code images for that build, so every other build sharing `target/base-r` silently started the slow way, and the recommended packages' images (MASS, Matrix, ...) stayed with whichever build ran `just base-r`. `tools/bench/bench.py` refused to time two builds that shared a tree.
+- **Weakness.** One file name stood for many builds' images, so the tree held one build's truth at a time and builds displaced each other; a per-build tree copy would duplicate about 50 MiB of identical sources to hold a different 54 MiB of images.
+- **Target shape.** `crates/rcmd/src/images.rs` names every image by build: `library/base/R/ry-start.<build>.image` and `R/<package>.<build>.ryc` (also `sysdata.<build>.ryc`). A build that finds no current image of its own (at `just base-r`, `just start-image`, home assembly, or reuse of an assembled home whose image was pruned) writes its start-up image, the base packages' code images and an untrained install-style code image for every other package in the tree (`run_image_writer` in `crates/rcmd/src/base.rs`; a first start that writes them all takes about 2.6 s and peaks at 190 MiB), and leaves every other build's files alone. Writes go to `.partial` and rename, and happen under the tree's `.start-image.lock` with a re-check, so two processes starting at once write once. `crates/repl/build.rs` embeds only the building build's images in a release, and the release smoke test (`tools/smoke-test.sh`) fails when the first start of an installed archive writes or skips an image.
+- **Prune rule.** After writing, under the lock, the writer records itself as newest in the tree's ledger (`library/base/R/ry-builds`, one build per line, oldest first, replaced by rename) and keeps the images of `KEPT_BUILDS` = 4 builds: its own and the 3 others the ledger orders newest. Builds on disk but missing from the ledger count as oldest, by name. The order never comes from file times, which `cp`, `tar` and archive extraction reset. Every process holds a shared `flock` on its build's start-up image until it exits (`images::hold_start_image`, taken before the image is checked), and the pruner removes a build only while holding an exclusive lock on its start-up image, so a running build's images are never removed; a start that loses the race finds the file gone and writes it again. Unkeyed names belong to runtimes that predate the keying and are never pruned. `fuzz_prune_keeps_the_most_recent_and_running_builds_whole` checks the exact kept set against random ledgers, file times and running builds.
+- **A package installed by another build is named, not rebuilt.** After an upgrade or a runtime rebuild, every package in a user library has only another build's code image, so its functions compile as they run. ry prints one note per library and session that names those packages and says to reinstall them (`note_foreign` in `crates/interp/src/code_image.rs`), and `RY_IMAGE_LOG=1` reports each one as an unused image. Rejected: rebuilding the code image lazily at load. A session would then write into package libraries, which may be read-only or shared by concurrent processes, a first load would pay for compiling the whole package, and every runtime rebuild in a development checkout would leave another set of images in the corpus library with nothing to prune them. Scenario `install-foreign-code-image` pins the note.
+- **Benchmarks.** `bench.py`'s `refuse_foreign_images` starts each compared build once before timing (which writes any missing images into the base R tree) and stops when a corpus or `R_LIBS` package has only another build's code image, naming the packages to reinstall. The shared-tree refusal and the header scan of the base tree it replaced are gone, since keyed names let builds share a tree. Every timed process runs with `RY_IMAGE_LOG=1`, and `spawn` fails one that prints `ry: image unused: <reason>` (an image skipped because it is missing, of another build, of another format, of another database version or damaged) or `ry: image written: ...` (a start that wrote images, such as after a prune). That per-run check is the loader's own verdict and catches what a name cannot: damage, a database reinstalled since, and a prune between the preflight and the run.
+- **Impact.** Two builds compared on one tree both start from their own images, with no per-build tree and no silent slow start; `two_builds_alternate_starts_without_displacing_each_others_images` in `crates/ry/tests/test_perf.rs` pins it. Disk grows by about 54 MiB per kept build (a 16 MiB start-up image and 38 MiB of code images), bounded at four plus any build still running. No runtime semantics change; the runtime adds the note on standard error.
+
 ## Marking a traced object costs a few table loads
 
 - **Previous shape.** Every marked object paid for decisions recomputed from its kind: `element_size` and `shape` were `match` ladders, `locate` divided by a slot size looked up through a branch on the page class, `age` was an out-of-line call, the leaf check walked the kind ladder again, and `mark_child` wrote a `younger_child` field on the heap that `trace` read back. `vector_cells` computed each small vector's exact cell count from its length. On `records` the collector was 757M of 5.55G instructions, about 1,600 instructions per kept record.
@@ -9269,7 +9396,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Previous rule.** A change's peak RSS, one number per workload, must not grow against main.
 - **Weakness.** Release builds are fat LTO with no function ordering, so the resident pages of `libR.so`'s code depend on where the linker places hot functions. Two changes were blocked by this alone: one showed +2.6 MB peak RSS, all of it `libR.so` resident text (14.2 to 16.6 MB) with identical anonymous and start-image RSS; another showed +0.6 and +1.4 MB of file-backed RSS on two applications with equal anonymous RSS. The number mixed a real signal with layout noise of the same size.
 - **Target rule.** `tools/bench/bench.py` reports anonymous RSS, start-image RSS and `libR.so` file RSS separately, plus the size of `libR.so`'s `.text` section (`size -A`). Anonymous and image RSS must not grow. Resident text is not judged per change; `.text` size is, and the reviewer accepts growth that matches the code the change adds. Resident text is checked on the shipped layout (`tools/layout/optimize.sh`, PGO plus BOLT) when a release is cut, and a regression there becomes a backlog item.
-- **Impact.** The real memory signal (heap and image) stays strict, and the noisy one is replaced by a deterministic measure. Implementing the split in `bench.py` and recording the measured layout swing of a no-op change in `development/testing.md` are open work.
+- **Impact.** The real memory signal (heap and image) stays strict, and the noisy one is replaced by a deterministic measure. `bench.py` reports the parts (`sample_memory`, which samples `/proc/<pid>/smaps` every 20 ms because a process's smaps cannot be read after it exits, and `text_size`). Recording the measured layout swing of a no-op change in `development/testing.md` is open work.
 
 ## R lists do not convert to records at a typed boundary
 
@@ -9416,7 +9543,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 - **Previous shape.** Whether a typed function ran on native code was known only to the typed core. A function `lower.rs` refused ran in the interpreter with the same output, and the only signal was a line on stderr under `RY_TYPED_LOG`. The checker held no notion of "native", so a refusal showed up as benchmark time, and the only guard was `test_scenarios::typed_benchmarks_run_natively` for the benchmark programs.
 - **Target shape.** `semantics::native::native_blockers` judges each native function after its item is checked, from the item's HIR and recorded types, and stores the blockers in `ItemCheck.native_blockers`. `strict_diagnostics` renders them under two codes (next bullet), so they show in `ry check` and in the editor, and the errors reach the gate that refuses to run strict code (`preflight`). It is a pass over one item, not a query, so the per-item firewall holds and it reads other definitions only through the declared signatures the check already resolved. The contract is `reference/type-system.mdx`, "Native functions".
-- **Which functions are judged.** A function literal whose declared signature (inline or `#:`) is written entirely in ry types: every parameter annotated with one, the result one, `NULL` or absent, and at least one ry type. A signature with an R type is the opt-out: such a boundary function is where R values and ry values meet, it may run in the interpreter, and it is not judged. The signature decides, because it is what the author wrote and what every caller sees, and because a function that takes or returns an R value cannot avoid holding one. An unannotated function literal is judged only inside a native function. A signature whose parameter types are in a `#:` comment or on the assigned name is judged by the same rule and gets an `interpreted` warning on top (`Uncompiled::DetachedSignature`), because the runtime registers a signature only from the types written on the parameters (`interp::annotations::register_definition`); `Annotation::inline_signature` records which form the author wrote. The warning is left out while inline annotations are turned off, where no signature can be written inline and the warning about the setting stands for all of them. A type parameter bounded by an R type (`<T: numeric>`, `native::has_r_bound`) makes a boundary function, so `ry check --annotate` output on plain R code is not judged as ry.
+- **Which functions are judged.** A function literal whose declared signature (inline or `#:`) is written entirely in ry types: every parameter annotated with one, the result one, `NULL` or absent, and at least one ry type. A signature with an R type is the opt-out: such a boundary function is where R values and ry values meet, it may run in the interpreter, and it is not judged. The signature decides, because it is what the author wrote and what every caller sees, and because a function that takes or returns an R value cannot avoid holding one. An unannotated function literal is judged only inside a native function. A signature in a `#:` comment or on the assigned name is judged by the same rule and compiles like the inline form ("A function has one signature, resolved in `syntax::annotation`"); only a signature that is the name of a type alias gets an `interpreted` warning on top (`Uncompiled::AliasedSignature`). A type parameter bounded by an R type (`<T: numeric>`, `native::has_r_bound`) makes a boundary function, so `ry check --annotate` output on plain R code is not judged as ry.
 - **Two codes, two severities.** An R value in a native function (`NativeBlockerKind` other than `Uncompiled`: an R call's value, a nested R call, an outside variable, a column read, `a:b`, an R literal, a stray `*.to_r`) is a `native` error, because it breaks the rule the function is written under and the author can fix it. Legitimate ry that the typed core does not compile yet (`Uncompiled`: `try`, list patterns, a standard library function without native code) is an `interpreted` warning that says the function runs in the interpreter and how to write the step so it compiles. It is a warning because the gap is the compiler's: as an error, strict mode refused about 195 standard library functions and `try`, and the docs examples for them had to leave strict mode. A warning keeps the property visible at the construct without rejecting the language.
 - **The rule in the body.** Every value is a ry value. An R function may be called as the direct argument of a `*.from_r`, as a statement whose value is unused, and as `stop(...)`. Table values (`DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy`, `Expr`) are ry values, and a table function that gives one is a native call (`native::gives_table_value`, which must agree with `interp::dataframe::gives_table_value`).
 - **Sound in one direction.** A native function with neither finding compiles in the typed core. The checker over-reports where it cannot decide: base R functions the typed core computes itself (`sqrt`, `nchar`, `paste0`) are still R functions to the rule, and `a:b` is reported although `for (i in a:b)` compiles. `native::COMPILED_STD` mirrors the standard library functions `Lowerer::builtin` has code for, because `semantics` cannot depend on `typed`; the agreement test fails for a listed name that no natively running function of its corpus calls, so a name the typed core lacks cannot stay listed. An operator that builds an `Expr` is told from arithmetic by the form of its operands on both sides (`Lowerer::is_table`, `Judge::table_operand`): a variable, an operator, or a call of a table function or of a top-level function that declares a table result.
@@ -9559,3 +9686,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** `compile` lowers (`lower_settled`), confirms `Lowered::constructed`, and lowers again only if a `match` over any tag saw an older epoch. `generate` runs the rest of the pipeline once, on the lowering that settled. A lowering is a small part of a compilation, so the repeat is cheap.
 - **Confirming before the code exists is safe.** A confirmed shape only adds a case to matches over any tag. If the backend then refuses the function, later matches test for a shape nothing constructs, which costs a comparison and changes no answer.
 - **Impact.** `orders` compiles in about 1.5 ms where it took 2.4 ms, and every typed benchmark program generates code once per compiled function (`RY_SSA_DUMP=1` prints one `function Tail` per `typed: compiled` line).
+
+## A function has one signature, resolved in `syntax::annotation`
+
+- **Decision (orchestrator, on the user's mandate that the two annotation forms are equal).** A function whose signature is written in a `#:` comment, or on the name it is assigned to, runs exactly like its inline-annotated twin: the same boundary checks and the same native compilation.
+- **Previous source of truth.** There were two. The checker resolved a function's signature from all three forms (`semantics::annotations::merge_annotations`, `comment_slots`, the definition check's pairing of declared parameters with formals). The runtime (`interp::annotations::register_definition`) read only the `TYPE_ASCRIPTION` and `RETURN_TYPE` nodes on the literal. So `#: fn(x: I64) -> I64` above `function(x) x` was typed for the checker and untyped at run time, and the checker carried a warning (`Uncompiled::DetachedSignature`, `Annotation::inline_signature`) whose only job was to report that the two disagreed.
+- **What was structurally weak.** The attachment rule (which `#:` block belongs to which statement), the pairing rule (a formal takes the declared parameter of its name, else the next unnamed one, and `...` the rest type) and the precedence between forms lived in `semantics` only, next to code that needs the type database. The runtime could not call them, because it lowers code the checker never sees (`eval(parse())`, an installed package, a lazy definition) and `interp` does not depend on `semantics`.
+- **Target shape.** `syntax::annotation::signature(function, inline)` resolves, from syntax alone, the type node of each formal and of the result. Per slot, a type written on the literal wins; otherwise the function type on the binding (`name: fn(...) <- function(...)`), which replaces a `#:` block as a whole; otherwise the `#:` block attached to the statement, compact or `@param`/`@return`. A refused block, a block whose directives are out of order (`misplaced_directives`, which the checker reports from the same function) and a type that is not a written function type declare nothing. A coercion (`@trust`, `@if-unknown`, `@new`) in the block or on the binding governs the value wherever it is written, as the typing reference says, so a coerced function has no signature at all: the runtime checks nothing on it, and the checker does not judge it native. With `inline = false` (`[check] inline-annotations = false`) only the `#:` block counts. `register_definition` calls it, and the checker's merge, its definition check and its blocker judgement use the same `attached_annotation`, `block_declaration` and `pair_formals`. The checker lowers the types itself; what is shared is which syntax declares which slot.
+- **Why syntax and not the checker's resolved signature.** Handing the runtime the checker's scheme would need a serialized signature per function and a checker run before every lowering, and it would leave code the checker never saw without one. Two readers of one syntax-level rule cannot drift, and the one case where syntax is not enough is a signature that is only the name of a type alias (`#: Pick`, `f: Pick <- function(n) n`): the checker resolves it (`check::declared_function` peels transparent aliases), the runtime cannot, and `native::Uncompiled::AliasedSignature` reports it as an `interpreted` warning that asks for the function type in place of the alias. The warning is raised only when an alias was peeled and the written types are incomplete, so a signature that is incomplete for another reason (a parameter name the function does not have, which is a type error) is not blamed on an alias.
+- **Where the two readers differ.** The checker drops a block's whole payload on any lowering error (`Lowering::finish`), including errors only it can see, such as an unknown type name. The runtime reads no diagnostics, so it checks the types it recognizes in such a block. Every such block carries an error diagnostic, and strict mode refuses to run the file.
+- **Consequence for plain R code.** A `#:` comment is enforced on ry's runtime: a value whose storage type contradicts the comment is an error at the function's boundary, where GNU R (and `ry R`) reads a comment. This is the mandate's equality taken literally, and it applies to `ry check --annotate` output too. The check is first-order and looser than the checker, so it fails only on a value that really does not have the declared type.
+- **Where lowering needed the statement.** A lazy package definition lowers the binding's value alone, and the cached-index and kept-source paths lower it from file text. `loader::Code` carries `statement_start`, and `ry_runtime::lower_code` parses from the statement's line, extended over the `#:` lines directly above it, with the prefix masked by spaces so byte offsets and line numbers are the file's. A parse error inside a `#:` line does not fail the lowering, because such a line is a comment to R. The console is the other place: `syntax::input_is_unfinished` holds a command that ends in a `#:` block on its own lines until the next line arrives, and a blank line ends the wait, so a block typed before its function attaches as it does in a file.
+- **Lazy definitions resolve at compile time.** `typed::lower::resolve_function` forces a loader lazy-definition promise (`ryLoaderForce`), so a native function that calls a not yet forced function of the same package compiles on its first call. The loader binds only function definitions and pure constants of strict files that way, so forcing one early is not observable.
+- **Impact.** Correctness: the checker and the runtime agree about what a function declares for every block the checker accepts, and the mandate's two forms count the same in scripts, the console, `ry load` and `ry install`. Simplicity: the warning, its flag and the inline-off special case are gone, and three private copies of the pairing rule became one. Performance: one walk back over trivia per function literal lowered, and comment-annotated functions gain the per-call check their inline twins already pay. Incremental analysis: unchanged, the checker reads the same nodes as before.
+- **Pinned by** `typing-strict/native.R.test` (`signature_written_in_a_comment`, `signature_from_a_type_alias`, `signature_alias_is_blamed_only_when_an_alias_is_the_cause`, `signature_in_a_comment_reports_what_blocks_it`), `crates/ry/tests/native/blocked-aliased-signature.R`, `crates/syntax/tests/test_annotation.rs`, `a_console_reads_on_only_when_the_input_ended_too_early`, and the scenario `typed-comment-signatures`.
