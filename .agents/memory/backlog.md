@@ -1325,6 +1325,11 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 - Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler and `jit::runtime::jit_call` use it (`decisions.md`, "Positional builtin calls read their arguments from the registers").
 - `bytecode::slot_subject_call` still collects into `eval::Args` (0.42% of bond_book_full in SmallVec code). It needs a different shape: its arguments carry tags, their count is known only after walking the call, and it stops early and drops the refcounts it took. Owned by the call path.
 
+### Small-vector base builtins (open, tier 0)
+
+- On bond_book_full (warm, one thread, about 2,189M instructions per repetition), base builtins on length-200 vectors cost per call: `rep` about 640 (`repeat_plain` about 535), `sum` about 615 (`add_all` 122, `summary_args` 98), `exp` about 680 (`math` 420), `seq_len` about 280. `kernels::binary` runs 1.6M calls per 4 repetitions at about 226 instructions in `real_arithmetic` and 163 in `alloc_uninit` (allocation, owned by GC).
+- The argument handling and dispatch around these calls is estimated at a ceiling of about 10 to 13% of bond_book_full. A realistic estimate goes to the speed lead before building.
+
 ### Queued with measured ceilings
 
 Shares are of each application's instructions (profiling build, one process); a ceiling is the item's whole inclusive cost, so a realistic gain is about half.
