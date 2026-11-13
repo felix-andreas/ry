@@ -2,7 +2,7 @@
 <title id="title">ry check reports a type error that it inferred from plain R</title>
 <desc id="desc">  × expected a numeric value (`integer` or `double`), found `character`
  2 │ apply_discount(100, "0.2")
-   │                     ^^^^^</desc>
+                         ^^^^^</desc>
 <style>
 .bg { fill: #f6f8fa; stroke: #d0d7de; }
 text { fill: #1f2328; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; white-space: pre; }
@@ -18,5 +18,5 @@ text { fill: #e6edf3; }
 <rect class="bg" x="0.5" y="0.5" width="628" height="91" rx="6"/>
 <text y="30.5"><tspan x="16.0">  </tspan><tspan x="32.8" class="red">×</tspan><tspan x="41.2"> expected a numeric value (`integer` or `double`), found `character`</tspan></text>
 <text y="50.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">2</tspan><tspan x="32.8"> │ apply_discount(100, "0.2")</tspan></text>
-<text y="70.5"><tspan x="16.0">   │ </tspan><tspan x="58.0" class="magenta" font-weight="bold">                    ^^^^^</tspan></text>
+<text y="70.5"><tspan x="16.0">     </tspan><tspan x="58.0" class="magenta" font-weight="bold">                    ^^^^^</tspan></text>
 </svg>
