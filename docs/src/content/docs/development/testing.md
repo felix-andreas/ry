@@ -60,7 +60,8 @@ jobs:
 | `fuzz` | `just fuzz-all 20` | Every libFuzzer target for 20 seconds, stopping at the first failure |
 
 The release workflow calls `test.yml`, and its `publish` job needs it, so a release with a failing
-test publishes nothing.
+test publishes nothing. Both files are staged and run once a maintainer accepts them
+([Releasing](/development/releasing#the-workflows)).
 
 The full gate is `ci.yml`. It runs `just ci`, which
 builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the

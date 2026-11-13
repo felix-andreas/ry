@@ -7945,8 +7945,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
 - **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R is installed because the runtime's suites skip without an installation, which would leave the runtime untested. It is 4.6.2, the release the oracle's expectations are recorded with and ry bundles as its base R (the live `ci.yml` still installs 4.3.3 until `.github/pending/ci.yml` is accepted). The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
-- **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits.
+- **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits. The tests that need no GNU R run on every push through a second workflow ("A push to main runs the tests that need no GNU R, and a release fails on them").
 - **Impact.** CI covers every crate except `zed_ry` (wasm), at most once an hour on main, or on any ref when started by hand.
+
+## A push to main runs the tests that need no GNU R, and a release fails on them
+
+**Status:** planned. The workflow is staged in `.github/pending/` and takes effect when the user runs `just accept`.
+
+- **Previous source of truth.** `ci.yml` was the only workflow that ran a test, and it starts by hand ("CI runs `just gate` against GNU R 4.6.2, and nothing ignored", a user decision). `release.yml` built and published with no test, and the 17 libFuzzer targets in `fuzz/` ran only when someone typed `just fuzz-all`.
+- **What was weak.** Nothing stood between a push and a release. A regression in the fixture suites reached a tag unless a person had started the gate on that commit, and a fuzz target could stop building without anyone noticing.
+- **Target shape.** `test.yml` has two jobs, each one `just` recipe, so each also runs locally. `tests` runs `just test-push`: every test of the crates that build without the runtime (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `features`) and the `ry-lang` suites that need no GNU R. `fuzz` runs `just fuzz-all 20`, every libFuzzer target for 20 seconds. It triggers on a push to main, by hand, and as a called workflow: `release.yml` calls it and `publish` needs it, so a tag whose tests fail publishes nothing.
+- **Why a second workflow and not a trigger on `ci.yml`.** The full gate builds GNU R in the flake's shell and runs the oracle, about 31 minutes warm on four cores, and the user decided it starts by hand. `test.yml` needs neither Nix nor R, so it is the part that fits every push, and `ci.yml` keeps its trigger. A pull request gets no run, because agents commit to main directly during the broken-main phase and a pull request's branch is tested by its author before it merges.
+- **Impact.** A red push run names the commit that broke a fixture suite or a fuzz target. It does not replace the gate: the runtime, the oracle and everything else that compares ry with GNU R are tested only there.
 
 ## Alias cycles are reported at the declaration, and short names get narrow suggestions
 
@@ -10443,13 +10453,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Previous shape.** Each track learned which oracle failures main already had from messages between sessions, so a branch could not tell an inherited failure from its own regression without rerunning main, and a fixed case stayed "known" in people's heads.
 - **Target shape.** `crates/oracle/known_failures.toml` lists each case and engine main fails, with the area of ry the bug lives in and a one-line reason (`provisional` while it is seen only on a branch). `oracle compare` (which takes a comma-separated engine list and prints one summary line per engine) and `second_engine_matches_gnu_r` report a listed failure as known and fail on an unlisted failure or on a listed case that passes, so the fix and the entry's deletion land together. The oracle refuses an entry with an unknown engine, a missing case or a duplicate. `ry-jit-gctorture` (`RY_JIT=force` plus `RY_GC_STRESS=1`) is a named engine because compiled code that drops a root shows up only with both on.
 
-## A known oracle failure may be intermittent under a gctorture engine
+## A gctorture crash is never a known failure
 
 **Status:** built.
 
-- **Previous shape.** Every listed case that passed failed the run as a stale entry. `print__deparse_undefined_s4_class` under `ry-jit-gctorture` segfaults when the engine loads base R from GNU R's home and passes with ry's own home, so the same main was red on some hosts and green on others whether or not it was listed.
-- **Target shape.** `intermittent = true` on an entry in `crates/oracle/known_failures.toml` makes a passing case count as passed, on its own summary line (`<engine>: intermittent, passed here: N`), instead of failing the run. `verdict` and `fails_run` in `crates/oracle/src/oracle.rs` are the one place `oracle compare` and `second_engine_matches_gnu_r` decide this. `parse_known_failures` refuses the mark outside `GC_TORTURE_ENGINES`, because only a collector-stress crash depends on where the collector runs. `provisional` is a separate property.
-- **Limit.** A beta release still needs the file empty, intermittent entries included (`development/releasing.md`, checklist), so the mark postpones a fix but cannot hide one at a release.
+- **Previous source of truth.** `intermittent = true` on an entry in `crates/oracle/known_failures.toml` let a listed case under a gctorture engine pass on some hosts without failing the run. Two segfaults under `ry-jit-gctorture` carried the mark: `print__deparse_undefined_s4_class`, which crashed when the engine loaded base R from GNU R's home, and `s4__native_definitions`, which crashed with ry's own home.
+- **What was weak.** The mark recorded a memory-safety bug as host noise. Both crashes had one cause. A compiled body hands tier 0 an unwind by parking it in its activation, and the collector did not trace activations, so the value a `return()` carried was freed by a collection during the deoptimization exit that followed. Which home supplied base R only moved where the collections fell.
+- **Target shape.** The collector traces every running activation's parked unwind (`Interp::held_unwinds`, pinned by `a_parked_return_value_survives_its_exit` in `crates/jit/tests/test_tiers.rs`). `KnownFailure` has no `intermittent` field, and `parse_known_failures` refuses an entry that carries the key.
+- **Impact.** A crash under a gctorture engine fails the run on every host until it is fixed, however rarely it reproduces. An ordinary known failure still fails the run when the listed case passes, so a fix and its entry's deletion land together.
 
 ## The oracle refuses a partial run and finds the corpus library itself
 

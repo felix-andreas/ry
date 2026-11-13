@@ -39,12 +39,15 @@ without one it publishes with `--oidc`, which works only inside GitHub Actions.
 
 ## The workflows
 
-`.github/workflows/` holds five workflows: `release.yml`, `nightly.yml` (below), `docs.yml` (the docs
-deploy below), `test.yml` and `ci.yml`. `test.yml` runs on every push to main and inside every
-release: the fixture suites, the tests of the crates that need no R, and a bounded fuzz pass
-([Testing](/development/testing)). `ci.yml` is the full gate against GNU R. It runs only when
-started by hand (from the Actions tab, on any ref): the orchestrating agent starts it on main at its
-hourly check when main has new commits.
+`.github/workflows/` holds `release.yml`, `nightly.yml` (below), `docs.yml` (the docs deploy below),
+`cachix.yml` (fills the nix binary cache at each release), `test.yml` and `ci.yml`. `test.yml` runs
+on every push to main and inside every release: the fixture suites, the tests of the crates that
+need no R, and a bounded fuzz pass ([Testing](/development/testing)). `ci.yml` is the full gate
+against GNU R. It runs only when started by hand (from the Actions tab, on any ref): the
+orchestrating agent starts it on main at its hourly check when main has new commits.
+
+`test.yml` and the `tests` job of `release.yml` are staged in `.github/pending/`. Neither runs
+until a maintainer accepts them with the command below.
 
 Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
 under the same name in `.github/pending/`. A maintainer then moves it into place, commits and
