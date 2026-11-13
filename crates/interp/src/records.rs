@@ -150,17 +150,10 @@ pub unsafe fn alloc_lazy(
     Ok(record)
 }
 
-/// Fills `object` when it is a lazy record, before something reads its slots.
-pub unsafe fn settle(object: Sexp) -> R<()> {
-    if object.kind() == SexpType::Record && object.is_lazy_record() {
-        settle_lazy(object)?;
-    }
-    Ok(())
-}
-
-/// [`settle`] for a reader that can neither raise an error nor let a collection run, such as
-/// `identical()`. The collector waits until the record is filled, and running out of memory
-/// while filling it is fatal.
+/// Fills `object` when it is a lazy record, for a reader that can neither raise an error nor
+/// let a collection run, such as `identical()`. The collector waits until the record is
+/// filled, and running out of memory while filling it is fatal. Every other reader goes
+/// through [`slot_value`] or [`with_slots`], which fill the record first.
 pub unsafe fn settle_uncollected(object: Sexp) {
     if object.kind() != SexpType::Record || !object.is_lazy_record() {
         return;

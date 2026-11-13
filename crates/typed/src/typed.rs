@@ -1151,6 +1151,10 @@ const NATIVE_VALUES: NativeValues = NativeValues {
 /// tuple or tag field becomes a lazy record of its own, so reading one field of a deep tree
 /// converts one level.
 unsafe fn settle(record: Sexp) -> Result<(), Unwind> {
+    // Filling allocates, and a reader such as compiled code may hold `record` only in a
+    // register. Were it collected mid-fill, the collection would release the box this loop
+    // still reads.
+    interp::heap().root(record);
     let pointer = record.lazy_record_value() as *const u8;
     let (_, fields) = shapes::fields((*(pointer as *const Boxed)).shape);
     let mut slots: SmallVec<[Slot; 4]> = SmallVec::new();

@@ -48,3 +48,27 @@ file lazy.R
 run ry run --runtime ry lazy.R
 expect exit 0
 expect stdout "[1] 0\n[1] 0\n[1] TRUE\n[1] TRUE\n[1] FALSE\n[1] 2\n[\"a\", \"b\"]\n(label = \"p\", tags = [\"a\", \"b\"], x = 3)\n[1] TRUE\n:Add(left = :Add(left = :Num(value = 1), right = :Num(value = 5)), \n    right = :Add(left = :Num(value = 1), right = :Num(value = 2)))\n[1] 9\n[1] 33 -6 10\n"
+
+# A reader that understands records fills one, and one that only understands R objects reports
+# the record as it reports any other ry value.
+file reads.R
+| alias Point = Record{x: F64, label: Str, tags: List<Str>}
+| point <- function(x: F64) -> Point (x = x, label = "p", tags = ["a", "b"])
+| print(format(point(1)))
+| dput(point(2))
+| print(as.list(point(3))$tags)
+| print(tryCatch(saveRDS(point(4), tempfile()), error = conditionMessage))
+| print(tryCatch(serialize(point(5), NULL), error = conditionMessage))
+| print(tryCatch(str(point(6)), error = conditionMessage))
+
+run ry run --runtime ry reads.R
+expect exit 0
+expect stdout "[1] \"(label = \\\"p\\\", tags = [\\\"a\\\", \\\"b\\\"], x = 1)\"\n(label = \"p\", tags = [\"a\", \"b\"], x = 2)\n[\"a\", \"b\"]\n[1] \"`object` is a ry record, not an R object; convert it with `as.list()`\"\n[1] \"`object` is a ry record, not an R object; convert it with `as.list()`\"\n[1] \"`object` is a ry record, not an R object; convert it with `as.list()`\"\n"
+
+# Under collection stress a collection runs at every allocation, so one runs while each record
+# fills and right after each lazy record is made, in compiled code as well.
+env RY_GC_STRESS 1
+env RY_JIT force
+run ry run --runtime ry lazy.R
+expect exit 0
+expect stdout "[1] 0\n[1] 0\n[1] TRUE\n[1] TRUE\n[1] FALSE\n[1] 2\n[\"a\", \"b\"]\n(label = \"p\", tags = [\"a\", \"b\"], x = 3)\n[1] TRUE\n:Add(left = :Add(left = :Num(value = 1), right = :Num(value = 5)), \n    right = :Add(left = :Num(value = 1), right = :Num(value = 2)))\n[1] 9\n[1] 33 -6 10\n"
