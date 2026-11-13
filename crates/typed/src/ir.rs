@@ -530,6 +530,9 @@ pub enum Op {
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
     Split(Local, Local),
+    /// `Str.replace_each(string, pattern, replacement)`, failing for a result longer than R's
+    /// limit on a string.
+    ReplaceEach(Local, Local, Local),
     /// Where the leading pieces of `Str.split_on(string, separator)` lie in the string, for a
     /// split whose list nothing needs ([`crate::unbox::replace_split_lists`]). Each entry of
     /// `bounds` is a piece's 1-based number and the `I64` locals that receive the byte offsets
@@ -665,9 +668,11 @@ impl Op {
             | DictRemove(a, b)
             | Push(a, b)
             | Extend(a, b) => SmallVec::from_slice(&[*a, *b]),
-            Set(a, b, c) | DictInsert(a, b, c) | Swap(a, b, c) | Slice(a, b, c) => {
-                SmallVec::from_slice(&[*a, *b, *c])
-            }
+            Set(a, b, c)
+            | DictInsert(a, b, c)
+            | Swap(a, b, c)
+            | Slice(a, b, c)
+            | ReplaceEach(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
             Piece {
                 string,
                 start,

@@ -209,7 +209,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
   - `try`, which lowers to an R call of `.ry_try`;
   - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
-  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.reverse`, `List.keep_if`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
+  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.drop_at`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
   - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;
   - a function with `-> NULL` that ends in a loop, `<<-`, `...`, named arguments or a left-out default in a call of a typed function, a `Dict` of anything but `I64`, `F64` and `Str`, and `List.map(xs, Num.to_f64)` by name;
   - a variable, parameter or loop variable assigned a value of another layout (`layout_differs` mirrors the lowerer's value classes), branches that set a name to different layouts, and the value of an `if` without `else`;
@@ -221,20 +221,22 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 ### Gaps the typed public ports found
 
-Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
+Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Every port runs natively and prints GNU R's checksum, because it writes around each gap as noted.
 
 - **Not compiled natively; the whole function runs in the interpreter:**
-  - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
+  - a standard library function passed by name, as in `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure"), so the ports wrap it in a lambda (`\(row) List.sum(row)`);
   - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
-  - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
-  - An annotation does not reach the literals inside a list literal: `bodies: List<Body> <- [(x = 0, ...)]` reports `double` fields, so nbody and fasta spell `0f64`.
-  - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
-  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
-- **Nominal items do not fit an empty list.** `children <- []` then `List.append(children, @Tree(...))` is "expected `T`, found `Tree`", and `children: List<Tree> <- []` is "expected `List<Tree>`, found `List<T>`". A recursive `alias` is refused instead, with a message that prints an enormous expanded type. This blocks a typed awfy `storage`.
+  - A local whose literal is reassigned later in a loop or branch stays `double`: `x <- 0` then `if (n > 1i64) x <- x + 1.5` against an `F64` result reports "expected `F64`, found `double`", so the ports spell `0f64`.
+  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))` against `:Leaf(I64)`).
+  - A literal variable first read as a list index (`cprob_lookup[[j]]`) is decided as `double`, so a later `lookup[[i]] <- j` into a `List<I64>` is an error. The fastaredux ports spell `j <- 1i64`.
+- **A recursive `alias` is refused**, with a message that prints an enormous expanded type; a nominal `type` works.
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
-- **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
+- **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes. It runs at about GNU R's time, the slowest typed port against GNU R. A callgrind profile shows about 450 instructions per byte position, most of them in the `CallTyped` to `matches_at` and in list copies around it, so the cost is the typed core's per-call overhead, not the matching.
+- **A ry list holds no `NaN`**, so the mandelbrot ports freeze a point once `|z| > 2` (`List.map3`) instead of letting it overflow to `NaN` as the R vector code does; the count of points inside the set is the same.
+- **An empty `List.map`, `List.map2`, `List.map3`, `List.join_map` or `List.chunks_of` result stops native code** (`fail_if` in each lowering), and the interpreter runs the call again. The interpreter builds those results with `arrays::from_items(&[])`, which gives `logical(0)`, and the stop keeps the two tiers' values identical. `List.repeat(x, 0i64)` has no stop, so it gives `double(0)` natively against `logical(0)` interpreted. Settle the interpreter's empty result from the checker's type, then drop the stops.
+- **A walk accumulator's tags do not widen.** `List.walk(xs, :None, \(acc, x) :Some(x))` is "this function must return `:None`, but it returns `:Some(I64)`", `List.walk(xs, [:A], \(acc, x) List.append(acc, :B))` is "passed `List<:A>`, but its parameter `acc` accepts `List<:B>`", and a record state `(best = :None, n = 0i64)` fails the same way. The accumulator is left open (`widening_accumulator` in `check.rs`), but the step function's result is still checked against the initial state's tags.
 - **Non-constant defaults.** A typed function whose parameter default is not a constant is not compiled by the typed core. (Unverified.)
 - **Typed values outside elaborated code.** The preflight elaborates only code that `ry run` and the console evaluate, so under `ry load` and `source()` these gaps show (`decisions.md`, "The checker decides a literal's run-time type"; unverified):
   - a literal the checker types `I64` runs as `I64` only in elaborated code, so `ry load` and `source()` convert only annotated bindings;
