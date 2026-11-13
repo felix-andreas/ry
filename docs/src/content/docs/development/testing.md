@@ -52,7 +52,7 @@ While iterating, `cargo test -p semantics` is the default command, since it cove
 behavior. `just gate` runs every test plus clippy and a formatting check. CI runs `just ci`, which
 builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
 flake's `ci` dev shell. That shell pins everything the tests touch (the Rust toolchain, GNU R 4.6.2
-built as the oracle recorded it, GCC 13, glibc and the oracle's locales), so this command
+built as the oracle recorded it, GCC 13.3, glibc and the oracle's locales), so this command
 reproduces a CI run on any machine with nix:
 
 ```sh
