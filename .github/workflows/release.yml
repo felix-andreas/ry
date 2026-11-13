@@ -47,7 +47,7 @@ jobs:
       # so ry.exe, R.dll and package DLLs share one C runtime. The `linux` choice of `platforms`
       # keeps the Linux entry alone.
       matrix:
-        include: ${{ fromJSON(inputs.platforms == 'linux' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-14","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-gnullvm"}]') }}
+        include: ${{ fromJSON(inputs.platforms == 'linux' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-gnullvm"}]') }}
     defaults:
       run:
         shell: bash

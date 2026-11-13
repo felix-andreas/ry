@@ -858,7 +858,6 @@ label_width <- function(label) {
 == script.R
 label_width: fn(label: Str) -> F64
 25..36 warning[unused] `label_width` is assigned but never used.
-49..54 warning[interpreted] this function runs in the interpreter, because a function whose signature is written apart from it, in a `#:` comment or on the name it is assigned to, is not compiled natively yet: the runtime reads only the types written on the parameters. Write the signature inline, as in `function(x: I64) -> I64`
 69..81 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
 
 #---- unannotated_function_is_not_judged
@@ -1048,7 +1047,81 @@ mixed: fn(n: I64) -> I64
 0..9 warning[unused] `double_it` is assigned but never used.
 50..56 warning[unused] `inline` is assigned but never used.
 97..102 warning[unused] `mixed` is assigned but never used.
-41..42 warning[interpreted] this function runs in the interpreter, because a function whose signature is written apart from it, in a `#:` comment or on the name it is assigned to, is not compiled natively yet: the runtime reads only the types written on the parameters. Write the signature inline, as in `function(x: I64) -> I64`
+
+#---- signature_written_in_a_comment
+#~~~~ script.R
+#: fn(n: I64) -> I64
+compact <- function(n) n * 2
+#: @param n {I64}
+#: @return {I64}
+expanded <- function(n) n * 2
+#: (fn(I64) -> I64)
+positional <- function(n) n * 2
+#: fn(n: I64, m: I64) -> I64
+mixed <- function(n, m: I64) n * m
+#++++
+== script.R
+compact: fn(n: I64) -> I64
+expanded: fn(n: I64) -> I64
+positional: fn(n: I64) -> I64
+mixed: fn(n: I64, m: I64) -> I64
+21..28 warning[unused] `compact` is assigned but never used.
+85..93 warning[unused] `expanded` is assigned but never used.
+135..145 warning[unused] `positional` is assigned but never used.
+196..201 warning[unused] `mixed` is assigned but never used.
+
+#---- signature_from_a_type_alias
+#~~~~ script.R
+#: @alias Pick {fn(n: I64, m: I64) -> I64}
+
+#: Pick
+in_a_comment <- function(n, m) n
+on_the_name: Pick <- function(n, m) m
+#++++
+== script.R
+in_a_comment: Pick
+on_the_name: Pick
+52..64 warning[unused] `in_a_comment` is assigned but never used.
+85..96 warning[unused] `on_the_name` is assigned but never used.
+77..81 warning[interpreted] this function runs in the interpreter, because a function whose signature is a type alias is not compiled natively yet: the runtime reads the types where they are written, and an alias only names them. Write the function type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the parameters
+115..119 warning[interpreted] this function runs in the interpreter, because a function whose signature is a type alias is not compiled natively yet: the runtime reads the types where they are written, and an alias only names them. Write the function type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the parameters
+
+#---- signature_alias_is_blamed_only_when_an_alias_is_the_cause
+#~~~~ script.R
+#: @alias Pick {fn(n: I64, m: I64) -> I64}
+
+untyped_rest <- function(xs: List<F64>, ...) -> F64 List.sum(xs)
+#: fn(a: I64, b: I64) -> I64
+other_names <- function(x, y) x
+alias_with_types: Pick <- function(n: I64, m: I64) -> I64 n
+#: @trust fn(n: I64) -> I64
+trusted <- function(n: I64) n
+#++++
+== script.R
+untyped_rest: fn(xs: List<F64>, ...: Any) -> F64
+other_names: fn(x: I64, [y]: Unknown) -> I64
+alias_with_types: Pick
+trusted: fn(n: I64) -> I64
+44..56 warning[unused] `untyped_rest` is assigned but never used.
+60..108 error[type-mismatch] expected `fn(xs: List<F64>) -> F64`, found `fn(xs: List<F64>, ...: Any) -> F64`
+138..149 warning[unused] `other_names` is assigned but never used.
+153..169 error[type-mismatch] this annotation names a parameter `a`, but the function does not define one. An annotation parameter name must match the function's parameter name
+153..169 error[type-mismatch] this annotation names a parameter `b`, but the function does not define one. An annotation parameter name must match the function's parameter name
+170..186 warning[unused] `alias_with_types` is assigned but never used.
+258..265 warning[unused] `trusted` is assigned but never used.
+84..87 warning[interpreted] this function runs in the interpreter, because a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
+162..163 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+165..166 error[strict] strict mode: parameter `y` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `y: TYPE`
+
+#---- signature_in_a_comment_reports_what_blocks_it
+#~~~~ script.R
+#: fn(xs: List<F64>, ...: F64) -> F64
+total <- function(xs, ...) List.sum(xs)
+#++++
+== script.R
+total: fn(xs: List<F64>, ...: F64) -> F64
+38..43 warning[unused] `total` is assigned but never used.
+60..63 warning[interpreted] this function runs in the interpreter, because a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
 
 #---- type_parameter_bounded_by_an_r_type_makes_a_boundary_function
 #~~~~ script.R
