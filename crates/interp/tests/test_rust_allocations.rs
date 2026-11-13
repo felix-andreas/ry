@@ -92,6 +92,16 @@ caught <- function() {
   .Internal(.signalCondition(condition, 'm', NULL))
   hit
 }
+caught_twice <- function() {
+  here <- .Internal(environment(NULL))
+  hit <- 0
+  .Internal(.addCondHands('custom', list(function(condition) hit <<- hit + 1), here, here, TRUE))
+  condition <- list(message = 'm', call = NULL)
+  class(condition) <- c('custom', 'condition')
+  .Internal(.signalCondition(condition, 'm', NULL))
+  .Internal(.signalCondition(condition, 'm', NULL))
+  hit
+}
 grid <- 1:12
 dim(grid) <- c(3L, 4L)
 corner <- function(m) m[1:2, 2:3]
@@ -217,6 +227,9 @@ const YOUNG_STRESSED: &[&str] = &[
     // The second argument rebinds `x`, so the first argument's value is held by the evaluated
     // argument list alone.
     "same(rebound(), c(1, 2, 3))",
+    // A calling handler runs with the handler stack below its own entry, and the handler closure
+    // `.addCondHands` received is held by that entry alone.
+    "{ total <- 0; for (i in 1:20) total <- total + caught_twice(); total == 40 }",
 ];
 
 #[test]

@@ -17,6 +17,47 @@ description: Release announcements and project news
 
 A scalar `formatC()` call takes about 40% fewer instructions: its native path calls the formatting code directly instead of building R arguments for it, and reads `options(OutDec)` without calling `getOption()` when `decimal.mark` is left out. The report benchmark, which formats 20,000 account numbers with `formatC()`, takes 12% fewer instructions.
 
+## ry 0.4.4
+
+*Released in November 2026.*
+
+Version 0.4.4 is ry's first full release, not a pre-release. Closure calls run without an
+environment unless something asks for one, packages and base R are compiled before a session
+starts, the Linux build is profile-guided, and typed code runs natively in many more shapes.
+It ships for Linux x86_64 and macOS arm64; Windows follows in a later release.
+
+Every figure below was reported by the change that introduced it (instructions are callgrind
+counts). None was re-measured for these notes.
+
+### Highlights
+
+- **Closure calls run in slot frames.** A call keeps its arguments and locals in slots of the
+  interpreter's register window and creates an environment only when something asks for one.
+  62.5% of the calls on the testthat workload never need theirs.
+- **Code is compiled before a session starts.** `ry install` writes a code image (`.ryc`) beside
+  each package's lazy-load database. It holds the compiled code of every closure and machine code
+  for the package's numeric functions, which a session maps read-only and runs without warming up,
+  even with the JIT off. `ry install --train tests` trains the image on the package's own tests,
+  and `RY_CODE_IMAGE=0` makes a session ignore images ([CLI reference](/reference/cli)). Base R's
+  closures are compiled into the start-up image, which is laid out in the order a session first
+  touches it.
+- **The Linux build is profile-guided.** Every crate is compiled with profile-guided optimization,
+  and BOLT lays out `libR`. Against a plain release build, the test phase of the testthat workload
+  runs 10 to 13% faster, held-out public benchmark programs run 9 to 25% faster, and peak memory is
+  about 6 MB lower.
+- **Typed code runs natively in more shapes.** List literals, `List.append`, slicing, `List.swap`
+  and `List.concat`, sets, logical selection, sorting, records, tags, text and results, the scalar
+  `Num` functions, record updates, `Str.to_utf8` and `Str.from_utf8_lossy` all compile, and typed
+  code calls R natively. The typed mandelbrot_ascii port takes 0.31 s against 30.2 s in the
+  interpreter, and fannkuchredux 0.044 s against 5.8 s. `RY_TYPED_LOG` says why a typed call runs in
+  the interpreter.
+- **A better console.** Input is colored from ry's own parser, with the bracket at the cursor and
+  its partner highlighted (`[console] highlight = false` or `NO_COLOR` turns colors off, and
+  `[console.colors]` overrides a style; see [Configuration](/reference/configuration)). Each command
+  is checked against what earlier commands defined, so a paste costs time in proportion to its
+  length: 5,000 typed lines take 1.36 s, where 1,000 took 3.6 s. A paste no longer stalls on the
+  terminal, and `menu()`, `readline()`, `scan()` and `stdin()` read from the console.
+
 ### Faster sprintf
 
 `sprintf()` formats numbers with the same native code as `format()` and `paste()`, and it parses its formats once per call instead of once per element. A scalar `sprintf("%.2f", x)` takes half the instructions it did, and the report benchmark, which builds 20,000 lines with `sprintf`, takes 8% fewer instructions overall. The output matches GNU R byte for byte, including glibc's edge cases: a negative `*` precision, `%#g` when rounding carries to the next power of ten, and `%#o`.
@@ -89,6 +130,33 @@ per pass over its left operand, with each entry summed in the same order as befo
 are unchanged and spectralnorm_math rises from 1.27x to 1.44x.
 Small vectors are allocated inline at the call site, which takes 2.2% off the instructions of
 the testthat workload.
+
+### Also in this release
+
+- **More behavior matches GNU R.** `cat()` rejects a list or a call with GNU R's error, after
+  writing the output before it. `structure()` gives its result its own dimnames list, so xts's
+  `as.xts(m)` no longer clears `m`'s row names. `unlink()` removes files and trees as GNU R's
+  `R_unlink` does. `NaN + NA` is `NaN` and `NA + NaN` is `NA`. `sort`, `order` and `ls` follow GNU
+  R's collation rule for `LC_ALL=C` and `LC_COLLATE=C`, and so do `Rf_isUnsorted` and
+  `R_orderVector` in the C API. A process started with SIGINT ignored keeps ignoring it.
+- **DataFrame functions are qualified, so `package:ry` masks no other package's functions.**
+  `setkey` and `setkeyv` are `DataFrame.set_key(df, cols)`, `key` is `DataFrame.key(df)`, `copy`
+  is `DataFrame.copy(df)`, and `col` and `lit` are `Expr.col(name)` and `Expr.lit(value)`, so
+  `library(data.table)` attaches without a masking message ([DataFrames](/reference/dataframes)).
+- **ry cleans up its cache.** Each ry build assembles an R home under the cache, and homes that no
+  running process holds and no current build uses are deleted. A stale start-up image in a home is
+  rewritten instead of slowing every start.
+- **ry starts without a shell on `PATH` on Linux and macOS**, because `Sys.which()` searches
+  `PATH` natively there.
+- **Collector fixes.** Several objects the collector could free while they were still in use are
+  rooted: evaluated builtin arguments, argument references, tenured weak-pair lists with young
+  values, and a pending unwind during a JIT exit.
+- **Nightly builds.** Linux x86_64 nightlies of any ref are published as GitHub pre-releases, so
+  `releases/latest` always names the newest full release ([Installation](/installation)).
+
+### Known limitations
+
+- **`ry R` needs GNU R**, because it runs your code on GNU R itself.
 
 ## ry 0.4.3-beta, Linux only
 

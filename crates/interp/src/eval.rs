@@ -3886,6 +3886,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
         let saved_handlers = interp().handlers.clone();
+        let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
         interp().handlers = interp().frames[depth - 1].handlers.clone();
         let exit = if expression.kind() == SexpType::Bytecode {
             bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)

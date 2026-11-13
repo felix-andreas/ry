@@ -490,9 +490,11 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let state = interp::interp();
         let handlers = state.handlers.take();
         let restarts = state.restarts.take();
+        let saved = interp::conditions::set_aside(handlers.clone(), restarts.clone());
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
         let result = eval(expression, env);
+        drop(saved);
         let state = interp::interp();
         state.handlers = handlers;
         state.restarts = restarts;
