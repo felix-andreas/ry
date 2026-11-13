@@ -153,7 +153,7 @@ unsafe fn define_process_variables() -> R<()> {
     eval::define(values::install(".Machine")?, machine, base_env())?;
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
-    crate::graphics::define_device_variables()
+    (interp().extensions.graphics.define_device_variables)()
 }
 
 /// The base profile binds `.Library.site` in the global environment too, so that a site profile
@@ -238,7 +238,7 @@ unsafe fn start_slowly(
     }
     eval_text(".First.sys()", global_env())?;
     install_os_version()?;
-    crate::frame::attach_package()?;
+    crate::standard_library::attach_package()?;
     let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
     crate::profile_summary::mark_ready();
@@ -878,7 +878,7 @@ pub unsafe fn run_console(
 /// the files they were drawing, stops the profilers, runs the exit finalizers and removes the
 /// temporary directory. The directory goes last because a finalizer may still write there.
 pub unsafe fn finish() {
-    if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
+    if let Err(unwind) = (interp().extensions.graphics.kill_all_devices)() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_profiler() {

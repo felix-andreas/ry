@@ -1382,6 +1382,13 @@ BENCH bench_duplicate_call(int count)
 SEXP rytest_api_bench(SEXP count, SEXP env)
 {
     int n = INTEGER(count)[0];
+    /* A first install of a name can grow the symbol table, a one-time cost of hundreds of
+       thousands of instructions that would land in whichever loop installs first. Installing
+       the loops' names here keeps it out of every measured loop. */
+    install("rytest.tag");
+    install("rytest.symbol");
+    install("rytest.f");
+    install("rytest.variable");
     /* A collection before each loop keeps one from landing inside a measured loop. */
     R_gc();
     bench_set_attrib_symbol(n);

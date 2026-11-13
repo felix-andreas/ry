@@ -37,7 +37,8 @@ use {
         object::{
             CARD_CLEAN, CARD_ELEMENTS, CARD_UNTENURED, CARD_YOUNG, EnvironmentObject, LARGE_CLASS,
             NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, TripleObject,
-            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
+            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size,
+            slot_for,
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
@@ -2509,7 +2510,7 @@ impl Heap {
         // promises count as the frame's own cycles.
         if count as usize == self.frame_cycles(env, result, false) {
             if !self.roots.precious.contains(env) {
-                self.clear_frame(env);
+                self.clear_frame(env, |_, dots| dots == result);
             }
             return;
         }
@@ -2550,8 +2551,11 @@ impl Heap {
             .count()
     }
 
-    /// Releases the bindings of a frame nothing else references, and its enclosure.
-    unsafe fn clear_frame(&mut self, env: Sexp) {
+    /// Releases the bindings of a frame nothing else references, and its enclosure. A `...` list
+    /// that `kept` answers for keeps its arguments: the list can outlive its frame uncounted, as
+    /// the result of the call (`get("...")` returns the list itself) or in a root, and whoever
+    /// holds it can still read the arguments.
+    unsafe fn clear_frame(&mut self, env: Sexp, kept: impl Fn(&Heap, Sexp) -> bool) {
         let nil = self.known.nil;
         // Clearing a binding changes no frame, so the cells are read in place rather than
         // copied out first, and `nil` is immortal, so storing it needs no count or barrier.
@@ -2563,15 +2567,8 @@ impl Heap {
             let value = cell.cdr();
             match value.kind() {
                 SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
-                SexpType::Dots if value.refcount() == 1 => {
-                    let mut dots = value;
-                    while matches!(dots.kind(), SexpType::Dots | SexpType::Pairlist) {
-                        let promise = dots.car();
-                        if promise.kind() == SexpType::Promise && promise.refcount() == 1 {
-                            self.release_promise(promise);
-                        }
-                        dots = dots.cdr();
-                    }
+                SexpType::Dots if value.refcount() == 1 && !kept(self, value) => {
+                    self.release_dots(value)
                 }
                 _ => {}
             }
@@ -2620,13 +2617,45 @@ impl Heap {
         let nil = self.known.nil;
         for slot in slots {
             let value = *slot;
-            if value.kind() == SexpType::Promise && value.refcount() == 1 {
-                self.release_promise(value);
+            match value.kind() {
+                SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
+                SexpType::Dots if value.refcount() == 1 => self.release_dots(value),
+                _ => {}
             }
             if value.release_reference() {
                 self.note_zero(value);
             }
             *slot = nil;
+        }
+    }
+
+    /// Empties a `...` list that only a released frame held: every argument loses the list's
+    /// reference, and a promise nothing else holds gives up its value and environment too. The
+    /// list is garbage from here on, and the collection that frees it lowers no count, so an
+    /// argument left in it would look held for the rest of its life. A cell something else
+    /// counts ends the walk, because the rest of the list is not this frame's alone.
+    unsafe fn release_dots(&mut self, dots: Sexp) {
+        let nil = self.known.nil;
+        let mut cell = dots;
+        while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) && cell.refcount() <= 1 {
+            let argument = cell.car();
+            if argument.kind() == SexpType::Promise && argument.refcount() == 1 {
+                self.release_promise(argument);
+            }
+            self.release_field(cell, argument);
+            cell.set_car_unbarriered(nil);
+            cell = cell.cdr();
+        }
+    }
+
+    /// Clears a promise made for one argument of a call that has returned, when nothing counts
+    /// a reference to it, as [`Heap::release_slots`] does for a promise only a slot held. A call
+    /// that ran without a frame has nothing else to release its promises, and the collection
+    /// that later frees such a promise does not lower the count of the value it was forced to,
+    /// so that value would look shared for the rest of its life.
+    pub unsafe fn release_argument(&mut self, promise: Sexp) {
+        if promise.kind() == SexpType::Promise && promise.refcount() == 0 {
+            self.release_promise(promise);
         }
     }
 
@@ -2654,7 +2683,7 @@ impl Heap {
                 .count();
             if count as usize == self.frame_cycles(env, unbound, true) + dead + entry.swept as usize
             {
-                self.clear_frame(env);
+                self.clear_frame(env, |_, dots| dots.gc_bits() & gc_bits::HELD != 0);
             }
         }
     }
@@ -3763,7 +3792,7 @@ impl Heap {
             if self.space.is_marked(entry.env) {
                 self.returned.push(entry);
             } else {
-                self.clear_frame(entry.env);
+                self.clear_frame(entry.env, |heap, dots| heap.space.is_marked(dots));
             }
         }
         self.release_swept_lists();

@@ -234,6 +234,21 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
     Ok(holds)
 }
 
+/// [`effect_free`], and whether the answer holds for every later call of a closure with the
+/// same body and enclosure while the binding epoch stays where it is: the body has no summary,
+/// or its proof is kept for that enclosure. A proof kept for the enclosure's home holds for the
+/// enclosure only while no function frame between them binds a name the body calls, which a
+/// binding there can change without moving the epoch.
+pub unsafe fn effect_free_for_epoch(function: Sexp) -> R<(bool, bool)> {
+    let holds = effect_free(function)?;
+    let summary = function.cdr().cdr().element(SUMMARY);
+    if summary == nil() {
+        return Ok((holds, true));
+    }
+    let slot = CacheSlot::of(function.cdr(), values::ints(summary.element(0))[0] as usize);
+    Ok((holds, slot.key() == function.tag()))
+}
+
 /// The function lookups a proof rests on: a body calls only a few functions.
 pub type Lookups = SmallVec<[Speculation; 8]>;
 

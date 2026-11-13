@@ -44,7 +44,7 @@
 
 use {
     crate::{
-        Interp,
+        Frame, Interp,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects, element_access,
@@ -63,6 +63,7 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
+    thin_vec::ThinVec,
     std::{
         hash::{Hash, Hasher},
         ops::Range,
@@ -116,6 +117,13 @@ pub struct State {
     bodies: Bodies,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
+    /// What the dispatch loop resumes as each callee it entered in place returns, innermost
+    /// last ([`Resume`]).
+    resumes: Vec<Resume>,
+    /// The `for` loop states of the bodies entered in place. Allocated once at
+    /// [`LOOP_STATE_CAPACITY`] and never grown past it, so a running body's states stay where
+    /// they are while deeper calls take and return theirs.
+    loop_states: Vec<LoopState>,
     /// GNU R's JIT level (`compiler::enableJIT`), 3 by default. It decides only what compiled
     /// code binds at compile time, since ry compiles at every level: at 0 GNU R compiles no
     /// closure, and below 3 no top-level loop, so such code guards its base functions as GNU R's
@@ -130,6 +138,8 @@ impl Default for State {
             bodies: Bodies::default(),
             tier: None,
             call_plans: CallPlans::default(),
+            resumes: Vec::new(),
+            loop_states: Vec::with_capacity(LOOP_STATE_CAPACITY),
             jit_level: 3,
         }
     }
@@ -435,6 +445,10 @@ unsafe fn hash_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
 /// The register file holds this many registers across all active frames. Deep recursion runs
 /// out of C stack or `expressions` long before it runs out of registers.
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
+
+/// How many `for` loop states the bodies entered in place hold between them. A call whose body
+/// would need more runs through [`run_at`], which keeps its states on the Rust stack.
+const LOOP_STATE_CAPACITY: usize = 1 << 14;
 
 /// A threshold no counter is compared against. Counters saturate at `i32::MAX`, so a
 /// threshold of that value would otherwise fire once a counter saturates.
@@ -6947,6 +6961,10 @@ struct Activation<'m, 'a> {
     exit: R<Sexp>,
     /// Where a single-stepped instruction continues, or [`STOP`] once the activation finished.
     stepped: usize,
+    /// How many [`Resume`] records [`State::resumes`] held when this dispatch loop started:
+    /// the records above it are the callers of bodies this loop entered in place.
+    /// [`NO_RESUMES`] for an activation that runs single instructions, whose calls nest.
+    resume_base: usize,
 }
 
 impl Activation<'_, '_> {
@@ -7060,6 +7078,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         &RUN_HANDLERS
     };
     if !SINGLE {
+        state.resume_base = (*state.interp).bytecode.resumes.len();
         release(&state);
     }
     (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
@@ -7143,7 +7162,232 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
         registers,
         exit: Ok(nil()),
         stepped: STOP,
+        resume_base: NO_RESUMES,
         machine,
+    }
+}
+
+/// Points `state` at the activation its machine now describes, after the dispatch loop entered
+/// a callee in place or returned from one.
+#[inline(always)]
+unsafe fn reload(state: &mut Activation<'_, '_>) {
+    let machine = &*state.machine;
+    let constants = machine.code.cdr();
+    state.feedback = if *pool_ints(constants, PROFILE).add(profile::RECORDING) != 0 {
+        pool_ints(constants, FEEDBACK)
+    } else {
+        std::ptr::null_mut()
+    };
+    state.code = machine.code.car().data().cast::<i32>().cast_const();
+    state.registers = register_address(machine.base);
+    let slots = pool_entry(constants, SLOTS);
+    state.slot_map = if slots == nil() {
+        std::ptr::null()
+    } else {
+        pool_ints(slots, 0).cast_const()
+    };
+    state.constants = constants;
+    state.cache = LookupCache::of(machine.code);
+    state.header = register_address(machine.header);
+    state.mark = machine.mark;
+}
+
+/// Forgets the callers of bodies entered in place, for an unwind to top level that skipped
+/// their returns.
+pub fn forget_resumes(state: &mut State) {
+    state.resumes.clear();
+    state.loop_states.clear();
+}
+
+/// [`Activation::resume_base`] of an activation that enters no callee in place.
+const NO_RESUMES: usize = usize::MAX;
+
+/// The caller of a body the dispatch loop entered in place: what [`Machine`] held for it, and
+/// what its call instruction still has to do once the callee returns.
+struct Resume {
+    function: Sexp,
+    code: Sexp,
+    header: usize,
+    base: usize,
+    mark: usize,
+    loops: *mut [LoopState],
+    /// Where the caller's call instruction is in its code.
+    call_at: usize,
+    /// The callee's frame, which [`eval::leave`] pops.
+    depth: u32,
+    /// [`Interp::references_used`] before the call collected its arguments.
+    references: u32,
+    /// How many [`State::loop_states`] were in use before the callee took its own.
+    loop_mark: u32,
+}
+
+/// Continues the dispatch loop in the body of the call [`eval::enter`] set up as `entered`,
+/// for the call instruction at `call_at`, and answers where: the callee's first instruction,
+/// or wherever the loop goes on when the optimizing tier ran the body whole.
+unsafe fn enter_in_place(
+    state: &mut Activation<'_, '_>,
+    call_at: usize,
+    function: Sexp,
+    entered: eval::Entered,
+    slots: usize,
+    references: u32,
+) -> usize {
+    switch_to_callee(
+        state,
+        call_at,
+        function,
+        entered.header as usize,
+        slots,
+        entered.depth,
+        references,
+        loop_count(entered.value),
+    );
+    let register_count = *pool_ints(state.constants, REGISTERS) as usize;
+    if let Err(unwind) = reserve_registers(state.machine.base + register_count) {
+        return finished(state, Err(unwind));
+    }
+    count_entry(state)
+}
+
+/// Makes the body of `function` the activation the dispatch loop runs, on the slot frame at
+/// `header` whose call frame is at `depth`, and records what the caller's call instruction at
+/// `call_at` still has to do once the body returns ([`Resume`]). The caller has checked that
+/// the body's `loops` loop states fit ([`in_place`]).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn switch_to_callee(
+    state: &mut Activation<'_, '_>,
+    call_at: usize,
+    function: Sexp,
+    header: usize,
+    slots: usize,
+    depth: u32,
+    references: u32,
+    loops: usize,
+) {
+    let code = function.cdr();
+    let bytecode = &mut (*state.interp).bytecode;
+    let loop_mark = bytecode.loop_states.len();
+    if loops != 0 {
+        bytecode
+            .loop_states
+            .extend(std::iter::repeat_n(LoopState::default(), loops));
+    }
+    let loops: *mut [LoopState] = bytecode.loop_states.get_unchecked_mut(loop_mark..);
+    let machine = &mut *state.machine;
+    bytecode.resumes.push(Resume {
+        function: machine.function,
+        code: machine.code,
+        header: machine.header,
+        base: machine.base,
+        mark: machine.mark,
+        loops: std::ptr::from_mut(std::mem::replace(&mut machine.loops, &mut *loops)),
+        call_at,
+        depth,
+        references,
+        loop_mark: loop_mark as u32,
+    });
+    machine.function = function;
+    machine.code = code;
+    machine.header = header;
+    machine.base = header + 1 + slots;
+    (*state.heap).root(code);
+    machine.mark = (*state.heap).handle_mark();
+    reload(state);
+}
+
+/// Counts an entry of the body the dispatch loop just switched to, and answers where the loop
+/// goes on: the body's first instruction, unless the tiers' schedule picked this entry.
+#[inline(always)]
+unsafe fn count_entry(state: &mut Activation<'_, '_>) -> usize {
+    let profile = pool_ints(state.constants, PROFILE);
+    let entries = (*profile.add(profile::ENTRIES)).saturating_add(1);
+    *profile.add(profile::ENTRIES) = entries;
+    if entries < *profile.add(profile::NEXT) {
+        return 0;
+    }
+    scheduled_entry_in_place(state, entries)
+}
+
+/// [`run_scheduled_entry`] for a body entered in place.
+#[inline(never)]
+unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32) -> usize {
+    let event = entry_event(state.machine, entries);
+    // The tier may have started or stopped the body's recording.
+    reload(state);
+    match event {
+        Some(TierExit::Finished(result)) => finished(state, result),
+        Some(TierExit::Resume { pc, pending }) => match pending {
+            Some(unwind) => failed::<false>(state, pc, unwind),
+            None => pc,
+        },
+        None => 0,
+    }
+}
+
+/// Where the dispatch loop goes on once the running activation has ended with `result`: in the
+/// caller that entered it in place, after its call instruction or at a loop target the unwind
+/// names there, or nowhere ([`STOP`]) when the activation is the one the loop started with or
+/// no caller takes the unwind. An in-place callee leaves through here on every way out, as it
+/// would leave [`run_at`] and [`eval::leave`] were the call a Rust call.
+unsafe fn finished(state: &mut Activation<'_, '_>, result: R<Sexp>) -> usize {
+    // Most activations were entered from Rust and have no caller to resume. Testing for that
+    // here keeps their exit free of the frame the resuming path needs.
+    if (*state.interp).bytecode.resumes.len() <= state.resume_base {
+        state.exit = result;
+        return STOP;
+    }
+    resume_caller(state, result)
+}
+
+/// [`finished`] for an activation a call instruction entered in place: pops its resume record
+/// and goes on in the caller, or in the first caller further out that takes the unwind.
+#[inline(never)]
+unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> usize {
+    loop {
+        let bytecode = &mut (*state.interp).bytecode;
+        if bytecode.resumes.len() <= state.resume_base {
+            state.exit = result;
+            return STOP;
+        }
+        let Some(resume) = bytecode.resumes.pop() else {
+            unreachable!("the dispatch loop's resume records are above its base");
+        };
+        bytecode.registers.truncate(state.machine.base);
+        let env = *state.header;
+        if env != nil() {
+            env.set_gp_bits(gp::COMPILED_FRAME, false);
+        }
+        if let Err(Unwind::Error(failure)) = result {
+            result = Err(conditions::signal_error(failure));
+        }
+        let returned = eval::leave(resume.depth as usize, result);
+        let interp = &mut *state.interp;
+        interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+        let machine = &mut *state.machine;
+        machine.function = resume.function;
+        machine.code = resume.code;
+        machine.header = resume.header;
+        machine.base = resume.base;
+        machine.mark = resume.mark;
+        machine.loops = &mut *resume.loops;
+        reload(state);
+        if interp.references_used != resume.references {
+            eval::release_references(resume.references);
+        }
+        let at = resume.call_at;
+        match returned {
+            Ok(value) => {
+                state.record(at, value);
+                *state.registers.add(*state.code.add(at + 1) as usize) = value;
+                release(state);
+                return after_instruction(state.code, at);
+            }
+            Err(unwind) => match continue_after(state.machine, at, unwind) {
+                Ok(pc) => return pc,
+                Err(unwind) => result = Err(unwind),
+            },
+        }
     }
 }
 
@@ -7234,10 +7478,7 @@ unsafe fn advance<const SINGLE: bool>(
     match flow {
         Ok(Flow::Next) => next,
         Ok(Flow::Goto(pc)) => pc,
-        Ok(Flow::Done(value)) => {
-            state.exit = Ok(value);
-            STOP
-        }
+        Ok(Flow::Done(value)) => finished(state, Ok(value)),
         Err(unwind) => failed::<SINGLE>(state, at, unwind),
     }
 }
@@ -7258,10 +7499,7 @@ unsafe fn failed<const SINGLE: bool>(
     };
     match resumed {
         Ok(pc) => pc,
-        Err(unwind) => {
-            state.exit = Err(unwind);
-            STOP
-        }
+        Err(unwind) => finished(state, Err(unwind)),
     }
 }
 
@@ -7338,10 +7576,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         {
             match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
-                BackEdge::Finished(result) => {
-                    state.exit = result;
-                    return;
-                }
+                BackEdge::Finished(result) => pc = finished(state, result),
                 BackEdge::Unwound { pc: resume, unwind } => {
                     pc = failed::<SINGLE>(state, resume, unwind);
                 }
@@ -7392,6 +7627,7 @@ macro_rules! fast_paths {
 
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*
+            table[Op::CallGeneric as usize] = fast_call_generic;
             table
         }
     };
@@ -7412,6 +7648,374 @@ fast_paths! {
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
     fast_field: Field, field_fast;
+    fast_return: Return, return_fast;
+}
+
+/// The fast handler of `CallGeneric`. Unlike the other fast paths, [`call_fast`] can end the
+/// activation the loop started with: an error the callee's entry raised, or the optimizing
+/// tier running the body whole and finishing it, answers [`STOP`].
+unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = call_fast(state, at) {
+        if next == STOP {
+            return;
+        }
+        dispatch!(state, next);
+    }
+    become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
+}
+
+/// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), from a slot
+/// frame, while nothing observes calls: the arguments are written once, onto the frame
+/// argument stack, the slots are filled from them by the plan's sources, the call's frame is
+/// pushed, and the dispatch loop goes on in the callee's body. Nothing is matched, no Rust
+/// frame is entered, and nothing is allocated unless the argument reference pool grows or the
+/// callee collects arguments in `...`.
+///
+/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`],
+/// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
+/// needs anything else to them: a debugger, a profile, a tracked move or a refused object
+/// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
+/// namespace loader, `do.call`, a frame stack or register file that is full.
+#[inline(always)]
+unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let interp = &mut *state.interp;
+    let heap = state.heap;
+    let known = (*heap).known();
+    let (nil, unbound, missing_value) = (known.nil, known.unbound, known.missing_arg);
+    let code = state.code;
+    let feedback = pool_entry(state.constants, FEEDBACK);
+    if at + 1 >= feedback.length() as usize
+        || state.resume_base == NO_RESUMES
+        || *state.header != nil
+        || activity::hooks() != 0
+    {
+        return None;
+    }
+    let word = *feedback.data().cast::<i32>().add(at + 1);
+    let function = *state.registers.add(*code.add(at + 2) as usize);
+    let plans = &mut interp.bytecode.call_plans;
+    if word <= 0 || word as usize > plans.rows.len() || function.kind() != SexpType::Closure {
+        return None;
+    }
+    debug_assert_eq!(
+        crate::observer_bits(),
+        0,
+        "the observer word is clear while something observes calls"
+    );
+    let row: *mut PlanRow = plans.rows.as_mut_ptr().add(word as usize - 1);
+    let body = function.cdr();
+    if (*row).owner != state.constants
+        || (*row).site as usize != at
+        || (*row).formals != function.car()
+        || (*row).body != body
+        || (*row).flags & PLAN_FAST == 0
+        || function.has_gp(
+            gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY,
+        )
+        || function == interp.namespace_loader
+        || function == interp.do_call
+    {
+        return None;
+    }
+    let shape = (*row).shape;
+    let (slots, loops) = (shape.slots as usize, (*row).loops as usize);
+    let depth = interp.frames.len();
+    let header = interp.bytecode.registers.len();
+    let end = header + 1 + slots + shape.registers as usize;
+    if depth as u32 >= interp.max_depth
+        || end > interp.bytecode.registers.capacity()
+        || (loops != 0
+            && interp.bytecode.loop_states.len() + loops
+                > interp.bytecode.loop_states.capacity())
+    {
+        return None;
+    }
+    let call_index = *code.add(at + 3) as usize;
+    let references = interp.references_used;
+    // The same test as the generic path's, with the callee's answer kept in the plan's row.
+    let eager = pool_constant(state, call_index + 2) != nil
+        && !conditions::calling_established(&interp.handlers)
+        && if (*row).effects_env == function.tag()
+            && (*row).effects_epoch == (*heap).binding_epoch()
+        {
+            (*row).flags & PLAN_EFFECT_FREE != 0
+        } else {
+            match site_effect_free(row, function) {
+                Ok(holds) => holds,
+                Err(unwind) => return Some(failed::<false>(state, at, unwind)),
+            }
+        };
+    let count = (*row).arguments as usize;
+    let pool = interp.bytecode.call_plans.pool.as_ptr();
+    let sources = pool.add((*row).sources_at as usize);
+    let sources_len = (*row).sources_len as usize;
+    let kinds = sources.add(sources_len);
+    let args_start = interp.frame_args.len();
+    interp.frame_args.reserve(count);
+    // Written past the stack's length, which moves once every argument is there. Until then
+    // each value is held by what it was read from: the caller's slots, the code's constants,
+    // the reference pool.
+    let args = interp.frame_args.as_mut_ptr().add(args_start);
+    let owner = interp.slot_owner as usize;
+    let compiled = pool_constant(state, call_index + 1);
+    let call = pool_constant(state, call_index);
+    let mut cell = if compiled == nil { call.cdr() } else { compiled };
+    for index in 0..count {
+        let expression = cell.car();
+        let kind = *kinds.add(index);
+        let value = if kind == ARGUMENT_VALUE {
+            expression
+        } else {
+            let eager_value = if !eager || kind == ARGUMENT_CODE {
+                None
+            } else if kind >= 0 {
+                let value = *state.header.add(1 + kind as usize);
+                if value == missing_value {
+                    None
+                } else if value == unbound {
+                    effects::eager_argument(expression, state.machine.function.tag())
+                } else if value.kind() == SexpType::Promise && value.car() != unbound {
+                    Some(value.car())
+                } else {
+                    Some(value)
+                }
+            } else {
+                effects::eager_argument(expression, state.machine.function.tag())
+            };
+            match eager_value {
+                Some(value) => value,
+                None => {
+                    let reference = if kind == ARGUMENT_CODE {
+                        eval::code_reference(owner, expression)
+                    } else {
+                        let slot = if kind >= 0 {
+                            kind as u32
+                        } else {
+                            eval::NO_REFERENCE_SLOT
+                        };
+                        eval::argument_reference(owner, slot, expression)
+                    };
+                    match reference {
+                        Ok(reference) => reference,
+                        Err(unwind) => {
+                            return Some(call_fast_left(state, at, references, Err(unwind)));
+                        }
+                    }
+                }
+            }
+        };
+        args.add(index).write(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    interp.frame_args.set_len(args_start + count);
+    let formals = (shape.formals as usize).min(sources_len);
+    let mut dots = missing_value;
+    for index in (formals..sources_len).rev() {
+        let arg = *args.add(*sources.add(index) as usize);
+        let rest = if dots == missing_value { nil } else { dots };
+        dots = match values::triple(SexpType::Dots, arg.value, rest, arg.tag) {
+            Ok(dots) => dots,
+            Err(unwind) => {
+                interp.frame_args.truncate(args_start);
+                return Some(call_fast_left(state, at, references, Err(unwind)));
+            }
+        };
+    }
+    // The capacity was checked above, and every register of the window is written here
+    // before anything can read it. The body's own registers start as `NULL` so that a
+    // collection frees what a returned call left in those words ([`grow_registers`]).
+    interp.bytecode.registers.set_len(end);
+    let window = interp.bytecode.registers.as_mut_ptr().add(header);
+    window.write(nil);
+    let (mut missing, mut promised) = (0u64, 0u64);
+    let (mut formal, mut formal_index) = (function.car(), 0);
+    for index in 0..formals {
+        let source = *sources.add(index);
+        let value = if source >= 0 {
+            (*args.add(source as usize)).value
+        } else if source == eval::DOTS_SOURCE {
+            dots
+        } else if source <= eval::LITERAL_DEFAULT {
+            while formal_index < index {
+                formal = formal.cdr();
+                formal_index += 1;
+            }
+            missing |= 1 << index;
+            if source == eval::PROMISED_DEFAULT {
+                promised |= 1 << index;
+            }
+            formal.car()
+        } else {
+            missing_value
+        };
+        value.increment_refcount();
+        window.add(1 + index).write(value);
+    }
+    for index in formals..slots {
+        window.add(1 + index).write(unbound);
+    }
+    for index in 1 + slots..end - header {
+        window.add(index).write(nil);
+    }
+    interp.calls_ever = interp.calls_ever.wrapping_add(1);
+    let caller = interp.slot_owner;
+    let frame = Frame {
+        call,
+        function,
+        env: nil,
+        sys_parent: nil,
+        args: args_start as u32,
+        on_exit: ThinVec::new(),
+        handlers: interp.handlers.clone(),
+        restarts: interp.restarts.clone(),
+        srcref: interp.srcref,
+        method_vars: interp.method_vars.len() as u32,
+        closures: interp.frame_closures.len() as u32,
+        slots: header as u32,
+        missing,
+        caller,
+        pending: nil,
+        unforced: 0,
+        inlined: false,
+        reified_by: crate::NOT_REIFIED,
+        pending_shared: false,
+        handle_mark: (*heap).handle_mark() as u32,
+        previous_owner: caller,
+    };
+    interp.frames.push_with(|| frame);
+    interp.srcref = if function.attrib() == nil {
+        nil
+    } else {
+        values::get_attr(function, symbols().srcref)
+    };
+    if promised != 0
+        && let Err(unwind) = eval::default_promises(depth, function, header, promised)
+    {
+        let result = eval::leave(depth + 1, Err(unwind));
+        return Some(call_fast_left(state, at, references, result));
+    }
+    interp.slot_owner = depth as u32;
+    switch_to_callee(
+        state,
+        at,
+        function,
+        header,
+        slots,
+        depth as u32 + 1,
+        references,
+        loops,
+    );
+    Some(count_entry(state))
+}
+
+/// [`effects::effect_free`] for a call of `function` at the site of `row`, which keeps the
+/// answer for the next call of the same closure ([`PlanRow::effects_env`]).
+#[cold]
+#[inline(never)]
+unsafe fn site_effect_free(row: *mut PlanRow, function: Sexp) -> R<bool> {
+    let (holds, keeps) = effects::effect_free_for_epoch(function)?;
+    // Answering can collect, which frees a plan whose keys died, but not this one: its keys
+    // are the running code and the closure being called.
+    (*row).effects_env = if keeps { function.tag() } else { nil() };
+    (*row).effects_epoch = crate::heap().binding_epoch();
+    (*row).flags = ((*row).flags & !PLAN_EFFECT_FREE) | if holds { PLAN_EFFECT_FREE } else { 0 };
+    Ok(holds)
+}
+
+/// Where the dispatch loop goes on when [`call_fast`] could not enter its callee and the call
+/// ended with `result` instead: after the call instruction with its value, or wherever the
+/// failure is taken.
+#[cold]
+#[inline(never)]
+unsafe fn call_fast_left(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    references: u32,
+    result: R<Sexp>,
+) -> usize {
+    if (*state.interp).references_used != references {
+        eval::release_references(references);
+    }
+    match result {
+        Ok(value) => {
+            state.record(at, value);
+            *state.registers.add(*state.code.add(at + 1) as usize) = value;
+            release(state);
+            after_instruction(state.code, at)
+        }
+        Err(unwind) => failed::<false>(state, at, unwind),
+    }
+}
+
+/// `Return` from a body the dispatch loop entered in place, when the frame has nothing to run
+/// or keep on the way out: no environment, no pending environment, no `on.exit`, and nothing
+/// observing calls. It does what [`finished`] does through [`eval::leave`] for such a frame
+/// and goes on after the caller's call instruction.
+///
+/// The value needs no root between the callee's registers and the caller's: giving up the
+/// slots' references frees nothing by itself, and nothing here allocates.
+#[inline(always)]
+unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let interp = &mut *state.interp;
+    let heap = &mut *state.heap;
+    let nil = heap.known().nil;
+    let count = interp.bytecode.resumes.len();
+    if count <= state.resume_base || *state.header != nil || activity::hooks() != 0 {
+        return None;
+    }
+    let depth = interp.bytecode.resumes.get_unchecked(count - 1).depth as usize;
+    if depth != interp.frames.len()
+        || !interp.pending_closures.is_empty()
+        || crate::annotations::checks_pending()
+    {
+        return None;
+    }
+    let frame = &interp.frames[depth - 1];
+    if frame.pending != nil || !frame.on_exit.is_empty() {
+        return None;
+    }
+    debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
+    let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    let (args, method_vars, closures) = (frame.args, frame.method_vars, frame.closures);
+    heap.release_handles(frame.handle_mark as usize);
+    interp.slot_owner = frame.previous_owner;
+    interp.srcref = frame.srcref;
+    let Some((handlers, restarts)) = interp.frames.pop() else {
+        unreachable!("the returning call's frame is on the stack");
+    };
+    conditions::restore_handlers(handlers);
+    interp.restarts = restarts;
+    interp.frame_args.truncate(args as usize);
+    interp.method_vars.truncate(method_vars as usize);
+    interp.frame_closures.truncate(closures as usize);
+    let header = state.machine.header;
+    let registers = &mut interp.bytecode.registers;
+    registers.truncate(state.machine.base);
+    heap.release_slots(registers.get_unchecked_mut(header + 1..));
+    registers.truncate(header);
+    let Some(resume) = interp.bytecode.resumes.pop() else {
+        unreachable!("the dispatch loop's resume records are above its base");
+    };
+    interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+    let machine = &mut *state.machine;
+    machine.function = resume.function;
+    machine.code = resume.code;
+    machine.header = resume.header;
+    machine.base = resume.base;
+    machine.mark = resume.mark;
+    machine.loops = &mut *resume.loops;
+    reload(state);
+    if interp.references_used != resume.references {
+        eval::release_references(resume.references);
+    }
+    let call_at = resume.call_at;
+    state.record(call_at, value);
+    *state.registers.add(*state.code.add(call_at + 1) as usize) = value;
+    release(state);
+    Some(after_instruction(state.code, call_at))
 }
 
 /// The constant `index` of the activation's constant pool, read without the ALTREP check of
@@ -8529,6 +9133,29 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                 return Ok(Flow::Next);
             }
         }
+        if let Some(id) = plan
+            && !per_call
+            && state.in_slots()
+            && function != (*state.interp).do_call
+        {
+            let plans = &(*state.interp).bytecode.call_plans;
+            // The site's compiled arguments are settled once it has run on a slot frame.
+            if plans.rows[id as usize].flags & PLAN_PREPARED == 0
+                && plans.pins[id as usize] == nil()
+                && state.constants.element(instruction.operand(2) + 1) != unbound()
+            {
+                prepare_plan(state, id, arguments);
+            }
+        }
+        if syntax::testing::invariants_enabled() {
+            let observers = activity::DEBUGGER | activity::MOVES | activity::NO_OBJECT_SYSTEMS;
+            assert_eq!(
+                activity::hooks() & observers,
+                crate::observer_bits(),
+                "the observer word that a call's fast path tests is out of step with the \
+                 interpreter's state"
+            );
+        }
         let references = (*state.interp).references_used;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
@@ -8560,6 +9187,30 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                 function,
             ) {
                 Some((shape, sources)) => {
+                    if in_place(state, function) {
+                        return Ok(Flow::Goto(
+                            match eval::bind_plan(call, function, shape, sources, &args, sys_parent)
+                            {
+                                Ok(entered) if entered.header == crate::NO_SLOTS => {
+                                    after_call(state, instruction, references, entered.value)
+                                }
+                                Ok(entered) => enter_in_place(
+                                    state,
+                                    instruction.at,
+                                    function,
+                                    entered,
+                                    shape.slots as usize,
+                                    references,
+                                ),
+                                Err(unwind) => {
+                                    if (*state.interp).references_used != references {
+                                        eval::release_references(references);
+                                    }
+                                    return Err(unwind);
+                                }
+                            },
+                        ));
+                    }
                     eval::call_with_plan(call, function, shape, sources, &args, sys_parent)
                 }
                 None => match eval::direct_sources(function, call)? {
@@ -8569,6 +9220,29 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     _ => eval::call_matching(call, function, &args, sys_parent),
                 },
             },
+            None if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) => {
+                return Ok(Flow::Goto(
+                    match eval::apply_closure_entering(call, function, &args, sys_parent, None) {
+                        Ok(entered) if entered.header == crate::NO_SLOTS => {
+                            after_call(state, instruction, references, entered.value)
+                        }
+                        Ok(entered) => enter_in_place(
+                            state,
+                            instruction.at,
+                            function,
+                            entered,
+                            slot_count(function.cdr()),
+                            references,
+                        ),
+                        Err(unwind) => {
+                            if (*state.interp).references_used != references {
+                                eval::release_references(references);
+                            }
+                            return Err(unwind);
+                        }
+                    },
+                ));
+            }
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {
@@ -8607,6 +9281,43 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// Whether the dispatch loop may run the body of `function`, which a call instruction is about
+/// to call through its plan, in place of calling it: the loop runs whole activations, and the
+/// body's loop states fit [`State::loop_states`].
+#[inline(always)]
+unsafe fn in_place(state: &Activation<'_, '_>, function: Sexp) -> bool {
+    let loops = &(*state.interp).bytecode.loop_states;
+    state.resume_base != NO_RESUMES
+        && loops.len() + loop_count(function.cdr()) <= loops.capacity()
+}
+
+/// What a `CallGeneric` instruction does with the value of a call that ran whole: the pc it
+/// goes on at.
+#[inline(always)]
+unsafe fn after_call(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+    references: u32,
+    value: Sexp,
+) -> usize {
+    if (*state.interp).references_used != references {
+        eval::release_references(references);
+    }
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    after_instruction(instruction.code, instruction.at)
+}
+
+/// The pc after the instruction at `at`. A call instruction of another opcode makes its call
+/// as `CallGeneric` does, so the pc after a call is read from the code.
+#[inline(always)]
+unsafe fn after_instruction(code: *const i32, at: usize) -> usize {
+    let Some(op) = op_of(*code.add(at) as u32) else {
+        unreachable!("a call instruction has an opcode");
+    };
+    at + 1 + operand_count(op)
 }
 
 /// The arguments of the closure call `call` at `instruction`, each compiled to run as a promise
@@ -8667,7 +9378,7 @@ unsafe fn direct_plan(
         .then(|| plans.owned(word as u32 - 1, owner, instruction.at))
         .flatten();
     let misses = match existing {
-        Some(id) if plans.formals[id] == formals && plans.bodies[id] == body => {
+        Some(id) if plans.rows[id].formals == formals && plans.rows[id].body == body => {
             return Ok(Some(id as u32));
         }
         Some(id) => i32::from(plans.misses[id]),
@@ -8690,7 +9401,20 @@ unsafe fn direct_plan(
     let misses = misses + i32::from(existing.is_some() || plan.is_none());
     let word = match (plan, existing) {
         (Some(plan), _) => {
-            let id = plans.store(existing, owner, instruction.at, formals, body, &plan);
+            let arguments = if plan.1[..] == [eval::MATCH_PER_CALL] {
+                0
+            } else {
+                length(call.cdr())
+            };
+            let id = plans.store(
+                existing,
+                owner,
+                instruction.at,
+                formals,
+                body,
+                arguments,
+                &plan,
+            );
             plans.misses[id] = misses as u8;
             values::ints_mut(owner.element(FEEDBACK))[word_at] = id as i32 + 1;
             return Ok(Some(id as u32));
@@ -8705,27 +9429,20 @@ unsafe fn direct_plan(
     Ok(None)
 }
 
-/// The direct-call plans of the session's call sites ([`direct_plan`]), as columns indexed by
-/// plan id. A site with no plan has no entry. The table holds its keys weakly: the code of the
-/// site, and the formals and body of the closures the plan is for. A collection that finds one
-/// of them dead frees the plan before the address can be reused, so no site matches a plan
-/// made for an object that has since died.
+/// The direct-call plans of the session's call sites ([`direct_plan`]), indexed by plan id: a
+/// row of what every call of the site reads ([`PlanRow`]), and columns for the rest. A site
+/// with no plan has no entry. The table holds its keys weakly: the code of the site, and the
+/// formals and body of the closures the plan is for. A collection that finds one of them dead
+/// frees the plan before the address can be reused, so no site matches a plan made for an
+/// object that has since died.
 #[derive(Default)]
 pub struct CallPlans {
-    /// The constants of the code holding the site, or `NULL` for a free id.
-    owners: Vec<Sexp>,
-    /// The position of the site's call instruction in that code.
-    sites: Vec<u32>,
-    formals: Vec<Sexp>,
-    bodies: Vec<Sexp>,
+    rows: Vec<PlanRow>,
     /// How many times the site failed to plan ([`PLAN_MISSES`]).
     misses: Vec<u8>,
-    /// Where the plan's sources start in [`CallPlans::pool`], how many there are, and how many
-    /// the range can hold, so a site that plans again reuses it.
-    sources_at: Vec<u32>,
-    sources_len: Vec<u32>,
-    sources_capacity: Vec<u32>,
-    shapes: Vec<eval::CallShape>,
+    /// How many words of [`CallPlans::pool`] the plan's range holds, so a site that plans again
+    /// reuses it.
+    capacities: Vec<u32>,
     /// The site's pin of a wrapper's lookups ([`WrapperPin`]): unbound until the site calls the
     /// wrapper, `NULL` for a closure that is not one. The one heap object a plan refers to
     /// strongly.
@@ -8737,19 +9454,67 @@ pub struct CallPlans {
     generation: u32,
 }
 
+/// What a call reads of its site's plan, in one cache line.
+#[derive(Clone, Copy)]
+struct PlanRow {
+    /// The constants of the code holding the site, or `NULL` for a free id.
+    owner: Sexp,
+    formals: Sexp,
+    body: Sexp,
+    /// The enclosure of the closure [`effects::effect_free`] last answered for at this site,
+    /// with the binding epoch it answered at ([`PlanRow::effects_epoch`]) and the answer
+    /// ([`PLAN_EFFECT_FREE`]): a closure with the same enclosure called again under the same
+    /// epoch gets the same answer without reading the proof
+    /// ([`effects::effect_free_for_epoch`]). `NULL` when no answer is kept. Any collection
+    /// drops it, because the row does not keep the enclosure alive and its address can be
+    /// reused.
+    effects_env: Sexp,
+    effects_epoch: u64,
+    /// The position of the site's call instruction in that code.
+    site: u32,
+    /// Where the plan's sources start in [`CallPlans::pool`]. The kinds of the site's
+    /// arguments ([`prepare_plan`]) follow them.
+    sources_at: u32,
+    sources_len: u32,
+    /// How many arguments the site writes.
+    arguments: u16,
+    shape: eval::CallShape,
+    /// How many `for` loops the body has.
+    loops: u16,
+    flags: u8,
+}
+
+/// The [`PlanRow::flags`] bit set once the kinds of the site's arguments are worked out.
+const PLAN_PREPARED: u8 = 1;
+/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls.
+const PLAN_FAST: u8 = 2;
+/// The [`PlanRow::flags`] bit holding the answer [`PlanRow::effects_env`] is kept for.
+const PLAN_EFFECT_FREE: u8 = 4;
+
+/// The kind of an argument a site passes as it is written: a constant, or the empty argument.
+const ARGUMENT_VALUE: i32 = -1;
+/// The kind of an argument that names a variable the calling frame keeps in no slot. A
+/// variable in a slot has the slot's index as its kind.
+const ARGUMENT_OUTSIDE: i32 = -2;
+/// The kind of an argument that is code compiled to run on the calling frame's slots.
+const ARGUMENT_CODE: i32 = -3;
+
 impl CallPlans {
     /// The plan `id` when it belongs to the site at `at` in the code whose constants are
     /// `owner`. A site's word can name an id that was freed and reused, or come from a session
     /// that saved the code.
     fn owned(&self, id: u32, owner: Sexp, at: usize) -> Option<usize> {
         let id = id as usize;
-        (self.owners.get(id) == Some(&owner) && self.sites[id] as usize == at).then_some(id)
+        self.rows
+            .get(id)
+            .is_some_and(|row| row.owner == owner && row.site as usize == at)
+            .then_some(id)
     }
 
     pub fn sources(&self, id: u32) -> &[i32] {
-        let id = id as usize;
-        let at = self.sources_at[id] as usize;
-        &self.pool[at..at + self.sources_len[id] as usize]
+        let row = &self.rows[id as usize];
+        let at = row.sources_at as usize;
+        &self.pool[at..at + row.sources_len as usize]
     }
 
     /// The plan `id` with its shape and sources, when it is still the site's plan for closures
@@ -8769,57 +9534,77 @@ impl CallPlans {
             id as usize
         } else {
             let id = self.owned(id, owner, at)?;
-            if self.formals[id] != function.car() || self.bodies[id] != function.cdr() {
+            if self.rows[id].formals != function.car() || self.rows[id].body != function.cdr() {
                 return None;
             }
             id
         };
-        Some((self.shapes[id], self.sources(id as u32)))
+        Some((self.rows[id].shape, self.sources(id as u32)))
     }
 
-    /// Stores a plan for the site, in `existing`'s place when it has one.
-    fn store(
+    /// Stores a plan for the site, which writes `arguments` arguments, in `existing`'s place
+    /// when it has one.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn store(
         &mut self,
         existing: Option<usize>,
         owner: Sexp,
         at: usize,
         formals: Sexp,
         body: Sexp,
+        arguments: usize,
         (shape, sources): &eval::CallPlan,
     ) -> usize {
         self.generation = self.generation.wrapping_add(1);
         let id = match existing.or_else(|| self.free.pop().map(|id| id as usize)) {
             Some(id) => id,
             None => {
-                self.owners.push(nil());
-                self.sites.push(0);
-                self.formals.push(nil());
-                self.bodies.push(nil());
+                self.rows.push(PlanRow {
+                    owner: nil(),
+                    formals: nil(),
+                    body: nil(),
+                    effects_env: nil(),
+                    effects_epoch: 0,
+                    site: 0,
+                    sources_at: 0,
+                    sources_len: 0,
+                    arguments: 0,
+                    shape: eval::CallShape::default(),
+                    loops: 0,
+                    flags: 0,
+                });
                 self.misses.push(0);
-                self.sources_at.push(0);
-                self.sources_len.push(0);
-                self.sources_capacity.push(0);
-                self.shapes.push(eval::CallShape::default());
+                self.capacities.push(0);
                 self.pins.push(nil());
-                self.owners.len() - 1
+                self.rows.len() - 1
             }
         };
-        self.owners[id] = owner;
-        self.sites[id] = at as u32;
-        self.formals[id] = formals;
-        self.bodies[id] = body;
-        self.shapes[id] = *shape;
         self.pins[id] = unbound();
-        let length = sources.len() as u32;
-        if length > self.sources_capacity[id] {
-            self.sources_at[id] = self.pool.len() as u32;
-            self.sources_capacity[id] = length;
-            self.pool.extend_from_slice(sources);
-        } else {
-            let start = self.sources_at[id] as usize;
-            self.pool[start..start + sources.len()].copy_from_slice(sources);
+        let length = sources.len() + arguments;
+        let mut sources_at = self.rows[id].sources_at;
+        if length > self.capacities[id] as usize {
+            sources_at = self.pool.len() as u32;
+            self.capacities[id] = length as u32;
+            self.pool.resize(self.pool.len() + length, 0);
         }
-        self.sources_len[id] = length;
+        let start = sources_at as usize;
+        self.pool[start..start + sources.len()].copy_from_slice(sources);
+        self.rows[id] = PlanRow {
+            owner,
+            formals,
+            body,
+            effects_env: nil(),
+            effects_epoch: 0,
+            site: at as u32,
+            sources_at,
+            sources_len: sources.len() as u32,
+            // A site with more arguments, or a body with more loops, than the row counts never
+            // prepares ([`prepare_plan`]).
+            arguments: u16::try_from(arguments).unwrap_or(u16::MAX),
+            shape: *shape,
+            loops: u16::try_from(loop_count(body)).unwrap_or(u16::MAX),
+            flags: 0,
+        };
         id
     }
 
@@ -8831,25 +9616,72 @@ impl CallPlans {
 
     /// Frees every plan with a dead key. A major collection also drops every pin: a pin holds
     /// the closure's environment, which can reach the very code and body that key the plan,
-    /// and would otherwise keep the plan alive forever.
+    /// and would otherwise keep the plan alive forever. A site whose pin is dropped decides
+    /// again whether its callee is a wrapper, so its calls leave the fast path until it has.
     pub unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         let live = |object: Sexp| object == nil() || liveness.is_live(object);
-        for id in 0..self.owners.len() {
-            if self.owners[id] == nil() {
+        for id in 0..self.rows.len() {
+            let row = &mut self.rows[id];
+            if row.owner == nil() {
                 continue;
             }
-            if !live(self.owners[id]) || !live(self.formals[id]) || !live(self.bodies[id]) {
-                self.owners[id] = nil();
-                self.formals[id] = nil();
-                self.bodies[id] = nil();
+            row.effects_env = nil();
+            if !live(row.owner) || !live(row.formals) || !live(row.body) {
+                row.owner = nil();
+                row.formals = nil();
+                row.body = nil();
+                row.flags = 0;
                 self.pins[id] = nil();
                 self.free.push(id as u32);
                 self.generation = self.generation.wrapping_add(1);
             } else if liveness.is_major() {
+                row.flags = 0;
                 self.pins[id] = unbound();
             }
         }
     }
+}
+
+/// Works out, once the site at `at` knows its callee is no wrapper, how each of the site's
+/// `arguments` binds ([`ARGUMENT_VALUE`] and the kinds beside it), and whether [`call_fast`]
+/// may take the site's calls: every argument is a constant, the empty argument, a variable or
+/// code compiled against the calling frame's slots. `...`, `..N` and code that needs the
+/// frame's environment leave the site to the generic path.
+unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
+    let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
+    let mut fast = true;
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        kinds.push(match expression.kind() {
+            _ if expression == missing_arg() => ARGUMENT_VALUE,
+            SexpType::Symbol
+                if expression == symbols().dots || eval::dot_dot_index(expression).is_some() =>
+            {
+                fast = false;
+                break;
+            }
+            SexpType::Symbol => {
+                slot_index(state, expression).map_or(ARGUMENT_OUTSIDE, |slot| slot as i32)
+            }
+            SexpType::Bytecode if expression.cdr().element(SLOTS) != nil() => ARGUMENT_CODE,
+            SexpType::Bytecode | SexpType::Language | SexpType::Promise => {
+                fast = false;
+                break;
+            }
+            _ => ARGUMENT_VALUE,
+        });
+        cell = cell.cdr();
+    }
+    let plans = &mut (*state.interp).bytecode.call_plans;
+    let row = &mut plans.rows[id as usize];
+    row.flags |= PLAN_PREPARED;
+    if !fast || kinds.len() != row.arguments as usize || row.loops == u16::MAX {
+        return;
+    }
+    let start = (row.sources_at + row.sources_len) as usize;
+    row.flags |= PLAN_FAST;
+    plans.pool[start..start + kinds.len()].copy_from_slice(&kinds);
 }
 
 /// Runs a planned call of `function` with [`eval::run_wrapper`] when the closure is a wrapper,
@@ -10615,7 +11447,7 @@ unsafe fn slot_subject_call(
     }
     if subject.is_object() {
         if subject.has_gp(gp::S4_OBJECT)
-            || (definition.name == "[" && crate::frame::is_frame(subject))
+            || (definition.name == "[" && (interp().extensions.tables.is_frame)(subject))
         {
             return Ok(None);
         }

@@ -201,6 +201,29 @@ class TypedSuite(unittest.TestCase):
         self.assertEqual(refused, {"seconds": None, "reason": "RY_BENCH_REPEAT must be a positive whole number, not `none`"})
 
 
+class PublicSuite(unittest.TestCase):
+    def test_every_program_has_a_typed_source_that_prints_its_own_name(self):
+        for program in bench.load_suite("public")["programs"]:
+            typed = bench.root / program["typed_source"]
+            name = typed.name.removesuffix(".typed.R")
+            self.assertIn(f'sprintf("{name} %s', typed.read_text(), program["id"])
+
+    def test_a_shared_typed_source_is_read_by_the_name_it_prints(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        for name in ("loop.R", "loop_2.R", "loop.typed.R"):
+            (directory / name).write_text("")
+        program = {"id": "loop_2", "source": str(directory / "loop_2.R"),
+                   "typed_source": str(directory / "loop.typed.R")}
+        # The engine prints a line for each name, so only the right one gives these numbers.
+        engine = argparse.Namespace(typed=True, env=dict(os.environ), command=[
+            sys.executable, "-c", "print('loop 1:2 0.5'); print('loop_2 3:4 9.0')"])
+        runner = bench.PublicRunner("public", None)
+        self.addCleanup(runner.close)
+        outcome = runner.run(program, engine)
+        self.assertEqual((outcome["seconds"], outcome["checksum"]), (0.5, "1:2"))
+
+
 class BuildProfile(unittest.TestCase):
     def test_names_a_build_that_is_not_a_release(self):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))

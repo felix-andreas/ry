@@ -57,7 +57,7 @@ pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
-pub mod dataframe;
+pub mod crash;
 pub mod debugger;
 pub mod deparse;
 pub mod dispatch;
@@ -66,23 +66,17 @@ pub mod effects;
 pub mod element_access;
 pub mod envir;
 pub mod eval;
-mod fft;
+pub mod extensions;
 pub mod file_removal;
 #[cfg(unix)]
 pub mod fork;
 pub mod format;
-pub mod frame;
-pub mod graphics;
-pub mod graphics_engine;
-pub mod graphics_render;
 pub mod help_server;
 pub mod http;
 pub mod image;
 pub mod kernels;
 pub mod latex;
 pub mod linalg;
-pub mod linpack;
-pub mod long_double;
 pub mod lower;
 #[path = "../../rcmd/src/makeconf.rs"]
 mod makeconf;
@@ -96,30 +90,15 @@ pub mod parallel;
 pub mod parse_data;
 mod pcre;
 pub mod platform;
-pub mod plotmath;
 pub mod print;
 pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
-pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
 pub mod standard_library;
-pub mod stats;
-pub mod stats_arima;
-pub mod stats_cluster;
-pub mod stats_deriv;
-pub mod stats_lbfgsb;
-pub mod stats_loess;
-pub mod stats_models;
-pub mod stats_nlm;
-pub mod stats_optimize;
-pub mod stats_port;
-pub mod stats_port_minimizer;
-pub mod stats_spline;
-pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
@@ -128,10 +107,11 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
-pub mod vector_math;
-pub mod viewer;
 
-pub use crate::unwind::{Jump, RError};
+pub use {
+    crate::unwind::{Jump, RError},
+    numeric::{linpack, long_double, rmath, vector_math},
+};
 use {
     crate::{
         base_fast_paths::Entry,
@@ -140,7 +120,7 @@ use {
         unwind::{R, Unwind},
     },
     heap::{
-        Heap, Liveness, Marker, RootSource,
+        Heap, Liveness, Marker, RootSource, activity,
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
@@ -221,6 +201,52 @@ impl Frame {
     }
 }
 
+/// The attached debugger, if any. A call's fast path tests [`activity::hooks`] instead of
+/// this field, so the slot is written only through [`DebuggerSlot::set`] and
+/// [`DebuggerSlot::take`], which keep the [`activity::DEBUGGER`] bit equal to whether it is
+/// occupied.
+pub struct DebuggerSlot(Option<Box<debugger::Adapter>>);
+
+impl DebuggerSlot {
+    pub fn set(&mut self, adapter: Option<Box<debugger::Adapter>>) {
+        activity::set_hook(activity::DEBUGGER, adapter.is_some());
+        self.0 = adapter;
+    }
+
+    pub fn take(&mut self) -> Option<Box<debugger::Adapter>> {
+        activity::set_hook(activity::DEBUGGER, false);
+        self.0.take()
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut Box<debugger::Adapter>> {
+        self.0.as_mut()
+    }
+}
+
+impl std::ops::Deref for DebuggerSlot {
+    type Target = Option<Box<debugger::Adapter>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Says whether the session defines S4, R6 and reference classes ([`Interp::object_systems`]),
+/// keeping the [`activity::NO_OBJECT_SYSTEMS`] bit that a call's fast path tests in step.
+pub fn set_object_systems(allowed: bool) {
+    interp().object_systems = allowed;
+    activity::set_hook(activity::NO_OBJECT_SYSTEMS, !allowed);
+}
+
+/// The bits of [`activity::hooks`] that stand for interpreter state, computed from that state:
+/// what the word must hold, apart from the profiling bits.
+pub fn observer_bits() -> u8 {
+    let state = interp();
+    (if state.debugger.is_some() { activity::DEBUGGER } else { 0 })
+        | (if moves::tracking() { activity::MOVES } else { 0 })
+        | (if state.object_systems { 0 } else { activity::NO_OBJECT_SYSTEMS })
+}
+
 // A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
 // few vector moves; above that it becomes a `memcpy` call on every call.
 const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
@@ -287,6 +313,13 @@ impl FrameStack {
 
     pub fn clear(&mut self) {
         self.truncate(0);
+    }
+
+    /// The frames' address and count for a crash report, which reads them without trusting
+    /// either: the count never exceeds the allocated slots, as the report must tolerate a
+    /// corrupted stack.
+    pub fn crash_view(&self) -> (*const Frame, usize) {
+        (self.slots.as_ptr(), self.depth.min(self.slots.len()))
     }
 }
 
@@ -392,6 +425,9 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
     state.frames.truncate(depth);
     // An unwind to top level skips the releases of the calls it leaves, so their argument
     // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 {
+        bytecode::forget_resumes(&mut state.bytecode);
+    }
     if depth == 0 && state.references_used != 0 {
         // SAFETY: `state` is the interpreter's own state, which `release_references` reads
         // through `interp()`, and it is not used after this call.
@@ -554,6 +590,9 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The DataFrames whose `x[i, j, by]` queries are running, outermost first. An update of a
+    /// frame that an outer query is still reading must not write into it.
+    pub frame_queries: Vec<Sexp>,
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
@@ -597,7 +636,7 @@ pub struct Interp {
     pub show_error_messages: bool,
     /// The attached Debug Adapter Protocol server, which the evaluator consults before each
     /// statement.
-    pub debugger: Option<Box<debugger::Adapter>>,
+    pub debugger: DebuggerSlot,
     /// Depth of nested default error handling, to stop an error in `options(error=)` looping.
     pub in_error: u32,
     /// Objects that live as long as the session: the options list, `.Random.seed` helpers, and
@@ -633,6 +672,15 @@ pub struct Interp {
     pub interactive: bool,
     /// The default packages' libraries `dyn.load` loaded, with the paths it was given.
     pub builtin_libraries: Vec<(&'static str, String)>,
+    /// The native routine tables registered by crates above the interpreter, each with the
+    /// default package it implements ([`builtin_libraries::register_routines`]).
+    pub routine_tables: Vec<(
+        &'static str,
+        &'static [(&'static str, builtin_libraries::NativeFn)],
+    )>,
+    /// The implementation of each of the default packages' routines, in the order of the
+    /// routine list, filled on the first native call and emptied when a table is registered.
+    pub routine_implementations: Vec<Option<builtin_libraries::NativeFn>>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
     /// Values moved out of a caller's variable into a closure's parameter.
@@ -673,6 +721,9 @@ pub struct Interp {
     pub code_image: code_image::State,
     /// The records of typed-core values R holds unread ([`records::LazyRecords`]).
     pub lazy_records: records::LazyRecords,
+    /// The graphics system, the tables and the data viewer, which crates above this one
+    /// implement ([`extensions`]).
+    pub extensions: extensions::Extensions,
 }
 
 struct InterpState {
@@ -754,6 +805,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     }
     state.heap = heap_pointer;
     heap::set_pending_resolver(crate::eval::resolve_pending_read);
+    system::provide_emulated_r();
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
@@ -785,6 +837,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         symbols,
         visible: true,
         returned_values: Vec::new(),
+        frame_queries: Vec::new(),
         assignment_call: None,
         native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
@@ -796,7 +849,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         error_message: String::new(),
         text_buffer: Vec::new(),
         show_error_messages: true,
-        debugger: None,
+        debugger: DebuggerSlot(None),
         in_error: 0,
         globals: values::Globals::placeholder(),
         hooks,
@@ -812,6 +865,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         command_args: Vec::new(),
         interactive: false,
         builtin_libraries: Vec::new(),
+        routine_tables: Vec::new(),
+        routine_implementations: Vec::new(),
         annotations: annotations::State::default(),
         moves: moves::State::default(),
         method_cache: dispatch::MethodCache::default(),
@@ -828,6 +883,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtins_env: None,
         code_image: code_image::State::default(),
         lazy_records: records::LazyRecords::default(),
+        extensions: extensions::Extensions::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -835,10 +891,24 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     heap.allow_collection();
 }
 
-/// Adds builtins the host implements, such as the foreign-function interface. A name that is
-/// already registered is replaced, so the host's version wins.
+/// Replaces builtins with the host's versions, such as the foreign-function interface, whose
+/// engine definitions report that the host has none.
 pub unsafe fn register_builtins(definitions: &[BuiltinDef]) {
     builtins::register(definitions);
+}
+
+/// Adds the builtins of a crate above the interpreter. A name the interpreter already defines
+/// would silently replace its builtin, so it is a bug to catch at start-up.
+pub unsafe fn define_builtins(definitions: &[BuiltinDef]) {
+    builtins::assert_undefined(definitions);
+    builtins::register(definitions);
+}
+
+/// Adds builtins that belong to ry's own values, which `package:ry` binds instead of base, so
+/// that plain R code which never names them sees exactly GNU R's base namespace.
+pub unsafe fn define_own_builtins(definitions: &[BuiltinDef]) {
+    builtins::assert_undefined(definitions);
+    builtins::register_own(definitions);
 }
 
 /// The default hooks: console output to the process's stdout and stderr, no ALTREP classes, no
@@ -982,7 +1052,7 @@ impl RootSource for InterpRoots {
             }
             marker.mark(interp.srcref);
             dispatch::trace_method_cache(&mut interp.method_cache, marker);
-            graphics_engine::trace(marker);
+            (interp.extensions.graphics.trace)(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
             }

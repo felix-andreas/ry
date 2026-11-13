@@ -1125,7 +1125,16 @@ unsafe fn apply_method(
                     value,
                 });
             }
-            call_builtin(definition, call, method, &forced, sys_parent)
+            let result = call_builtin(definition, call, method, &forced, sys_parent)?;
+            if owned {
+                let heap = crate::heap();
+                for arg in args {
+                    if !eval::is_reference(arg.value) {
+                        heap.release_argument(arg.value);
+                    }
+                }
+            }
+            Ok(result)
         }
         _ => eval::apply(call, method, args, sys_parent),
     }
@@ -1778,8 +1787,11 @@ pub unsafe fn dispatch_evaluated_subject(
         eval::evaluate_args_into(arguments.cdr(), env, true, call, args)?;
         return Ok(None);
     }
-    if definition.name == "[" && crate::frame::is_frame(object) {
-        return crate::frame::run(call, object, env).map(Some);
+    if definition.name == "[" {
+        let tables = interp().extensions.tables;
+        if (tables.is_frame)(object) {
+            return (tables.subset)(call, object, env).map(Some);
+        }
     }
     let mut promised: Args = smallvec::smallvec![Arg {
         tag: arguments.tag(),

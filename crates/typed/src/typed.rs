@@ -110,6 +110,8 @@ thread_local! {
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
     /// did anything visible first.
     static R_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Calls whose native code stopped for the interpreter to run them again.
+    static STOPS: Cell<u64> = const { Cell::new(0) };
     /// The error an R call from compiled code raised, which [`call`] raises once the code has
     /// given up.
     static PARKED: RefCell<Option<Unwind>> = const { RefCell::new(None) };
@@ -255,6 +257,7 @@ pub unsafe fn call(
                  holds",
             )));
         }
+        STOPS.set(STOPS.get() + 1);
         decline(|| {
             String::from(
                 "its native code stopped at an operation only the interpreter finishes, such as \
@@ -372,6 +375,11 @@ unsafe fn compiled_or_refusal(
     found
 }
 
+/// How many calls on this thread stopped in native code and ran again in the interpreter.
+pub fn native_stops() -> u64 {
+    STOPS.get()
+}
+
 /// Whether `function` has compiled code for some argument types.
 pub fn has_compiled(function: Sexp) -> bool {
     COMPILED.with_borrow(|compiled| {
@@ -430,12 +438,30 @@ unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Lin
         let mut guess = first;
         for _ in 0..=MAX_REVISIONS {
             let mut linker = Linker::default();
-            let lowered = match lower::lower(function, params, guess, declared, &mut linker) {
+            let mut returned = None;
+            let lowered = match lower::lower(
+                function,
+                params,
+                guess,
+                declared,
+                &mut linker,
+                &mut returned,
+            ) {
                 Ok(lowered) => lowered,
-                Err(why) => {
-                    refusal = why;
-                    break;
-                }
+                // A recursive call's guessed result the body cannot use, as a number where
+                // the body reads a record's field, is revised to what a `return` before the
+                // refusal gave.
+                Err(why) => match returned {
+                    Some(ty) if ty != guess => {
+                        refusal = why;
+                        guess = ty;
+                        continue;
+                    }
+                    _ => {
+                        refusal = why;
+                        break;
+                    }
+                },
             };
             let result = lowered.function.result;
             if result == guess || !calls_itself(&lowered.function) {
@@ -630,7 +656,7 @@ fn item_kind(item: Item) -> u32 {
 /// value of the table API a table.
 /// A record or tuple has none, because a typed closure takes one only from typed code.
 unsafe fn type_of(value: Sexp) -> Option<Type> {
-    if interp::dataframe::is_table_value(value) {
+    if (interp::interp().extensions.tables.is_table_value)(value) {
         return Some(Type::Table);
     }
     if value.is_altrep() || value.attrib() != rvalues::nil() {
@@ -1374,7 +1400,7 @@ unsafe fn call_r(
         RResult::Unused => return Ok(()),
         RResult::Converted(conversion, ty) => (conversion, ty),
         RResult::Table => {
-            if !interp::dataframe::is_table_value(value) {
+            if !(interp::interp().extensions.tables.is_table_value)(value) {
                 return Err(interp::unwind::error(format!(
                     "`{}` gave a value of type `{}` where the typed function was compiled for a \
                      table value",

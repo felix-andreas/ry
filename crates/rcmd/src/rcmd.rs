@@ -410,7 +410,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
     // searches the library, and `sessionInfo()` fails on a loaded namespace it cannot describe.
-    // The version is the one the namespace's `spec` gives (`crates/interp/src/frame.rs`).
+    // The version is the one the namespace's `spec` gives (`namespace_source` in `crates/interp/src/standard_library.rs`).
     let ry_package = root.join("library/ry");
     fs::create_dir_all(&ry_package).map_err(io_error(&ry_package))?;
     write(
@@ -806,20 +806,26 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
-    // The rename and the downgrade to a shared lock happen under the cache's lock, which a
-    // pruner holds while it works, because converting a lock first releases it and a pruner
-    // could otherwise take the new home in between.
+    // The lock is released and retaken on the final path under the cache's lock, which every
+    // pruner holds while it works, so none can take the new home in between. Windows cannot
+    // rename a directory that holds an open file, which is why the lock cannot simply be kept
+    // across the rename.
     let cache_lock = lock_cache(cache)?;
+    drop(lock);
     match fs::rename(&staging, &home) {
         Ok(()) => {
-            lock.lock_shared().map_err(io_error(&home))?;
+            let lock = lock_home(&home)?.ok_or_else(|| {
+                Error::Io(
+                    home.clone(),
+                    io::Error::other("the home vanished while it was locked"),
+                )
+            })?;
             hold(lock);
             prune_stale_homes(cache, &home, &cache_lock);
             Ok(home)
         }
         // Another process renamed its home into place first.
         Err(_) if home.join("etc").join("Makeconf").exists() => {
-            drop(lock);
             fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
             drop(cache_lock);
             cached_home(cache, libr, rcmd, base)
@@ -855,7 +861,7 @@ fn hold(lock: File) {
 /// taken. A home from an older ry has no lock file, and the first process to use it adds one.
 fn lock_home(home: &Path) -> Result<Option<File>> {
     let path = home.join(LOCK_FILE);
-    let lock = match File::options().create(true).append(true).open(&path) {
+    let lock = match File::options().create(true).write(true).open(&path) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::Io(path, error)),
@@ -871,7 +877,7 @@ fn lock_cache(cache: &Path) -> Result<File> {
     let path = cache.join(LOCK_FILE);
     let lock = File::options()
         .create(true)
-        .append(true)
+        .write(true)
         .open(&path)
         .map_err(io_error(&path))?;
     lock.lock().map_err(io_error(&path))?;
@@ -899,7 +905,7 @@ fn prune_stale_homes(cache: &Path, current: &Path, _cache_lock: &File) {
         }
         // A staging directory without its lock yet is being created this instant, while a home
         // from an older ry, and one a pruner failed to delete, have no lock to take.
-        let lock = match File::options().append(true).open(entry.join(LOCK_FILE)) {
+        let lock = match File::options().write(true).open(entry.join(LOCK_FILE)) {
             Ok(lock) => Some(lock),
             Err(error) if error.kind() == io::ErrorKind::NotFound && !staging => None,
             Err(_) => continue,
@@ -1513,7 +1519,9 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
     // (`$(BINPREF)gcc`, `$(PKG_CONFIG)`), and its `winshlib.mk` links a DLL exporting what the
     // package's `<name>-win.def` lists, or else every global symbol. Exporting every symbol
     // keeps `R_init_<name>` visible even when an object marks other symbols `dllexport`, which
-    // turns the linker's automatic export off.
+    // turns the linker's automatic export off. A package that includes `libintl.h` has `vsnprintf`
+    // redirected to `libintl_vsnprintf`, which GNU R's `R.dll` exports but ry's `libR` does not,
+    // so the DLL links Rtools' gettext (`LIBINTL`).
     let platform_variables = match platform {
         Platform::Windows => {
             "BINPREF ?=\nIMPDIR = bin/x64\nPKG_CONFIG = $(BINPREF)pkg-config\n\
@@ -1522,7 +1530,8 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
              STRIP_STATIC_LIB = $(BINPREF)strip --strip-debug\n\
              SHLIB_DEF = $(wildcard $(basename $(SHLIB))-win.def)\n\
              EXPORT_ALL_SYMBOLS = -Wl,--export-all-symbols\n\
-             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n"
+             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n\
+             LIBINTL = -lintl -liconv\n"
         }
         Platform::Linux | Platform::MacOs => "SHLIB_EXPORTS =\n",
     };

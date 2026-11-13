@@ -3,10 +3,11 @@
 //! checksum`), so the two outputs line up row by row. Loading is not timed, and every question
 //! runs twice.
 //!
-//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only | --joins-only]
-//! [--polars-streaming]`, where the directory holds the CSV files
+//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only | --joins-only
+//! | --updates-only] [--polars-streaming]`, where the directory holds the CSV files
 //! `tools/bench/internal/table/datagen.R` writes. `--groupby-only` runs only the ten group-by
-//! questions, and `--joins-only` only the five join questions.
+//! questions, `--joins-only` only the five join questions, and `--updates-only` only the two
+//! `:=` loops that write existing columns.
 //!
 //! `--polars-streaming` answers the group-by and join questions with plain Polars plans on
 //! Polars' streaming engine instead of ry's kernels, over the same tables in memory, so the two
@@ -46,7 +47,7 @@ fn main() -> ExitCode {
         .find(|argument| !argument.starts_with("--"))
     else {
         eprintln!(
-            "usage: db_benchmark <data-dir> [--groupby-only | --joins-only] [--polars-streaming]"
+            "usage: db_benchmark <data-dir> [--groupby-only | --joins-only | --updates-only] [--polars-streaming]"
         );
         return ExitCode::FAILURE;
     };
@@ -58,6 +59,7 @@ fn main() -> ExitCode {
         .find_map(|argument| match argument.as_str() {
             "--groupby-only" => Some(Only::Groupby),
             "--joins-only" => Some(Only::Joins),
+            "--updates-only" => Some(Only::Updates),
             _ => None,
         });
     let dir = PathBuf::from(dir);
@@ -82,6 +84,7 @@ fn main() -> ExitCode {
 enum Only {
     Groupby,
     Joins,
+    Updates,
 }
 
 fn run(dir: &Path, only: Option<Only>) -> Result<()> {
@@ -90,9 +93,9 @@ fn run(dir: &Path, only: Option<Only>) -> Result<()> {
         polars_threads()
     );
     if only != Some(Only::Joins) {
-        groupby(dir, only == Some(Only::Groupby))?;
+        groupby(dir, only)?;
     }
-    if only == Some(Only::Groupby) {
+    if matches!(only, Some(Only::Groupby | Only::Updates)) {
         return Ok(());
     }
     joins(dir)?;
@@ -102,29 +105,74 @@ fn run(dir: &Path, only: Option<Only>) -> Result<()> {
     rolling_join(dir)
 }
 
-fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
+fn groupby(dir: &Path, only: Option<Only>) -> Result<()> {
     let mut x = read(dir, "groupby.csv", true)?;
+    if only != Some(Only::Updates) {
+        groupby_questions(&x)?;
+    }
+    if only == Some(Only::Groupby) {
+        return Ok(());
+    }
+
+    time_question("update full", || {
+        for _ in 0..100 {
+            let update = binary(BinaryOp::Multiply, column("v3"), Expr::Double(1.000001));
+            execute(&mut x, assign("v3", update))?;
+        }
+        total(&mut x, "v3")
+    })?;
+    time_question("update subset", || {
+        for step in 1..=100 {
+            let rows = Rows::Filter(binary(BinaryOp::Equal, column("id4"), Expr::Integer(step)));
+            let update = binary(BinaryOp::Add, column("v1"), Expr::Integer(1));
+            execute(
+                &mut x,
+                Query {
+                    rows,
+                    ..assign("v1", update)
+                },
+            )?;
+        }
+        total(&mut x, "v1")
+    })?;
+    // The loop below holds 100 more columns at its end, which at 1e8 rows are 80 GB, so a run
+    // limited to the updates leaves it out.
+    if only == Some(Only::Updates) {
+        return Ok(());
+    }
+    time_question("update add", || {
+        for step in 1..=100 {
+            let update = binary(BinaryOp::Multiply, column("v2"), Expr::Integer(step));
+            execute(&mut x, assign(&format!("added{step}"), update))?;
+        }
+        total(&mut x, "added100")
+    })
+}
+
+/// The plans hold the table they read, so they live only in this function: a `:=` that runs
+/// while a plan shares a column would copy that column first.
+fn groupby_questions(x: &Table) -> Result<()> {
     let sum = |name: &str| unnamed(aggregate(Aggregate::Sum, column(name)));
     let mean = |name: &str| unnamed(aggregate(Aggregate::Mean, column(name)));
     let questions = [
-        ("groupby q1", grouped(&x, &["id1"], vec![sum("v1")])),
-        ("groupby q2", grouped(&x, &["id1", "id2"], vec![sum("v1")])),
+        ("groupby q1", grouped(x, &["id1"], vec![sum("v1")])),
+        ("groupby q2", grouped(x, &["id1", "id2"], vec![sum("v1")])),
         (
             "groupby q3",
-            grouped(&x, &["id3"], vec![sum("v1"), mean("v3")]),
+            grouped(x, &["id3"], vec![sum("v1"), mean("v3")]),
         ),
         (
             "groupby q4",
-            grouped(&x, &["id4"], vec![mean("v1"), mean("v2"), mean("v3")]),
+            grouped(x, &["id4"], vec![mean("v1"), mean("v2"), mean("v3")]),
         ),
         (
             "groupby q5",
-            grouped(&x, &["id6"], vec![sum("v1"), sum("v2"), sum("v3")]),
+            grouped(x, &["id6"], vec![sum("v1"), sum("v2"), sum("v3")]),
         ),
         (
             "groupby q6",
             grouped(
-                &x,
+                x,
                 &["id4", "id5"],
                 vec![
                     named("median_v3", aggregate(Aggregate::Median, column("v3"))),
@@ -135,7 +183,7 @@ fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
         (
             "groupby q7",
             grouped(
-                &x,
+                x,
                 &["id3"],
                 vec![named(
                     "range_v1_v2",
@@ -162,7 +210,7 @@ fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
         (
             "groupby q9",
             grouped(
-                &x,
+                x,
                 &["id2", "id4"],
                 vec![named(
                     "r2",
@@ -177,7 +225,7 @@ fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
         (
             "groupby q10",
             grouped(
-                &x,
+                x,
                 &["id1", "id2", "id3", "id4", "id5", "id6"],
                 vec![sum("v3"), named("count", Expr::Count)],
             ),
@@ -186,38 +234,7 @@ fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
     for (question, plan) in questions {
         time_question(question, || collected(plan.clone()))?;
     }
-    if groupby_only {
-        return Ok(());
-    }
-
-    time_question("update full", || {
-        for _ in 0..100 {
-            let update = binary(BinaryOp::Multiply, column("v3"), Expr::Double(1.000001));
-            execute(&mut x, assign("v3", update))?;
-        }
-        total(&mut x, "v3")
-    })?;
-    time_question("update subset", || {
-        for step in 1..=100 {
-            let rows = Rows::Filter(binary(BinaryOp::Equal, column("id4"), Expr::Integer(step)));
-            let update = binary(BinaryOp::Add, column("v1"), Expr::Integer(1));
-            execute(
-                &mut x,
-                Query {
-                    rows,
-                    ..assign("v1", update)
-                },
-            )?;
-        }
-        total(&mut x, "v1")
-    })?;
-    time_question("update add", || {
-        for step in 1..=100 {
-            let update = binary(BinaryOp::Multiply, column("v2"), Expr::Integer(step));
-            execute(&mut x, assign(&format!("added{step}"), update))?;
-        }
-        total(&mut x, "added100")
-    })
+    Ok(())
 }
 
 fn joins(dir: &Path) -> Result<()> {

@@ -3941,6 +3941,82 @@ fn typed_to_typed_calls_evaluate_their_arguments_first() {
 }
 
 #[test]
+fn typed_core_runs_list_programs_without_stopping() {
+    // Each case compiles and must finish natively on every call, agreeing with tier 0: native
+    // code that stops and lets the interpreter run the call again gives the right value too, so
+    // only the stop count shows that the case runs natively.
+    let helpers = [
+        "pair_walk <- function(k: I64) if (k == 0i64) (a = 0i64, b = 1i64) else { \
+         r <- pair_walk(k - 1i64)\n (a = r$b, b = r$a + r$b) }",
+    ];
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "function(x: List<F64>, y: List<F64>) -> F64 { z <- x + y\n w <- z * 2.5\n \
+             List.sum(w) + List.sum(x - y) + List.sum(x / y) }",
+            &["{ a <- List.from_r(c(1.5, 2, 3)); b <- List.from_r(c(0.5, 4, 8)); FUNCTION(a, b) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- List.repeat(List.range(1, n), n)\n \
+             List.sum(List.join_map(rows, \\(row) row)) + List.len(rows) }",
+            &["{ k <- 3i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- List.map(List.range(1, n), \\(k) List.range(1, k))\n \
+             flags <- List.map(List.range(1, n), \\(k) k > 2i64)\n \
+             List.sum(List.join_map(rows, \\(row) row)) * 100i64 + List.len(List.keep_if(flags, \\(f) f)) }",
+            &["{ k <- 5i64; FUNCTION(k) }"],
+        ),
+        // A recursive call's result is guessed from the branch of the result `if` that lowers.
+        (
+            "function(n: I64) -> I64 pair_walk(n)$a",
+            &["{ k <- 10i64; FUNCTION(k) }"],
+        ),
+    ];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            for helper in helpers {
+                run(helper);
+            }
+        }
+        for (case, &(definition, calls)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled, typed, stops) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let outcomes: Vec<String> = calls
+                        .iter()
+                        .map(|call| run(&call.replace("FUNCTION", name)))
+                        .collect();
+                    jit::install_mode(Mode::Off);
+                    outcomes
+                };
+                let reference = run_all(&format!("unstopped_reference_{case}"), Mode::Off);
+                let name = format!("unstopped_compiled_{case}");
+                let before = typed::native_stops();
+                let compiled = run_all(&name, Mode::On);
+                let stops = typed::native_stops() - before;
+                let function = lower::parse_text(&name, "<test>")
+                    .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+                (
+                    reference,
+                    compiled,
+                    function.is_ok_and(typed::has_compiled),
+                    stops,
+                )
+            };
+            assert_eq!(reference, compiled, "case {case}: FUNCTION <- {definition}");
+            assert!(
+                typed,
+                "case {case} did not run on the typed core: {definition}"
+            );
+            assert_eq!(stops, 0, "case {case} stopped in native code: {definition}");
+        }
+    });
+}
+
+#[test]
 fn typed_core_does_not_convert_dictionary_updates() {
     // A dictionary's values all have its value type, so an update that gives a logical for a
     // `F64` dictionary is an error on every tier, never a conversion.
@@ -4390,10 +4466,97 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ a <- 2147483645L; b <- 2147483647L; FUNCTION(a, b) }",
             ],
         ),
+        // The list searches and reshapes compile as loops with their function inlined: an
+        // empty result, a missed search and a `NaN` that makes a comparison `NA` (which the
+        // interpreter answers) all agree with tier 0.
+        (
+            "function(x: List<I64>, t: I64) -> I64 { kept <- List.keep_if(x, \\(v) v > t); \
+             back <- List.reverse(kept); hit <- if (List.contains(back, t + 1i64)) 1000i64 else 0i64; \
+             first <- if (List.is_empty(back)) 0i64 else back[[1]]; \
+             List.len(kept) * 100i64 + first + hit }",
+            &[
+                "{ a <- [1i64, 5i64, 3i64, 7i64]; b <- 2i64; FUNCTION(a, b) }",
+                "{ a <- [1i64, 5i64, 3i64, 7i64]; b <- 4i64; FUNCTION(a, b) }",
+                "{ a <- [1i64, 2i64]; b <- 9i64; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(x: List<F64>, t: F64) -> F64 { \
+             at <- match (List.find_first_index(x, \\(v) v > t)) { :Ok(k) => Num.to_f64(k)\n :Err(_) => 0 - 1 }; \
+             found <- Result.with_default(List.find_first(x, \\(v) v > t), 0); \
+             spread <- Result.with_default(List.max(x), 0 - 100) - Result.with_default(List.min(x), 100); \
+             at * 1000 + found * 10 + spread }",
+            &[
+                "{ a <- [0.5, 2, 3.5, 2, 3.5]; b <- 1; FUNCTION(a, b) }",
+                "{ a <- [0.5, 2, 3.5]; b <- 10; FUNCTION(a, b) }",
+                "{ a <- List.from_r(0[0L]); b <- 1; FUNCTION(a, b) }",
+                "{ a <- List.from_r(c(1, NaN, 3)); b <- 5; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(x: List<I64>, n: I64) -> I64 { chunks <- List.chunks_of(x, n); \
+             sums <- List.map(chunks, \\(chunk) List.sum(chunk)); \
+             pairs <- List.join_map(x, \\(v) [v, v * 10i64]); \
+             products <- List.map2(x, sums, \\(a, b) a * b); \
+             totals <- List.map3(x, x, sums, \\(a, b, c) a + b + c); \
+             List.len(chunks) * 1000000i64 + List.sum(sums) * 10000i64 + List.sum(pairs) \
+             + List.sum(products) * 100i64 + List.sum(totals) }",
+            &[
+                "{ a <- List.range(1, 7); b <- 3i64; FUNCTION(a, b) }",
+                "{ a <- List.range(1, 6); b <- 10i64; FUNCTION(a, b) }",
+                "{ a <- List.range(1, 6); b <- 0i64; FUNCTION(a, b) }",
+                "{ a <- List.range(1, 6); b <- -1i64; FUNCTION(a, b) }",
+            ],
+        ),
+        (
+            "function(x: F64, s: Str, p: Str) -> Str \
+             Str.concat(Num.to_str(Num.truncate(x)), Str.replace_each(s, p, \"xyz\"))",
+            &[
+                "{ a <- 2.7; b <- \"abcab\"; c <- \"ab\"; FUNCTION(a, b, c) }",
+                "{ a <- -2.7; b <- \"aaa\"; c <- \"aa\"; FUNCTION(a, b, c) }",
+                "{ a <- 0.5; b <- \"abc\"; c <- \"\"; FUNCTION(a, b, c) }",
+                "{ a <- 1e30; b <- \"abc\"; c <- \"b\"; FUNCTION(a, b, c) }",
+            ],
+        ),
         // A comparison with `NaN` is `NA`, which a condition must still refuse.
         (
             "function(x: double) -> double { flag <- x > 0\n if (flag) 1 else 2 }",
             &["{ x <- NaN; FUNCTION(x) }", "{ x <- 1; FUNCTION(x) }"],
+        ),
+        // The interpreter builds an empty mapped, joined or chunked list without an item type,
+        // and the typed core gives the same value for an empty input or result. The empty call
+        // comes second, so it reaches the compiled code.
+        (
+            "function(n: I64) -> List<F64> List.join_map(List.range(1, n), \\(k) [Num.to_f64(k)])",
+            &[
+                "{ k <- 2i64; FUNCTION(k) }",
+                "{ k <- 0i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> List<F64> List.join_map(List.range(1, n), \\(k) List.sublist([Num.to_f64(k)], 1i64, n - 2i64))",
+            &[
+                "{ k <- 3i64; FUNCTION(k) }",
+                "{ k <- 2i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> List<F64> List.map2(List.range(1, n), List.range(1, 3i64), \\(a, b) Num.to_f64(a * b))",
+            &[
+                "{ k <- 5i64; FUNCTION(k) }",
+                "{ k <- 0i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
+        ),
+        (
+            "function(n: I64) -> I64 List.len(List.chunks_of(List.range(1, n), 2i64))",
+            &["{ k <- 5i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> List<List<I64>> List.chunks_of(List.range(1, n), 2i64)",
+            &[
+                "{ k <- 3i64; FUNCTION(k) }",
+                "{ k <- 0i64; .Internal(typeof(FUNCTION(k))) }",
+            ],
         ),
     ];
     with_interpreter(|| {

@@ -816,7 +816,7 @@ unsafe fn reference_env(reference: Sexp) -> Option<Sexp> {
 
 /// The compiled code a code reference ([`code_reference`]) runs.
 #[inline]
-unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
+pub(crate) unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
     let tag = reference.tag();
     (tag.kind() == SexpType::Bytecode).then_some(tag)
 }
@@ -828,27 +828,49 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let used = state.references_used as usize;
     let reference = match state.references.get(used) {
-        Some(&reference) => {
+        Some(&reference) if reference.refcount() <= 1 => {
             heap.set_cdr(reference, symbol);
             reference
         }
+        // A `...` list counts the references it collected until its frame is released
+        // (`Heap::release_frame`), which happens late for a frame that waits for a reconcile
+        // and never for the frame of a call that failed. Handed out with that count, the
+        // reference would not look held by its frame alone once a frame detached it
+        // ([`detach_reference`]), so the pool gives it up and makes another.
+        Some(&counted) => {
+            let (reference, target) = new_reference(symbol)?;
+            counted.decrement_refcount();
+            let state = interp();
+            state.reference_targets[used].decrement_refcount();
+            state.references[used] = reference;
+            state.reference_targets[used] = target;
+            reference
+        }
         None => {
-            let target = values::integer_vector(&[0, 0, 0])?;
-            heap.root(target);
-            let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
-            reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-            // The pool's own counts keep a reference that a slot releases, and a target that a
-            // code reference displaced, from being freed.
-            reference.increment_refcount();
-            target.increment_refcount();
+            let (reference, target) = new_reference(symbol)?;
+            let state = interp();
             state.references.push(reference);
             state.reference_targets.push(target);
             reference
         }
     };
-    state.references_used += 1;
+    interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
     Ok(reference)
+}
+
+/// An argument reference naming `symbol` and its target, each with the count the pool keeps on
+/// it: the pool's own counts keep a reference that a slot releases, and a target that a code
+/// reference displaced, from being freed.
+unsafe fn new_reference(symbol: Sexp) -> R<(Sexp, Sexp)> {
+    let heap = crate::heap();
+    let target = values::integer_vector(&[0, 0, 0])?;
+    heap.root(target);
+    let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
+    reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+    reference.increment_refcount();
+    target.increment_refcount();
+    Ok((reference, target))
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -894,7 +916,7 @@ pub unsafe fn is_reference(value: Sexp) -> bool {
 
 /// The frame position and slot an argument reference names. A reference is released before
 /// its frame returns, so one that names another frame is a broken invariant.
-unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
+pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
     let &[owner, slot, header] = values::ints(reference.attrib()) else {
         panic!("an argument reference lost its target");
     };
@@ -1146,12 +1168,11 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
     heap.set_tag(reference, env);
     heap.set_attrib(reference, compiled);
     reference.set_gp_bits(gp::ARGUMENT_REFERENCE, false);
-    let target = values::integer_vector(&[0, 0, 0])?;
-    heap.root(target);
-    let fresh = heap.alloc_compiled_promise(unbound(), nil(), nil(), target)?;
-    fresh.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-    fresh.increment_refcount();
-    target.increment_refcount();
+    // The pool's count goes with the pool's place. A promise that kept it would never count as
+    // held by its frame alone, so the frame's release would leave it forced, and the value it
+    // holds would look shared for the rest of its life.
+    reference.decrement_refcount();
+    let (fresh, target) = new_reference(nil())?;
     let state = interp();
     state.references[index] = fresh;
     state.reference_targets[index] = target;
@@ -2256,31 +2277,78 @@ pub unsafe fn apply_closure_owning(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    let entered = apply_closure_entering(call, function, args, sys_parent, supplied)?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let slots = bytecode::slot_count(function.cdr());
+    let result = on_large_stack(|| bytecode::run_slots(function, entered.header as usize, slots));
+    leave(entered.depth as usize, result)
+}
+
+/// [`apply_closure_owning`] up to the point where the body would run, so that an interpreter
+/// loop can run it in place rather than recursing ([`enter`]). A call that does not get a slot
+/// frame, or that the general path has to run whole, comes back with its value and
+/// [`crate::NO_SLOTS`].
+// Inlined so that the Rust path, which runs the body right after, does not pay for a second
+// function's frame and for passing `Entered` through memory.
+#[inline]
+pub unsafe fn apply_closure_entering(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Entered> {
+    let whole = |value: Sexp| Entered {
+        value,
+        header: crate::NO_SLOTS,
+        depth: 0,
+    };
     if function.has_gp(gp::NATIVE_ENTRY)
         && supplied.is_none()
         && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
     {
-        return Ok(value);
+        return Ok(whole(value));
     }
     if crate::annotations::is_typed(function)
         && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
     {
-        return value;
+        return Ok(whole(value?));
     }
+    let method_vars = supplied.unwrap_or(&[]);
     if let Some(frame) = bind_slots(call, function, args)? {
-        let method_vars = supplied.unwrap_or(&[]);
-        return run_frame(
+        let CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        } = frame
+        else {
+            let value = run_frame_general(
+                call,
+                function,
+                frame,
+                sys_parent,
+                args,
+                Entry::Unchecked,
+                method_vars,
+            )?;
+            return Ok(whole(value));
+        };
+        return enter(
             call,
             function,
-            frame,
             sys_parent,
             args,
-            Entry::Unchecked,
             method_vars,
+            header,
+            missing,
+            promised,
         );
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+    let value = run_closure(call, function, env, sys_parent, args, Entry::Unchecked)?;
+    Ok(whole(value))
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
@@ -2637,14 +2705,40 @@ pub unsafe fn call_with_plan(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
+    let entered = bind_plan(call, function, shape, sources, args, sys_parent)?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let result =
+        on_large_stack(|| bytecode::run_slots(function, entered.header as usize, shape.slots as usize));
+    leave(entered.depth as usize, result)
+}
+
+/// The first half of [`call_with_plan`]: binds the arguments into a new slot frame and pushes
+/// the call's frame ([`enter`]), leaving the body to the caller, which runs the code
+/// [`Entered::value`] on the slots and then calls [`leave`]. A call that takes the generic
+/// path runs whole here.
+pub unsafe fn bind_plan(
+    call: Sexp,
+    function: Sexp,
+    shape: CallShape,
+    sources: &[i32],
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Entered> {
     let state = interp();
     if state.debugger.is_some()
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        return crate::scope(|| {
+        let value = crate::scope(|| {
             detach_references(args)?;
             apply_closure(call, function, args, sys_parent, None)
+        })?;
+        return Ok(Entered {
+            value,
+            header: crate::NO_SLOTS,
+            depth: 0,
         });
     }
     let count = shape.slots as usize;
@@ -2692,7 +2786,7 @@ pub unsafe fn call_with_plan(
     for index in sources.len()..count {
         *registers.add(1 + index) = unbound;
     }
-    let entered = enter(
+    enter(
         call,
         function,
         sys_parent,
@@ -2701,12 +2795,7 @@ pub unsafe fn call_with_plan(
         header as u32,
         missing,
         promised,
-    )?;
-    if entered.header == crate::NO_SLOTS {
-        return Ok(entered.value);
-    }
-    let result = on_large_stack(|| bytecode::run_slots(function, header, count));
-    leave(entered.depth as usize, result)
+    )
 }
 
 /// Runs a call of `function` without running its body: `run` does what the body would, from a
@@ -3843,7 +3932,7 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// Replaces the default of each formal in `promised`, which the binding
 /// put in its slot as the bare expression, with a promise of its code over the slot frame at
 /// `owner`.
-unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
+pub(crate) unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
     if promised == 0 {
         return Ok(());
     }
@@ -4058,6 +4147,12 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         Err(_) => None,
     };
     interp().returned_values.push(returned);
+    // The value is on its way to the caller and nothing counts it yet, so exit code that
+    // modifies a variable holding it would write into the value the caller receives. GNU R
+    // counts it for as long as the exit code runs.
+    if let Some(value) = returned {
+        value.increment_refcount();
+    }
     let mut outcome = result;
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
@@ -4087,6 +4182,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             }
             Ok(_) => {}
         }
+    }
+    if let Some(value) = returned {
+        value.decrement_refcount();
     }
     interp().returned_values.pop();
     crate::heap().release_handles(mark);

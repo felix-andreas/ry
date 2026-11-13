@@ -19,7 +19,6 @@ use {
         activity::{self, Activity, Counter},
         object::{Sexp, SexpType},
     },
-    std::sync::OnceLock,
 };
 
 /// A routine's implementation. It receives the arguments after `.NAME`, without `PACKAGE` and
@@ -305,10 +304,18 @@ const PACKAGES: [&str; 7] = [
 const LIBRARY_MARKER: &str = "ry builtin library";
 const ROUTINE_MARKER: &str = "ry builtin routine";
 
+/// Adds the implementations a crate above the interpreter has for the native routines of the
+/// default package `package`, such as the statistics crate's for `stats`.
+pub unsafe fn register_routines(package: &'static str, table: &'static [(&'static str, NativeFn)]) {
+    let state = interp();
+    state.routine_tables.push((package, table));
+    state.routine_implementations.clear();
+}
+
 fn implementation(package: &str, name: &str) -> Option<NativeFn> {
     let tables: &[&[(&str, NativeFn)]] = match package {
         "methods" => &[crate::methods::ROUTINES],
-        "stats" => &[crate::stats::ROUTINES, crate::distributions::ROUTINES],
+        "stats" => &[crate::distributions::ROUTINES],
         "utils" => &[crate::utils::ROUTINES],
         "tools" => &[crate::tools::ROUTINES],
         "parallel" => &[
@@ -316,12 +323,17 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
             #[cfg(unix)]
             crate::fork::ROUTINES,
         ],
-        "grDevices" => &[crate::graphics::GRDEVICES_ROUTINES],
-        "graphics" => &[crate::graphics::GRAPHICS_ROUTINES],
         _ => &[],
     };
+    let registered = interp()
+        .routine_tables
+        .iter()
+        .filter(|(owner, _)| *owner == package)
+        .map(|(_, table)| *table);
     tables
         .iter()
+        .copied()
+        .chain(registered)
         .flat_map(|table| table.iter())
         .find(|(routine, _)| *routine == name)
         .map(|(_, function)| *function)
@@ -330,14 +342,18 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
 /// The implementation of `routine`, resolved once per routine rather than searched by name on
 /// every call, because hot code such as `sd` reaches its routine through `.Call` each time.
 fn implementation_of(routine: &'static Routine) -> Option<NativeFn> {
-    static IMPLEMENTATIONS: OnceLock<Vec<Option<NativeFn>>> = OnceLock::new();
-    let implementations = IMPLEMENTATIONS.get_or_init(|| {
-        routines()
+    if interp().routine_implementations.is_empty() {
+        let implementations = routines()
             .map(|routine| implementation(routine.0, routine.2))
-            .collect()
-    });
+            .collect();
+        interp().routine_implementations = implementations;
+    }
     match routine_index(routine) {
-        Some(index) => implementations.get(index).copied().flatten(),
+        Some(index) => interp()
+            .routine_implementations
+            .get(index)
+            .copied()
+            .flatten(),
         None => implementation(routine.0, routine.2),
     }
 }

@@ -197,15 +197,24 @@ pub const BUILTIN_SLOTS: usize = 4096;
 /// The most [`label`]s [`count_package_fallback`] keeps a count for.
 pub const LABEL_SLOTS: usize = 1024;
 
-/// The hooks a call must run before its builtin or closure body: [`SUMMARY`] while a profile
-/// summary is collected, and [`PROFILE_TICK`] once per `Rprof` sampling interval. They share one
-/// byte so a call's fast path tests both with a single load ([`hooks`]).
+/// What makes a call leave its fast path, one bit each: [`SUMMARY`] while a profile summary is
+/// collected, [`PROFILE_TICK`] once per `Rprof` sampling interval, and the interpreter's own
+/// observers of calls ([`DEBUGGER`], [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so
+/// a call tests all of them with a single load ([`hooks`]). The byte is atomic because `Rprof`'s
+/// timer thread sets its bit; every other bit is written by the R thread, by whatever changes
+/// the state the bit stands for ([`set_hook`]).
 static HOOKS: AtomicU8 = AtomicU8::new(0);
 /// The [`HOOKS`] bit [`enabled`] reads.
 pub const SUMMARY: u8 = 1;
 /// The [`HOOKS`] bit set by `Rprof`'s timer thread and cleared once the R thread records a
 /// sample. GNU R takes its samples in a `SIGPROF` handler; ry checks the bit where calls begin.
 pub const PROFILE_TICK: u8 = 2;
+/// The [`HOOKS`] bit set while a debugger is attached to the interpreter.
+pub const DEBUGGER: u8 = 4;
+/// The [`HOOKS`] bit set while a call that moves an argument into its callee is running.
+pub const MOVES: u8 = 8;
+/// The [`HOOKS`] bit set while the session refuses to define S4, R6 and reference classes.
+pub const NO_OBJECT_SYSTEMS: u8 = 16;
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =
     [const { AtomicU64::new(0) }; Counter::ALL.len()];
@@ -236,7 +245,7 @@ pub fn set_enabled(on: bool) {
     }
 }
 
-/// The hook bits that are set; zero on a run with no profile summary and no `Rprof`.
+/// The hook bits that are set; zero while nothing observes calls.
 #[inline(always)]
 pub fn hooks() -> u8 {
     HOOKS.load(Ordering::Relaxed)
@@ -254,6 +263,15 @@ pub fn set_profile_tick(on: bool) {
         HOOKS.fetch_or(PROFILE_TICK, Ordering::Relaxed);
     } else {
         HOOKS.fetch_and(!PROFILE_TICK, Ordering::Relaxed);
+    }
+}
+
+/// Sets or clears one of the interpreter's bits in [`HOOKS`], as the state it stands for changes.
+pub fn set_hook(bit: u8, on: bool) {
+    if on {
+        HOOKS.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        HOOKS.fetch_and(!bit, Ordering::Relaxed);
     }
 }
 

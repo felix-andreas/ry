@@ -42,9 +42,9 @@ illegal dependency unrepresentable.
   that, it can never come to depend on an analysis result.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
   load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
-  backend hands the plan to R code as an RDS file, and its backend for ry's own runtime (behind the
-  `runtime` feature, which links `heap` and `interp`) builds the plan on the heap and binds each lazy
-  definition as a promise over the analysis's own syntax tree.
+  backend hands the plan to R code as an RDS file. The backend for ry's own runtime lives in `libr`
+  (`loader_backend.rs`), so `loader` links no runtime crate: it builds the plan on the heap and
+  binds each lazy definition as a promise over the analysis's own syntax tree.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It also generates the programs for
   differential fuzzing and runs the corpus packages' own tests and installs. It depends only on
@@ -57,18 +57,33 @@ illegal dependency unrepresentable.
   `CHARSXP` interning, symbols, environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
-  `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
+  `heap`, `interp`, the interpreter's leaf crates (`stats`, `graphics`, `frames`, `services`),
+  `jit`, `table`, `loader`, `rcmd`, `semantics` and `syntax`, and it is the host that installs the
+  runtime crates. Its design is the draft at
   [`development/design/r-runtime.md`](/development/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
-  `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
-  nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library. A `for`, `while` or `repeat` loop in the global
+  `heap`, `numeric`, `rcmd` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows
+  nothing about C. The values that are ry's own live here too: records and tags, `List` and the
+  standard library. A `for`, `while` or `repeat` loop in the global
   environment compiles to tier 0 before its first iteration, as GNU R's JIT compiles it, because
   compiled code binds the base functions it inlines at that moment
   ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
+- **`numeric`** holds the numeric kernels that take and return plain numbers: R's nmath library,
+  extended-precision sums, the vectorized elementary functions, the FFT, LINPACK and C's number
+  formats. It sits below `interp`, so an edit to the interpreter recompiles none of it.
+- **`stats`**, **`graphics`**, **`frames`** and **`services`** are the interpreter's leaf crates:
+  the stats package's native routines, R's graphics engine with its devices and renderer, the
+  `DataFrame` binding over `table`, and the HTTP client. Each depends on `interp`, and nothing
+  but the host depends on them, so the interpreter builds without Polars, a rasterizer or an HTTP
+  stack, and an edit to one of them rebuilds only that crate and the host. A leaf's `install()`
+  registers its builtins and native routine tables with the interpreter and fills the
+  interpreter's function-pointer table (`extensions.rs`) for the calls that go the other way,
+  such as tracing the graphics devices' objects during a collection. A host that installs no
+  leaf runs with the table's defaults: no device is open, no object is a table, and a transfer
+  fails as an unsupported protocol.
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -96,7 +111,7 @@ illegal dependency unrepresentable.
   twice: the typed core's own instructions after its passes, then the Cranelift IR built from them.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
-  data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
+  data.table helpers around it. `frames` owns the `DataFrame` value and calls the engine, and `libr`
   exposes a column to native code as an ALTREP vector, so the table holds only Arrow data.
 - **`sniff`** reads the layout of a delimited text file: separator, header and each column's R type.
   The table engine's reader and the checker both use it, so the checker types a literal

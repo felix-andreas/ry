@@ -10,8 +10,9 @@ The five suites, each described by the suite.toml in its directory:
   applications  Application workloads: our calls, dispatch, conditions, records and tables.
   typed         Typed ry against Rust: every typed kernel and application beside its Rust twin.
 
-In the first four the engines are GNU R, ry, and ry typed: a program with a `<name>.typed.R` beside
-it also runs that typed version in strict mode. Every run is a fresh process. A round runs every program on
+In the first four the engines are GNU R, ry, and ry typed: a program whose suite.toml entry names a
+`typed_source` (its own `<name>.typed.R`, or a variant's identical one) also runs that typed version
+in strict mode. Every run is a fresh process. A round runs every program on
 every engine once, programs in an order shuffled per round and engines in an order shuffled per
 program, so no engine always follows another and inherits its cache state, and a drift of the
 machine's speed hits all engines alike. Each suite first evicts every ry build's files from the
@@ -375,9 +376,14 @@ def load_suite(suite):
         if source is not None and not source.exists():
             sys.exit(f"error: {suite}/suite.toml names {program['source']}, which does not exist")
         if suite in TYPED_SUITES:
-            typed = source.with_name(f"{program['id']}.typed.R")
-            if typed.exists() != ("typed_source" in program):
+            # A variant whose typed version would repeat another program's may name that
+            # program's file, but a `<id>.typed.R` of its own is always its typed source.
+            own = source.with_name(f"{program['id']}.typed.R")
+            named = program.get("typed_source")
+            if (named is None and own.exists()) or (named is not None and own.exists() and root / named != own):
                 sys.exit(f"error: {suite}/suite.toml and the files disagree on whether {program['id']} has a typed version")
+            if named is not None and not (root / named).exists():
+                sys.exit(f"error: {suite}/suite.toml names {named}, which does not exist")
     listed = {program["id"] for program in manifest["programs"]}
     if suite in ("kernels", "applications"):
         present = {path.name.removesuffix(".R") for path in (here / suite).glob("*.R")
@@ -781,7 +787,8 @@ class PublicRunner:
     """Public programs: one run per process from the program's own directory, which prints
     `<name> <checksum> <seconds>`; the time includes byte compilation and tier-up. The typed
     version runs from a copy in a strict-mode project, still from the program's own directory,
-    because some programs read sibling files by relative path."""
+    because some programs read sibling files by relative path. A typed version shared by
+    several variants prints the name of the file it comes from."""
 
     def __init__(self, suite, args):
         self.network = []
@@ -791,11 +798,12 @@ class PublicRunner:
     def run(self, program, engine):
         source = root / program["source"]
         script = source.name
+        stem = source.name.removesuffix(".R")
         if engine.typed:
             script = self.work / f"{program['id']}.R"
             script.write_text((root / program["typed_source"]).read_text())
+            stem = pathlib.Path(program["typed_source"]).name.removesuffix(".typed.R")
         status, out, err, _, memory = spawn(engine.command + [str(script)], engine.env, cwd=source.parent)
-        stem = source.name.removesuffix(".R")
         lines = [line for line in out.splitlines() if line.startswith(stem + " ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
