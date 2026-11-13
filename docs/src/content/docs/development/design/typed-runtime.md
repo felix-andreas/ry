@@ -100,9 +100,9 @@ benchmark code bases says otherwise, the fix is a faster baseline compiler (`pri
 copy-and-patch tier), not a cache.
 
 **Mapped, shared code.** A code file is position-independent, and everything that differs between
-processes (runtime entry points, interned `CHARSXP` pointers for string constants that cross to R,
-R symbols, the base addresses of the value pools) is loaded from a small table that each process
-fills when it maps the file. The code pages are mapped read-only straight from the file, so the four
+processes (runtime entry points, shape ids, static boxes, the address of the file's own constant
+data, R call sites, typed functions of other namespaces) is loaded from a small table that each
+process fills when it maps the file and when a function attaches. The code pages are mapped read-only straight from the file, so the four
 test processes a CI machine runs share one copy of every installed dependency's typed code, and
 only the table is private to each. `ry install` writes the file to a temporary name and renames it
 into place, so a process never maps a half-written file. [The typed code file](/development/design/typed-code-file/)
@@ -110,7 +110,7 @@ is the implementation plan: the table as the code's global offset table, the fil
 function attaches at its first call, and the tests.
 
 **Standalone executables.** `ry build --aot --exe main.R` writes one executable in the spirit of
-`bun build --compile`: ry's runtime, the bytecode of the script and of the strict files it sources, and the
+`bun build --compile`: ry's runtime, the elaborated script and the strict files it sources, and the
 code file for their typed code, appended as a section that the executable maps read-only at
 start. Running the executable runs the script as `ry run main.R` does, with its arguments in
 `commandArgs()`. Plain `ry build` on a package writes a source tarball as `devtools::build()` does,
