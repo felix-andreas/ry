@@ -156,7 +156,7 @@ push)
 	# cachix posts to cachix.org unless told otherwise, and the proxy injects the token only for
 	# app.cachix.org. Outside a cloud session, set CACHIX_AUTH_TOKEN to the real token.
 	CACHIX_AUTH_TOKEN=${CACHIX_AUTH_TOKEN:-proxy-injected} nix shell --inputs-from "$root" nixpkgs#cachix \
-		-c cachix --host https://app.cachix.org push "$cache" "$path"
+		-c cachix --hostname https://app.cachix.org push "$cache" "$path"
 	nix-store --delete "$path" >/dev/null 2>&1 || log "$tree: $path stays in the nix store until the next garbage collection"
 	{
 		grep -v "^$tree " "$lock" 2>/dev/null || true

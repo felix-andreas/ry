@@ -185,6 +185,16 @@
             postInstall = ''
               HOME="$TMPDIR" "$out/bin/R" CMD INSTALL ${rlang}
             '';
+            # What nixpkgs' R ships, so that building an R package against this R finds the
+            # libraries of its dependencies.
+            setupHook = pkgs.writeText "r-setup-hook.sh" ''
+              addRLibPath () {
+                if [[ -d "$1/library" ]]; then
+                  addToSearchPath R_LIBS_SITE "$1/library"
+                fi
+              }
+              addEnvHooks "$targetOffset" addRLibPath
+            '';
             passthru = { inherit stdenv gfortran lapack; };
             meta = {
               mainProgram = "R";
