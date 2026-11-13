@@ -1272,8 +1272,7 @@ unsafe fn format_numbers(
                 _ => {
                     match values::ints(vector)[index] {
                         NA_INTEGER => out.push_str(NA),
-                        value => write!(out, "{value}")
-                            .map_err(|_| error("formatting a number failed"))?,
+                        value => push_decimal(out, i64::from(value)),
                     }
                     pad_start(out, common);
                 }
@@ -1342,51 +1341,42 @@ pub(crate) unsafe fn format_c_vector(
 ) -> R<Sexp> {
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
-    let mut padded = String::new();
-    let mut number = String::new();
     // Rounded numbers repeat, so their strings go through the call's memo.
     let mut memo = values::StringMemo::default();
     let character = mode == "character";
     let integer = mode == "integer";
     let left_justify = width < 0 || flag.contains('-');
+    let zero_fill = flag.contains('0');
     let width = width.unsigned_abs() as usize;
-    for index in 0..count {
-        let element;
-        let text: &str = if character {
-            element = values::string_at(vector, index).unwrap_or_default();
-            &element
-        } else {
-            number.clear();
-            let value = crate::subset::numeric_element(vector, index);
-            // GNU R writes an `fg` zero as a bare "0", whatever the width and flag.
-            if format == "fg" && value == 0.0 {
-                number.push('0');
+    with_text_buffer(|text| {
+        for index in 0..count {
+            text.clear();
+            if character {
+                text.push_str(&values::string_at(vector, index).unwrap_or_default());
             } else {
-                c_format_into(&mut number, value, format, digits, flag, integer);
+                let value = crate::subset::numeric_element(vector, index);
+                // GNU R writes an `fg` zero as a bare "0", whatever the width and flag.
+                if format == "fg" && value == 0.0 {
+                    text.push('0');
+                } else {
+                    c_format_into(text, value, format, digits, flag, integer);
+                }
             }
-            &number
-        };
-        let shortfall = width.saturating_sub(display_width(text));
-        if shortfall == 0 || (format == "fg" && text == "0") {
+            let shortfall = width.saturating_sub(display_width(text));
+            if shortfall > 0 && !(format == "fg" && text == "0") {
+                if left_justify {
+                    text.extend(std::iter::repeat_n(' ', shortfall));
+                } else if zero_fill && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
+                    let sign_length = usize::from(text.starts_with(['-', '+', ' ']));
+                    insert_fill(text, sign_length, '0', shortfall);
+                } else {
+                    insert_fill(text, 0, ' ', shortfall);
+                }
+            }
             store_string(result, index, text, &mut memo)?;
-            continue;
         }
-        padded.clear();
-        if left_justify {
-            padded.push_str(text);
-            padded.extend(std::iter::repeat_n(' ', shortfall));
-        } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
-            let sign_length = usize::from(text.starts_with(['-', '+', ' ']));
-            let (sign, digits) = text.split_at(sign_length);
-            padded.push_str(sign);
-            padded.extend(std::iter::repeat_n('0', shortfall));
-            padded.push_str(digits);
-        } else {
-            padded.extend(std::iter::repeat_n(' ', shortfall));
-            padded.push_str(text);
-        }
-        store_string(result, index, &padded, &mut memo)?;
-    }
+        Ok(())
+    })?;
     Ok(result)
 }
 
@@ -1443,9 +1433,7 @@ pub fn c_format_into(
     let precision = digits.unsigned_abs() as usize;
     // Writing to a `String` cannot fail, so the `fmt::Result`s below carry nothing.
     match format {
-        "d" => {
-            write!(out, "{}", value.round() as i64).ok();
-        }
+        "d" => push_decimal(out, value.round() as i64),
         "f" => push_fixed(out, value, precision),
         "e" | "E" => {
             let begin = out.len();
@@ -1468,12 +1456,32 @@ pub fn c_format_into(
         }
         _ => {
             if integer {
-                write!(out, "{}", value as i64).ok();
+                push_decimal(out, value as i64);
             } else {
                 push_general(out, value, precision.max(1), false);
             }
         }
     }
+}
+
+/// `value` in decimal, appended to `out`, without the formatting machinery `write!` runs for
+/// every number.
+pub(crate) fn push_decimal(out: &mut String, value: i64) {
+    let mut digits = [0u8; 20];
+    let mut magnitude = value.unsigned_abs();
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        out.push('-');
+    }
+    out.extend(digits[start..].iter().map(|&digit| char::from(digit)));
 }
 
 /// C's `%.*f`, appended to `out`.

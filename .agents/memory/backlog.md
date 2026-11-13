@@ -422,7 +422,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   | of which `real_format_candidates` (`scientific()` on the emulated long double, against GNU's 473 for all of `formatReal`) | 1.13k | 1.03% | about 1.3% together with a leaner text buffer |
   | of which the text buffer | 1.19k | 1.07% | |
 
-## Measured and not taken: one pass over the formals for the base fast paths
+## Measured: one pass over the formals for the base fast paths (taken for `formatC()` only)
 
 - **Under the bar on every workload.** The fast-path helpers `argument`, `is_default`, `is_supplied` and `dots` (`crates/interp/src/base_fast_paths.rs`) each walk the closure's formals pairlist again through `eval::slot_formal`. Their self cost, which holds the inlined walk (forcing an argument is excluded, because a single pass would still force it), as a share of warm Ir (callgrind, profiling build, threads 1, `RY_BENCH_REPEAT` 5 minus 2):
 
@@ -435,8 +435,11 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   | the other seven | 0.06% or less | |
 
   A table built in one walk still pays the walk (about 75 Ir for 15 formals), and each lookup still re-resolves the frame, because forcing an argument can give a slot frame an environment, and roots the value (about 20 Ir). That saves about 40%: about 2.1% on report and 0.9% on validation.
+- **`formatC()` reads its 13 formals in one walk** (`formals` in `base_fast_paths.rs`, `eval::slot_formals`), takes a formal left to its default as the known constant without forcing it, and reads `OutDec` only when `decimal.mark` is defaulted. With a leaner `format_c_vector`, report runs 4.5% fewer warm instructions (`do_format_c` 4.2k to 3.3k Ir per call). `format.default` still uses per-formal lookups; its remaining cost is in the table above.
+- **What is left on report's text path** (Ir per call): `sprintf` about 2.1k, of which `set_mkchar` 590 and its own body about 760; `paste` about 1.3k, of which `set_mkchar_bytes` 490 and `join_row` 240; `formatC`'s `store_string` 595. The interning share belongs to the one-probe item below.
 
 ## Open: a string `switch` without the linear name scan
+## Open: one probe to intern a new string (B4)
 
 - **A compiled `switch` on a string selector scans its arm names on every call.** `switch_arm` in `crates/interp/src/bytecode.rs` goes through `eval::switch_selector`, then compares the interned selector against each name in the table by identity, and compares text only if none matches (a missing name, or another encoding). On the expr_tree workload, `switch_arm` and `switch_selector` together are at most 3.6% of warm Ir under callgrind, which bounds the gain. The likely shape is a selector-to-arm map built once with the table, or a dense string id (below) indexing it, plus inlining the string case of `switch_selector` before its generic vector checks. It touches `bytecode.rs` call sites, so coordinate with whoever is rewriting them.
 
@@ -1418,15 +1421,15 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 - The closure frame push and pop (`eval::enter` and `eval::leave`) are about 5.9% of a testthat_full iteration, about 460 instructions per call against GNU R's `begincontext` plus `endcontext`, partly two copies of `Frame` into `state.frames`. Building the frame in place and trimming the handle release and `on.exit` checks in `leave` has a ceiling of about 3%.
 - What remains beyond that is a thinner call path (the AOT track's call plans).
 
-### Builtin call shape (held: percent-level tier-0 tuning)
+### Argument lists collected into `eval::Args`
 
-- Ceiling 4.5% of testthat_full self instructions (1,567M, one iteration): `run_call_builtin` 2.31% (36.2M, about 292,000 calls), `call_builtin_reusing` 1.57% (24.7M, about 150,000), `call_builtin_checked` 0.60% (9.4M, 61,000, of which 42,000 come from `call_inlined_internal`). Expected gain 2 to 2.5%.
-- Design agreed with the JIT track:
-  - Record at the call site whether every argument is untagged and none is empty, so that a positional call reads its values straight from the registers and skips building `eval::Args`.
-  - Pack that shape into spare bits of `CallBuiltin`'s operand 4 (the argument count). Operand 4 has more readers than the dispatch handler: `jit/analysis.rs` reads it in `call_builtin`, `matrix_element`, intrinsic selection, `reads()` and liveness (for both `CallBuiltin` and `CallBuiltinRebinding`), and `jit.rs` reads it in the debug trace. Every reader must therefore go through one decoder in `bytecode.rs` (such as `call_arguments(inst) -> (first, count, positional)`), because a raw read silently corrupts liveness instead of failing. Nothing depends on the instruction length.
-  - Replace the activity and profile-tick flags with one atomic "slow mode" byte in `heap::activity`, as the single source of truth. Every toggle writes it, and the builtin call path tests only that byte.
-  - Put `call_inlined_internal` on the same fast path, instead of always taking `call_builtin_checked`.
-- A prototype is on branch `perf/builtin-call-shape`. It uses a quickened handler form (`POSITIONAL_CALL_BUILTIN`, which `op_of` reports as `CallBuiltin`) instead of operand bits, so the JIT, the verifier and images are untouched. It also has the slow-mode byte and an oracle case, `builtins__positional_and_tagged_calls.R`, which has no `.expected` yet. The prototype is unmeasured.
+- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler and `jit::runtime::jit_call` use it (`decisions.md`, "Positional builtin calls read their arguments from the registers").
+- `bytecode::slot_subject_call` still collects into `eval::Args` (0.42% of bond_book_full in SmallVec code). It needs a different shape: its arguments carry tags, their count is known only after walking the call, and it stops early and drops the refcounts it took. Owned by the call path.
+
+### Small-vector base builtins (open, tier 0)
+
+- On bond_book_full (warm, one thread, about 2,189M instructions per repetition), base builtins on length-200 vectors cost per call: `rep` about 640 (`repeat_plain` about 535), `sum` about 615 (`add_all` 122, `summary_args` 98), `exp` about 680 (`math` 420), `seq_len` about 280. `kernels::binary` runs 1.6M calls per 4 repetitions at about 226 instructions in `real_arithmetic` and 163 in `alloc_uninit` (allocation, owned by GC).
+- The argument handling and dispatch around these calls is estimated at a ceiling of about 10 to 13% of bond_book_full. A realistic estimate goes to the speed lead before building.
 
 ### Queued with measured ceilings
 
