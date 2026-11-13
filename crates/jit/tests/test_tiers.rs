@@ -3876,6 +3876,60 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
              if (order$quantity > 5i64) net <- net - 1\n total <- total + net }\n total }",
             &["{ x <- 30i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
         ),
+        // A divisor that only a test makes positive, with a dividend of either sign and then
+        // with one a second test makes not negative.
+        (
+            "function(a: I64, d: I64) -> I64 if (d > 0i64) a %% d + a %/% d else 0i64",
+            &[
+                "{ a <- Num.min_i64; d <- 1i64; FUNCTION(a, d) }",
+                "{ a <- Num.min_i64; d <- 3i64; FUNCTION(a, d) }",
+                "{ a <- -7i64; d <- 2i64; FUNCTION(a, d) }",
+                "{ a <- 7i64; d <- Num.max_i64; FUNCTION(a, d) }",
+                "{ a <- 7i64; d <- 0i64; FUNCTION(a, d) }",
+            ],
+        ),
+        (
+            "function(a: I64, d: I64) -> I64 if (d > 0i64) { if (a >= 0i64) a %/% d - a %% d else \
+             -1i64 } else 0i64",
+            &[
+                "{ a <- Num.max_i64; d <- 1i64; FUNCTION(a, d) }",
+                "{ a <- 0i64; d <- Num.max_i64; FUNCTION(a, d) }",
+                "{ a <- 29i64; d <- 6i64; FUNCTION(a, d) }",
+                "{ a <- -29i64; d <- 6i64; FUNCTION(a, d) }",
+            ],
+        ),
+        // The inner counter starts at the outer one, which starts at 1, so both divisors are
+        // positive.
+        (
+            "function(n: I64) -> I64 { s <- 0i64\n for (i in List.range(1, n)) \
+             for (j in List.range(i, n)) s <- s + (j %% i) * (i %/% j + 1i64)\n s }",
+            &[
+                "{ x <- 6i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+                "{ x <- -3i64; FUNCTION(x) }",
+            ],
+        ),
+        // An integer counter is never `NA`, also when it counts down or starts at the lowest
+        // integer.
+        (
+            "function(n: integer) -> double { total <- 0\n for (i in seq_len(n)) \
+             total <- total + i\n total }",
+            &["{ x <- 10L; FUNCTION(x) }", "{ x <- 0L; FUNCTION(x) }"],
+        ),
+        (
+            "function(a: integer, b: integer) -> double { total <- 0\n for (i in a:b) \
+             total <- total + i\n total }",
+            &[
+                "{ a <- 3L; b <- -2L; FUNCTION(a, b) }",
+                "{ a <- -2147483647L; b <- -2147483645L; FUNCTION(a, b) }",
+                "{ a <- 2147483645L; b <- 2147483647L; FUNCTION(a, b) }",
+            ],
+        ),
+        // A comparison with `NaN` is `NA`, which a condition must still refuse.
+        (
+            "function(x: double) -> double { flag <- x > 0\n if (flag) 1 else 2 }",
+            &["{ x <- NaN; FUNCTION(x) }", "{ x <- 1; FUNCTION(x) }"],
+        ),
     ];
     with_interpreter(|| {
         for (case, &(definition, calls)) in cases.iter().enumerate() {

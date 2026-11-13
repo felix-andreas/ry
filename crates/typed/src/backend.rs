@@ -2009,8 +2009,8 @@ impl Emitter<'_> {
     }
 
     /// `I64` arithmetic as the standard library does it: an overflow, a division by zero and a
-    /// negative power give up, so the interpreter raises the error.
-    /// Arithmetic on two `I64`s, which lie in the two ranges.
+    /// negative power give up, so the interpreter raises the error. The operands lie in the
+    /// two ranges, which decide the checks an operator needs.
     fn i64_arith(
         &mut self,
         op: Arith,
@@ -2058,19 +2058,22 @@ impl Emitter<'_> {
                     // the dividend is negative. Then the remainder is negative or zero, which
                     // its sign bit says, and a negative one moves up by the divisor while the
                     // quotient moves down by one.
-                    let remainder = self.builder.ins().srem(x, y);
-                    let quotient = (op == Arith::IntDiv).then(|| self.builder.ins().sdiv(x, y));
                     if x_range.lo >= 0 {
-                        return Ok(quotient.unwrap_or(remainder));
+                        return Ok(if op == Arith::Mod {
+                            self.builder.ins().srem(x, y)
+                        } else {
+                            self.builder.ins().sdiv(x, y)
+                        });
                     }
+                    let remainder = self.builder.ins().srem(x, y);
                     let sign = self.iconst(63);
                     let negative = self.builder.ins().sshr(remainder, sign);
-                    return Ok(match quotient {
-                        None => {
-                            let moved = self.builder.ins().band(negative, y);
-                            self.builder.ins().iadd(remainder, moved)
-                        }
-                        Some(quotient) => self.builder.ins().iadd(quotient, negative),
+                    return Ok(if op == Arith::Mod {
+                        let moved = self.builder.ins().band(negative, y);
+                        self.builder.ins().iadd(remainder, moved)
+                    } else {
+                        let quotient = self.builder.ins().sdiv(x, y);
+                        self.builder.ins().iadd(quotient, negative)
                     });
                 }
                 let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, y, 0);

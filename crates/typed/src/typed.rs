@@ -867,7 +867,7 @@ unsafe fn to_box_in(
     value: Sexp,
     depth: u32,
 ) -> Result<(u64, Item), &'static str> {
-    if depth % STACK_CHECK_LEVELS == 0 {
+    if depth.is_multiple_of(STACK_CHECK_LEVELS) {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
             to_box_inner(shapes, value, depth)
         })

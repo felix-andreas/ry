@@ -209,9 +209,9 @@ fn a_logical_copied_from_a_condition_is_never_na() {
     builder.terminate(Terminator::Return(stored));
 
     let found = ranges(&builder.function);
-    assert_eq!(found.of(0, stored), Range { lo: 0, hi: 1 });
-    assert_eq!(found.of(0, unknown), Range { lo: NA, hi: 1 });
-    assert_eq!(found.of(0, tested), Range { lo: 0, hi: 1 });
+    assert!(found.of(0, stored).lo > NA);
+    assert_eq!(found.of(0, unknown).lo, NA);
+    assert!(found.of(0, tested).lo > NA);
     assert_eq!(found.of(0, integer).lo, NA);
     assert_eq!(
         found.of(0, wide),
@@ -408,8 +408,11 @@ fn random_function(rng: &mut Rng) -> Function {
                     b,
                 ),
             };
+            // A parameter is assigned again now and then, which takes it out of the tests.
             let dest = if fresh {
                 builder.local(Type::I64)
+            } else if rng.once_in(5) {
+                numbers[rng.below(2)]
             } else {
                 numbers[2 + rng.below(numbers.len() - 2)]
             };
@@ -419,9 +422,10 @@ fn random_function(rng: &mut Rng) -> Function {
             }
         }
         let target = |rng: &mut Rng| BlockId(rng.below(blocks) as u32);
-        let terminator = match rng.below(6) {
+        let terminator = match rng.below(7) {
             0 => Terminator::Return(numbers[rng.below(numbers.len())]),
             1 => Terminator::Jump(target(rng)),
+            2 => Terminator::Fail,
             _ => Terminator::Branch {
                 // Most branches test the comparison the block just made.
                 condition: last_condition

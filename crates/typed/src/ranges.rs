@@ -33,9 +33,11 @@
 //! The machine code starts every local that is not a parameter at zero, so a local that some
 //! path reads before assigning it has 0 in its range as well.
 //!
-//! The types set the widest range: all of `i64` for an `I64`, all of `i32` for an integer,
-//! where the lowest value is `NA`, 0 and 1 for a `Bool`, and those two and `NA` for a logical.
-//! An integer or logical whose range starts above the lowest `i32` is therefore never `NA`.
+//! The types set the widest range: all of `i64` for an `I64`, and all of `i32` for an integer
+//! or a logical, where the lowest value is `NA`. One whose range starts above the lowest `i32`
+//! is therefore never `NA`. A `Bool` is never `NA`, and that is all its type says: a logical
+//! vector that a package's C code filled can hold a true value other than 1, and a truth test
+//! passes it on as it is.
 
 use {
     crate::{
@@ -67,9 +69,8 @@ impl Range {
     /// gets all of `i64`, which says nothing.
     pub fn of_type(ty: Type) -> Range {
         let (lo, hi) = match ty {
-            Type::Int => (NA, i64::from(i32::MAX)),
-            Type::Lgl => (NA, 1),
-            Type::Bool => (0, 1),
+            Type::Int | Type::Lgl => (NA, i64::from(i32::MAX)),
+            Type::Bool => (NA + 1, i64::from(i32::MAX)),
             _ => (i64::MIN, i64::MAX),
         };
         Range { lo, hi }
@@ -122,17 +123,6 @@ pub struct Ranges {
     tests: Vec<Test>,
 }
 
-/// `left op right` holds, in the blocks whose scope reaches this test.
-struct Test {
-    op: Compare,
-    left: Local,
-    right: Local,
-    /// The next test out that holds in the same blocks, or `NONE`.
-    outer: u32,
-}
-
-const NONE: u32 = u32::MAX;
-
 impl Ranges {
     /// The range of `local` where an instruction of block `block` reads it.
     pub fn of(&self, block: usize, local: Local) -> Range {
@@ -150,65 +140,21 @@ impl Ranges {
     }
 }
 
-/// The part of `range` whose values can stand in `value op other` for some value of `other`.
-fn narrowed(range: Range, op: Compare, other: Range) -> Range {
-    if other.is_empty() {
-        return Range::EMPTY;
-    }
-    let bound = match op {
-        Compare::Eq => other,
-        // Only a range of one value rules a value out.
-        Compare::Ne => return range,
-        Compare::Lt => Range {
-            lo: i64::MIN,
-            hi: other.hi.saturating_sub(1),
-        },
-        Compare::Le => Range {
-            lo: i64::MIN,
-            hi: other.hi,
-        },
-        Compare::Gt => Range {
-            lo: other.lo.saturating_add(1),
-            hi: i64::MAX,
-        },
-        Compare::Ge => Range {
-            lo: other.lo,
-            hi: i64::MAX,
-        },
-    };
-    range.meet(bound)
-}
-
-/// The comparison with its operands swapped.
-fn mirrored(op: Compare) -> Compare {
-    match op {
-        Compare::Eq | Compare::Ne => op,
-        Compare::Lt => Compare::Gt,
-        Compare::Le => Compare::Ge,
-        Compare::Gt => Compare::Lt,
-        Compare::Ge => Compare::Le,
-    }
-}
-
-/// The comparison that holds exactly when `op` does not.
-fn negated(op: Compare) -> Compare {
-    match op {
-        Compare::Eq => Compare::Ne,
-        Compare::Ne => Compare::Eq,
-        Compare::Lt => Compare::Ge,
-        Compare::Le => Compare::Gt,
-        Compare::Gt => Compare::Le,
-        Compare::Ge => Compare::Lt,
-    }
-}
-
 /// How many rounds a bound may grow before it jumps to the limit of its type.
 const ROUNDS_BEFORE_LIMIT: u32 = 3;
 
 /// How many rounds take back what the jump to the limit overshot.
 const TIGHTENING_ROUNDS: u32 = 3;
 
+/// The ranges of `function`'s locals. A function without blocks has none to read.
 pub fn ranges(function: &Function) -> Ranges {
+    if function.blocks.is_empty() {
+        return Ranges {
+            locals: Vec::new(),
+            scopes: Vec::new(),
+            tests: Vec::new(),
+        };
+    }
     let order = reverse_postorder(function);
     let sites = assignment_sites(function);
     let (scopes, tests) = branch_tests(function, &order, &sites);
@@ -312,6 +258,69 @@ pub fn ranges(function: &Function) -> Ranges {
         }
     }
     ranges
+}
+
+/// `left op right` holds, in the blocks whose scope reaches this test.
+struct Test {
+    op: Compare,
+    left: Local,
+    right: Local,
+    /// The next test out that holds in the same blocks, or `NONE`.
+    outer: u32,
+}
+
+const NONE: u32 = u32::MAX;
+
+/// The part of `range` whose values can stand in `value op other` for some value of `other`.
+fn narrowed(range: Range, op: Compare, other: Range) -> Range {
+    if other.is_empty() {
+        return Range::EMPTY;
+    }
+    let bound = match op {
+        Compare::Eq => other,
+        // Only a range of one value rules a value out.
+        Compare::Ne => return range,
+        Compare::Lt => Range {
+            lo: i64::MIN,
+            hi: other.hi.saturating_sub(1),
+        },
+        Compare::Le => Range {
+            lo: i64::MIN,
+            hi: other.hi,
+        },
+        Compare::Gt => Range {
+            lo: other.lo.saturating_add(1),
+            hi: i64::MAX,
+        },
+        Compare::Ge => Range {
+            lo: other.lo,
+            hi: i64::MAX,
+        },
+    };
+    range.meet(bound)
+}
+
+/// The comparison with its operands swapped.
+fn mirrored(op: Compare) -> Compare {
+    match op {
+        Compare::Eq | Compare::Ne => op,
+        Compare::Lt => Compare::Gt,
+        Compare::Le => Compare::Ge,
+        Compare::Gt => Compare::Lt,
+        Compare::Ge => Compare::Le,
+    }
+}
+
+/// The comparison that holds exactly when `op` does not.
+fn negated(op: Compare) -> Compare {
+    match op {
+        Compare::Eq => Compare::Ne,
+        Compare::Ne => Compare::Eq,
+        Compare::Lt => Compare::Ge,
+        Compare::Le => Compare::Gt,
+        Compare::Gt => Compare::Le,
+        Compare::Ge => Compare::Lt,
+    }
 }
 
 /// The range of the value `inst`, an instruction of block `block`, assigns `dest`. It is empty
@@ -429,7 +438,14 @@ fn assigned_range(
         }
         _ => widest,
     };
-    range.meet(widest)
+    // A value outside the destination's type would read as an assignment that never runs,
+    // so such a range says nothing instead.
+    let within = range.meet(widest);
+    if within.is_empty() && !range.is_empty() {
+        widest
+    } else {
+        within
+    }
 }
 
 /// Where each local's one assignment is, as a block and an instruction in it, or `UNASSIGNED`
