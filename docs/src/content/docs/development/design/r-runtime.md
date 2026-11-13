@@ -1626,93 +1626,111 @@ data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a t
 generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
-`ry run` beat data.table under GNU R on every question, and all three runs give the
-same checksums. Each cell is the faster of two runs, in seconds, and the last row is each engine's
-peak resident memory over the whole run. The last column is the same engine driven from Rust,
-without R.
+`ry run` beat data.table under GNU R on every group-by and join question and on two of the three
+`:=` loops, and all three runs give the same checksums. The loop that updates 1% of the rows is
+the exception. data.table builds an index on `id4` during the first pass and afterwards writes
+only the matching rows, in place, while a `:=` on a row subset of a DataFrame computes a whole
+new column on every pass. Each cell is the faster of two runs, in seconds, and the last row is
+each engine's peak resident memory over the whole run, which is the loop that adds 100 columns.
+The last column is the same engine driven from Rust, without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.172 | 0.034 | 0.026 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.204 | 0.035 | 0.024 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.252 | 0.105 | 0.112 |
-| groupby q4: three means by `id4` | 0.391 | 0.145 | 0.125 |
-| groupby q5: three sums by `id6` | 0.376 | 0.126 | 0.126 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.637 | 0.151 | 0.158 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.727 | 0.068 | 0.065 |
-| groupby q8: the two largest `v3` by `id6` | 0.753 | 0.291 | 0.241 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.871 | 0.081 | 0.081 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.998 | 0.671 | 0.558 |
-| `:=` on a whole column, 100 times | 5.432 | 0.301 | 0.296 |
-| `:=` on 1% of rows, 100 times | 3.722 | 0.915 | 0.872 |
-| `:=` adding a column, 100 times | 5.865 | 1.074 | 0.770 |
-| join q1: small, on `id1` | 0.340 | 0.129 | 0.102 |
-| join q2: medium, on `id2` | 0.469 | 0.142 | 0.113 |
-| join q3: medium, left, on `id2` | 0.623 | 0.149 | 0.138 |
-| join q4: medium, on factor `id5` | 0.446 | 0.135 | 0.113 |
-| join q5: big, on `id3` | 3.592 | 0.889 | 0.832 |
-| keyed rolling join | 0.137 | 0.100 | 0.109 |
-| total | 27.01 | 5.54 | 4.86 |
-| peak memory (GB) | 6.9 | 8.0 | 7.6 |
+| groupby q1: `sum(v1)` by `id1` | 0.115 | 0.022 | 0.019 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.140 | 0.022 | 0.019 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.231 | 0.084 | 0.079 |
+| groupby q4: three means by `id4` | 0.178 | 0.122 | 0.092 |
+| groupby q5: three sums by `id6` | 0.283 | 0.100 | 0.105 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.868 | 0.102 | 0.126 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.561 | 0.037 | 0.043 |
+| groupby q8: the two largest `v3` by `id6` | 1.512 | 0.127 | 0.132 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.579 | 0.056 | 0.054 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.599 | 0.680 | 0.650 |
+| `:=` on a whole column, 100 times | 4.572 | 0.886 | 0.498 |
+| `:=` on 1% of rows, 100 times | 0.405 | 2.414 | 0.628 |
+| `:=` adding a column, 100 times | 4.876 | 0.812 | 0.782 |
+| join q1: small, on `id1` | 0.366 | 0.106 | 0.080 |
+| join q2: medium, on `id2` | 0.470 | 0.093 | 0.088 |
+| join q3: medium, left, on `id2` | 0.724 | 0.117 | 0.124 |
+| join q4: medium, on factor `id5` | 0.514 | 0.095 | 0.104 |
+| join q5: big, on `id3` | 3.171 | 0.353 | 0.364 |
+| keyed rolling join | 0.120 | 0.063 | 0.053 |
+| total | 21.28 | 6.29 | 4.04 |
+| peak memory (GB) | 7.7 | 8.4 | 4.7 |
 <!-- /bench-table:1e7 -->
 
-At 5e7 rows (2.6 GB of CSV) and at db-benchmark's 5 GB size (1e8 rows) the tables hold the ten
-group-by questions alone, because the `:=` loop that adds 100 columns needs more than this
-machine's 15 GB. The last row is each engine's peak resident memory over the whole run. At both
-sizes the peak is q10, whose answer has nearly one group per row, and ry stays below data.table.
-The R script reads only the answer's numeric columns back into R for its checksum (`DataFrame.schema`
-picks them), because reading q10's six key columns as R vectors would add about 1 GB at 5e7 rows.
-
-<!-- bench-table:5e7-groupby -->
-| Question | data.table | ry, from R | ry, from Rust |
-|---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.762 | 0.152 | 0.132 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.919 | 0.167 | 0.164 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.284 | 0.618 | 0.608 |
-| groupby q4: three means by `id4` | 1.683 | 0.609 | 0.577 |
-| groupby q5: three sums by `id6` | 1.356 | 0.636 | 0.680 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 4.222 | 0.673 | 0.863 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 5.120 | 0.470 | 0.480 |
-| groupby q8: the two largest `v3` by `id6` | 3.233 | 1.659 | 1.576 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.072 | 0.311 | 0.309 |
-| groupby q10: `sum(v3)`, count by all six ids | 10.177 | 4.036 | 4.100 |
-| total | 30.83 | 9.33 | 9.49 |
-| peak memory (GB) | 6.6 | 6.1 | 5.9 |
-<!-- /bench-table:5e7-groupby -->
+At db-benchmark's 5 GB size (1e8 rows) the table holds the ten group-by questions alone,
+because the `:=` loop that adds 100 columns needs more than this machine's 15 GB. The peak is
+q10, whose answer has nearly one group per row. The R script's checksum sums an answer's numeric
+columns in the engine (`DataFrame.select` of one `Expr.sum` per column), because reading a
+1e8-row column back as an R vector would copy it.
 
 <!-- bench-table:1e8-groupby -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 1.538 | 0.302 | 0.292 |
-| groupby q2: `sum(v1)` by `id1, id2` | 1.990 | 0.293 | 0.301 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 2.906 | 2.519 | 1.573 |
-| groupby q4: three means by `id4` | 3.602 | 1.214 | 1.168 |
-| groupby q5: three sums by `id6` | 2.741 | 1.836 | 1.539 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.343 | 1.533 | 1.617 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 11.334 | 1.188 | 1.163 |
-| groupby q8: the two largest `v3` by `id6` | 7.691 | 4.108 | 3.491 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 4.513 | 0.708 | 0.536 |
-| groupby q10: `sum(v3)`, count by all six ids | 23.561 | 8.722 | 9.131 |
-| total | 69.22 | 22.42 | 20.81 |
-| peak memory (GB) | 13.7 | 13.4 | 12.6 |
+| groupby q1: `sum(v1)` by `id1` | 1.399 | 0.179 | 0.164 |
+| groupby q2: `sum(v1)` by `id1, id2` | 1.674 | 0.199 | 0.212 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.954 | 1.238 | 1.197 |
+| groupby q4: three means by `id4` | 1.831 | 1.034 | 0.971 |
+| groupby q5: three sums by `id6` | 2.129 | 1.309 | 1.242 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 9.314 | 1.130 | 1.123 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 6.729 | 0.813 | 0.677 |
+| groupby q8: the two largest `v3` by `id6` | 17.289 | 2.510 | 2.185 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 3.155 | 0.582 | 0.521 |
+| groupby q10: `sum(v3)`, count by all six ids | 17.497 | 8.289 | 8.588 |
+| total | 62.97 | 17.28 | 16.88 |
+| peak memory (GB) | 12.5 | 8.5 | 8.5 |
 <!-- /bench-table:1e8-groupby -->
 
-The join questions are measured separately (`just bench-table 2e7 --joins-only`), because their
-inputs are larger than the group-by file. At 2e7 rows ry answers the five joins in 3.7 s from R
-(3.1 s from Rust) against data.table's 22.3 s, but peaks at 11.6 GB against 5.2 GB. Nearly all of
-that memory is reading the CSVs: `join_x` alone takes 4.9 GB, because every distinct `id4`..`id6`
-string becomes a factor level and a Polars Enum spends about 135 bytes per level (it stores each
-level twice, in a string array and in a hash map). At 1e8 rows neither engine fits the inputs in
-15 GB: data.table and ry both run out of memory reading `join_x` with factors, and ry reading the
-key columns as text loads `join_x` at an 11.7 GB peak but cannot then load `join_big`. Closing that
-gap needs a factor type outside Polars (integer codes plus one level array) and a text reader that
-does not hold the parsed chunks and the final columns at once; `backlog.md` tracks both.
+The join questions are measured separately at db-benchmark's 5 GB size
+(`just bench-table <dir> --rows 1e8 --joins-only`), because their inputs are twice the group-by
+file: `join_x` and `join_big` are 5.1 GB of CSV each, and `join_x` has 63.2 million distinct `id6`
+strings. ry answers all five joins at a peak of 11.6 GB from R and 12.0 GB from Rust. data.table
+runs out of memory before its first answer: the kernel stops it at 14.3 GB resident.
+
+<!-- bench-table:1e8-joins -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| join q1: small, on `id1` | out of memory | 1.090 | 0.994 |
+| join q2: medium, on `id2` | out of memory | 1.177 | 1.315 |
+| join q3: medium, left, on `id2` | out of memory | 1.449 | 1.457 |
+| join q4: medium, on factor `id5` | out of memory | 1.191 | 1.197 |
+| join q5: big, on `id3` | out of memory | 5.863 | 6.165 |
+| total | out of memory | 10.77 | 11.13 |
+| peak memory (GB) | over 14.3 | 11.6 | 12.0 |
+<!-- /bench-table:1e8-joins -->
+
+Three choices keep the joins inside the machine:
+
+- **A factor is a code column plus one level table**
+  (`crates/table/src/factor.rs`). The table stores its labels sorted by bytes and front-coded in
+  blocks of 16: each label records how many bytes it shares with the label before it, then the
+  rest. Looking a label up is a binary search over the blocks' first labels and a scan of one
+  block, so there is no hash index. In `tests/test_memory.rs`, a table shaped like `join_x` holds
+  32 bytes per row, its seven columns' values and level tables together.
+- **A join buckets one side's rows by a dense code of the key**, coded over that side's value
+  range alone (`crates/table/src/join.rs`). The bucketed side is the right table of
+  `DataFrame.join`, unless the left table has at most 65,536 rows and no more than the right. The
+  bucket index is two flat arrays, the probe counts its matches before it writes them, and the
+  answer's columns are gathered one side at a time.
+- **A block of a megabyte or more has a mapping of its own**, which returns to the kernel when
+  the block is freed (`heap::large::Mapped`), so the reader's and a join's scratch memory does
+  not stay resident beside the next answer. While a table operation runs, a mapping of 2 MiB or
+  more asks for huge pages, because a query maps its buffers afresh and would otherwise take a
+  page fault per 4 KiB. Outside a table operation a block gets small pages, so a session that
+  uses no table commits only the memory it touches.
+
+`tests/test_memory.rs` in `crates/table` pins the bytes per row that the reader, each join
+question and the grouped sums allocate at their peak and hold afterwards, on four threads and
+with a margin of 1 to 4 bytes per row. A buffer that scales with the rows, outlives its use and
+is larger than that margin fails the test. The test counts allocated bytes, not resident memory,
+and does not check the answers, which `tests/test_table.rs` does.
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. The Rust driver runs the same lazy plans on the
-same allocator as libR (mimalloc, keeping freed memory), so it measures the engine without the R
-calls around it.
+same allocator as libR (mimalloc for small blocks, a mapping of its own for each large one), so it
+measures the engine without the R calls around it.
 
 `tools/bench/internal/table/ops.R` times data.table's helpers on the db-benchmark group-by file (10 million
 rows, 4 threads), and the `ops_benchmark` bench in `crates/table` times the engine's kernels for the

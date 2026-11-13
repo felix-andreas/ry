@@ -27,7 +27,10 @@ use {
         },
         write_console,
     },
-    heap::object::{NA_INTEGER, Sexp, SexpType},
+    heap::{
+        large::huge_pages,
+        object::{NA_INTEGER, Sexp, SexpType},
+    },
     rustc_hash::FxHashSet,
     std::{borrow::Cow, cell::Cell, ffi::c_void},
     table::{
@@ -44,31 +47,45 @@ use {
     },
 };
 
+/// A builtin that works on tables, wrapped so the allocator asks for huge pages while it runs
+/// (`heap::large::huge_pages` has the reason). The wrapper is a closure without captures, which
+/// is still a plain function pointer in the builtin table.
+macro_rules! table_work {
+    ($function:path) => {
+        |call| {
+            let _pages = heap::large::huge_pages();
+            // SAFETY: the builtin's caller upholds the contract of the function it registered.
+            unsafe { $function(call) }
+        }
+    };
+}
+pub(crate) use table_work;
+
 pub const BUILTINS: &[BuiltinDef] = &[
-    special(".frame_new", -1, do_frame_new).keep_visibility(),
-    builtin(".frame_from_list", 1, do_from_list),
-    builtin(".frame_to_list", 1, do_to_list),
-    builtin(".frame_read_csv", 2, do_read_csv),
-    builtin(".frame_read_parquet", 1, do_read_parquet),
-    builtin(".frame_write_csv", 2, do_write_csv).invisible(),
-    builtin(".frame_write_parquet", 2, do_write_parquet).invisible(),
-    builtin(".frame_schema", 1, do_frame_schema),
-    builtin(".frame_key", 1, do_frame_key),
-    builtin(".frame_copy", 1, do_frame_copy),
-    builtin(".frame_setkey", 3, do_frame_setkey).invisible(),
-    builtin("print.DataFrame", -1, do_print).invisible(),
-    builtin("$.DataFrame", 2, do_dollar),
-    builtin("[[.DataFrame", -1, do_column),
-    builtin("[.DataFrame", -1, do_bracket_values),
-    builtin("$<-.DataFrame", 3, do_set_column),
-    builtin("[[<-.DataFrame", 3, do_set_column),
-    builtin("names.DataFrame", 1, do_names),
-    builtin("dim.DataFrame", 1, do_dim),
-    builtin("dimnames.DataFrame", 1, do_dimnames),
-    builtin("length.DataFrame", 1, do_length),
-    builtin("as.list.DataFrame", -1, do_to_list),
-    builtin("head.DataFrame", -1, do_head),
-    builtin("tail.DataFrame", -1, do_tail),
+    special(".frame_new", -1, table_work!(do_frame_new)).keep_visibility(),
+    builtin(".frame_from_list", 1, table_work!(do_from_list)),
+    builtin(".frame_to_list", 1, table_work!(do_to_list)),
+    builtin(".frame_read_csv", 2, table_work!(do_read_csv)),
+    builtin(".frame_read_parquet", 1, table_work!(do_read_parquet)),
+    builtin(".frame_write_csv", 2, table_work!(do_write_csv)).invisible(),
+    builtin(".frame_write_parquet", 2, table_work!(do_write_parquet)).invisible(),
+    builtin(".frame_schema", 1, table_work!(do_frame_schema)),
+    builtin(".frame_key", 1, table_work!(do_frame_key)),
+    builtin(".frame_copy", 1, table_work!(do_frame_copy)),
+    builtin(".frame_setkey", 3, table_work!(do_frame_setkey)).invisible(),
+    builtin("print.DataFrame", -1, table_work!(do_print)).invisible(),
+    builtin("$.DataFrame", 2, table_work!(do_dollar)),
+    builtin("[[.DataFrame", -1, table_work!(do_column)),
+    builtin("[.DataFrame", -1, table_work!(do_bracket_values)),
+    builtin("$<-.DataFrame", 3, table_work!(do_set_column)),
+    builtin("[[<-.DataFrame", 3, table_work!(do_set_column)),
+    builtin("names.DataFrame", 1, table_work!(do_names)),
+    builtin("dim.DataFrame", 1, table_work!(do_dim)),
+    builtin("dimnames.DataFrame", 1, table_work!(do_dimnames)),
+    builtin("length.DataFrame", 1, table_work!(do_length)),
+    builtin("as.list.DataFrame", -1, table_work!(do_to_list)),
+    builtin("head.DataFrame", -1, table_work!(do_head)),
+    builtin("tail.DataFrame", -1, table_work!(do_tail)),
 ];
 
 /// A registered namespace in the shape `loadNamespace` builds, so `ry::DataFrame`, `std::List.map`
@@ -1290,6 +1307,7 @@ unsafe fn tag_name(tag: Sexp) -> Option<String> {
 
 /// Runs a query in its own handle scope, signals an error it raised, and sets the visibility.
 pub unsafe fn run(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
+    let _pages = huge_pages();
     let result = scope(|| query(call, subject, env));
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),

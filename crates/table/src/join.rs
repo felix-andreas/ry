@@ -14,25 +14,29 @@
 //! A rolling join first checks that `x` is sorted within each group of the leading join columns,
 //! with each rolling value at most once, and then binary searches each row of `i` in its group.
 //!
-//! Join columns of other types (doubles, strings, a mix), codes spanning more than
-//! [`MAX_CODES`] values, rolling to the nearest value, and rolling over `NA`s give `None`, and
-//! the join runs as a Polars plan.
+//! Join columns of other types (doubles, strings, a mix), keys spread over many more codes than
+//! there are rows ([`indexable`]), rolling to the nearest value, and rolling over `NA`s give
+//! `None`, and the join runs as a Polars plan.
 
 use {
     crate::{
         Error, Result, Table, factor,
-        kernel::{CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column, pack_map},
+        kernel::{
+            CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
+            pack_map,
+        },
         query::{Comparison, Join, Mult, On, Roll, Side, join_layout},
     },
     polars::prelude::{Column, DataFrame, DataType, GroupsType, PlSmallStr},
     polars_arrow::bitmap::Bitmap,
     polars_core::runtime::THREAD_POOL,
     rayon::prelude::*,
-    std::{borrow::Cow, ops::Range, sync::Arc},
+    std::{ops::Range, sync::Arc},
 };
 
-/// The widest code range the kernels index directly: one bucket per code on the built side.
-const MAX_CODES: u64 = 1 << 27;
+/// Up to this many codes, keys may be spread eight times wider than the rows: the bucket bounds
+/// then take at most half a gigabyte.
+const SPARSE_CODES: u64 = 1 << 27;
 /// The most rows of `i` the kernels index while scanning `x`. Each thread keeps a count per row of
 /// `i`, so this bounds that memory.
 const MAX_INDEXED_I: usize = 1 << 16;
@@ -54,22 +58,21 @@ pub(crate) fn join(
     }
     if on.iter().any(|condition| condition.op != Comparison::Equal) {
         let matches = non_equi(x_frame, i_frame, on, types, join.drop_unmatched, join.mult)?;
-        return assemble(x_frame, i_frame, on, &matches).map(Some);
+        return assemble(x_frame, i_frame, on, matches).map(Some);
     }
     let matches = match join.roll {
         Roll::None => {
-            let Some(keys) = key_codes(x_frame, i_frame, on)? else {
+            let built = if i_height <= MAX_INDEXED_I && i_height <= x_height {
+                Side::I
+            } else {
+                Side::X
+            };
+            let Some(keys) = key_codes(x_frame, i_frame, on, built)? else {
                 return Ok(None);
             };
-            // Buckets cost memory per possible code, so sparse keys over a wide range are left
-            // to the plan's hash join.
-            if u64::from(keys.radix) > 8 * (x_height + i_height) as u64 + (1 << 12) {
-                return Ok(None);
-            }
-            if i_height <= MAX_INDEXED_I && i_height <= x_height {
-                scan_x(&keys, join.drop_unmatched)
-            } else {
-                scan_i(&keys, join.drop_unmatched)
+            match built {
+                Side::I => scan_x(&keys, join.drop_unmatched),
+                Side::X => scan_i(&keys, join.drop_unmatched),
             }
         }
         Roll::Backward(limit) => {
@@ -95,7 +98,7 @@ pub(crate) fn join(
         Mult::All => matches,
         mult => matches.keep_one(mult == Mult::Last),
     };
-    assemble(x_frame, i_frame, on, &matches).map(Some)
+    assemble(x_frame, i_frame, on, matches).map(Some)
 }
 
 /// The output rows of a join: the row of `i` and the row of `x` ([`NO_ROW`] when unmatched) each
@@ -136,29 +139,45 @@ impl Matches {
     }
 }
 
-/// Both sides' join columns coded into one integer per row, in `0..radix`. Equal keys get equal
-/// codes, `NA` included.
+/// Both sides' join columns coded into one integer per row, in `0..radix`. The codes cover the
+/// values of the built side, the one whose rows the join buckets: two rows on different sides
+/// have equal codes exactly when their keys are equal, `NA` included, and a row of the other side
+/// whose key the built side lacks has a code no built row has.
 struct Keys {
     x: Vec<u32>,
     i: Vec<u32>,
     radix: u32,
 }
 
-fn key_codes(x: &DataFrame, i: &DataFrame, on: &[On]) -> Result<Option<Keys>> {
+/// Whether keys over `radix` codes are dense enough to bucket. The built side gets one bucket
+/// bound per code, four bytes each, so keys spread over a range much wider than the rows would
+/// spend more memory and cache misses on empty buckets than a hash join spends on its table.
+/// Up to [`SPARSE_CODES`] the range may be eight times the rows, and beyond it twice.
+fn indexable(radix: u64, x_height: usize, i_height: usize) -> bool {
+    let rows = (x_height + i_height) as u64;
+    radix <= u64::from(u32::MAX)
+        && radix <= 8 * rows + (1 << 12)
+        && (radix <= SPARSE_CODES || radix <= 2 * rows)
+}
+
+/// The join columns of `on` coded as [`Keys`] over the values of the `built` side, or `None` for
+/// column types the kernels do not code and for keys that are not [`indexable`].
+fn key_codes(x: &DataFrame, i: &DataFrame, on: &[On], built: Side) -> Result<Option<Keys>> {
+    let (x_height, i_height) = (x.height(), i.height());
     let mut keys: Option<Keys> = None;
     for condition in on {
         // A missing column is left to the plan, which reports it.
         let (Ok(x_column), Ok(i_column)) = (x.column(&condition.x), i.column(&condition.i)) else {
             return Ok(None);
         };
-        let Some(digit) = column_codes(x_column, i_column) else {
+        let Some(digit) = column_codes(x_column, i_column, built) else {
             return Ok(None);
         };
         keys = Some(match keys {
             None => digit,
             Some(keys) => {
                 let radix = u64::from(keys.radix) * u64::from(digit.radix);
-                if radix > MAX_CODES {
+                if !indexable(radix, x_height, i_height) {
                     return Ok(None);
                 }
                 let combine = |high: &[u32], low: &[u32]| {
@@ -179,13 +198,13 @@ fn key_codes(x: &DataFrame, i: &DataFrame, on: &[On]) -> Result<Option<Keys>> {
             }
         });
     }
-    Ok(keys)
+    Ok(keys.filter(|keys| indexable(u64::from(keys.radix), x_height, i_height)))
 }
 
 /// One pair of join columns coded as [`Keys`], or `None` for a pair the kernels do not code.
-fn column_codes(x: &Column, i: &Column) -> Option<Keys> {
+fn column_codes(x: &Column, i: &Column, built: Side) -> Option<Keys> {
     match (x.dtype(), i.dtype()) {
-        (DataType::Int32, DataType::Int32) => integer_codes(x, i),
+        (DataType::Int32, DataType::Int32) => integer_codes(x, i, built),
         (DataType::Boolean, DataType::Boolean) => logical_codes(x, i),
         (x_dtype, i_dtype) if factor::is_factor(x_dtype) && factor::is_factor(i_dtype) => {
             factor_codes(x, i)
@@ -194,7 +213,10 @@ fn column_codes(x: &Column, i: &Column) -> Option<Keys> {
     }
 }
 
-fn integer_codes(x: &Column, i: &Column) -> Option<Keys> {
+/// An integer `v` of the built side's range `low..=high` is coded as `v - low`. The other side's
+/// range does not widen the codes: at a hundred million rows, keys that only partly overlap would
+/// otherwise double the bucket bounds for values no built row has.
+fn integer_codes(x: &Column, i: &Column, built: Side) -> Option<Keys> {
     let (
         Vector::Integer {
             values: x_values,
@@ -208,35 +230,20 @@ fn integer_codes(x: &Column, i: &Column) -> Option<Keys> {
     else {
         return None;
     };
-    let range = |values: &[i32], validity: &Option<Bitmap>| {
-        let valid = |row: usize| {
-            validity
-                .as_ref()
-                .is_none_or(|validity| validity.get_bit(row))
-        };
-        let mut low = i32::MAX;
-        let mut high = i32::MIN;
-        for (row, value) in values.iter().enumerate() {
-            if valid(row) {
-                low = low.min(*value);
-                high = high.max(*value);
-            }
-        }
-        (low, high)
+    let (low, high) = match built {
+        Side::X => integer_range(&x_values, x_validity.as_ref()),
+        Side::I => integer_range(&i_values, i_validity.as_ref()),
     };
-    let (x_low, x_high) = range(&x_values, &x_validity);
-    let (i_low, i_high) = range(&i_values, &i_validity);
-    let (low, high) = (x_low.min(i_low), x_high.max(i_high));
-    // With no valid value on either side, every key is `NA`.
+    // With no valid value on the built side, only `NA` can match.
     let span = if low > high {
         0
     } else {
         u64::try_from(i64::from(high) - i64::from(low) + 1).ok()?
     };
-    if span + 1 > MAX_CODES {
+    if !indexable(span + 2, x_values.len(), i_values.len()) {
         return None;
     }
-    let na = span as u32;
+    let (na, absent) = (span as u32, span as u32 + 1);
     let codes = |values: &[i32], validity: &Option<Bitmap>| {
         fill(values.len(), |start, out| {
             let end = start + out.len();
@@ -244,10 +251,14 @@ fn integer_codes(x: &Column, i: &Column) -> Option<Keys> {
                 let valid = validity
                     .as_ref()
                     .is_none_or(|validity| validity.get_bit(start + offset));
-                slot.write(if valid {
-                    (i64::from(*value) - i64::from(low)) as u32
-                } else {
+                // A value below `low` wraps to a distance above every span.
+                let distance = (i64::from(*value) - i64::from(low)) as u64;
+                slot.write(if !valid {
                     na
+                } else if distance < span {
+                    distance as u32
+                } else {
+                    absent
                 });
             }
         })
@@ -255,7 +266,45 @@ fn integer_codes(x: &Column, i: &Column) -> Option<Keys> {
     Some(Keys {
         x: codes(&x_values, &x_validity),
         i: codes(&i_values, &i_validity),
-        radix: na + 1,
+        radix: absent + 1,
+    })
+}
+
+/// The least and the greatest valid value, or `(i32::MAX, i32::MIN)` when there is none.
+fn integer_range(values: &[i32], validity: Option<&Bitmap>) -> (i32, i32) {
+    let range = |start: usize, values: &[i32]| {
+        let mut low = i32::MAX;
+        let mut high = i32::MIN;
+        match validity {
+            None => {
+                for value in values {
+                    low = low.min(*value);
+                    high = high.max(*value);
+                }
+            }
+            Some(validity) => {
+                for (offset, value) in values.iter().enumerate() {
+                    if validity.get_bit(start + offset) {
+                        low = low.min(*value);
+                        high = high.max(*value);
+                    }
+                }
+            }
+        }
+        (low, high)
+    };
+    if values.len() < PARALLEL_ROWS {
+        return range(0, values);
+    }
+    THREAD_POOL.install(|| {
+        values
+            .par_chunks(CHUNK_ROWS)
+            .enumerate()
+            .map(|(index, chunk)| range(index * CHUNK_ROWS, chunk))
+            .reduce(
+                || (i32::MAX, i32::MIN),
+                |left, right| (left.0.min(right.0), left.1.max(right.1)),
+            )
     })
 }
 
@@ -293,10 +342,7 @@ fn factor_codes(x: &Column, i: &Column) -> Option<Keys> {
     let translation: Vec<u32> = if Arc::ptr_eq(x_levels, i_levels) {
         (0..levels).collect()
     } else {
-        i_levels
-            .iter()
-            .map(|level| x_levels.position(level).unwrap_or(absent))
-            .collect()
+        i_levels.translation(x_levels, absent)
     };
     let identity: Vec<u32> = (0..levels).collect();
     let codes = |codes: Codes, translation: &[u32]| {
@@ -337,34 +383,72 @@ fn factor_codes(x: &Column, i: &Column) -> Option<Keys> {
 }
 
 /// Rows grouped by code, each group in row order: the rows with code `c` are
-/// `rows[starts[c]..starts[c + 1]]`.
+/// `rows[bounds[c]..bounds[c + 1]]`.
 struct Buckets {
-    starts: Vec<u32>,
+    bounds: Vec<u32>,
     rows: Vec<u32>,
 }
 
 impl Buckets {
+    /// Groups the rows by code. Each task owns an equal share of the code range and scans all of
+    /// `codes` for the codes it owns, so the tasks count and place rows without sharing a
+    /// counter, and every bucket fills in row order. Reading the codes once per task is
+    /// sequential and cheap next to the writes, which land all over the buckets and are what the
+    /// tasks divide between them.
     fn of(codes: &[u32], radix: u32) -> Buckets {
-        let mut starts = vec![0u32; radix as usize + 1];
-        for code in codes {
-            starts[*code as usize + 1] += 1;
+        let radix = radix as usize;
+        let tasks = if codes.len() < PARALLEL_ROWS {
+            1
+        } else {
+            THREAD_POOL.current_num_threads().max(1)
+        };
+        let share = radix.div_ceil(tasks).max(1);
+        // Code `c` is counted in `bounds[c + 2]`, so the running sum leaves the start of bucket
+        // `c` in `bounds[c + 1]`. Placing a row advances that entry, which ends as the bucket's
+        // end, and the entry before it has ended as its start. The bounds are therefore counted,
+        // advanced and read in one array, with no second copy to advance.
+        let mut bounds = vec![0u32; radix + 2];
+        THREAD_POOL.install(|| {
+            bounds[2..]
+                .par_chunks_mut(share)
+                .enumerate()
+                .for_each(|(task, counts)| {
+                    let low = (task * share) as u32;
+                    for code in codes {
+                        // A code below `low` wraps past the end of the share.
+                        if let Some(count) = counts.get_mut(code.wrapping_sub(low) as usize) {
+                            *count += 1;
+                        }
+                    }
+                });
+        });
+        for code in 0..radix {
+            bounds[code + 2] += bounds[code + 1];
         }
-        for index in 1..starts.len() {
-            starts[index] += starts[index - 1];
-        }
-        let mut next = starts.clone();
         let mut rows = vec![0u32; codes.len()];
-        for (row, code) in codes.iter().enumerate() {
-            let slot = &mut next[*code as usize];
-            rows[*slot as usize] = row as u32;
-            *slot += 1;
-        }
-        Buckets { starts, rows }
+        let out = Shared(rows.as_mut_ptr());
+        THREAD_POOL.install(|| {
+            bounds[1..=radix]
+                .par_chunks_mut(share)
+                .enumerate()
+                .for_each(|(task, next)| {
+                    let low = (task * share) as u32;
+                    for (row, code) in codes.iter().enumerate() {
+                        if let Some(slot) = next.get_mut(code.wrapping_sub(low) as usize) {
+                            // SAFETY: the slot counts up from its bucket's start to its end,
+                            // which lie inside `rows`, and only this task owns the bucket.
+                            unsafe { out.write(*slot as usize, row as u32) };
+                            *slot += 1;
+                        }
+                    }
+                });
+        });
+        Buckets { bounds, rows }
     }
 
     fn get(&self, code: u32) -> &[u32] {
         let code = code as usize;
-        &self.rows[self.starts[code] as usize..self.starts[code + 1] as usize]
+        &self.rows[self.bounds[code] as usize..self.bounds[code + 1] as usize]
     }
 }
 
@@ -448,8 +532,9 @@ fn scan_x(keys: &Keys, drop_unmatched: bool) -> Matches {
 }
 
 /// The join for a large `i`: buckets `x`'s rows by code, and every row of `i` copies its bucket.
+/// Each chunk of `i` first counts the output rows it gives, so the chunks then write disjoint
+/// runs of the output and no row of `i` needs a start position of its own.
 fn scan_i(keys: &Keys, drop_unmatched: bool) -> Matches {
-    let i_height = keys.i.len();
     let buckets = Buckets::of(&keys.x, keys.radix);
     let width = |code: u32| {
         let matched = buckets.get(code).len();
@@ -459,35 +544,54 @@ fn scan_i(keys: &Keys, drop_unmatched: bool) -> Matches {
             matched
         }
     };
-    let mut starts = Vec::with_capacity(i_height + 1);
+    let mut starts: Vec<usize> = THREAD_POOL.install(|| {
+        keys.i
+            .par_chunks(CHUNK_ROWS)
+            .map(|codes| codes.iter().map(|code| width(*code)).sum())
+            .collect()
+    });
     let mut total = 0usize;
-    for code in &keys.i {
-        starts.push(total);
-        total += width(*code);
+    for start in &mut starts {
+        let count = *start;
+        *start = total;
+        total += count;
     }
-    starts.push(total);
-    let mut i_rows = vec![0u32; total];
-    let mut x_rows = vec![NO_ROW; total];
+    let mut i_rows: Vec<u32> = Vec::with_capacity(total);
+    let mut x_rows: Vec<u32> = Vec::with_capacity(total);
     let (i_out, x_out) = (Shared(i_rows.as_mut_ptr()), Shared(x_rows.as_mut_ptr()));
-    let starts = &starts;
     THREAD_POOL.install(|| {
-        (0..i_height)
-            .into_par_iter()
-            .with_min_len(PARALLEL_ROWS)
-            .for_each(|i_row| {
-                let start = starts[i_row];
-                let matched = buckets.get(keys.i[i_row]);
-                for offset in 0..starts[i_row + 1] - start {
-                    // SAFETY: row `i_row` owns the positions `starts[i_row]..starts[i_row + 1]`.
+        keys.i
+            .par_chunks(CHUNK_ROWS)
+            .zip(starts.par_iter())
+            .enumerate()
+            .for_each(|(chunk, (codes, start))| {
+                let mut position = *start;
+                let mut write = |i_row: u32, x_row: u32| {
+                    // SAFETY: the chunk writes the positions from its start on, as many as it
+                    // counted, which end where the next chunk's start.
                     unsafe {
-                        i_out.write(start + offset, i_row as u32);
-                        if let Some(x_row) = matched.get(offset) {
-                            x_out.write(start + offset, *x_row);
-                        }
+                        i_out.write(position, i_row);
+                        x_out.write(position, x_row);
+                    }
+                    position += 1;
+                };
+                for (offset, code) in codes.iter().enumerate() {
+                    let i_row = (chunk * CHUNK_ROWS + offset) as u32;
+                    let matched = buckets.get(*code);
+                    if matched.is_empty() && !drop_unmatched {
+                        write(i_row, NO_ROW);
+                    }
+                    for x_row in matched {
+                        write(i_row, *x_row);
                     }
                 }
             });
     });
+    // SAFETY: the chunks' counts sum to `total`, and each chunk wrote every position it counted.
+    unsafe {
+        i_rows.set_len(total);
+        x_rows.set_len(total);
+    }
     Matches { i_rows, x_rows }
 }
 
@@ -520,7 +624,7 @@ fn rolling(
             radix: 1,
         }
     } else {
-        match key_codes(x, i, groups)? {
+        match key_codes(x, i, groups, Side::X)? {
             Some(keys) => keys,
             None => return Ok(None),
         }
@@ -650,40 +754,55 @@ where
 }
 
 /// The joined frame in data.table's layout, as [`join_layout`] gives it.
-fn assemble(x: &DataFrame, i: &DataFrame, on: &[On], matches: &Matches) -> Result<DataFrame> {
-    let height = matches.i_rows.len();
-    let unmatched = pack_map(height, &matches.x_rows, |row| row != NO_ROW);
-    let (x_rows, keep) = if unmatched.unset_bits() == 0 {
-        (Cow::Borrowed(&matches.x_rows), None)
-    } else {
-        let rows = fill(height, |start, out| {
-            let end = start + out.len();
-            for (slot, row) in out.iter_mut().zip(&matches.x_rows[start..end]) {
-                slot.write(if *row == NO_ROW { 0 } else { *row });
-            }
+fn assemble(x: &DataFrame, i: &DataFrame, on: &[On], matches: Matches) -> Result<DataFrame> {
+    let Matches { i_rows, mut x_rows } = matches;
+    let height = i_rows.len();
+    let matched = pack_map(height, &x_rows, |row| row != NO_ROW);
+    let keep = (matched.unset_bits() > 0).then_some(matched);
+    if keep.is_some() {
+        // An unmatched row gathers row 0, and its unset bit in `keep` then makes the value `NA`.
+        THREAD_POOL.install(|| {
+            x_rows
+                .par_iter_mut()
+                .with_min_len(PARALLEL_ROWS)
+                .for_each(|row| {
+                    if *row == NO_ROW {
+                        *row = 0;
+                    }
+                });
         });
-        (Cow::Owned(rows), Some(unmatched))
-    };
+    }
     let layout = join_layout(&x.get_column_names(), &i.get_column_names(), on);
-    // Each gather is parallel over rows, so the columns go one at a time.
-    let columns = layout
-        .into_iter()
-        .map(|column| match column.side {
-            Side::I => gather_column(
-                i.column(&column.source)?,
-                &matches.i_rows,
-                None,
-                column.name,
-            ),
-            Side::X => gather_column(
+    // Each gather is parallel over rows, so the columns go one at a time. The columns of `x` go
+    // first, so that its row numbers are freed before the columns of `i` are built: the output
+    // of a join of two large tables is the most memory the join holds.
+    let mut columns: Vec<Option<Column>> = Vec::new();
+    columns.resize_with(layout.len(), || None);
+    for (slot, column) in columns.iter_mut().zip(&layout) {
+        if column.side == Side::X {
+            *slot = Some(gather_column(
                 x.column(&column.source)?,
                 &x_rows,
                 keep.as_ref(),
-                column.name,
-            ),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(DataFrame::new(height, columns)?)
+                column.name.clone(),
+            )?);
+        }
+    }
+    drop(x_rows);
+    for (slot, column) in columns.iter_mut().zip(&layout) {
+        if column.side == Side::I {
+            *slot = Some(gather_column(
+                i.column(&column.source)?,
+                &i_rows,
+                None,
+                column.name.clone(),
+            )?);
+        }
+    }
+    Ok(DataFrame::new(
+        height,
+        columns.into_iter().flatten().collect(),
+    )?)
 }
 
 /// A join with an ordering condition, run for every such join. The equality conditions split `x`
@@ -855,9 +974,7 @@ fn equal_groups(x: &DataFrame, i: &DataFrame, equal: &[(On, Option<DataType>)]) 
         .iter()
         .map(|(condition, _)| condition.clone())
         .collect();
-    if let Some(keys) = key_codes(x, i, &conditions)?
-        && u64::from(keys.radix) <= 8 * (x_height + i_height) as u64 + (1 << 12)
-    {
+    if let Some(keys) = key_codes(x, i, &conditions, Side::X)? {
         return Ok(Groups {
             x: keys.x,
             i: keys.i,

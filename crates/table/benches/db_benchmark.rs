@@ -3,11 +3,18 @@
 //! checksum`), so the two outputs line up row by row. Loading is not timed, and every question
 //! runs twice.
 //!
-//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only | --joins-only]`,
-//! where the directory holds the CSV files `tools/bench/internal/table/datagen.R` writes. `--groupby-only`
-//! runs only the ten group-by questions, and `--joins-only` only the five join questions.
+//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only | --joins-only]
+//! [--polars-streaming]`, where the directory holds the CSV files
+//! `tools/bench/internal/table/datagen.R` writes. `--groupby-only` runs only the ten group-by
+//! questions, and `--joins-only` only the five join questions.
+//!
+//! `--polars-streaming` answers the group-by and join questions with plain Polars plans on
+//! Polars' streaming engine instead of ry's kernels, over the same tables in memory, so the two
+//! can be compared question by question. It needs `--features polars-streaming`.
 
 mod allocator;
+#[cfg(feature = "polars-streaming")]
+mod streaming;
 
 use {
     std::{
@@ -32,13 +39,20 @@ use {
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> ExitCode {
+    // Every call below is table work, which `ry run` does inside this guard too.
+    let _pages = heap::large::huge_pages();
     let Some(dir) = env::args()
         .skip(1)
         .find(|argument| !argument.starts_with("--"))
     else {
-        eprintln!("usage: db_benchmark <data-dir> [--groupby-only | --joins-only]");
+        eprintln!(
+            "usage: db_benchmark <data-dir> [--groupby-only | --joins-only] [--polars-streaming]"
+        );
         return ExitCode::FAILURE;
     };
+    let polars_streaming = env::args()
+        .skip(1)
+        .any(|argument| argument == "--polars-streaming");
     let only = env::args()
         .skip(1)
         .find_map(|argument| match argument.as_str() {
@@ -46,7 +60,15 @@ fn main() -> ExitCode {
             "--joins-only" => Some(Only::Joins),
             _ => None,
         });
-    match run(&PathBuf::from(dir), only) {
+    let dir = PathBuf::from(dir);
+    let result = match polars_streaming {
+        #[cfg(feature = "polars-streaming")]
+        true => streaming::run(&dir, only),
+        #[cfg(not(feature = "polars-streaming"))]
+        true => Err("`--polars-streaming` needs a build with `--features polars-streaming`".into()),
+        false => run(&dir, only),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("db_benchmark: {error}");
@@ -266,12 +288,20 @@ fn answer(output: Output) -> Result<Answer> {
             let frame = table.frame();
             let mut checksum = 0.0;
             for (name, kind) in &schema.columns {
-                if matches!(kind, ColumnType::Integer | ColumnType::Double) {
-                    let values = frame
-                        .column(name)?
-                        .as_materialized_series()
-                        .cast(&DataType::Float64)?;
-                    checksum += sum_without_na(values.f64()?);
+                // Each value widens as it is added. Casting a whole integer column of 1e8 rows
+                // first would hold 0.8 GB beside the answer.
+                let series = frame.column(name)?.as_materialized_series();
+                match kind {
+                    ColumnType::Integer => {
+                        checksum += series
+                            .i32()?
+                            .downcast_iter()
+                            .flat_map(|array| array.iter().flatten())
+                            .map(|&value| f64::from(value))
+                            .sum::<f64>();
+                    }
+                    ColumnType::Double => checksum += sum_without_na(series.f64()?),
+                    _ => {}
                 }
             }
             Ok(Answer {

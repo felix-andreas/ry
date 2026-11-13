@@ -1766,13 +1766,18 @@ fn fuzz_mapped_vectors_keep_their_elements() {
 }
 
 /// Blocks through the mapping allocator, grown and shrunk across the mapping threshold in both
-/// directions, keep their bytes, and zeroed ones read as zero.
+/// directions, keep their bytes, and zeroed ones read as zero, inside a huge-page guard and
+/// outside one. A block is advised for huge pages only when it is mapped or grown inside a guard.
+///
+/// The guard counter is one for the process, so this is the only test of this binary that takes
+/// a guard: another one running beside it would turn the advice on behind its back.
 #[test]
 fn fuzz_mapped_allocator_keeps_contents() {
     use std::alloc::{GlobalAlloc, Layout, System};
     let allocator = heap::large::Mapped(System);
     for_each_seed(8, |seed| {
         let mut rng = SplitMix64(seed);
+        let _pages = rng.chance(1, 2).then(heap::large::huge_pages);
         let mut blocks: Vec<(*mut u8, Layout, u8)> = Vec::new();
         let size = |rng: &mut SplitMix64| match rng.below(3) {
             0 => 1 + rng.below(4096),
@@ -1834,6 +1839,76 @@ fn fuzz_mapped_allocator_keeps_contents() {
             }
         }
     });
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let layout = Layout::from_size_align(8 << 20, 16).expect("layout");
+        let outside = allocator.alloc(layout);
+        assert!(!outside.is_null());
+        assert!(
+            !advised_huge(outside),
+            "a block mapped outside a guard asked for huge pages"
+        );
+        let pages = heap::large::huge_pages();
+        let nested = heap::large::huge_pages();
+        drop(nested);
+        let inside = allocator.alloc(layout);
+        assert!(!inside.is_null());
+        // A kernel built without transparent huge pages refuses the advice.
+        let supported = std::path::Path::new("/sys/kernel/mm/transparent_hugepage").exists();
+        assert_eq!(
+            advised_huge(inside),
+            supported,
+            "a block mapped inside a guard, after a nested guard ended"
+        );
+        let grown = allocator.realloc(outside, layout, 16 << 20);
+        assert!(!grown.is_null());
+        assert_eq!(
+            advised_huge(grown),
+            supported,
+            "a block grown inside a guard"
+        );
+        drop(pages);
+        let after = allocator.alloc(layout);
+        assert!(!after.is_null());
+        assert!(
+            !advised_huge(after),
+            "a block mapped after the last guard ended asked for huge pages"
+        );
+        allocator.dealloc(after, layout);
+        allocator.dealloc(inside, layout);
+        allocator.dealloc(
+            grown,
+            Layout::from_size_align(16 << 20, 16).expect("layout"),
+        );
+    }
+}
+
+/// Whether the mapping that holds `address` carries the kernel's huge-page advice flag.
+#[cfg(target_os = "linux")]
+fn advised_huge(address: *mut u8) -> bool {
+    let maps = std::fs::read_to_string("/proc/self/smaps").expect("smaps");
+    let address = address as usize;
+    let mut inside = false;
+    for line in maps.lines() {
+        if let Some(flags) = line.strip_prefix("VmFlags:") {
+            if inside {
+                return flags.split_whitespace().any(|flag| flag == "hg");
+            }
+        } else if let Some((start, end)) = line
+            .split_whitespace()
+            .next()
+            .and_then(|range| range.split_once('-'))
+            .and_then(|(start, end)| {
+                Some((
+                    usize::from_str_radix(start, 16).ok()?,
+                    usize::from_str_radix(end, 16).ok()?,
+                ))
+            })
+        {
+            inside = (start..end).contains(&address);
+        }
+    }
+    panic!("no mapping holds {address:#x}");
 }
 
 #[test]
