@@ -78,7 +78,7 @@ pub struct RCall {
     /// change a variable a lazy argument reads before R would force it.
     pub diverges: bool,
     /// Whether the call changes nothing a second run of it would see: a table function
-    /// ([`interp::dataframe::gives_table_value`]) or a read of a table's column. Code that gives
+    /// ([`gives_table_value`]) or a read of a table's column. Code that gives
     /// up after one may run again in the interpreter, no lazy argument can observe it, and it
     /// may stand inside another call's arguments.
     pub effect_free: bool,
@@ -93,7 +93,7 @@ pub enum RResult {
     /// call, which gives this type.
     Converted(Conversion, Type),
     /// The call is one of the table API's that gives a table value
-    /// ([`interp::dataframe::gives_table_value`]), which the code holds as it is.
+    /// ([`gives_table_value`]), which the code holds as it is.
     Table,
 }
 
@@ -6590,7 +6590,7 @@ fn is_operator(name: &str) -> bool {
 /// Whether a call resolved to one of the table API's functions that gives a table value: the
 /// `ry` namespace's own function of that name, which `package:ry` binds too.
 unsafe fn is_table_function(speculation: &Speculation) -> bool {
-    if !interp::dataframe::gives_table_value(&rvalues::symbol_name(speculation.symbol)) {
+    if !gives_table_value(&rvalues::symbol_name(speculation.symbol)) {
         return false;
     }
     let Ok(package) = rvalues::install("ry") else {
@@ -6600,6 +6600,34 @@ unsafe fn is_table_function(speculation: &Speculation) -> bool {
     loaded_namespace(package)
         .and_then(|namespace| heap.frame_cell(namespace, speculation.symbol))
         .is_some_and(|cell| cell.cdr() == speculation.function)
+}
+
+/// Whether the API function `name` gives one of the API's own values. Every function of the
+/// `Expr`, `DataFrame`, `LazyFrame`, `GroupBy` and `LazyGroupBy` modules does, except the ones that
+/// read a table out into R values, write it somewhere or change it in place. A function that gives
+/// a table value changes nothing a second run of it would see.
+fn gives_table_value(name: &str) -> bool {
+    const R_VALUES: [&str; 9] = [
+        "DataFrame.height",
+        "DataFrame.width",
+        "DataFrame.columns",
+        "DataFrame.schema",
+        "DataFrame.key",
+        "DataFrame.set_key",
+        "DataFrame.write_csv",
+        "DataFrame.write_parquet",
+        "LazyFrame.explain",
+    ];
+    if matches!(name, "DataFrame" | "as.DataFrame") {
+        return true;
+    }
+    let Some((module, _)) = name.split_once('.') else {
+        return false;
+    };
+    matches!(
+        module,
+        "Expr" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+    ) && !R_VALUES.contains(&name)
 }
 
 /// Whether `function` is a typed closure that declares a table value as its result.

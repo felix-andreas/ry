@@ -1871,3 +1871,16 @@ pub unsafe fn primitive_name<'a>(object: Sexp) -> &'a str {
         .builtin(object.primitive_index())
         .map_or("<unknown>", |definition| definition.name)
 }
+
+/// The row count that compact row names (`c(NA, n)` or `c(NA, -n)`) stand for, or `None` for
+/// row names of any other form.
+pub unsafe fn compact_row_count(row_names: Sexp) -> Option<usize> {
+    if row_names.kind() == SexpType::Integer
+        && length(row_names) == 2
+        && ints(row_names)[0] == NA_INTEGER
+    {
+        Some(ints(row_names)[1].unsigned_abs() as usize)
+    } else {
+        None
+    }
+}

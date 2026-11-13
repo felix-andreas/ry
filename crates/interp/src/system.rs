@@ -1,6 +1,7 @@
 //! The operating system as R sees it: environment variables, files and directories, time and
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
+pub use numeric::{NEWEST_EMULATED_R, r_at_least, r_at_least_release};
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
@@ -2793,17 +2794,26 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
                 continue;
             }
             let shown = if full {
-                path.display().to_string()
+                slashed(&path)
             } else {
-                path.strip_prefix(&directory)
-                    .map(|relative| relative.display().to_string())
-                    .unwrap_or(name)
+                path.strip_prefix(&directory).map(slashed).unwrap_or(name)
             };
             names.push(shown);
         }
     }
     crate::sort::sort_strings(&mut names);
     string_vector(&names)
+}
+
+/// A path as R names it: separated by `/` on every platform, as GNU R's listings are, so that
+/// code that takes the names apart on `/` (`dir.create(recursive = TRUE)`, `dirname`) works.
+fn slashed(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
 }
 
 unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
@@ -2828,17 +2838,15 @@ unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
         walk(Path::new(&directory), recursive, true, &mut paths, true);
         for path in paths.into_iter().filter(|path| path.is_dir()) {
             names.push(if full {
-                path.display().to_string()
+                slashed(&path)
             } else {
                 path.strip_prefix(&directory)
-                    .map(|relative| relative.display().to_string())
+                    .map(slashed)
                     .unwrap_or_default()
             });
         }
     }
     crate::sort::sort_strings(&mut names);
-    #[cfg(windows)]
-    eprintln!("DIAG list.dirs {names:?}");
     string_vector(&names)
 }
 
@@ -3094,8 +3102,6 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
         trimmed => trimmed,
     };
     let cannot_create = |directory: &str, failure: std::io::Error| -> R<Sexp> {
-        #[cfg(windows)]
-        eprintln!("DIAG dir.create failed {directory:?}: {failure:?}");
         if show_warnings {
             crate::conditions::warning(format!(
                 "cannot create dir '{directory}', reason '{}'",
@@ -3104,12 +3110,13 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
         }
         scalar_bool(false)
     };
-    #[cfg(windows)]
-    eprintln!("DIAG dir.create {path:?} recursive={recursive}");
     // GNU R makes each parent in turn and then the path itself, so `dir.create("a/.",
     // recursive = TRUE)` makes `a` and still reports that `a/.` exists.
     if recursive {
-        for (index, _) in path.match_indices('/').filter(|(index, _)| *index > 0) {
+        for (index, _) in path
+            .match_indices(|character| character == '/' || (cfg!(windows) && character == '\\'))
+            .filter(|(index, _)| *index > 0)
+        {
             let parent = &path[..index];
             match std::fs::create_dir(parent) {
                 Err(failure) if failure.kind() != std::io::ErrorKind::AlreadyExists => {
@@ -3355,21 +3362,6 @@ impl RVersion {
     }
 }
 
-/// Whether the emulated R is `major.minor` or later. Behavior that GNU R changed between
-/// supported releases follows the release in `R_HOME`, so the base packages' R code and the
-/// internals it calls always agree.
-pub fn r_at_least(major: u32, minor: u32) -> bool {
-    let version = r_version();
-    (version.major, version.minor) >= (major, minor)
-}
-
-/// Whether the emulated R is `major.minor.patch` or later, for the rare change GNU R made in a
-/// patch release.
-pub fn r_at_least_release(major: u32, minor: u32, patch: u32) -> bool {
-    let version = r_version();
-    (version.major, version.minor, version.patch) >= (major, minor, patch)
-}
-
 /// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
 /// guard for them also checks the revision, so ry reports at least this one
 /// (`rcmd::MINIMUM_SVN_REVISION` writes the same floor into `Rversion.h`).
@@ -3379,8 +3371,17 @@ pub const MINIMUM_SVN_REVISION: u32 = 89194;
 /// with argument lists ry does not implement.
 pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
 
-/// The newest GNU R release whose behavior ry emulates, which is the base R ry bundles.
-pub const NEWEST_EMULATED_R: (u32, u32, u32) = (4, 6, 2);
+/// Tells the numeric kernels whose results GNU R changed between releases where to read the
+/// release of the R in [`r_home`]. The interpreter does it when it is installed, and a host that
+/// exports the kernels does it before each call, because C code may call one before anything
+/// has installed the interpreter.
+#[inline]
+pub fn provide_emulated_r() {
+    numeric::set_emulated_r_provider(|| {
+        let version = r_version();
+        (version.major, version.minor, version.patch)
+    });
+}
 
 /// The version of the R in [`r_home`], read once. With no base R found no session can start, so
 /// only code that runs outside a session, such as a unit test, sees the fallback: the newest
@@ -3644,10 +3645,7 @@ unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
         ))),
         Err(FetchError::Transport { code, detail, .. }) => {
             let detail = if code == 6 {
-                let host = reqwest::Url::parse(&url)
-                    .ok()
-                    .and_then(|parsed| parsed.host_str().map(str::to_owned))
-                    .unwrap_or_default();
+                let host = crate::http::host(&url).unwrap_or_default();
                 format!("Could not resolve host: {host}")
             } else {
                 detail
@@ -3687,7 +3685,7 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
         write_collection_report(&heap.report(kind));
     }
     (interp().hooks.run_finalizers)();
-    crate::frame::release_worker_memory();
+    (interp().extensions.tables.release_worker_memory)();
     let heap = crate::heap();
     if reset {
         heap.reset_max_usage();

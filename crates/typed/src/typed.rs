@@ -650,7 +650,7 @@ fn item_kind(item: Item) -> u32 {
 /// value of the table API a table.
 /// A record or tuple has none, because a typed closure takes one only from typed code.
 unsafe fn type_of(value: Sexp) -> Option<Type> {
-    if interp::dataframe::is_table_value(value) {
+    if (interp::interp().extensions.tables.is_table_value)(value) {
         return Some(Type::Table);
     }
     if value.is_altrep() || value.attrib() != rvalues::nil() {
@@ -1394,7 +1394,7 @@ unsafe fn call_r(
         RResult::Unused => return Ok(()),
         RResult::Converted(conversion, ty) => (conversion, ty),
         RResult::Table => {
-            if !interp::dataframe::is_table_value(value) {
+            if !(interp::interp().extensions.tables.is_table_value)(value) {
                 return Err(interp::unwind::error(format!(
                     "`{}` gave a value of type `{}` where the typed function was compiled for a \
                      table value",

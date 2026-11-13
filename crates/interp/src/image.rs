@@ -573,7 +573,7 @@ unsafe fn check_empty(before: &Before) -> Result<(), String> {
     if heap().layouts.counts() != before.layouts {
         left.push("record layouts");
     }
-    if crate::graphics_engine::has_open_device() {
+    if (interp().extensions.graphics.has_open_device)() {
         left.push("an open graphics device");
     }
     if format::output_decimal() != "." {

@@ -24,7 +24,6 @@ use {
     interp::{
         AltrepSummary, TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        graphics_engine,
         native::{Interface, foreign_context},
         unwind::park,
     },
@@ -130,10 +129,14 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         read: read_altrep_element,
         write: write_altrep_element,
     });
+    stats::install();
+    ::graphics::install();
+    frames::install();
+    services::install();
     jit::install();
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
-    interp::register_builtins(loader::ry_runtime::BUILTINS);
+    interp::register_builtins(crate::loader_backend::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
     interp::register_builtins(crate::inspect::BUILTINS);
     interp::register_builtins(crate::altrep::INTERNALS);
@@ -618,12 +621,12 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     .keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
         foreign_context(call.call, || {
-            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+            ::graphics::engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
         })
     }),
     builtin(".External.graphics", -1, |call| unsafe {
         foreign_context(call.call, || {
-            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+            ::graphics::engine::graphics_call(call, || dot_call(call, RoutineKind::External))
         })
     }),
     builtin(".C", -1, |call| unsafe {
@@ -1257,6 +1260,19 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
     concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
 }
 
+/// Prints the R call stack for the executable's crash report (`crates/crash`), which calls it
+/// from a signal handler and passes the writer and the memory probe it wants used.
+///
+/// # Safety
+/// Both functions are async-signal-safe, as the crash handler's are.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_crash_traceback(
+    emit: interp::crash::Emit,
+    readable: interp::crash::Readable,
+) {
+    unsafe { interp::crash::write_traceback(emit, readable) }
+}
+
 /// Whether the start-up image at the NUL-terminated `path` is one this library loads: 1 when it
 /// is, 0 when it is missing, of another format, or written by another build.
 ///
@@ -1378,7 +1394,7 @@ pub unsafe extern "C" fn ry_run(
 const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
     identity: env!("RY_RUNTIME_ID"),
     fixed_objects: crate::altrep::image_objects,
-    environment: loader::ry_runtime::build,
+    environment: crate::loader_backend::build,
 };
 
 /// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
@@ -1436,7 +1452,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return false;
     }
-    if let Err(unwind) = loader::ry_runtime::attach() {
+    if let Err(unwind) = crate::loader_backend::attach() {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return false;
@@ -1621,7 +1637,7 @@ unsafe fn apply_flags(flags: c_int) {
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
     interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
     interp::interp().prelude = flags & RUN_FLAG_NO_PRELUDE == 0;
-    loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
+    crate::loader_backend::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Reads one chunk of console input after showing `prompt`: writes at most `length - 1` bytes
@@ -1655,7 +1671,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
-    if let Err(unwind) = loader::ry_runtime::attach() {
+    if let Err(unwind) = crate::loader_backend::attach() {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return 2;
@@ -1724,33 +1740,33 @@ pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
         return;
     }
     let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
-    loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
+    crate::loader_backend::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Makes the package loader wait for `verdict` before the parts of a load that may have
 /// effects, so the host can check the package while the definitions bind (see
-/// `loader::ry_runtime::set_verdict`). `ry load` calls it once, before [`ry_run`].
+/// `crate::loader_backend::set_verdict`). `ry load` calls it once, before [`ry_run`].
 #[unsafe(no_mangle)]
-pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
-    loader::ry_runtime::set_verdict(verdict);
+pub extern "C" fn ry_loader_set_verdict(verdict: crate::loader_backend::Verdict) {
+    crate::loader_backend::set_verdict(verdict);
 }
 
 /// Makes the package loader ask `check` before a load of a strict package runs anything (see
-/// `loader::ry_runtime::set_check`). Every command that runs ry's runtime calls it once, before
+/// `crate::loader_backend::set_check`). Every command that runs ry's runtime calls it once, before
 /// [`ry_run`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_loader_set_check(
-    strict_config: loader::ry_runtime::Check,
-    check: loader::ry_runtime::Check,
+    strict_config: crate::loader_backend::Check,
+    check: crate::loader_backend::Check,
 ) {
-    loader::ry_runtime::set_check(strict_config, check);
+    crate::loader_backend::set_check(strict_config, check);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0
 /// otherwise. ry's console asks before each command and reloads with `.ry_autoreload()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_loader_changed() -> c_int {
-    c_int::from(loader::ry_runtime::changed())
+    c_int::from(crate::loader_backend::changed())
 }
 
 /// SIGINT requests a user interrupt, which the evaluator delivers at its next interrupt check. At
