@@ -371,6 +371,10 @@ package version target="":
     	base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
     	RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
     fi
+    # Without PT_GNU_STACK glibc 2.41 and later refuse to load libR (BOLT drops the header).
+    case "$target" in
+    	*linux*) python3 -I tools/layout/gnu_stack.py check "$build/$library" "$build/$executable" ;;
+    esac
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and

@@ -49,6 +49,10 @@ name = "test_frame_altrep"
 path = "tests/test_frame_altrep.rs"
 
 [[test]]
+name = "test_gnu_stack"
+path = "tests/test_gnu_stack.rs"
+
+[[test]]
 name = "test_native"
 path = "tests/test_native.rs"
 

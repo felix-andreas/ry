@@ -156,7 +156,10 @@ stringr, lubridate, data.table, xts and zoo in GNU R's library, the instrumented
 `ry` takes about 14 GB of memory, which outgrows a GitHub-hosted runner's 16 GB of memory and 4 GB
 of swap (the runner is killed mid-link), so under GitHub Actions the script first adds 16 GB of
 swap at `/mnt/ry-swap`. The pipeline takes about 30 minutes on 4 cores plus the
-base R build. The
+base R build. BOLT's `-use-gnu-stack` replaces
+libR's `PT_GNU_STACK` header, which glibc 2.41 and later require, so the script restores it
+(`tools/layout/gnu_stack.py`), and `just package` fails if `libR.so` or `ry` lacks a
+non-executable one. The
 binaries land in `target/x86_64-unknown-linux-gnu/release`, apart from the plain
 `cargo build --release` output in `target/release` that `just bench` and the other bench
 recipes time, so benchmarks of interpreter changes keep measuring the plain layout. On first use `ry` extracts the runtime into
