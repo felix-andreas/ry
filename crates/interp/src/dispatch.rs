@@ -242,7 +242,7 @@ pub struct MethodCache {
     /// `class`. Building and interning the name was a third of a dispatch. Symbols are never
     /// freed and the table keeps its strings alive, so it needs no invalidation.
     names: FxHashMap<(Sexp, Sexp), Sexp>,
-    rows: MethodRows,
+    rows: Vec<MethodRow>,
     pub s4: crate::methods::S4Cache,
     /// The `.Group` NextMethod defines when there is no group: `""`, shared and not mutable.
     blank_group: Option<Sexp>,
@@ -282,23 +282,27 @@ impl MethodCache {
     }
 }
 
-/// The method rows, as columns indexed by row. A lookup reads the four key columns and the cell.
-#[derive(Default)]
-struct MethodRows {
+/// One method row. A lookup reads every field but `string` and `default`, so the row is one
+/// record rather than a column per field: a lookup touches one cache line and checks one bound.
+#[derive(Clone, Copy)]
+struct MethodRow {
     /// The symbol that owns the row, which a lookup checks so that a row number left on a
     /// symbol by another session's table can only miss.
-    symbols: Vec<Sexp>,
+    symbol: Sexp,
     /// The symbol's name as a one-string character vector, not mutable.
-    strings: Vec<Sexp>,
+    string: Sexp,
+    /// The symbol `name.default` when the symbol names a generic whose default method was looked
+    /// up, otherwise `NULL`. Symbols are never freed, so it needs no marking.
+    default: Sexp,
     /// The top environment the last stored lookup started from, the empty environment when it
     /// skipped the global frame, or `NULL` before any lookup was stored.
-    tops: Vec<Sexp>,
+    top: Sexp,
     /// The methods table that lookup searched, or `NULL` for none.
-    tables: Vec<Sexp>,
+    table: Sexp,
     /// The name's lookup stamp when that lookup ran.
-    stamps: Vec<u64>,
+    stamp: u64,
     /// The binding that lookup found, or `NULL` for none.
-    cells: Vec<Sexp>,
+    cell: Sexp,
 }
 
 pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Marker<'_>) {
@@ -308,7 +312,11 @@ pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Mar
         }
         for &key in &cache.written {
             match key {
-                Written::Row(row) => mark_row(&cache.rows, row as usize, marker),
+                Written::Row(row) => {
+                    if let Some(row) = cache.rows.get(row as usize) {
+                        mark_row(row, marker);
+                    }
+                }
                 Written::Name(key) => {
                     if cache.names.contains_key(&key) {
                         marker.mark(key.1);
@@ -336,19 +344,14 @@ unsafe fn trace_every_entry(cache: &MethodCache, marker: &mut heap::Marker<'_>) 
     for &(_, class) in cache.names.keys() {
         marker.mark(class);
     }
-    let rows = &cache.rows;
-    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells] {
-        for &object in column {
-            marker.mark(object);
-        }
+    for row in &cache.rows {
+        mark_row(row, marker);
     }
 }
 
-unsafe fn mark_row(rows: &MethodRows, row: usize, marker: &mut heap::Marker<'_>) {
-    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells] {
-        if let Some(&object) = column.get(row) {
-            marker.mark(object);
-        }
+unsafe fn mark_row(row: &MethodRow, marker: &mut heap::Marker<'_>) {
+    for object in [row.string, row.top, row.table, row.cell] {
+        marker.mark(object);
     }
 }
 
@@ -356,21 +359,27 @@ unsafe fn mark_row(rows: &MethodRows, row: usize, marker: &mut heap::Marker<'_>)
 unsafe fn method_row(symbol: Sexp) -> R<usize> {
     let heap = crate::heap();
     if let Some(row) = heap.method_row(symbol)
-        && interp().method_cache.rows.symbols.get(row as usize) == Some(&symbol)
+        && interp()
+            .method_cache
+            .rows
+            .get(row as usize)
+            .is_some_and(|row| row.symbol == symbol)
     {
         return Ok(row as usize);
     }
     let string = values::scalar_string_charsxp(symbol.car())?;
     string.mark_not_mutable();
     let cache = &mut interp().method_cache;
-    let rows = &mut cache.rows;
-    let row = rows.symbols.len();
-    rows.symbols.push(symbol);
-    rows.strings.push(string);
-    rows.tops.push(nil());
-    rows.tables.push(nil());
-    rows.stamps.push(0);
-    rows.cells.push(nil());
+    let row = cache.rows.len();
+    cache.rows.push(MethodRow {
+        symbol,
+        string,
+        default: nil(),
+        top: nil(),
+        table: nil(),
+        stamp: 0,
+        cell: nil(),
+    });
     heap.set_method_row(symbol, row as u32);
     cache.note_written(Written::Row(row as u32));
     Ok(row)
@@ -379,7 +388,20 @@ unsafe fn method_row(symbol: Sexp) -> R<usize> {
 /// `symbol`'s name as a shared one-string character vector.
 unsafe fn name_string(symbol: Sexp) -> R<Sexp> {
     let row = method_row(symbol)?;
-    Ok(interp().method_cache.rows.strings[row])
+    Ok(interp().method_cache.rows[row].string)
+}
+
+/// The symbol `generic.default`, kept in the generic's row so that the fallback every dispatch
+/// without a class method tries costs no name lookup.
+unsafe fn default_name(generic: Sexp) -> R<Sexp> {
+    let row = method_row(generic)?;
+    let default = interp().method_cache.rows[row].default;
+    if default != nil() {
+        return Ok(default);
+    }
+    let default = method_name(generic, symbols().default.car())?;
+    interp().method_cache.rows[row].default = default;
+    Ok(default)
 }
 
 /// The S3 method for `classes` of the generic `generic` (or of its group `group`, when that is
@@ -393,7 +415,7 @@ unsafe fn resolve_s3(
     call_env: Sexp,
     def_env: Sexp,
 ) -> R<Option<S3Method>> {
-    let scope = method_scope(call_env, def_env)?;
+    let mut scope = method_scope(call_env, def_env)?;
     let count = length(classes);
     let mut found = None;
     'classes: for index in 0..count {
@@ -403,12 +425,12 @@ unsafe fn resolve_s3(
                 continue;
             }
             let name = method_name(prefix, class)?;
-            if let Some(function) = lookup_in_scope(name, &scope)? {
+            if let Some(function) = lookup_in_scope(name, &mut scope)? {
                 // base's `sort.list` is a function, not the `sort` method for class "list",
                 // and GNU R's dispatch passes over it.
-                if name.car().bytes() == b"sort.list"
-                    && function.kind() == SexpType::Closure
+                if function.kind() == SexpType::Closure
                     && function.tag() == values::base_namespace()
+                    && name.car().bytes() == b"sort.list"
                 {
                     continue;
                 }
@@ -418,8 +440,8 @@ unsafe fn resolve_s3(
         }
     }
     if found.is_none() && with_default {
-        let name = method_name(generic, symbols().default.car())?;
-        if let Some(function) = lookup_in_scope(name, &scope)? {
+        let name = default_name(generic)?;
+        if let Some(function) = lookup_in_scope(name, &mut scope)? {
             found = Some((function, name, count));
         }
     }
@@ -479,106 +501,184 @@ struct MethodStrings {
     method: Sexp,
 }
 
-/// Where an S3 method lookup from `call_env` searches: the frames up to the top environment
-/// `top`, then `top` itself when `search_top` is set, the generic's methods table, and the
+/// Where an S3 method lookup from `call_env` searches: the frames up to the top environment,
+/// then the top environment itself when the walk found one, the generic's methods table, and the
 /// search path.
+///
+/// Most names a dispatch tries name no method anywhere, and most of the rest are bound only
+/// outside function frames. A name that no attached frame other than the base frames has ever
+/// bound (it lacks [`gp::BOUND_ELSEWHERE`]) resolves from an attached `call_env` to its base
+/// binding, whatever the frames between, so its lookup reads that binding and, when the table
+/// is detached and so marks nothing, the table: it walks no frame. The walk to the top
+/// environment is made once, by the first lookup of a name that some frame binds.
 struct MethodScope {
-    /// The frames below `top`, innermost first, found by the one walk that finds `top`, so the
-    /// lookup of each candidate name reads them without walking the chain again.
+    call_env: Sexp,
+    /// Whether `call_env` reaches a base frame, which every attached environment does (it
+    /// lacks [`gp::DETACHED`]).
+    attached: bool,
+    table: Option<Sexp>,
+    walk: Option<ScopeWalk>,
+}
+
+/// The chain from the calling environment to its top environment `top`.
+struct ScopeWalk {
+    /// The frames below `top`, innermost first.
     frames: SmallVec<[Sexp; 4]>,
     top: Sexp,
+    /// Whether `top`'s own frame is searched: not when the chain ended at the empty environment
+    /// without a top environment, where GNU R continues at the base environment.
     search_top: bool,
-    table: Option<Sexp>,
 }
 
 unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
-    let mut env = call_env;
-    let mut frames = SmallVec::new();
-    // A frame chain that ends without a top environment continues at the base environment, as
-    // in GNU R: the global frame is not searched.
-    let (top, search_top) = loop {
-        if env == values::empty_env() {
-            break (values::global_env(), false);
-        }
-        if is_top_env(env) {
-            break (env, true);
-        }
-        frames.push(env);
-        env = env.enclosure();
+    // Generics dispatched from builtins are defined in base, the commonest case by far.
+    let def_top = if def_env == values::base_namespace() {
+        def_env
+    } else {
+        top_env(def_env)
     };
-    let table = match crate::heap().frame_cell(top_env(def_env), symbols().dot_s3_methods_table) {
-        Some(cell) => value_of(eval::cell_value(cell)?)?,
+    let table = match crate::heap().frame_cell(def_top, symbols().dot_s3_methods_table) {
+        Some(cell) => {
+            let value = eval::cell_value(cell)?;
+            // Base is lazy-loaded, so the binding usually holds the forced promise of the table.
+            if value.kind() == SexpType::Promise && value.car() != unbound() {
+                value.car()
+            } else {
+                value_of(value)?
+            }
+        }
         None => nil(),
     };
     Ok(MethodScope {
-        frames,
-        top,
-        search_top,
+        call_env,
+        attached: !call_env.has_gp(gp::DETACHED),
         table: (table.kind() == SexpType::Environment).then_some(table),
+        walk: None,
     })
+}
+
+unsafe fn scope_walk(call_env: Sexp) -> ScopeWalk {
+    let mut env = call_env;
+    let mut frames = SmallVec::new();
+    loop {
+        if env == values::empty_env() {
+            return ScopeWalk {
+                frames,
+                top: values::global_env(),
+                search_top: false,
+            };
+        }
+        if is_top_env(env) {
+            return ScopeWalk {
+                frames,
+                top: env,
+                search_top: true,
+            };
+        }
+        frames.push(env);
+        env = env.enclosure();
+    }
 }
 
 /// Looks up the S3 method `name`: from the calling environment to its top environment, then in
 /// the generic's namespace's registered-methods table, then along the search path.
 pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Option<Sexp>> {
-    let scope = method_scope(call_env, def_env)?;
-    lookup_in_scope(name, &scope)
+    let mut scope = method_scope(call_env, def_env)?;
+    lookup_in_scope(name, &mut scope)
 }
 
-/// The method `name` in `scope`, through the name's row for the part from the top environment
-/// on.
-unsafe fn lookup_in_scope(name: Sexp, scope: &MethodScope) -> R<Option<Sexp>> {
-    for &env in &scope.frames {
+/// The method `name` in `scope`: its base binding for a name only the base frames bind,
+/// otherwise through the name's row for the part from the top environment on.
+unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>> {
+    if scope.attached && !name.has_gp(gp::BOUND_ELSEWHERE) {
+        let found = base_method(name, scope.table)?;
+        if syntax::testing::invariants_enabled() {
+            let walk = scope_walk(scope.call_env);
+            let walked = walked_method(name, &walk, scope.table)?;
+            assert!(
+                found == walked,
+                "the S3 method `{}` resolves to its base binding, but a walk of the scope finds \
+                 another one",
+                symbol_name(name)
+            );
+        }
+        return Ok(found);
+    }
+    let walk = scope.walk.get_or_insert_with(|| scope_walk(scope.call_env));
+    for &env in &walk.frames {
         if let Some(function) = function_in_frame(name, env)? {
             return Ok(Some(function));
         }
     }
     let heap = crate::heap();
     let stamp = heap.lookup_stamp(name);
-    let top = if scope.search_top {
-        scope.top
+    let top = if walk.search_top {
+        walk.top
     } else {
         values::empty_env()
     };
     let table = scope.table.unwrap_or(nil());
-    if let Some(row) = heap.method_row(name) {
-        let rows = &interp().method_cache.rows;
-        let row = row as usize;
-        if rows.symbols.get(row) == Some(&name)
-            && rows.stamps[row] == stamp
-            && rows.tops[row] == top
-            && rows.tables[row] == table
-        {
-            let cell = rows.cells[row];
-            if cell == nil() {
-                return Ok(None);
-            }
-            let value = value_of(eval::cell_value(cell)?)?;
-            if values::is_function(value) {
-                return Ok(Some(value));
-            }
+    if let Some(row) = heap.method_row(name)
+        && let Some(row) = interp().method_cache.rows.get(row as usize)
+        && row.symbol == name
+        && row.stamp == stamp
+        && row.top == top
+        && row.table == table
+    {
+        if row.cell == nil() {
+            return Ok(None);
+        }
+        let value = value_of(eval::cell_value(row.cell)?)?;
+        if values::is_function(value) {
+            return Ok(Some(value));
         }
     }
     let mut cacheable = true;
-    let found = method_cell_from(
-        name,
-        scope.top,
-        scope.search_top,
-        scope.table,
-        &mut cacheable,
-    )?;
+    let found = method_cell_from(name, walk.top, walk.search_top, scope.table, &mut cacheable)?;
     // Forcing a lazily loaded binding can run code that defines bindings, and a row stamped
     // before that would claim a validity it never had.
     if cacheable && heap.lookup_stamp(name) == stamp {
         let row = method_row(name)?;
         let cache = &mut interp().method_cache;
-        let rows = &mut cache.rows;
-        rows.tops[row] = top;
-        rows.tables[row] = table;
-        rows.stamps[row] = stamp;
-        rows.cells[row] = found.map_or(nil(), |(cell, _)| cell);
+        let entry = &mut cache.rows[row];
+        entry.top = top;
+        entry.table = table;
+        entry.stamp = stamp;
+        entry.cell = found.map_or(nil(), |(cell, _)| cell);
         cache.note_written(Written::Row(row as u32));
     }
+    Ok(found.map(|(_, function)| function))
+}
+
+/// The method `name` for a name no attached frame outside the base frames binds: a detached
+/// methods table's binding, which marks nothing, else the base binding.
+unsafe fn base_method(name: Sexp, table: Option<Sexp>) -> R<Option<Sexp>> {
+    let mut cacheable = true;
+    if let Some(table) = table
+        && table.has_gp(gp::DETACHED)
+        && let Some((_, function)) = method_cell_in_frame(name, table, &mut cacheable)?
+    {
+        return Ok(Some(function));
+    }
+    match crate::heap().frame_cell(values::base_env(), name) {
+        Some(cell) => {
+            let value = value_of(eval::cell_value(cell)?)?;
+            Ok(values::is_function(value).then_some(value))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The method `name` found by walking the whole scope, without the rows: what
+/// [`lookup_in_scope`] must agree with.
+unsafe fn walked_method(name: Sexp, walk: &ScopeWalk, table: Option<Sexp>) -> R<Option<Sexp>> {
+    for &env in &walk.frames {
+        if let Some(function) = function_in_frame(name, env)? {
+            return Ok(Some(function));
+        }
+    }
+    let mut cacheable = true;
+    let found = method_cell_from(name, walk.top, walk.search_top, table, &mut cacheable)?;
     Ok(found.map(|(_, function)| function))
 }
 
@@ -1301,13 +1401,13 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         }
     }
     // Find the next method along the remaining classes.
-    let scope = method_scope(lookup_env, def_env)?;
+    let mut scope = method_scope(lookup_env, def_env)?;
     let mut found: Option<(Sexp, Sexp, usize)> = None;
     'classes: for index in start..class_count {
         let class = classes.element(index);
         for prefix in [Some(generic_symbol), group_symbol].into_iter().flatten() {
             let name = method_name(prefix, class)?;
-            if let Some(method) = lookup_in_scope(name, &scope)? {
+            if let Some(method) = lookup_in_scope(name, &mut scope)? {
                 found = Some((method, name, index));
                 break 'classes;
             }
@@ -1316,8 +1416,8 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let (method, next_name, next_index) = match found {
         Some(found) => found,
         None => {
-            let default = method_name(generic_symbol, symbols.default.car())?;
-            if let Some(method) = lookup_in_scope(default, &scope)? {
+            let default = default_name(generic_symbol)?;
+            if let Some(method) = lookup_in_scope(default, &mut scope)? {
                 (method, default, class_count)
             } else {
                 let function = eval::find_fun(generic_symbol, values::base_env())
@@ -1503,8 +1603,7 @@ unsafe fn apply_next_primitive(
     }
     // The call names the default method, as in GNU R's "Error in `[.default`(x, 5)", which
     // also tells a special that dispatches internally not to dispatch again.
-    let default_name = method_name(generic_symbol, symbols().default.car())?;
-    let primitive_call = renamed_call(frame_call, default_name)?;
+    let primitive_call = renamed_call(frame_call, default_name(generic_symbol)?)?;
     call_builtin(definition, primitive_call, method, &forced, caller_env)
 }
 
