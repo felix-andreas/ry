@@ -178,7 +178,8 @@ const MAX_NESTING: usize = 256;
 
 /// Lowers `closure` for arguments of `params`, assuming a recursive call returns `guess`. A
 /// refused lowering sets `returned` to the type of the `return`s it lowered before the refusal,
-/// which is a better guess when the guess itself was what the body could not use.
+/// or else of a branch of an `if` whose value is the function's result, which is a better guess
+/// when the guess itself was what the body could not use.
 pub unsafe fn lower(
     closure: Sexp,
     params: &[Type],
@@ -255,6 +256,7 @@ unsafe fn lower_calling(
         unusable: SmallVec::new(),
         epoch: None,
         returned: None,
+        tail_branch: None,
         constructed: SmallVec::new(),
         r_calls: Vec::new(),
         r_use: None,
@@ -281,7 +283,7 @@ unsafe fn lower_calling(
     let value = match lowering.expression(body) {
         Ok(value) => value,
         Err(why) => {
-            *returned = lowering.returned;
+            *returned = lowering.returned.or(lowering.tail_branch);
             return Err(why);
         }
     };
@@ -369,7 +371,7 @@ struct Lowering<'c> {
     /// The result type the function declares, which a `match` whose value is the function's
     /// result lowers its arms against ([`Lowering::switch_shapes`]).
     declared: Option<Type>,
-    /// The `match` calls whose value is the function's result.
+    /// The `if` and `match` calls whose value is the function's result.
     tails: SmallVec<[Sexp; 2]>,
     callees: &'c mut dyn Callees,
     /// The function's own names, then one scope per inlined function.
@@ -397,6 +399,9 @@ struct Lowering<'c> {
     /// The type an early `return` of the function itself gives, the union of the tags when it
     /// returns tags.
     returned: Option<Type>,
+    /// The type of the first branch of a result `if` that lowered, a guess for a recursive
+    /// call's result when lowering is refused.
+    tail_branch: Option<Type>,
     /// The tag shapes the code constructs, which a `match` over any tag also tests for.
     constructed: SmallVec<[u32; 4]>,
     r_calls: Vec<RCall>,
@@ -1557,6 +1562,12 @@ impl Lowering<'_> {
         self.builder.switch_to(then_block);
         let saved = self.enter_control();
         let then_value = self.expression(then)?;
+        if let Some(value) = then_value
+            && self.inlined.is_empty()
+            && self.tails.contains(&call)
+        {
+            self.tail_branch.get_or_insert(self.builder.ty(value));
+        }
         let then_created = self.leave_control(saved);
         let then_end = self.builder.current;
         self.builder.switch_to(else_block);
@@ -6417,8 +6428,9 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
     }
 }
 
-/// Collects the `match` calls whose value is the value of `expression`: `expression` itself,
-/// the last expression of a block, the branches of an `if` and the bodies of a `match`'s arms.
+/// Collects the `if` and `match` calls whose value is the value of `expression`: `expression`
+/// itself, the last expression of a block, the branches of an `if` and the bodies of a `match`'s
+/// arms.
 unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
     if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
         return;
@@ -6431,6 +6443,7 @@ unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
             }
         }
         "if" => {
+            tails.push(expression);
             for &(_, branch) in args.iter().skip(1) {
                 tail_matches(branch, tails);
             }

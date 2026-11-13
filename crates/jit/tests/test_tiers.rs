@@ -3476,6 +3476,74 @@ fn typed_to_typed_calls_evaluate_their_arguments_first() {
 }
 
 #[test]
+fn typed_core_runs_list_programs_without_stopping() {
+    // Each case compiles and must finish natively on every call, agreeing with tier 0: native
+    // code that stops and lets the interpreter run the call again gives the right value too, so
+    // only the stop count shows that the case runs natively.
+    let helpers = [
+        "pair_walk <- function(k: I64) if (k == 0i64) (a = 0i64, b = 1i64) else { \
+         r <- pair_walk(k - 1i64)\n (a = r$b, b = r$a + r$b) }",
+    ];
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "function(x: List<F64>, y: List<F64>) -> F64 { z <- x + y\n w <- z * 2.5\n \
+             List.sum(w) + List.sum(x - y) + List.sum(x / y) }",
+            &["{ a <- List.from_r(c(1.5, 2, 3)); b <- List.from_r(c(0.5, 4, 8)); FUNCTION(a, b) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- List.repeat(List.range(1, n), n)\n \
+             List.sum(List.join_map(rows, \\(row) row)) + List.len(rows) }",
+            &["{ k <- 3i64; FUNCTION(k) }", "{ k <- 0i64; FUNCTION(k) }"],
+        ),
+        (
+            "function(n: I64) -> I64 { rows <- List.map(List.range(1, n), \\(k) List.range(1, k))\n \
+             flags <- List.map(List.range(1, n), \\(k) k > 2i64)\n \
+             List.sum(List.join_map(rows, \\(row) row)) * 100i64 + List.len(List.keep_if(flags, \\(f) f)) }",
+            &["{ k <- 5i64; FUNCTION(k) }"],
+        ),
+        // A recursive call's result is guessed from the branch of the result `if` that lowers.
+        (
+            "function(n: I64) -> I64 pair_walk(n)$a",
+            &["{ k <- 10i64; FUNCTION(k) }"],
+        ),
+    ];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            for helper in helpers {
+                run(helper);
+            }
+        }
+        for (case, &(definition, calls)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled, typed, stops) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let outcomes: Vec<String> = calls
+                        .iter()
+                        .map(|call| run(&call.replace("FUNCTION", name)))
+                        .collect();
+                    jit::install_mode(Mode::Off);
+                    outcomes
+                };
+                let reference = run_all(&format!("unstopped_reference_{case}"), Mode::Off);
+                let name = format!("unstopped_compiled_{case}");
+                let before = typed::native_stops();
+                let compiled = run_all(&name, Mode::On);
+                let stops = typed::native_stops() - before;
+                let function = lower::parse_text(&name, "<test>")
+                    .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+                (reference, compiled, function.is_ok_and(typed::has_compiled), stops)
+            };
+            assert_eq!(reference, compiled, "case {case}: FUNCTION <- {definition}");
+            assert!(typed, "case {case} did not run on the typed core: {definition}");
+            assert_eq!(stops, 0, "case {case} stopped in native code: {definition}");
+        }
+    });
+}
+
+#[test]
 fn typed_core_does_not_convert_dictionary_updates() {
     // A dictionary's values all have its value type, so an update that gives a logical for a
     // `F64` dictionary is an error on every tier, never a conversion.

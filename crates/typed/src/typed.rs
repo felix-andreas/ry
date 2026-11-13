@@ -110,6 +110,8 @@ thread_local! {
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
     /// did anything visible first.
     static R_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Calls whose native code stopped for the interpreter to run them again.
+    static STOPS: Cell<u64> = const { Cell::new(0) };
     /// The error an R call from compiled code raised, which [`call`] raises once the code has
     /// given up.
     static PARKED: RefCell<Option<Unwind>> = const { RefCell::new(None) };
@@ -255,6 +257,7 @@ pub unsafe fn call(
                  holds",
             )));
         }
+        STOPS.set(STOPS.get() + 1);
         decline(|| {
             String::from(
                 "its native code stopped at an operation only the interpreter finishes, such as \
@@ -370,6 +373,11 @@ unsafe fn compiled_or_refusal(
         table.insert(key, compiled);
     });
     found
+}
+
+/// How many calls on this thread stopped in native code and ran again in the interpreter.
+pub fn native_stops() -> u64 {
+    STOPS.get()
 }
 
 /// Whether `function` has compiled code for some argument types.
