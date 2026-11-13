@@ -44,7 +44,9 @@ file tests/testthat/test-wrong.R
 | test_that("a wrong expectation fails the run", expect_equal(area(2, 2), 5))
 
 # The package declares parallel tests, so a plain run starts workers, as many as
-# `TESTTHAT_CPUS` names.
+# `TESTTHAT_CPUS` names. An inherited R_HOME naming a GNU R would make the workers start that R
+# instead of ry's, so the journey starts without one.
+unset R_HOME
 env TESTTHAT_CPUS 3
 run ry test --reporter summary --runtime ry
 expect exit 1
