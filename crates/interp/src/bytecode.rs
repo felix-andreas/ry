@@ -2734,7 +2734,19 @@ impl Compiler {
         {
             sites.push(self.code.len() as u32);
         }
-        self.code.push(op_word(op));
+        let word = if op == Op::CallBuiltin
+            && let [_, _, call, _, count] = *operands
+            && let Some(&call) = (call as usize)
+                .checked_sub(FIRST_CONSTANT)
+                .and_then(|index| self.constants.get(index))
+            // SAFETY: the compiler roots every constant it holds, and a call is a pairlist.
+            && unsafe { positional_call(call, count as usize) }
+        {
+            POSITIONAL_CALL_BUILTIN_WORD
+        } else {
+            op_word(op)
+        };
+        self.code.push(word);
         self.code.extend_from_slice(operands);
     }
 
@@ -5275,11 +5287,16 @@ const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
 ];
 
 /// Tier 0's form of [`Op::CallBuiltin`] for a site whose argument cells are all untagged and
-/// none empty, which is a fact of the call and so holds for every run of the site. Tier 0 writes
-/// it over the generic opcode the first time the site runs ([`quicken_call_builtin`]); its
-/// handler then fills the arguments straight from the registers, skipping the walk over the call's
-/// cells. Like the arithmetic forms, [`op_of`] reports it as the generic instruction.
+/// none empty ([`positional_call`]), which is a fact of the call. The compiler emits it, so no
+/// code page is written at run time, which keeps the start-up image's privately mapped code
+/// shared between processes. Its handler fills the arguments straight from the registers,
+/// skipping the walk over the call's cells. Like the arithmetic forms, [`op_of`] reports it as
+/// the generic instruction.
 const POSITIONAL_CALL_BUILTIN: usize = OPS.len() + QUICK_ARITHMETIC.len();
+
+/// The code word of [`POSITIONAL_CALL_BUILTIN`].
+const POSITIONAL_CALL_BUILTIN_WORD: u32 =
+    (op_word(Op::CallBuiltin) & !OP_MASK) | POSITIONAL_CALL_BUILTIN as u32;
 
 /// The size of tier 0's handler tables: every generic and specialized opcode.
 const HANDLER_COUNT: usize = POSITIONAL_CALL_BUILTIN + 1;
@@ -5479,7 +5496,9 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     while pc < words.len() {
         let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
         // Specialized forms trust what tier 0 saw when it wrote them, which a file cannot show.
-        if words[pc] as u32 != op_word(op) {
+        // The positional builtin call is the exception: its call constant shows it, and the
+        // operand pass below checks that.
+        if words[pc] as u32 != op_word(op) && words[pc] as u32 != POSITIONAL_CALL_BUILTIN_WORD {
             return Err("a specialized instruction".to_owned());
         }
         operands(op).ok_or("a record instruction")?;
@@ -5576,6 +5595,11 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
         }
         if op == Op::EndStatement && operand(1) > operand(2) {
             return Err(format!("an invalid register range at {pc}"));
+        }
+        if words[pc] as u32 == POSITIONAL_CALL_BUILTIN_WORD
+            && !positional_call(constant(operand(2))?, operand(4))
+        {
+            return Err(format!("a positional builtin call with other arguments at {pc}"));
         }
         pc += 1 + operand_count(op);
     }
@@ -7309,24 +7333,16 @@ unsafe fn positional_call_builtin(state: &mut Activation<'_, '_>, at: usize) {
     dispatch!(state, pc)
 }
 
-/// Writes [`POSITIONAL_CALL_BUILTIN`] over the generic `CallBuiltin` at `word` when `count`
-/// untagged, non-empty cells make up `call`'s arguments, and otherwise marks the site as examined
-/// (the undo count at its limit) so that its later runs skip the walk.
-#[cold]
-#[inline(never)]
-unsafe fn quicken_call_builtin(word: *mut i32, call: Sexp, count: usize) {
+/// Whether `count` untagged, non-empty cells make up `call`'s arguments, which lets its
+/// `CallBuiltin` take [`POSITIONAL_CALL_BUILTIN_WORD`].
+unsafe fn positional_call(call: Sexp, count: usize) -> bool {
     let mut cell = call.cdr();
     let mut cells = 0;
     while cell != nil() && cell.tag() == nil() && cell.car() != missing_arg() {
         cell = cell.cdr();
         cells += 1;
     }
-    let generic = op_word(Op::CallBuiltin);
-    *word = if cell == nil() && cells == count {
-        (generic & !OP_MASK) | POSITIONAL_CALL_BUILTIN as u32
-    } else {
-        generic | RESPECIALIZE_LIMIT << RESPECIALIZE_SHIFT
-    } as i32;
+    cell == nil() && cells == count
 }
 
 /// The opcode of the specialized form of `operator` on two integers or on doubles, if there is
@@ -7661,13 +7677,9 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let call = state.constant(instruction, 2);
     let first = instruction.operand(3);
     let count = instruction.operand(4);
-    let word = instruction.code.add(instruction.at).cast_mut();
-    if *word as u32 == op_word(Op::CallBuiltin) {
-        quicken_call_builtin(word, call, count);
-    }
     // The step table, which the optimizing tier runs single instructions through, sends a
-    // quickened site here too.
-    if *word as u32 & OP_MASK == POSITIONAL_CALL_BUILTIN as u32 {
+    // positional site here too.
+    if *instruction.code.add(instruction.at) as u32 == POSITIONAL_CALL_BUILTIN_WORD {
         return op_call_builtin_positional(state, instruction);
     }
     let definition = eval::builtin_def(function)?;
