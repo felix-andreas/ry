@@ -1031,6 +1031,316 @@ fn inline_variable_loads_agree_with_tier_zero() {
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
+/// A closure call compiled code runs as an inlined frame has no frame of its own until
+/// something needs it. Each program below makes the call need one after it has run without:
+/// an error or a warning the callee raises, a value of another type than the callee's code
+/// expects, `substitute`, `missing`, `sys.call` and `sys.function` in the callee, a
+/// superassignment, and a function the callee looks up being replaced. The frame the call
+/// gets then must be the one tier 0 would have given it, with every formal still bound to
+/// its argument: a formal the callee never read stays unevaluated.
+#[test]
+fn inlined_frames_agree_with_tier_zero() {
+    let programs: &[(&str, &str, &[&str])] = &[
+        (
+            "callee(1L, 2)",
+            "rate <- 2
+             callee <- function(x, k) { if (x > 90L) stop('too big: ', x); y <- x * k * rate; y + 1 }
+             caller <- function(n) { s <- 0; i <- 0L; while (i < n) { i <- i + 1L; s <- s + callee(i, 2) }; s }",
+            &[
+                "caller(80L)",
+                "caller(100L)",
+                "tryCatch(caller(100L), error = function(e) deparse(conditionCall(e)))",
+                "caller(80L)",
+                "rate <- 3L",
+                "caller(80L)",
+                "rate <- c(1, 2)",
+                "caller(3L)",
+                "rate <- 'a'",
+                "caller(3L)",
+                "rate <- 2",
+                "caller(80L)",
+            ],
+        ),
+        (
+            "callee(1L, 2)",
+            "callee <- function(x, d) { if (x > 90L) warning('big ', x); if (x > 95L) return(sys.call()); x / d }
+             caller <- function(n) { s <- 0; i <- 0L; while (i < n) { i <- i + 1L; s <- s + callee(i, 2) }; s }",
+            &[
+                "caller(80L)",
+                "caller(93L)",
+                "tryCatch(caller(100L), error = function(e) conditionMessage(e))",
+                "withCallingHandlers(caller(92L), warning = function(w) invokeRestart('muffleWarning'))",
+                "caller(80L)",
+            ],
+        ),
+        (
+            "callee(1L, stop('never forced'))",
+            "callee <- function(x, unused) {
+               if (x > 90L) return(list(substitute(x), missing(unused), substitute(unused), nargs(), sys.function()))
+               x + 1L
+             }
+             caller <- function(n) {
+               s <- 0L; i <- 0L
+               while (i < n) { i <- i + 1L; r <- callee(i * 1L, stop('never forced')); if (is.list(r)) return(r); s <- s + r }
+               s
+             }",
+            &["caller(80L)", "caller(100L)", "caller(80L)"],
+        ),
+        (
+            "middle(1L, 2)",
+            "base <- 10
+             inner <- function(a) { if (a > 180) stop('inner fails at ', a); a + base }
+             middle <- function(x, k) { if (x < 0L) stop('negative'); t <- inner(x * k); t * 2 }
+             caller <- function(n) { s <- 0; i <- 0L; while (i < n) { i <- i + 1L; s <- s + middle(i, 2) }; s }",
+            &[
+                "caller(80L)",
+                "caller(100L)",
+                "tryCatch(caller(100L), error = function(e) deparse(conditionCall(e)))",
+                "caller(80L)",
+                "base <- 20L",
+                "caller(80L)",
+                "inner <- function(a) a - 1",
+                "caller(80L)",
+            ],
+        ),
+        (
+            "callee(1L, 2)",
+            "make <- function(step) { count <- 0; function(x, k) { if (x > 90L) count <<- count + 1; x * k + step } }
+             callee <- make(3)
+             caller <- function(n) { s <- 0; i <- 0L; while (i < n) { i <- i + 1L; s <- s + callee(i, 2) }; s }",
+            &[
+                "caller(80L)",
+                "caller(100L)",
+                "environment(callee)$count",
+                "callee <- make(5)",
+                "caller(80L)",
+                "caller(100L)",
+                "environment(callee)$count",
+            ],
+        ),
+        (
+            "callee(1L, 2)",
+            "callee <- function(x, k) { if (x < 0L) stop('negative'); x * k }
+             caller <- function(n, k) { s <- 0; i <- 0L; while (i < n) { i <- i + 1L; s <- s + callee(i, k) }; s }",
+            &[
+                "caller(80L, 2)",
+                "caller(80L, 2L)",
+                "caller(80L, 2)",
+                "caller(3L, c(1, 2))",
+                "caller(3L, 'a')",
+                "caller(3L)",
+                "caller(0L)",
+                "caller(80L, 2)",
+            ],
+        ),
+        (
+            "callee(c(1, 2, 3), 2L)",
+            "callee <- function(v, i) { if (i < 1L) stop('low'); w <- v; w[[i]] <- 0; w[[1L]] + v[[i]] }
+             caller <- function(n) { v <- c(1, 2, 3); s <- 0; i <- 0L; while (i < n) { i <- i + 1L; s <- s + callee(v, 1L + i %% 3L) }; s + sum(v) }",
+            &["caller(80L)", "caller(81L)"],
+        ),
+    ];
+    let mut outcomes = Vec::new();
+    let mut inlined = 0;
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            let mut results = Vec::new();
+            for (warm, setup, calls) in programs {
+                run(setup);
+                // The callee is inlined from the code and the types its own calls left.
+                for _ in 0..3 {
+                    results.push(run(warm));
+                }
+                let first = calls.first().copied().unwrap_or("caller(80L)");
+                results.push(run(first));
+                results.push(run(first));
+                if mode == Mode::Force
+                    && let Ok(caller) = eval::eval(
+                        lower::parse_text("caller", "<test>")
+                            .map(|parsed| parsed.element(0))
+                            .unwrap_or(values::nil()),
+                        values::global_env(),
+                    )
+                {
+                    inlined += usize::from(jit::inlined_frames(caller) > 0);
+                }
+                results.extend(calls.iter().map(|call| run(call)));
+            }
+            outcomes.push(results);
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+    // A planner that inlined none of the calls would agree trivially.
+    assert!(inlined >= 4, "only {inlined} callers inlined a frame");
+}
+
+/// Random callers that loop over a call of a random three-formal closure. The callee computes
+/// with its arguments and two globals, and past a threshold it does something only a real
+/// frame can answer (an error, a warning, `sys.call`, `substitute`, `missing`, forcing its
+/// lazy third argument, a superassignment, a local that changes type). The calls first stay
+/// below the threshold, so the compiled caller runs the callee without a frame, then cross
+/// it, change an argument's type, and rebind a global.
+#[test]
+fn fuzz_inlined_frames_agree_with_tier_zero() {
+    with_interpreter(|| {
+        let (mut runs, mut inlined) = (0, 0);
+        for_each_seed(150, |seed| {
+            let mut rng = SplitMix64(seed);
+            let (setup, calls) = inlined_program(&mut rng);
+            let mut outcomes = Vec::new();
+            // Every third seed runs the compiled caller a second time with a collection before
+            // each allocation, alternating between the two stress modes: a deoptimization exit
+            // allocates the frames it rebuilds while the values that go into them exist only in
+            // the compiled code's registers.
+            let stresses: &[GcStress] = match seed % 6 {
+                0 => &[GcStress::Off, GcStress::EveryAllocation],
+                3 => &[GcStress::Off, GcStress::Young],
+                _ => &[GcStress::Off],
+            };
+            // SAFETY: the interpreter is installed.
+            unsafe {
+                jit::install_mode(Mode::Off);
+                run(&setup);
+                outcomes.push(calls.iter().map(|call| run(call)).collect::<Vec<_>>());
+                for stress in stresses {
+                    jit::install_mode(Mode::Force);
+                    run(&setup);
+                    let mut results = Vec::new();
+                    for (index, call) in calls.iter().enumerate() {
+                        results.push(run(call));
+                        if index != 4 {
+                            continue;
+                        }
+                        if *stress == GcStress::Off
+                            && let Ok(parsed) = lower::parse_text("caller", "<test>")
+                            && let Ok(caller) = eval::eval(parsed.element(0), values::global_env())
+                        {
+                            inlined += usize::from(jit::inlined_frames(caller) > 0);
+                        }
+                        interp::heap().update_policy(|policy| policy.stress = *stress);
+                    }
+                    interp::heap().update_policy(|policy| policy.stress = GcStress::Off);
+                    outcomes.push(results);
+                }
+                jit::install_mode(Mode::Off);
+            }
+            runs += 1;
+            for results in &outcomes[1..] {
+                for (index, call) in calls.iter().enumerate() {
+                    assert_eq!(
+                        outcomes[0][index], results[index],
+                        "seed {seed}, call {index} ({call}) of\n{setup}"
+                    );
+                }
+            }
+        });
+        // A planner that refused every call a frame would agree trivially. A replay of one seed
+        // says nothing about the share.
+        eprintln!("{inlined} of {runs} callers inlined a frame");
+        assert!(
+            runs < 50 || inlined * 4 > runs,
+            "only {inlined} of {runs} callers inlined a frame"
+        );
+    });
+}
+
+/// The definitions of a random `callee` and `caller` and the calls that exercise them, for
+/// [`fuzz_inlined_frames_agree_with_tier_zero`].
+fn inlined_program(rng: &mut SplitMix64) -> (String, Vec<String>) {
+    const FIRST: &[&str] = &[
+        "x * y",
+        "x + y * scale",
+        "x - 1L",
+        "y / 2",
+        "x %% 3L",
+        "x * x",
+        "scale + y",
+        "x + offset",
+    ];
+    const SECOND: &[&str] = &["t + x", "t * 2", "t - y", "x", "t * scale", "offset - t"];
+    const LAST: &[&str] = &[
+        "t + u",
+        "u",
+        "t",
+        "t * u + x",
+        "if (x > 2L) t else u",
+        "u - y",
+    ];
+    const RARE: &[&str] = &[
+        "stop('failed at ', x)",
+        "warning('odd ', x)",
+        "return(list(sys.call()))",
+        "return(list(substitute(y), substitute(z)))",
+        "return(list(missing(z), nargs()))",
+        "return(list(sys.function()))",
+        "return(list(z))",
+        "return(list(x, y, t))",
+        "seen <<- x",
+        "t <- 'text'",
+        "scale <<- 3L",
+        "t <- z",
+    ];
+    const FIRST_ARGUMENT: &[&str] = &["i", "i * 2L", "i + 1L", "n - i"];
+    const SECOND_ARGUMENT: &[&str] = &["k", "2", "i * 0.5", "s", "3L"];
+    const THIRD_ARGUMENT: &[&str] = &["stop('z forced')", "i", "k", "warning('z forced')", "s * 2"];
+    let pick = |rng: &mut SplitMix64, items: &[&str]| items[rng.below(items.len())].to_owned();
+    let threshold = 8 + rng.below(20);
+    let mut body = vec![format!("t <- {}", pick(rng, FIRST))];
+    if rng.chance(2, 3) {
+        body.push(format!("if (x > {threshold}L) {}", pick(rng, RARE)));
+    }
+    body.push(format!("u <- {}", pick(rng, SECOND)));
+    if rng.chance(1, 2) {
+        body.push(format!("if (x > {}L) {}", threshold + 3, pick(rng, RARE)));
+    }
+    body.push(pick(rng, LAST));
+    let arguments = if rng.chance(1, 6) {
+        format!(
+            "{}, {}",
+            pick(rng, FIRST_ARGUMENT),
+            pick(rng, SECOND_ARGUMENT)
+        )
+    } else {
+        format!(
+            "{}, {}, {}",
+            pick(rng, FIRST_ARGUMENT),
+            pick(rng, SECOND_ARGUMENT),
+            pick(rng, THIRD_ARGUMENT)
+        )
+    };
+    let setup = format!(
+        "scale <- 2\noffset <- 5L\nseen <- 0L\n\
+         callee <- function(x, y, z) {{\n{}\n}}\n\
+         caller <- function(n, k) {{\ns <- 0\ni <- 0L\nwhile (i < n) {{\ni <- i + 1L\n\
+         r <- callee({arguments})\nif (is.list(r)) return(r)\ns <- s + r\n}}\ns\n}}",
+        body.join("\n")
+    );
+    let calls = [
+        "callee(1L, 2, 3)",
+        "callee(2L, 2, 3)",
+        "callee(3L, 2, 3)",
+        "caller(3L, 2)",
+        "caller(3L, 2)",
+        "caller(40L, 2)",
+        "seen",
+        "caller(3L, 2)",
+        "caller(40L, 2)",
+        "caller(3L, 2L)",
+        "caller(3L, 'a')",
+        "scale <- 3L",
+        "caller(3L, 2)",
+        "caller(40L, 2)",
+        "offset <- 1.5",
+        "caller(3L, 2)",
+        "caller(40L, 2.5)",
+        "seen",
+        "scale",
+    ];
+    (setup, calls.iter().map(|&call| call.to_owned()).collect())
+}
+
 /// Compiled code calls an active binding at every read, as tier 0 does. The first compiled run
 /// that meets the binding hands its activation to tier 0 once, after the load, and the body
 /// compiled again loads the variable at each read, so calls after the first neither compile nor

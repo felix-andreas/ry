@@ -24,18 +24,22 @@
 
 pub use interp::effects::{Speculation, base_builtin, resolve_function};
 use {
-    crate::native::{self, Native},
+    crate::{
+        native::{self, Native},
+        runtime::elidable,
+    },
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
         annotations::{self, Declared, Entry},
-        bytecode::{self, ARITHS, Arith, FEEDBACK, Op, feedback, operand_count},
+        bytecode::{self, ARITHS, Arith, FEEDBACK, Op, PROFILE, feedback, operand_count, profile},
         effects, values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
     smallvec::{SmallVec, smallvec},
     std::{
         alloc::{AllocError, Allocator, Layout},
+        fmt,
         ptr::NonNull,
     },
 };
@@ -921,6 +925,23 @@ pub enum Action<'a> {
         entry: Entry,
         dst: (usize, Ty),
     },
+    /// A call of a closure known at compile time whose body, planned as `callee`, runs inside
+    /// this compiled code on registers of its own but without a call frame. `steps` evaluate
+    /// the arguments that have no effect, and the callee reads each one where it first loads
+    /// the formal, which is where a promise would be forced. An argument of `None` is not
+    /// evaluated: the callee has never read its formal, and a read hands the call to tier 0,
+    /// which binds the formal to a promise. The callee's code
+    /// runs nothing that could look at the missing frame: every point where it would hands
+    /// the call to tier 0 through a frame state, which gives the call its real frame first.
+    /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
+    Frame {
+        steps: &'a [(Action<'a>, StateId)],
+        callee: &'a Plan<'a>,
+        function: Sexp,
+        call: Sexp,
+        args: &'a [Option<Argument>],
+        dst: (usize, Ty),
+    },
     /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
     /// vectors as objects), and puts its unboxed value in `dst`. When the function fails, tier 0
     /// runs the call instead.
@@ -1101,6 +1122,12 @@ pub struct Plan<'a> {
     /// By slot, a bitset of the variables loaded at every read because a read called an
     /// active binding.
     pub volatile: List<'a, u64>,
+}
+
+impl fmt::Debug for Plan<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Plan({} instructions)", self.insts.len())
+    }
 }
 
 /// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
@@ -1395,6 +1422,7 @@ fn native(action: &Action<'_>) -> bool {
         Action::Inline { .. }
             | Action::Traverse { .. }
             | Action::Call { .. }
+            | Action::Frame { .. }
             | Action::NativeCall { .. }
             | Action::Arithmetic { .. }
             | Action::Comparison { .. }
@@ -1437,6 +1465,18 @@ pub unsafe fn plan<'a>(
     patient: bool,
     shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
+    plan_at(arena, code, frame, patient, shared, 0)
+}
+
+/// [`plan`] for a body `depth` inlined calls inside the one being compiled.
+unsafe fn plan_at<'a>(
+    arena: Arena<'a>,
+    code: Sexp,
+    frame: Frame,
+    patient: bool,
+    shared: bool,
+    depth: usize,
+) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
     let (formals, enclosure, locals, global) = match frame {
@@ -1471,6 +1511,8 @@ pub unsafe fn plan<'a>(
         modified: List::new_in(arena),
         declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
+        callees: Map::with_hasher_in(FxBuildHasher, arena),
+        depth,
         closure_code: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
@@ -1739,6 +1781,12 @@ struct Builder<'a> {
     declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
     frame_safe: Map<'a, Sexp, bool>,
+    /// The plan of each closure asked to be inlined with a frame of its own and the type of
+    /// its value, or `None` for one that cannot be, so each body is planned once however many
+    /// calls of it the body makes.
+    callees: Map<'a, Sexp, Result<(&'a Plan<'a>, Ty), &'static str>>,
+    /// How many inlined calls surround the body being planned.
+    depth: usize,
     /// The byte code of each `function` expression of this body that has run, by source body.
     /// Its feedback says what the closure's arguments have been.
     closure_code: Map<'a, Sexp, Sexp>,
@@ -2521,6 +2569,16 @@ impl<'a> Builder<'a> {
                             Some(function.tag()),
                             operand(0),
                         )
+                        .or_else(|| match self.frame(state, call, function, operand(0)) {
+                            Ok(action) => Some(action),
+                            Err(why) => {
+                                if crate::logging() {
+                                    let call = interp::deparse::deparse_one_line(call);
+                                    eprintln!("jit: no inlined frame for {call}: {why}");
+                                }
+                                None
+                            }
+                        })
                         .or_else(|| {
                             self.direct_call(
                                 state,
@@ -2641,7 +2699,10 @@ impl<'a> Builder<'a> {
             // closure's declared formals at its first call.
             Op::Fused => 'fused: {
                 let program = self.constant(operand(1));
-                if program == values::nil() {
+                // The pass reads its variables from the frame, which an inlined call has none
+                // of. The ordinary code computes the same value from the types the pass
+                // recorded for it.
+                if program == values::nil() || self.depth > 0 {
                     break 'fused Action::FallThrough;
                 }
                 // The fused pass records its result's type at the instruction whose value it
@@ -3437,6 +3498,275 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Inlines a call of the closure `function` as a frame of its own ([`Action::Frame`]),
+    /// when the callee's plan runs without a frame and the call passes each formal one
+    /// positional argument that evaluates without an effect.
+    unsafe fn frame(
+        &mut self,
+        state: &mut State<'a>,
+        call: Sexp,
+        function: Sexp,
+        dst: usize,
+    ) -> Result<Action<'a>, &'static str> {
+        let (callee, result) = self.callee(function)?;
+        let formals = values::pairlist_items(function.car());
+        let arguments = values::pairlist_items(call.cdr());
+        if arguments.len() != formals.len() {
+            return Err("the call does not pass each formal one argument");
+        }
+        let mut lowering = Lowering {
+            state: state.clone(),
+            steps: List::new_in(self.arena),
+            next: self.registers,
+            scope: SmallVec::new(),
+            closed: None,
+            inlined: false,
+        };
+        let mut args = List::new_in(self.arena);
+        for (&(tag, expression), &(formal, _)) in arguments.iter().zip(&formals) {
+            if tag != values::nil()
+                || expression == values::missing_arg()
+                || expression == values::symbols().dots
+            {
+                return Err("a named, missing or `...` argument");
+            }
+            if expression.kind() == SexpType::Symbol
+                && let Some(slot) = self.peek_slot(&mut lowering, expression, true)
+                && !lowering.state.slots[slot].ty.is_unboxed()
+            {
+                // The callee reads the object from the slot's cell, which an unboxed number
+                // that may be either kind does not keep current.
+                if lowering.state.slots[slot].ty.in_variables() {
+                    return Err("an argument that is a number of either kind");
+                }
+                args.push(Some(Argument::Slot(slot)));
+                continue;
+            }
+            let slot = callee.slots.iter().position(|&symbol| symbol == formal);
+            let (state, steps, next) =
+                (lowering.state.clone(), lowering.steps.len(), lowering.next);
+            let Some(register) = self.lower_expression(&mut lowering, expression, 0) else {
+                // The argument stays a promise, which only tier 0 forces, so the call is
+                // worth inlining only while the callee has not read the formal.
+                let feedback = values::ints(function.cdr().cdr().element(FEEDBACK));
+                let unread =
+                    callee
+                        .actions
+                        .iter()
+                        .zip(callee.insts.iter())
+                        .all(|(action, inst)| match *action {
+                            Action::GetVar { slot: read, .. } if Some(read) == slot => {
+                                feedback.get(inst.pc).copied().unwrap_or(0) == 0
+                            }
+                            _ => true,
+                        });
+                if !unread {
+                    return Err("an argument the callee reads that may have an effect");
+                }
+                lowering.state = state;
+                lowering.steps.truncate(steps);
+                lowering.next = next;
+                args.push(None);
+                continue;
+            };
+            let ty = lowering.state.registers[register];
+            // The callee's loads of the formal expect what its own calls have passed. An
+            // unboxed argument is never checked against that, so it must be that type, or
+            // one the load converts from.
+            let admitted = callee.actions.iter().all(|action| match *action {
+                Action::GetVar {
+                    slot: read,
+                    load: Some(load),
+                    ..
+                } if Some(read) == slot => {
+                    load == ty || load == Ty::Boxed || (load == Ty::Num && ty != Ty::Lgl)
+                }
+                _ => true,
+            });
+            if !ty.is_unboxed() {
+                return Err("an argument expression whose value is an object");
+            }
+            if !admitted {
+                return Err("an argument of another type than the callee has seen");
+            }
+            args.push(Some(Argument::Unboxed { register, ty }));
+        }
+        let mut after = lowering.state;
+        for register in self.registers..after.registers.len() {
+            after.registers[register] = Ty::Bottom;
+        }
+        // The callee cannot reach this frame while it has none of its own, so the variables
+        // stay as they are.
+        after.visible = None;
+        after.registers[dst] = result;
+        *state = after;
+        Ok(Action::Frame {
+            steps: lowering.steps.leak(),
+            callee,
+            function,
+            call,
+            args: args.leak(),
+            dst: (dst, result),
+        })
+    }
+
+    /// The plan of `function`'s body as an inlined frame and the type of its value, or `None`
+    /// when a call of it needs its frame.
+    unsafe fn callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
+        if let Some(&found) = self.callees.get(&function) {
+            return found;
+        }
+        let found = self.plan_callee(function);
+        self.callees.insert(function, found);
+        found
+    }
+
+    unsafe fn plan_callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
+        let (formals, code, enclosure) = (function.car(), function.cdr(), function.tag());
+        // A frame whose environment is still pending belongs to a running slot frame, which a
+        // real call of the closure would give its environment.
+        if self.depth >= MAX_INLINE_DEPTH {
+            return Err("the call is nested too deep");
+        }
+        if code.kind() != SexpType::Bytecode {
+            return Err("the callee has no tier 0 code");
+        }
+        // Entering a frame is where a typed closure's arguments are checked.
+        if annotations::is_typed(function) {
+            return Err("the callee is typed");
+        }
+        if code == self.code {
+            return Err("the call is recursive");
+        }
+        if enclosure.has_gp(gp::PENDING_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
+            return Err("the callee's environment may not outlive the code");
+        }
+        let constants = code.cdr();
+        if !elidable(values::ints(constants.element(PROFILE))[profile::TIER_STATE]) {
+            return Err("calls of the callee have needed their frame");
+        }
+        // Giving the call its frame later binds each formal in the slot the code numbers it
+        // by, so the body must run in a slot frame.
+        let table = constants.element(bytecode::SLOTS);
+        if table == values::nil() {
+            return Err("the callee runs in an environment");
+        }
+        let names = table.element(1);
+        let parameters = values::pairlist_items(formals);
+        let numbered = parameters.iter().enumerate().all(|(index, &(symbol, _))| {
+            symbol != values::symbols().dots
+                && index < values::length(names)
+                && names.element(index) == symbol
+        });
+        if !numbered {
+            return Err("the callee takes `...`");
+        }
+        let plan = plan_at(
+            self.arena,
+            code,
+            Frame::Closure { formals, enclosure },
+            false,
+            self.shared,
+            self.depth + 1,
+        )
+        .map_err(|Refusal(why)| why)?;
+        // A loop would need a counter and an entry of its own for a body that leaves compiled
+        // code while it runs.
+        if plan.loops != 0 || !plan.loop_headers.is_empty() {
+            return Err("the callee loops");
+        }
+        let feedback = values::ints(constants.element(FEEDBACK));
+        let mut result = Ty::Bottom;
+        for (position, action) in plan.actions.iter().enumerate() {
+            let frameless = match *action {
+                // The first load of a formal reads the argument, so it can neither evaluate a
+                // default nor call an active binding, and the frame the call may get later
+                // binds a formal to what the caller passed, not to a value assigned since.
+                Action::GetVar {
+                    forcing, volatile, ..
+                } => !forcing && !volatile,
+                Action::SetVar { slot, .. } => parameters
+                    .iter()
+                    .all(|&(symbol, _)| symbol != plan.slots[slot]),
+                Action::Step {
+                    effect: Effect::Pure | Effect::PureUnlessObserved,
+                    fast,
+                    ..
+                } => !matches!(fast, Fast::Store(_)),
+                // An instruction that may run R code leaves for tier 0 every time, which is
+                // only worth compiling where the instruction has never run. One with no
+                // destination records nothing that would say so.
+                Action::Step {
+                    effect: Effect::Opaque,
+                    dst,
+                    fast,
+                    ..
+                } => {
+                    dst.is_some()
+                        && fast == Fast::No
+                        && feedback.get(plan.insts[position].pc).copied().unwrap_or(0) == 0
+                }
+                Action::Return { src } => {
+                    let returned = plan
+                        .before(position)
+                        .ok_or("an instruction without a state")?
+                        .registers[src];
+                    result = match (result, returned) {
+                        (joined, Ty::Bottom) => joined,
+                        (Ty::Bottom, ty) => ty,
+                        (joined, ty) if joined == ty => ty,
+                        _ => Ty::Boxed,
+                    };
+                    true
+                }
+                Action::Inline { .. }
+                | Action::Traverse { .. }
+                | Action::Call { .. }
+                | Action::NativeCall { .. }
+                | Action::GetFunSlot { .. }
+                | Action::Peek { .. }
+                | Action::Prologue { .. }
+                | Action::Fused { .. }
+                | Action::SubAssign { .. }
+                | Action::SubAssignMatrix { .. }
+                | Action::ForInit { .. }
+                | Action::ForStep { .. }
+                | Action::ForEnd { .. } => false,
+                _ => true,
+            };
+            if !frameless {
+                if crate::logging() {
+                    let inst = &plan.insts[position];
+                    eprintln!("jit: an inlined frame cannot run {:?}@{}", inst.op, inst.pc);
+                }
+                return Err(match *action {
+                    Action::GetVar { .. } => "the callee reads a variable that may run code",
+                    Action::SetVar { .. } => "the callee assigns a formal",
+                    Action::Step {
+                        effect: Effect::Opaque,
+                        ..
+                    } => "the callee runs an instruction only tier 0 has",
+                    Action::Step { .. } => "the callee stores into an object",
+                    Action::Call { .. } | Action::GetFunSlot { .. } => {
+                        "the callee calls a closure that needs a frame"
+                    }
+                    Action::ForInit { .. } | Action::ForStep { .. } | Action::ForEnd { .. } => {
+                        "the callee loops"
+                    }
+                    _ => "the callee runs an instruction that needs its frame",
+                });
+            }
+        }
+        // A value that is a closure the plan knows is still an object to the caller.
+        let result = match result {
+            Ty::Bottom => return Err("the callee never returns"),
+            Ty::Fun(_) | Ty::Closure(..) | Ty::Num => Ty::Boxed,
+            ty => ty,
+        };
+        let plan: &'a Plan<'a> = self.arena.0.alloc(plan);
+        Ok((plan, result))
+    }
+
     #[allow(clippy::too_many_arguments)]
     unsafe fn lower_call(
         &mut self,
@@ -3786,7 +4116,8 @@ impl<'a> Builder<'a> {
     /// Makes sure `symbol`'s slot is loaded in inlined code, peeking at it when it may not be,
     /// and returns the slot.
     /// A variable compiled code has not loaded is assumed to have the type tier 0 saw at its
-    /// loads, which the peek checks. Only a `boxed` peek may find a boxed value.
+    /// loads, which the peek checks. Only a `boxed` peek may find a boxed value, or load a
+    /// variable tier 0 has not.
     unsafe fn peek_slot(
         &mut self,
         lowering: &mut Lowering<'a>,
@@ -3803,6 +4134,13 @@ impl<'a> Builder<'a> {
                 current.ty
             } else {
                 self.hints[slot]
+            };
+            // A variable the body only passes on has no load that recorded a type, and an
+            // argument that stays an object needs none.
+            let ty = if ty == Ty::Bottom && boxed {
+                Ty::Boxed
+            } else {
+                ty
             };
             if ty == Ty::Bottom || (ty == Ty::Boxed && !boxed) {
                 return None;

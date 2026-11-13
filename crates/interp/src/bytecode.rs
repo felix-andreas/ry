@@ -650,6 +650,18 @@ pub fn reserve_registers(length: usize) -> R<()> {
     grow_registers(length)
 }
 
+/// How many registers the file holds, which is where the next window starts.
+#[inline]
+pub fn register_top() -> usize {
+    interp().bytecode.registers.len()
+}
+
+/// Gives the registers from `length` up back to the file.
+#[inline]
+pub fn release_registers(length: usize) {
+    interp().bytecode.registers.truncate(length);
+}
+
 #[inline(never)]
 fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
@@ -6546,6 +6558,46 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
     if env != nil() {
         env.set_gp_bits(gp::COMPILED_FRAME, was_compiled_frame);
     }
+    match result {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        other => other,
+    }
+}
+
+/// Continues the body of `function` at `pc` in the slot frame whose header register is
+/// `header`, whose frame [`eval::enter`] pushed and whose slots and registers the caller wrote:
+/// how the optimizing tier hands over a call it ran without a frame once that call has to leave
+/// compiled code. A `pending` unwind is what the instruction at `pc` raised. The entry is not
+/// counted and no tier runs it, because the activation is already under way.
+pub unsafe fn resume_slots(
+    function: Sexp,
+    header: usize,
+    pc: usize,
+    pending: Option<Unwind>,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let code = function.cdr();
+    heap.root(code);
+    let mark = heap.handle_mark();
+    let base = header + 1 + slot_count(code);
+    reserve_registers(base + *pool_ints(code.cdr(), REGISTERS) as usize)?;
+    let mut loops: SmallVec<[LoopState; 4]> = SmallVec::new();
+    loops.extend(std::iter::repeat_n(LoopState::default(), loop_count(code)));
+    let mut machine = Machine {
+        function,
+        code,
+        header,
+        base,
+        mark,
+        loops: &mut loops,
+    };
+    let result = eval::on_large_stack(|| match pending {
+        Some(unwind) => {
+            continue_after(&mut machine, pc, unwind).and_then(|pc| execute_code(&mut machine, pc))
+        }
+        None => execute_code(&mut machine, pc),
+    });
+    interp().bytecode.registers.truncate(base);
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         other => other,
