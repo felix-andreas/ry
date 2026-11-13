@@ -15,47 +15,26 @@
         "url": "https://github.com/ipetkov/crane"
       }
     },
-    "devshell": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1768818222,
-        "narHash": "sha256-460jc0+CZfyaO8+w8JNtlClB2n4ui1RbHfPTLkpwhU8=",
-        "rev": "255a2b1725a20d060f566e4755dbf571bbbb5f76",
-        "shallow": true,
-        "type": "git",
-        "url": "https://github.com/numtide/devshell"
-      },
-      "original": {
-        "shallow": true,
-        "type": "git",
-        "url": "https://github.com/numtide/devshell"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1784497964,
         "narHash": "sha256-vlHUuqAcbcH2RKmHbPiuQzbv1pnzzavXnI62RD0bqCU=",
+        "ref": "refs/heads/nixos-unstable",
         "rev": "241313f4e8e508cb9b13278c2b0fa25b9ca27163",
         "shallow": true,
         "type": "git",
-        "url": "https://github.com/NixOS/nixpkgs",
-        "ref": "refs/heads/nixos-unstable"
+        "url": "https://github.com/NixOS/nixpkgs"
       },
       "original": {
+        "ref": "nixos-unstable",
         "shallow": true,
         "type": "git",
-        "url": "https://github.com/NixOS/nixpkgs",
-        "ref": "nixos-unstable"
+        "url": "https://github.com/NixOS/nixpkgs"
       }
     },
     "root": {
       "inputs": {
         "crane": "crane",
-        "devshell": "devshell",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
         "systems": "systems"
