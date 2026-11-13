@@ -659,9 +659,17 @@ fn unpack_base(base: &EmbeddedBase, root: &Path) -> io::Result<()> {
         match kind {
             0 => fs::create_dir_all(&path)?,
             1 | 2 => {
+                let modified = u64::from_le_bytes(take_array(&archive, &mut position)?);
                 let size = u64::from_le_bytes(take_array(&archive, &mut position)?);
                 let size = usize::try_from(size).map_err(|_| corrupt_archive())?;
                 fs::write(&path, take(&archive, &mut position, size)?)?;
+                if modified != 0 {
+                    let time = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(modified);
+                    fs::File::options()
+                        .write(true)
+                        .open(&path)?
+                        .set_modified(time)?;
+                }
                 #[cfg(unix)]
                 if kind == 2 {
                     use std::os::unix::fs::PermissionsExt;

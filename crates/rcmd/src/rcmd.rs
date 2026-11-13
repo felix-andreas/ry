@@ -1513,7 +1513,9 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
     // (`$(BINPREF)gcc`, `$(PKG_CONFIG)`), and its `winshlib.mk` links a DLL exporting what the
     // package's `<name>-win.def` lists, or else every global symbol. Exporting every symbol
     // keeps `R_init_<name>` visible even when an object marks other symbols `dllexport`, which
-    // turns the linker's automatic export off.
+    // turns the linker's automatic export off. A package that includes `libintl.h` has `vsnprintf`
+    // redirected to `libintl_vsnprintf`, which GNU R's `R.dll` exports but ry's `libR` does not,
+    // so the DLL links Rtools' gettext (`LIBINTL`).
     let platform_variables = match platform {
         Platform::Windows => {
             "BINPREF ?=\nIMPDIR = bin/x64\nPKG_CONFIG = $(BINPREF)pkg-config\n\
@@ -1522,7 +1524,8 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
              STRIP_STATIC_LIB = $(BINPREF)strip --strip-debug\n\
              SHLIB_DEF = $(wildcard $(basename $(SHLIB))-win.def)\n\
              EXPORT_ALL_SYMBOLS = -Wl,--export-all-symbols\n\
-             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n"
+             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n\
+             LIBINTL = -lintl -liconv\n"
         }
         Platform::Linux | Platform::MacOs => "SHLIB_EXPORTS =\n",
     };
