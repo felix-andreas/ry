@@ -120,9 +120,6 @@ pub struct State {
     /// What the dispatch loop resumes as each callee it entered in place returns, innermost
     /// last ([`Resume`]).
     resumes: Vec<Resume>,
-    /// The promises whose code the dispatch loop runs in place, innermost last, one per
-    /// [`Resume`] marked [`PROMISE_RESUME`] ([`force_in_loop`]).
-    forcing: Vec<Forcing>,
     /// The `for` loop states of the bodies entered in place. Allocated once at
     /// [`LOOP_STATE_CAPACITY`] and never grown past it, so a running body's states stay where
     /// they are while deeper calls take and return theirs.
@@ -142,7 +139,6 @@ impl Default for State {
             tier: None,
             call_plans: CallPlans::default(),
             resumes: Vec::new(),
-            forcing: Vec::new(),
             loop_states: Vec::with_capacity(LOOP_STATE_CAPACITY),
             jit_level: 3,
         }
@@ -7148,34 +7144,11 @@ unsafe fn reload(state: &mut Activation<'_, '_>) {
 /// their returns.
 pub fn forget_resumes(state: &mut State) {
     state.resumes.clear();
-    // The unwind skipped the ends of these forcings, which would have let their promises be
-    // forced again.
-    for forcing in state.forcing.drain(..) {
-        // SAFETY: a promise being forced is rooted until its forcing ends, and this is its end.
-        unsafe { forcing.promise.set_gp_bits(eval::PROMISE_SEEN, false) };
-    }
     state.loop_states.clear();
 }
 
 /// [`Activation::resume_base`] of an activation that enters no callee in place.
 const NO_RESUMES: usize = usize::MAX;
-
-/// The [`Resume::depth`] of a caller whose `GetVar` forces a promise in place: no call frame
-/// returns with it, and [`State::forcing`] holds the rest of what the end of the forcing needs.
-const PROMISE_RESUME: u32 = u32::MAX;
-
-/// A promise whose code the dispatch loop runs in place, for the `GetVar` that read it.
-struct Forcing {
-    promise: Sexp,
-    /// [`Interp::slot_owner`] and the srcref before the forcing, which its end restores.
-    slot_owner: u32,
-    srcref: Sexp,
-    /// The handle stack's height before the promise and its code were rooted.
-    mark: usize,
-    /// The caller's registers below the `GetVar`'s output, which count as referenced while the
-    /// promise's code runs ([`holding`]).
-    held: Range<usize>,
-}
 
 /// The caller of a body the dispatch loop entered in place: what [`Machine`] held for it, and
 /// what its call instruction still has to do once the callee returns.
@@ -7316,15 +7289,6 @@ unsafe fn finished(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> usize
             unreachable!("the dispatch loop's resume records are above its base");
         };
         bytecode.registers.truncate(state.machine.base);
-        if resume.depth == PROMISE_RESUME {
-            match forced(state, resume, result) {
-                Ok(pc) => return pc,
-                Err(unwind) => {
-                    result = Err(unwind);
-                    continue;
-                }
-            }
-        }
         let env = *state.header;
         if env != nil() {
             env.set_gp_bits(gp::COMPILED_FRAME, false);
@@ -8028,10 +7992,9 @@ unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
     };
     match value.kind() {
         SexpType::Promise => {
-            let promise = value;
             value = value.car();
             if value == known.unbound {
-                return force_in_loop(state, at, promise);
+                return None;
             }
         }
         SexpType::Symbol if value == known.missing_arg || value == known.unbound => return None,
@@ -8041,112 +8004,6 @@ unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
     *state.registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
     Some(at + 1 + operand_count(Op::GetVar))
-}
-
-/// `GetVar` of an unforced argument reference whose code runs on its frame's slots, while
-/// nothing observes calls: the dispatch loop goes on in the promise's code, and [`forced`]
-/// settles the promise and finishes the `GetVar` when that code returns. It does what
-/// [`eval::force_promise`] does for the same promise through [`run_promise_on_slots`], without
-/// entering a Rust frame.
-#[inline(never)]
-unsafe fn force_in_loop(state: &mut Activation<'_, '_>, at: usize, promise: Sexp) -> Option<usize> {
-    if state.resume_base == NO_RESUMES
-        || activity::hooks() != 0
-        || !promise.has_gp(gp::ARGUMENT_REFERENCE)
-        || promise.has_gp(eval::PROMISE_SEEN)
-    {
-        return None;
-    }
-    let code = eval::reference_code(promise)?;
-    let (owner, _) = eval::reference_target(promise);
-    let interp = &mut *state.interp;
-    let frame = interp.frames.get(owner)?;
-    let (function, header) = (frame.function, frame.slots as usize);
-    let base = interp.bytecode.registers.len();
-    reserve_registers(base + *pool_ints(code.cdr(), REGISTERS) as usize).ok()?;
-    // Visible before the code runs, so that a promise forced to `invisible()` leaves the value
-    // invisible ([`op_get_var`]).
-    interp.visible = true;
-    let held = state.machine.base..state.machine.base + *state.code.add(at + 1) as usize;
-    for value in interp.bytecode.registers.get(held.clone()).unwrap_or_default() {
-        value.increment_refcount();
-    }
-    let heap = &mut *state.heap;
-    let mark = heap.handle_mark();
-    heap.root(promise);
-    heap.root(code);
-    promise.set_gp_bits(eval::PROMISE_SEEN, true);
-    interp.bytecode.forcing.push(Forcing {
-        promise,
-        slot_owner: interp.slot_owner,
-        srcref: interp.srcref,
-        mark,
-        held,
-    });
-    interp.slot_owner = owner as u32;
-    let machine = &mut *state.machine;
-    interp.bytecode.resumes.push(Resume {
-        function: machine.function,
-        code: machine.code,
-        header: machine.header,
-        base: machine.base,
-        mark: machine.mark,
-        loops: std::ptr::from_mut(std::mem::take(&mut machine.loops)),
-        call_at: at,
-        depth: PROMISE_RESUME,
-        references: interp.references_used,
-        loop_mark: interp.bytecode.loop_states.len() as u32,
-    });
-    machine.function = function;
-    machine.code = code;
-    machine.header = header;
-    machine.base = base;
-    machine.mark = heap.handle_mark();
-    reload(state);
-    Some(0)
-}
-
-/// Ends the forcing [`force_in_loop`] started, whose code returned `result`, in the caller
-/// `resume` describes: restores what the forcing changed, settles the promise and finishes the
-/// caller's `GetVar` with its value, answering where the loop goes on. An unwind comes back for
-/// [`finished`] to take further, unless it is a `break` or `next` the caller's loops take.
-unsafe fn forced(state: &mut Activation<'_, '_>, resume: Resume, result: R<Sexp>) -> R<usize> {
-    let interp = &mut *state.interp;
-    let Some(forcing) = interp.bytecode.forcing.pop() else {
-        unreachable!("a promise resume has its forcing");
-    };
-    interp.slot_owner = forcing.slot_owner;
-    interp.srcref = forcing.srcref;
-    let machine = &mut *state.machine;
-    machine.function = resume.function;
-    machine.code = resume.code;
-    machine.header = resume.header;
-    machine.base = resume.base;
-    machine.mark = resume.mark;
-    machine.loops = &mut *resume.loops;
-    reload(state);
-    let promise = forcing.promise;
-    promise.set_gp_bits(eval::PROMISE_SEEN, false);
-    for value in interp.bytecode.registers.get(forcing.held).unwrap_or_default() {
-        value.decrement_refcount();
-    }
-    let result = match result {
-        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
-        other => other,
-    };
-    let settled = result.and_then(|value| eval::settle_promise(promise, value));
-    let heap = &mut *state.heap;
-    heap.release_handles(forcing.mark);
-    let at = resume.call_at;
-    match settled {
-        Ok(value) => {
-            state.record(at, value);
-            *state.registers.add(*state.code.add(at + 1) as usize) = value;
-            release(state);
-            Ok(after_instruction(state.code, at))
-        }
-        Err(unwind) => continue_after(state.machine, at, unwind),
-    }
 }
 
 /// `GetFun` in a slot frame: a slot holding a function, or else the cached cell of a name the
@@ -9298,6 +9155,29 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     _ => eval::call_matching(call, function, &args, sys_parent),
                 },
             },
+            None if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) => {
+                return Ok(Flow::Goto(
+                    match eval::apply_closure_entering(call, function, &args, sys_parent, None) {
+                        Ok(entered) if entered.header == crate::NO_SLOTS => {
+                            after_call(state, instruction, references, entered.value)
+                        }
+                        Ok(entered) => enter_in_place(
+                            state,
+                            instruction.at,
+                            function,
+                            entered,
+                            slot_count(function.cdr()),
+                            references,
+                        ),
+                        Err(unwind) => {
+                            if (*state.interp).references_used != references {
+                                eval::release_references(references);
+                            }
+                            return Err(unwind);
+                        }
+                    },
+                ));
+            }
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {

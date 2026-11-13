@@ -2147,31 +2147,75 @@ pub unsafe fn apply_closure_owning(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    let entered = apply_closure_entering(call, function, args, sys_parent, supplied)?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let slots = bytecode::slot_count(function.cdr());
+    let result = on_large_stack(|| bytecode::run_slots(function, entered.header as usize, slots));
+    leave(entered.depth as usize, result)
+}
+
+/// [`apply_closure_owning`] up to the point where the body would run, so that an interpreter
+/// loop can run it in place rather than recursing ([`enter`]). A call that does not get a slot
+/// frame, or that the general path has to run whole, comes back with its value and
+/// [`crate::NO_SLOTS`].
+pub unsafe fn apply_closure_entering(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Entered> {
+    let whole = |value: Sexp| Entered {
+        value,
+        header: crate::NO_SLOTS,
+        depth: 0,
+    };
     if function.has_gp(gp::NATIVE_ENTRY)
         && supplied.is_none()
         && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
     {
-        return Ok(value);
+        return Ok(whole(value));
     }
     if crate::annotations::is_typed(function)
         && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
     {
-        return value;
+        return Ok(whole(value?));
     }
+    let method_vars = supplied.unwrap_or(&[]);
     if let Some(frame) = bind_slots(call, function, args)? {
-        let method_vars = supplied.unwrap_or(&[]);
-        return run_frame(
+        let CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        } = frame
+        else {
+            let value = run_frame_general(
+                call,
+                function,
+                frame,
+                sys_parent,
+                args,
+                Entry::Unchecked,
+                method_vars,
+            )?;
+            return Ok(whole(value));
+        };
+        return enter(
             call,
             function,
-            frame,
             sys_parent,
             args,
-            Entry::Unchecked,
             method_vars,
+            header,
+            missing,
+            promised,
         );
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+    let value = run_closure(call, function, env, sys_parent, args, Entry::Unchecked)?;
+    Ok(whole(value))
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
