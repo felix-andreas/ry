@@ -213,7 +213,7 @@ including `"setnames"`, `"setorder"`, `"fifelse"` and `"as.data.table"`. Whether
 ry adds no special cases for data.table covers the type checker is a question for the user. If it
 does, those arms belong in stub attributes.
 
-**The loader** keeps its session in process statics (`ry_runtime.rs:177`, `261`, `279`, `281`) that
+**The loader** keeps its session in process statics (`crates/libr/src/loader_backend.rs:177`, `261`, `279`, `281`) that
 panic on a second set, so it cannot be simulated twice in one process, which the robustness contract
 requires. Its index lives in `semantics`, which is what drags salsa into `libr`.
 

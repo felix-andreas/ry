@@ -3883,10 +3883,14 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
                             file.path,
                             parent,
                             parent.as_ref().map(|p| p.exists()),
-                            parent.as_ref().map(|p| std::fs::metadata(p).map(|m| m.is_dir())),
+                            parent
+                                .as_ref()
+                                .map(|p| std::fs::metadata(p).map(|m| m.is_dir())),
                             std::env::current_dir(),
                             parent.as_ref().map(|p| std::fs::canonicalize(p)),
-                            parent.as_ref().and_then(|p| std::fs::read_dir(p).ok().map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())),
+                            parent.as_ref().and_then(|p| std::fs::read_dir(p)
+                                .ok()
+                                .map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())),
                         );
                     }
                     crate::conditions::warning(format!(

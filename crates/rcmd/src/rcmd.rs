@@ -410,7 +410,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
     // searches the library, and `sessionInfo()` fails on a loaded namespace it cannot describe.
-    // The version is the one the namespace's `spec` gives (`crates/interp/src/frame.rs`).
+    // The version is the one the namespace's `spec` gives (`crates/frames/src/frame.rs`).
     let ry_package = root.join("library/ry");
     fs::create_dir_all(&ry_package).map_err(io_error(&ry_package))?;
     write(

@@ -1,6 +1,7 @@
 //! The operating system as R sees it: environment variables, files and directories, time and
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
+pub use numeric::{NEWEST_EMULATED_R, r_at_least, r_at_least_release};
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
@@ -3355,21 +3356,6 @@ impl RVersion {
     }
 }
 
-/// Whether the emulated R is `major.minor` or later. Behavior that GNU R changed between
-/// supported releases follows the release in `R_HOME`, so the base packages' R code and the
-/// internals it calls always agree.
-pub fn r_at_least(major: u32, minor: u32) -> bool {
-    let version = r_version();
-    (version.major, version.minor) >= (major, minor)
-}
-
-/// Whether the emulated R is `major.minor.patch` or later, for the rare change GNU R made in a
-/// patch release.
-pub fn r_at_least_release(major: u32, minor: u32, patch: u32) -> bool {
-    let version = r_version();
-    (version.major, version.minor, version.patch) >= (major, minor, patch)
-}
-
 /// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
 /// guard for them also checks the revision, so ry reports at least this one
 /// (`rcmd::MINIMUM_SVN_REVISION` writes the same floor into `Rversion.h`).
@@ -3379,8 +3365,12 @@ pub const MINIMUM_SVN_REVISION: u32 = 89194;
 /// with argument lists ry does not implement.
 pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
 
-/// The newest GNU R release whose behavior ry emulates, which is the base R ry bundles.
-pub const NEWEST_EMULATED_R: (u32, u32, u32) = (4, 6, 2);
+/// The release of the R in [`r_home`], for the numeric kernels whose results GNU R changed
+/// between releases.
+pub(crate) fn emulated_r() -> (u32, u32, u32) {
+    let version = r_version();
+    (version.major, version.minor, version.patch)
+}
 
 /// The version of the R in [`r_home`], read once. With no base R found no session can start, so
 /// only code that runs outside a session, such as a unit test, sees the fallback: the newest
@@ -3644,10 +3634,7 @@ unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
         ))),
         Err(FetchError::Transport { code, detail, .. }) => {
             let detail = if code == 6 {
-                let host = reqwest::Url::parse(&url)
-                    .ok()
-                    .and_then(|parsed| parsed.host_str().map(str::to_owned))
-                    .unwrap_or_default();
+                let host = crate::http::host(&url).unwrap_or_default();
                 format!("Could not resolve host: {host}")
             } else {
                 detail
@@ -3687,7 +3674,7 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
         write_collection_report(&heap.report(kind));
     }
     (interp().hooks.run_finalizers)();
-    crate::frame::release_worker_memory();
+    (interp().extensions.tables.release_worker_memory)();
     let heap = crate::heap();
     if reset {
         heap.reset_max_usage();

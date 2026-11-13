@@ -403,8 +403,6 @@ pub(crate) unsafe fn install_all() {
         crate::approximate::BUILTINS,
         crate::print::BUILTINS,
         crate::format::BUILTINS,
-        crate::frame::BUILTINS,
-        crate::dataframe::BUILTINS,
         crate::deparse::BUILTINS,
         crate::sort::BUILTINS,
         crate::random::BUILTINS,
@@ -420,7 +418,6 @@ pub(crate) unsafe fn install_all() {
         crate::utils::BUILTINS,
         crate::records::BUILTINS,
         crate::arrays::BUILTINS,
-        crate::graphics_engine::BUILTINS,
         library,
     ] {
         // `register` lets a later definition replace an earlier one, which the host relies on;
@@ -435,7 +432,7 @@ pub(crate) unsafe fn install_all() {
         }
         // ry's own values, tables and standard library live in `package:ry`, not base, so that
         // plain R code which never names them sees exactly GNU R's base namespace.
-        if [library, crate::records::BUILTINS, crate::frame::BUILTINS]
+        if [library, crate::records::BUILTINS]
             .iter()
             .any(|own| std::ptr::eq(table, *own))
         {
@@ -457,6 +454,14 @@ pub(crate) unsafe fn install_all() {
 
 pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
     register_in(definitions, crate::heap().known().base_env);
+}
+
+/// Registers `definitions`, binding the primitives in `package:ry`.
+pub(crate) unsafe fn register_own(definitions: &[BuiltinDef]) {
+    let env = interp()
+        .builtins_env
+        .unwrap_or_else(|| panic!("`package:ry` exists once the interpreter is installed"));
+    register_in(definitions, env);
 }
 
 /// Registers `definitions`, binding the primitives in `env`.

@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, jit, typed, libr, sniff, table, and rcmd crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, numeric, interp, stats, graphics, frames, services, jit, typed, libr, sniff, table, and rcmd crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -102,8 +102,6 @@ The crate root is `src/loader.rs`.
 - **`runtime.R`**: the R code both backends share, which applies a plan to a session and provides
   `load_all()`. **`r.rs`** turns a plan into an R list, encoding it as an RDS file for GNU R, and
   **`gnur.R`** and **`ry.R`** are the hooks of the two runtimes.
-- **`ry_runtime.rs`** (feature `runtime`): the backend for ry's own runtime, where the plan never
-  leaves the process and a lazy definition is a promise over the analysis's syntax tree.
 - **`testing.rs`**: the fuzz contracts for reloads and the load index, shared by the in-tree
   harness and the coverage-guided targets.
 
@@ -178,12 +176,32 @@ nothing about C.
 - **`env.rs`**: environment frames, which map symbols to binding cells.
 - **`arena.rs`**: the `R_alloc` arena and its `vmaxget` watermarks.
 
+## `numeric`
+
+The crate root is `src/numeric.rs`. It holds the numeric kernels that take and return plain
+numbers, so it sits below `interp` and an edit to the evaluator recompiles none of it. The root
+answers which GNU R release is emulated (`r_at_least`), because a few results changed between
+releases.
+
+- **`rmath.rs`**: R's nmath library: the densities, distribution functions, quantiles and the
+  special functions behind them.
+- **`long_double.rs`**: x87 extended-precision arithmetic, for the sums GNU R accumulates in a
+  `long double`.
+- **`vector_math.rs`**: the elementary functions over whole slices.
+- **`fft.rs`**: Singleton's mixed-radix FFT. **`linpack.rs`**: the LINPACK routines base R calls.
+- **`c_format.rs`**: C's `printf` number formats.
+
 ## `interp`
 
 The crate root is `src/interp.rs`. It is the R interpreter: it evaluates R code on `heap`'s
-objects and implements base R's primitives and internals, and the default packages' native
-routines, in Rust. It knows nothing about C; `libr` installs it and supplies the native-code
-builtins. The root holds the interpreter state (`Interp`, the frame stack, the host `Hooks`).
+objects and implements base R's primitives and internals in Rust. It knows nothing about C;
+`libr` installs it and supplies the native-code builtins. The root holds the interpreter state
+(`Interp`, the frame stack, the host `Hooks`).
+
+The engine links no table engine, rasterizer or HTTP client. The crates that do (`stats`,
+`graphics`, `frames` and `services`) sit above it, and each has an `install()` that a host calls
+after `interp::install`: it registers the crate's builtins and native routine tables, and fills
+the engine's table of function pointers for the few calls the engine makes into that crate.
 
 - **`eval.rs`**: the AST evaluator: variable lookup, promises, calls and argument matching,
   closures and `on.exit`, the control-flow specials, `substitute` and complex assignment.
@@ -214,29 +232,68 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   environment).
 - **`native.rs`**: the foreign-function builtins for a session without libR, and base's routines.
   **`builtin_libraries.rs`**: the default packages' routine tables, which `dyn.load` hands out
-  instead of loading their shared libraries; **`utils.rs`**, **`tools.rs`** and **`graphics.rs`**
-  implement them.
+  instead of loading their shared libraries, and `register_routines`, through which a crate
+  above the engine adds a package's table; **`utils.rs`** and **`tools.rs`** implement the two
+  the engine keeps.
+- **`extensions.rs`**: the function-pointer tables (`Graphics`, `Tables`, `Viewer`, `Transport`)
+  the engine calls into the crates above it through. Each entry defaults to what a session
+  without that crate does. **`http.rs`**: the request and error types of the HTTP transport, and
+  the calls that go through its table.
 - **`platform.rs`**: every operating-system call the interpreter makes, with a Unix and a Windows
   implementation of the same functions, so a libc use outside it is a Windows build error.
-- **`graphics_engine.rs`**: R's graphics engine, with the device table, the graphics systems
-  registered with every device, and the `DevDesc` layout that device packages fill in.
 - **`session.rs`**: start-up (the base R tree `system.rs` finds, the profiles, the default
   packages) and running a script.
-- **`stats.rs`** and its `stats_*.rs` siblings (`stats_models`, `stats_optimize`, `stats_nlm`,
-  `stats_lbfgsb`, `stats_port`, `stats_arima`, `stats_cluster`, `stats_deriv`, `stats_tests`): the
-  stats package's native routines. **`parallel.rs`** holds the parallel package's, **`rd.rs`** the
-  Rd parser behind `tools::parse_Rd`, and **`graphics_render.rs`** what a graphics device draws
-  and the image files it writes.
+- **`parallel.rs`**: the parallel package's native routines. **`rd.rs`**: the Rd parser behind
+  `tools::parse_Rd`.
 - **`annotations.rs`**: the run-time checks that [annotations](/reference/type-system#annotations-at-run-time)
   become at a function's boundary.
 - **`records.rs`**: records, tuples, tags and `match` at run time. **`arrays.rs`**: `List<T>`, an R
   vector with the heap's list bit set, and the strict rules that go with it; **`numbers.rs`**: the native number types.
-- **`dataframe.rs`**: the Polars-style `DataFrame` verbs and column expressions. **`frame.rs`**: the
-  `DataFrame` value, its readers, writers and conversions.
 - **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, typed by
   `types/std.Rtypes`.
 - **`testing.rs`**: the fuzz contracts of the interpreter, shared by the in-tree harness and the
   coverage-guided targets.
+
+## `stats`
+
+The crate root is `src/stats.rs`. It holds the stats package's native routines, and `install()`
+registers their table for the package `stats`.
+
+- **`routines.rs`**: the routine table, and the routines that need no file of their own.
+- **`models.rs`**: model frames, model matrices and the fitting routines behind `lm` and `glm`.
+- **`optimize.rs`**, **`nlm.rs`**, **`lbfgsb.rs`**, **`port.rs`** with **`port_minimizer.rs`**:
+  the optimizers behind `optim`, `optimize`, `integrate`, `nlm` and `nlminb`.
+- **`arima.rs`**, **`loess.rs`**, **`spline.rs`**, **`cluster.rs`**, **`deriv.rs`**,
+  **`hypothesis_tests.rs`**: time series, local regression, splines, clustering, symbolic
+  derivatives, and the exact distributions of the test statistics.
+
+## `graphics`
+
+The crate root is `src/graphics.rs`. It is R's graphics stack, and `install()` registers its
+builtins and the routine tables of the packages `graphics` and `grDevices`.
+
+- **`engine.rs`**: R's graphics engine, with the device table, the graphics systems registered
+  with every device, and the `DevDesc` layout that device packages fill in.
+- **`routines.rs`**: the native routines of the graphics and grDevices packages.
+- **`plotmath.rs`**: mathematical annotation in plot text.
+- **`render.rs`**: what a graphics device draws and the image files it writes.
+- **`testing.rs`**: the fuzz contract of the renderer.
+
+## `frames`
+
+The crate root is `src/frames.rs`. It binds the `table` engine to the interpreter as the
+`DataFrame` type, and `install()` registers its builtins.
+
+- **`frame.rs`**: the `DataFrame` value, its readers, writers and conversions.
+- **`dataframe.rs`**: the Polars-style `DataFrame` verbs and column expressions.
+- **`viewer.rs`**: the paged table viewer the console server opens for a data frame.
+
+## `services`
+
+The crate root is `src/services.rs`. It holds the interpreter's network client, and `install()`
+makes it the engine's HTTP transport.
+
+- **`http.rs`**: `url()` connections and `download.file` over HTTP and HTTPS.
 
 ## `jit`
 
@@ -283,6 +340,8 @@ runtime state and R's C API. Each exported function that can fail runs its body 
 - **`attributes.rs`**: attributes, classes and the header bits.
 - **`strings.rs`**: `CHARSXP`s, encodings, symbols and `Riconv`.
 - **`environments.rs`**: environments, variable lookup, bindings, namespaces and options.
+- **`loader_backend.rs`**: the package loader's backend for ry's own runtime, where the plan never
+  leaves the process and a lazy definition is a promise over the analysis's syntax tree.
 - **`eval.rs`**: installs the interpreter and its `Evaluator` hook, the evaluation entry points of
   the C API (with a small built-in evaluator for a host without the interpreter), the
   foreign-call builtins and `dyn.load` family; `.Call`,
@@ -303,7 +362,7 @@ runtime state and R's C API. Each exported function that can fail runs its body 
 - **`hashtab.rs`**: R's hash tables, kept in heap objects.
 - **`legacy.rs`**: names R 4.6 no longer declares that binaries built against older R import
   (`TRUELENGTH`, `SETLENGTH`, `FRAME`, `R_PPStack` and the like).
-- **`graphics.rs`**: the C entry points of R's graphics engine over `interp`'s `graphics_engine.rs`,
+- **`graphics.rs`**: the C entry points of R's graphics engine over the `graphics` crate's `engine.rs`,
   so grid and device packages such as ragg run unchanged.
 - **`arith.rs`**: NA tests, sorting, and the random number generator, which shares its state with the
   interpreter's through `.Random.seed`.

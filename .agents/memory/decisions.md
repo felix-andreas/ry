@@ -1736,8 +1736,8 @@ the texts, and `docs/src/content/docs/reference/licensing.md` is the user-facing
   port. They are TOMS 708, `pnorm`/`qnorm`, `ptukey`/`qtukey`, `pnt` and helpers in `rmath.rs`,
   the random variate generators (`distributions.rs`, `random.rs`), `plotmath.rs`, contour label
   placement and `persp` (`graphics.rs`), the `complex.c` corrections (`arith.rs`), `swilk` and
-  `prho` (`stats_tests.rs`), UNCMIN (`stats_nlm.rs`), QUADPACK and Brent's minimizer
-  (`stats_optimize.rs`) and the X-spline (`graphics_engine.rs`, from R's Xfig-derived
+  `prho` (`crates/stats/src/hypothesis_tests.rs`), UNCMIN (`crates/stats/src/nlm.rs`), QUADPACK and Brent's minimizer
+  (`crates/stats/src/optimize.rs`) and the X-spline (`crates/graphics/src/engine.rs`, from R's Xfig-derived
   `xspline.c`). The clean-room claim was false, so UPL-1.0 could not stand.
 - **Choice.** Each of those files keeps R's copyright lines in a header that names the R source
   file and marks the file as a modified translation under GPL-2.0-or-later. A crate is
@@ -2343,7 +2343,7 @@ primitives, and nothing built or installed packages.
   resizable. `FRAME` returns a snapshot pairlist (frames are hashed). `R_PPStack` is a real array
   that a root source scans up to `R_PPStackTop`, for code compiled with R's internal macros.
 - **The graphics engine C API is real** (`crates/libr/src/graphics.rs` over
-  `crates/interp/src/graphics_engine.rs`); see "One graphics engine for base graphics, grid and
+  `crates/graphics/src/engine.rs`); see "One graphics engine for base graphics, grid and
   device packages" below.
 - **`.C` and `.Fortran` copy their arguments** and pass data pointers through the same
   dispatcher as `.Call` (all arguments are pointers), returning the copies as a named list.
@@ -2440,8 +2440,8 @@ primitives, and nothing built or installed packages.
     what GNU R's answers show. GNU R's `dnchisq` truncates its sum at an absolute 5e-15, so in
     the tails ry differs from it but matches mpmath; `test_rmath` allows that absolute error.
 - **One L-BFGS-B, written from the BSD reference v3.0** (Zhu, Byrd, Lu and Nocedal's Fortran,
-  `lbfgsb.f`). `crates/interp/src/stats_lbfgsb.rs` is the only implementation: `optim` calls it
-  through `stats_optimize.rs`, and libR's `lbfgsb` entry point only maps `nbd` and wraps the C
+  `lbfgsb.f`). `crates/stats/src/lbfgsb.rs` is the only implementation: `optim` calls it
+  through `crates/stats/src/optimize.rs`, and libR's `lbfgsb` entry point only maps `nbd` and wraps the C
   callbacks. GNU R behaves as a hybrid of the versions, found by comparing every iterate bitwise
   (`%a`) against Rscript: the subspace step backtracks to the box without v3.0's Morales-Nocedal
   projection, and the Cauchy search keeps the `f2` floor (`eps * f2_org`) and is skipped for an
@@ -2453,7 +2453,7 @@ primitives, and nothing built or installed packages.
   search that exhausts 20 evaluations is unverified, since no case reached it in GNU R.
 - **`nlminb` runs PORT's own drivers, written from netlib's reference** (<https://netlib.org/port/>,
   the code R's `COPYRIGHTS.portsrc` relies on; GNU R's `portsrc.f`/`port.c` were never read).
-  `crates/interp/src/stats_port_minimizer.rs` holds `DRMNG`/`DRMNGB` (gradient: BFGS factor,
+  `crates/stats/src/port_minimizer.rs` holds `DRMNG`/`DRMNGB` (gradient: BFGS factor,
   double dogleg), `DRMNH`/`DRMNHB` (gradient and Hessian: More-Hebden steps) and
   `DRMNF`/`DRMNFB` (finite differences around the secant drivers), behind one reverse-
   communication `Minimizer`. GNU R's driver, found by black-box tests: a Hessian without a
@@ -2469,7 +2469,7 @@ primitives, and nothing built or installed packages.
   scaled norm, because GNU R links PORT's norm to the BLAS: with PORT's own norm the iterates
   differ in the last bit from the second step. `stats__nlminb_port_paths` pins the matching
   cases bitwise; the open divergences are in `backlog.md`. `nls(algorithm = "port")` still runs
-  ry's own trust-region method in `stats_port.rs`.
+  ry's own trust-region method in `crates/stats/src/port.rs`.
 - **KalmanLike and `prod` accumulate as GNU R observably does.** The Kalman filter subtracts and
   adds term by term (`y -= z_i a_i`, `V[i,j] += m T`), and `prod` multiplies each argument in long
   double, combines arguments in double, and lets the first NaN win, so `prod(NaN, NA)` is NaN.
@@ -2546,7 +2546,7 @@ Nothing loaded packages before; `development/design/r-runtime.md` section 6 and 
 - **Target shape:** one R runtime (`runtime.R`) with backend hooks (`.ry_request`,
   `.ry_sources`, `.ry_bind_lazily`, `.ry_run`). GNU R's hooks (`gnur.R`) keep the RDS plan and
   `makeLazy`; ry's hooks (`ry.R`) call `.Internal(ryLoaderPlan/Commit/Bind/Run/Force)` in
-  `loader::ry_runtime`, which keeps the plan in process. A lazy binding is a promise over a call to
+  `libr::loader_backend`, which keeps the plan in process. A lazy binding is a promise over a call to
   `ryLoaderForce(tree, start, end)`, where `tree` is an external pointer to the file's `Parse`
   from the analysis, and forcing lowers the node spanning `start..end` with
   `interp::lower::lower_node`. The plan carries byte offsets (`SourceSpan::source_start/end`) so the
@@ -2643,11 +2643,11 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
 - **One graphics engine for base graphics, grid and device packages.** GNU R's split is kept:
-  graphics systems (base graphics, grid) call the engine (`graphics_engine.rs`), and the engine
+  graphics systems (base graphics, grid) call the engine (`crates/graphics/src/engine.rs`), and the engine
   calls a device through the C callbacks of a `DevDesc`. `GEDevDesc`, `DevDesc`, `GEContext` and
   `GESystemDesc` are `#[repr(C)]` copies of R_GE_version 17's headers, because grid and ragg read
   and write their fields directly; a built-in device is a `DevDesc` whose callbacks are Rust
-  (`graphics_render.rs`), so a ragg device and `pdf()` take exactly the same path. Previously base
+  (`crates/graphics/src/render.rs`), so a ragg device and `pdf()` take exactly the same path. Previously base
   graphics drew straight into the built-in devices' shape lists and the GE entry points errored, so
   grid and ragg could not run and two drawing paths would have had to agree.
   - The display list is struct-of-arrays inside the engine's own `EngineDevice` (parallel `ops`
@@ -2682,7 +2682,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
     GNU R's `afm/Helvetica*.afm`), which makes `strwidth` on pdf match GNU R exactly. Bitmap
     devices in GNU R measure with cairo's font instead, so their widths differ slightly.
 - **Built-in devices record a drawing and render it when they close.** Each built-in device's
-  callbacks append `graphics_render::Item`s (a path, text or group use, with the clip and mask in
+  callbacks append `graphics::render::Item`s (a path, text or group use, with the clip and mask in
   force) in inches to the current page, and each file format is one writer over the same
   `Drawing`: PDF, SVG and PostScript as vectors, PNG, JPEG, BMP and TIFF rasterized with
   tiny-skia, text outlined with ab_glyph from the system's Helvetica-compatible fonts. Rendering at
@@ -2741,7 +2741,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   - Labels are a `Label` (string lines, or an expression laid out by `plotmath.rs`), and every
     text path (`text`, `mtext`, `title`, `axis`, `strwidth`) goes through `push_label`, so
     plotmath is one code path rather than a deparse fallback per caller.
-  - Base graphics draws `pch` 0 to 25 through `graphics_engine::symbol` (GNU R's `GESymbol`),
+  - Base graphics draws `pch` 0 to 25 through `graphics::engine::symbol` (GNU R's `GESymbol`),
     which sizes symbols in device units. A second copy of the shapes in `push_symbol` had drawn
     pch 0, 15 and 5 at different half-widths and started pch 23 at another vertex, which moves
     where an antialiased outline closes.
@@ -2754,7 +2754,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   default the user set is kept, but the platform's own (`pdf`, `X11`, `quartz`, `windows`) is
   replaced, since an X11 default would open a window or fail without a display. At each prompt, `publish_plot` in
   `console_server.rs` compares the current device's display-list stamp
-  (`graphics_engine::display_list_stamp`, drawn from one global counter, so a device that takes
+  (`graphics::engine::display_list_stamp`, drawn from one global counter, so a device that takes
   a closed one's slot never repeats a stamp) with the last one sent; when it changed, it copies
   the display list onto an svg device with `dev.copy` (warnings muffled, and every device it
   opened closed on exit, so a replay that fails leaks neither a device nor a warning) and sends
@@ -3219,7 +3219,7 @@ first lines R had already read, leaving R mid-command.
 ## Frames as runtime values
 
 - **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`
-  and classed `"frame"` alone** (`crates/interp/src/frame.rs`). A weak reference with a C
+  and classed `"frame"` alone** (`crates/frames/src/frame.rs`). A weak reference with a C
   finalizer drops the box. The table is the only copy of the data: a column becomes an R vector
   when R code reads it (`$`, `[[`, `as.list`, a data mask). It is no longer a `data.frame` (the
   class was `c("frame", "data.frame")`), because nothing about a data.frame's list layout or row
@@ -3713,7 +3713,7 @@ first lines R had already read, leaving R mid-command.
 
 - **One Rmath.** The interpreter's distributions and libR's Rmath were two independent
   implementations of the same functions, so a precision fix landed in one and not the other.
-  `crates/interp/src/rmath.rs` is now the single copy (libR's version, the one the conformance
+  `crates/numeric/src/rmath.rs` is now the single copy (libR's version, the one the conformance
   suite holds to GNU R): the interpreter's builtins vectorize it, libR only converts C flags,
   raises the collected warnings and draws variates, and `gamma`, `lgamma`, `beta` and `lbeta` call
   it instead of libm's `tgamma`, which is not exact for whole arguments.
@@ -3743,8 +3743,8 @@ first lines R had already read, leaving R mid-command.
 - **One UNCMIN, one QUADPACK, one interval search, all in `interp`.** libR used to carry its own
   copies of the routines behind `optif9`/`fdhess`, `Rdqags`/`Rdqagi` and `findInterval2`, next to
   the interpreter's `nlm`, `integrate` and `findInterval`. The single copies are
-  `interp::stats_nlm` (all three methods, analytic derivatives, the `msg` bits, `fdhess`),
-  `interp::stats_optimize::{qags, qagi}` (writing into caller-owned `Subintervals`, so the C
+  `stats::nlm` (all three methods, analytic derivatives, the `msg` bits, `fdhess`),
+  `stats::optimize::{qags, qagi}` (writing into caller-owned `Subintervals`, so the C
   entry points pass `work`/`iwork` straight through) and `interp::arith::find_interval`; libR
   only converts C callbacks and arguments, as `lbfgsb` does. GNU R black box decided the details
   the copies disagreed on: the cubic backtrack groups its coefficient as `3 * t3 * (...)`, and a
@@ -4312,7 +4312,7 @@ contract.
 
 ## Source-change detection lives in the loader, so both runtimes reload the same way
 
-- **Previous shape.** The ry binary kept a per-root fingerprint map beside its `Loader` (`crates/ry/src/load.rs`), updated by the GNU R `.Call` routines, and its `ReloadWatcher` compared it before each command. `libR.so` has its own `Loader` (`crates/loader/src/ry_runtime.rs`) that the binary cannot see, so ry's console had no watcher, no `load_all()` and no package autoload. The fingerprint was duplicated state outside the loader that owns what is loaded.
+- **Previous shape.** The ry binary kept a per-root fingerprint map beside its `Loader` (`crates/ry/src/load.rs`), updated by the GNU R `.Call` routines, and its `ReloadWatcher` compared it before each command. `libR.so` has its own `Loader` (`crates/libr/src/loader_backend.rs`) that the binary cannot see, so ry's console had no watcher, no `load_all()` and no package autoload. The fingerprint was duplicated state outside the loader that owns what is loaded.
 - **Target shape.** `Loader` records the fingerprint of the sources a plan read (taken before reading, so an edit made mid-read counts later) and promotes it on `commit`. `Loader::changed_roots` reports each committed package whose fingerprint moved, once per change. Both backends ask it: the binary's `ReloadWatcher` for GNU R, and for ry's runtime `libR.so` exports `ry_loader_changed`, which `repl`'s `RuntimeReloadWatcher` calls before each command. `ry_repl` attaches `tools:ry` and runs a startup load, so `ry run` in a package loads it as `ry R` does.
 - **Impact.** One source of truth per loaded package, one console loop on both runtimes, and the reload is the same `.ry_autoreload()`. The check stats `DESCRIPTION`, `NAMESPACE` and the code files in `R/` (the same extension test `collated_r_files` uses, so editor swap files do not reload) without reading them. It overlaps the per-file `stamps` that `Loader::read` keeps, on purpose: `stamps` decides which texts a plan rereads, the fingerprint decides whether to plan at all, and merging them would make the per-command check walk `Collate` too. `crates/loader/tests/test_reload_fuzz.rs` and `test_repl_e2e.rs` pin it.
 
@@ -4680,7 +4680,7 @@ check` releases its trees once, and memoized records are compact" below).
   db-benchmark group-by script ran out of memory on a 15 GB machine where data.table peaked at
   6.4 GB.
 - **Shape.** `table::on_every_worker` runs a closure on every thread of both pools;
-  `interp::frame::release_worker_memory` runs `mi_collect(true)` there and on the R thread. It runs
+  `frames::frame::release_worker_memory` runs `mi_collect(true)` there and on the R thread. It runs
   when a frame of at least 2^22 cells is wrapped or finalized, and in `gc()`. The size floor keeps
   loops over smaller frames from paying for a broadcast per iteration.
 - **Trap.** A broadcast waits for every pool thread, and a forked child has none of its parent's
@@ -5568,7 +5568,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Replacement primitives called directly** (`` `names<-`(x, v) `` outside an assignment) copy their target, because only a complex assignment owns it.
 - **`pretty()` and plot axes near the double range**: the 4% axis extension is clamped to ±`DBL_MAX`; a log axis stays inside `log10(0.99*DBL_MAX)` and `log10(1.01*DBL_MIN)`; a zero log limit becomes -320 with GNU R's "nonfinite axis limits -- corrected now" warning. `GEPretty` and `Rf_CreateAtVector` in libR reuse the interpreter's `linear_axis` and `at_vector`, so grid and base graphics share one tick algorithm.
 - **Deparse parenthesizes dangling operands**: an `if`, loop or low-precedence unary operator that ends a binary operator's left operand gets parentheses (GNU R's PR#18232 fix). GNU R leaves `function` bare there, which reparses differently; ry keeps the parentheses on purpose.
-- **`smooth.spline`** (`rbart`, `bvalus` in `crates/interp/src/stats_spline.rs`) is written from the penalized B-spline method. It copies GNU R's 0.333 in the roughness integral because the printed matrices and fitted values depend on it. Near-interpolating GCV fits can settle on a different `spar`, since the criterion there is rounding noise; that divergence is accepted.
+- **`smooth.spline`** (`rbart`, `bvalus` in `crates/stats/src/spline.rs`) is written from the penalized B-spline method. It copies GNU R's 0.333 in the roughness integral because the printed matrices and fitted values depend on it. Near-interpolating GCV fits can settle on a different `spar`, since the criterion there is rounding noise; that divergence is accepted.
 - **`Fexact`, `parseLatex`, `gzcon`, `OutDec`, classed `parseError` conditions and `file(encoding=)` re-encoding** are native implementations of the documented interfaces, checked against GNU R's tests.
 - **Bytes-encoded strings force byte matching**: when any pattern or text element of `regexpr`, `gregexpr`, `regexec`, `grep`, `sub`, `gsub` or `strsplit` is marked `"bytes"`, the call behaves as `useBytes = TRUE` (byte positions, `index.type = "bytes"`, non-ASCII results marked `"bytes"`), as GNU R does.
 - **TRE compile errors** reject PCRE-only groups (`(?<`, `(?=`, `(?!`, `(?>`, `(?P<`) with "Invalid regexp" and an inverted interval with "Invalid contents of {}". The warning and error wording follows GNU R's three observed paths (wide-character `regexpr`/`grep`, `regexec`, everything else).
@@ -5584,8 +5584,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`LC_CTYPE` is C.UTF-8** at session start, so `iconv(..., "ASCII//TRANSLIT")` transliterates as GNU R does in a UTF-8 locale.
 - **`qnchisq` stops at a relative accuracy of 1e-13**, as GNU R's results do. A full-precision search round-trips some quantiles exactly, and `all.equal` leaves exact matches out of its mean, so `d-p-q-r-tests` line 188 failed on a more precise answer.
 - **Accepted numeric divergence**: `pf(x, 1, 1, ncp = 20, lower = FALSE, log = TRUE)` is -17.1486, which an independent mixture sum confirms, while GNU R's less precise noncentral beta gives -17.1318 and `d-p-q-r-tst-2` line 302 asserts GNU R's range.
-- **Native `loess`** (`crates/interp/src/stats_loess.rs`) is written from the documented method and black-box checks against GNU R. Fits, robustness weights and `predict` match GNU R; the kd-tree vertex interpolation is a cubic Hermite blend along edges and, in two dimensions, a Coons patch (edge curves plus cross-edge slopes, minus the corner tensor product), found by fitting candidates to GNU R's predictions. Three or more predictors use the tensor product alone, unverified. With `span > 1` the neighbourhood radius is the largest distance times `sqrt(span)`. The approximate statistics (`enp`, `one.delta`, `two.delta`) are computed exactly rather than with GNU R's interpolation table, so they differ in the third digit; above 1000 observations the deltas use a cheaper approximation.
-- **URL transfers use `reqwest`, not libcurl** (`crates/interp/src/http.rs`). The blocking client was already linked through polars, honors the proxy variables and reads the platform's roots (`SSL_CERT_FILE`). A `url()` connection fetches its whole body when it opens and then reads from memory, like `unz()`. Failures are reported with libcurl's codes and wording, because R code and GNU R's tests match on them. Each request runs on a scoped thread (`on_transfer_thread`), since the blocking client panics inside an async runtime an embedder may own; a transfer thread that dies reports libcurl's "Failed initialization" instead of unwinding into R. `curlGetHeaders` follows redirects hop by hop, so it reports each hop's headers, but not the proxy's CONNECT response that libcurl adds. `libcurlVersion()` reports 8.5.0, the libcurl release whose wording and behavior the transfers follow, so version checks in packages pass; its attributes say what ry really uses (`ssl_version` "rustls", no `libssh_version`, protocols file, http and https).
+- **Native `loess`** (`crates/stats/src/loess.rs`) is written from the documented method and black-box checks against GNU R. Fits, robustness weights and `predict` match GNU R; the kd-tree vertex interpolation is a cubic Hermite blend along edges and, in two dimensions, a Coons patch (edge curves plus cross-edge slopes, minus the corner tensor product), found by fitting candidates to GNU R's predictions. Three or more predictors use the tensor product alone, unverified. With `span > 1` the neighbourhood radius is the largest distance times `sqrt(span)`. The approximate statistics (`enp`, `one.delta`, `two.delta`) are computed exactly rather than with GNU R's interpolation table, so they differ in the third digit; above 1000 observations the deltas use a cheaper approximation.
+- **URL transfers use `reqwest`, not libcurl** (`crates/services/src/http.rs`). The blocking client was already linked through polars, honors the proxy variables and reads the platform's roots (`SSL_CERT_FILE`). A `url()` connection fetches its whole body when it opens and then reads from memory, like `unz()`. Failures are reported with libcurl's codes and wording, because R code and GNU R's tests match on them. Each request runs on a scoped thread (`on_transfer_thread`), since the blocking client panics inside an async runtime an embedder may own; a transfer thread that dies reports libcurl's "Failed initialization" instead of unwinding into R. `curlGetHeaders` follows redirects hop by hop, so it reports each hop's headers, but not the proxy's CONNECT response that libcurl adds. `libcurlVersion()` reports 8.5.0, the libcurl release whose wording and behavior the transfers follow, so version checks in packages pass; its attributes say what ry really uses (`ssl_version` "rustls", no `libssh_version`, protocols file, http and https).
 - **Socket connections are `std::net` streams in blocking mode** (`Device::Socket` and `Device::ServerSocket` in `crates/interp/src/connections.rs`). A non-blocking R connection does not switch the OS socket to non-blocking mode: its read first polls with a zero timeout and, with nothing to read, marks the connection incomplete and returns no bytes, which is how `readLines` holds back a partial line. A blocking read waits up to `socketTimeout()` seconds through the stream's read timeout. Each read refills a 64 KiB buffer with one receive, so `socketSelect()` counts buffered input as ready without asking the OS. Polling is `platform::poll_sockets` (`poll(2)`, `WSAPoll` on Windows). Messages follow GNU R's, with two deliberate differences: `serverSocket(70000)` is an "invalid 'port' argument" where GNU R silently truncates the port to 16 bits, and `socketAccept(timeout =)` gives up after the timeout where GNU R waits forever. With these, `parallel::makeCluster()` works (oracle case `parallel__socket_cluster`). Workers start from `R.home("bin")/Rscript`, so under ry's own R home (`just ry-home`) they run on ry, while under plain `ry run`, whose `R.home()` is GNU R's, they are GNU R processes speaking the same serialization.
 - **Unserializing from a connection reads one object** (`unserialize_connection` in `crates/interp/src/serialize.rs`), so several objects on one connection, or a peer's next message on a socket, stay unread. An ASCII string reads exactly its length, which leaves the newline after it unread as GNU R does; an ASCII object that ends in a string is therefore followed by that newline, which the next ASCII header (`\nA\n`) accepts and a binary one does not.
 - **`warning(immediate. = TRUE)` signals like any warning**; a flag on the interpreter makes only the default handler print it at once, so calling handlers and `assertWarning` still see it.
@@ -6069,7 +6069,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   guard lives, `Mapped::alloc` and `Mapped::realloc` ask for transparent huge pages
   (`MADV_HUGEPAGE`) on a mapping of 2 MiB or more. The guards are counted in one atomic for the
   process, because an operation's buffers are mapped on the worker threads. The interpreter
-  takes the guard in every table builtin (`table_work!` in `crates/interp/src/frame.rs` wraps
+  takes the guard in every table builtin (`table_work!` in `crates/frames/src/frame.rs` wraps
   the entries of both builtin tables) and in `frame::run`, which serves `[` on a frame; the
   benchmark drivers take it for their whole run. Outside a guard a block gets small pages, so a
   process that runs no table operation issues the same `madvise` calls as before the advice
@@ -6941,7 +6941,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## A formula's dot expands to the sum GNU R prints
 
-- `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
+- `stats::models::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
 
 ## The strict load check analyses only the package
 
@@ -6960,7 +6960,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## Dates, windows, ranks, cross joins and pivots in the table engine
 
-- **Date is a column type.** `ColumnType::Date` maps to Polars' `Date` (whole days since 1970-01-01) and to an R double with class `"Date"` both ways (`table::convert::RVector::Date`, `libr::frame_altrep::date_vector`, `interp::frame::literal`). A fractional R date floors to its day, as `as.Date` printing does. Typing follows R's own rules for days: date ± number is a date, date - date is `integer[]` days, dates compare only with dates, and any other operator on a date is a `DateOperation` error (`check.rs`, `date_operation`). R itself would give a `difftime` for date - date; the engine has no duration column, so the integer day count is the deliberate shape.
+- **Date is a column type.** `ColumnType::Date` maps to Polars' `Date` (whole days since 1970-01-01) and to an R double with class `"Date"` both ways (`table::convert::RVector::Date`, `libr::frame_altrep::date_vector`, `frames::frame::literal`). A fractional R date floors to its day, as `as.Date` printing does. Typing follows R's own rules for days: date ± number is a date, date - date is `integer[]` days, dates compare only with dates, and any other operator on a date is a `DateOperation` error (`check.rs`, `date_operation`). R itself would give a `difftime` for date - date; the engine has no duration column, so the integer day count is the deliberate shape.
 - **`Ops.Expr` beats `Ops.Date`.** `Expr.col("day") >= as.Date(...)` has two S3 `Ops` methods, which R refuses as incompatible. `chooseOpsMethod.Expr` returns `TRUE` (R >= 4.3 protocol, honored by `interp::dispatch`), so the expression method always wins; the stub's `Ops.Expr` accepts `Date` on either side.
 - **Windows and ranks lower to Polars.** `Expr.over(e, keys)` is `Expr::Window` and `Expr.rank` is `Expr::Rank` (ordinal, ties broken by row, `NA` last). The fast kernels decline both, so they run in Polars; the checker types `over` as per-row with its argument's type and `rank` as `integer[]`. The ordinal row number is `is_null().cum_count()`, because a constant `TRUE` mask is folded by Polars into a scalar of length one.
 - **Cross join is a `How`.** `How::Cross` takes no keys (`check_join_keys` rejects any), renames clashing right columns with the suffix, and keeps left-major order; the checker's `join_type` treats it as a join with empty keys.
@@ -8228,7 +8228,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   compiles (8 of them in `.expand_R_libs_env_var`) spent about 29M of 181M instructions there.
 - **Target shape.** `ImageHost::environment` builds the host's environment when the image is
   written; `Globals::host_environment` roots it and `image::save_state` carries it, and
-  `ry_runtime::attach` takes it from the image (`image::host_environment`) or builds it on a slow
+  `loader_backend::attach` takes it from the image (`image::host_environment`) or builds it on a slow
   start. `Matcher::Automaton` holds a `LazyAutomata` that builds both automata on first use, so a
   `sub`/`gsub` whose replacement refers to groups (which only runs the backtracking regex) never
   builds them, and builds them with `dfa(false)`: the full DFA was most of the build cost, and the
@@ -8806,7 +8806,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Rejected: lazy fused vectors as ALTREP objects** (Riposte, pqR). Every reader of a vector, C code through `DATAPTR` included, would have to materialize it, and the point where a deferred warning surfaced would become observable.
 - **Fused assignment writes into the old buffer.** For `y <- tree`, the program's `REDUCTION` word is `fusion::ASSIGNED`, and the pass reads `y`'s symbol and lookup slot from the `SetVar` at its own jump target rather than storing them (two extra words in every program grew the start image by two 64 KB pages). At run time `bytecode::reusable_target` offers `y`'s vector when its binding is neither active nor locked, its count is one and `eval::reuse_permitted` holds; `kernels::fused` then takes it when it is a double vector of the result's length. When `y` is also a leaf (`x <- exp(-x^2/2) * 0.5 + x`), `kernels::chunks` evaluates each chunk's root into scratch and copies it over `y` only after every node has read that chunk. Integer passes never reuse: an overflow declines halfway, and the ordinary code it falls to must read the old value. Pinned by `crates/oracle/cases/kernels__vector_math.R` (captured old values, `get` through the frame, a locked binding, overflow). Do not verify reuse with `.Internal(inspect(y))`: the call takes a reference to `y` and defeats it.
 - **Baseline code runs the pass too.** The JIT lowers `Op::Fused` to `Action::Fused`, a call to `runtime::jit_fused` that reads the registers the program names (`bytecode::fused_operand_registers`) and returns `FUSED` (jump past the ordinary code) or `FUSED_INVALIDATED`; type feedback comes from `bytecode::fused_result_site`.
-- **SIMD `exp` and `log` are ports of glibc's FMA variants** (`crates/interp/src/vector_math.rs`). GNU R on an AVX2+FMA machine calls glibc's `__exp_fma` and `__log_fma` through ifunc, so a four-lane port of those exact algorithms (same tables, same polynomial, same special-case paths) reproduces its bits; a different SIMD exp would not. The first call runs a probe against the host glibc on edge values and switches the kernels off on a mismatch or without AVX2+FMA. Lookups use four 128-bit loads and unpacks, not `vgatherqpd`: gathers are microcoded slowly under the Gather Data Sampling mitigation (1.02 against 0.84 ns per element for exp). glibc's scalar exp costs 3.9 ns per element and log 2.9; the kernels cost 0.84 and 1.1. `kernels::vector_lanes` wraps them with R's NA handling and the produced-NaN warning.
+- **SIMD `exp` and `log` are ports of glibc's FMA variants** (`crates/numeric/src/vector_math.rs`). GNU R on an AVX2+FMA machine calls glibc's `__exp_fma` and `__log_fma` through ifunc, so a four-lane port of those exact algorithms (same tables, same polynomial, same special-case paths) reproduces its bits; a different SIMD exp would not. The first call runs a probe against the host glibc on edge values and switches the kernels off on a mismatch or without AVX2+FMA. Lookups use four 128-bit loads and unpacks, not `vgatherqpd`: gathers are microcoded slowly under the Gather Data Sampling mitigation (1.02 against 0.84 ns per element for exp). glibc's scalar exp costs 3.9 ns per element and log 2.9; the kernels cost 0.84 and 1.1. `kernels::vector_lanes` wraps them with R's NA handling and the produced-NaN warning.
 - **No AVX2 build of the real arithmetic loop either.** A narrow `#[target_feature(enable = "avx2")]` copy of `real_operation` and of unary minus measured faster on L1-resident fused chunks in isolation, but end to end on 10,000 doubles it was 15 to 25% slower than the baseline loop (`y <- x * 2 + 1`, `x * z - z / 3`, `exp(-x^2/2) * k`, a four-operator tree; three runs each), and its 85 KB sat on every double arithmetic call, so every workload faulted in its 64 KB windows of text. Only `vector_math`'s exp and log run AVX2, where the gain is 4x.
 - **`R_POW`'s bits.** GNU R computes `x^2` as `x * x` for every `x`, and `R_pow` returns `x + y` for a NaN operand, so both quiet a signalling NaN: `NA^2` has bits `7ff8...07a2`, not NA's `7ff0...07a2`. `arith::power` and the fused square follow that. Division by a normal power of two is multiplication by its exact reciprocal (`kernels::exact_reciprocal`), which is bit-identical and avoids `vdivpd` (0.6 ns per element).
 - **Complex arithmetic is a slice kernel too.** `kernels::binary` sends `+`, `-`, `*`, `/` and `^` with a complex operand to `complex_binary`, which serves a complex operand without attributes and a plain double (or, from R 4.4.0, logical or integer) beside it, under the same reuse rule and recycling runs. The arithmetic builtin's general path (`arith::complex_arithmetic`) calls the same `kernels::complex_arithmetic`, so there is one loop per operator. `z^2` with the single exponent 2 (complex, double or integer) is its own loop computing `R_cpow_n`'s `1 * (z * z)`, bit for bit the general path.
@@ -9736,7 +9736,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** `semantics::native::native_blockers` judges each native function after its item is checked, from the item's HIR and recorded types, and stores the blockers in `ItemCheck.native_blockers`. `strict_diagnostics` renders them under two codes (next bullet), so they show in `ry check` and in the editor, and the errors reach the gate that refuses to run strict code (`preflight`). It is a pass over one item, not a query, so the per-item firewall holds and it reads other definitions only through the declared signatures the check already resolved. The contract is `reference/type-system.mdx`, "Native functions".
 - **Which functions are judged.** A function literal whose declared signature (inline or `#:`) is written entirely in ry types: every parameter annotated with one, the result one, `NULL` or absent, and at least one ry type. A signature with an R type is the opt-out: such a boundary function is where R values and ry values meet, it may run in the interpreter, and it is not judged. The signature decides, because it is what the author wrote and what every caller sees, and because a function that takes or returns an R value cannot avoid holding one. An unannotated function literal is judged only inside a native function. A signature in a `#:` comment or on the assigned name is judged by the same rule and compiles like the inline form ("A function has one signature, resolved in `syntax::annotation`"); only a signature that is the name of a type alias gets an `interpreted` warning on top (`Uncompiled::AliasedSignature`). A type parameter bounded by an R type (`<T: numeric>`, `native::has_r_bound`) makes a boundary function, so `ry check --annotate` output on plain R code is not judged as ry.
 - **Two codes, two severities.** An R value in a native function (`NativeBlockerKind` other than `Uncompiled`: an R call's value, a nested R call, an outside variable, a column read, `a:b`, an R literal, a stray `*.to_r`) is a `native` error, because it breaks the rule the function is written under and the author can fix it. Legitimate ry that the typed core does not compile yet (`Uncompiled`: `try`, list patterns, a standard library function without native code) is an `interpreted` warning that says the function runs in the interpreter and how to write the step so it compiles. It is a warning because the gap is the compiler's: as an error, strict mode refused about 195 standard library functions and `try`, and the docs examples for them had to leave strict mode. A warning keeps the property visible at the construct without rejecting the language.
-- **The rule in the body.** Every value is a ry value. An R function may be called as the direct argument of a `*.from_r`, as a statement whose value is unused, and as `stop(...)`. Table values (`DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy`, `Expr`) are ry values, and a table function that gives one is a native call (`native::gives_table_value`, which must agree with `interp::dataframe::gives_table_value`).
+- **The rule in the body.** Every value is a ry value. An R function may be called as the direct argument of a `*.from_r`, as a statement whose value is unused, and as `stop(...)`. Table values (`DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy`, `Expr`) are ry values, and a table function that gives one is a native call (`native::gives_table_value`, which must agree with `gives_table_value` in `crates/typed/src/lower.rs`).
 - **Sound in one direction.** A native function with neither finding compiles in the typed core. The checker over-reports where it cannot decide: base R functions the typed core computes itself (`sqrt`, `nchar`, `paste0`) are still R functions to the rule, and `a:b` is reported although `for (i in a:b)` compiles. `native::COMPILED_STD` mirrors the standard library functions `Lowerer::builtin` has code for, because `semantics` cannot depend on `typed`; the agreement test fails for a listed name that no natively running function of its corpus calls, so a name the typed core lacks cannot stay listed. An operator that builds an `Expr` is told from arithmetic by the form of its operands on both sides (`Lowerer::is_table`, `Judge::table_operand`): a variable, an operator, or a call of a table function or of a top-level function that declares a table result.
 - **Each function is judged alone.** A caller of a blocked native function gets no finding, and an R value is reported once, where it first appears, as `strict_origins` does for an undetermined value.
 - **Not covered.** The rule judges a function's body, not its calls. A call from R code that the native entry declines (a record, tuple, list literal or function argument, an argument that is not a constant or variable, a variable argument to a function that calls R, a `Dict` or `Set` result) runs that call in the interpreter without a finding, and so does the first call that waits on the interpreter to load an R function or to learn a conversion's type.
@@ -9746,7 +9746,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## Typed code holds table values natively
 
 - **Previous shape.** A typed function with a `DataFrame` parameter never compiled: `typed::type_of` had no type for a table, so the whole function ran in the interpreter. The typed `sales` benchmark was the one typed program exempted from `test_scenarios::typed_benchmarks_run_natively`.
-- **Target shape.** `ir::Type::Table` is one opaque word: the pointer of a DataFrame, LazyFrame, GroupBy, LazyGroupBy or Expr (`interp::dataframe::is_table_value`). Typed code cannot look inside it. It passes it to the table API, whose functions (`interp::dataframe::gives_table_value`: every `DataFrame.*`, `LazyFrame.*`, `GroupBy.*`, `LazyGroupBy.*` and `Expr.*` function that gives a table value, plus `DataFrame()` and `as.DataFrame()`) compile to `Op::CallR` sites with `RResult::Table`. A table value is not counted: the collector owns it.
+- **Target shape.** `ir::Type::Table` is one opaque word: the pointer of a DataFrame, LazyFrame, GroupBy, LazyGroupBy or Expr (`frames::dataframe::is_table_value`). Typed code cannot look inside it. It passes it to the table API, whose functions (`gives_table_value` in `crates/typed/src/lower.rs`: every `DataFrame.*`, `LazyFrame.*`, `GroupBy.*`, `LazyGroupBy.*` and `Expr.*` function that gives a table value, plus `DataFrame()` and `as.DataFrame()`) compile to `Op::CallR` sites with `RResult::Table`. A table value is not counted: the collector owns it.
 - **A table call is not an R call for the two R-call rules.** The table API changes nothing a second run would see, so a table call may nest in another call's arguments (compiled code computes arguments first, and no order is observable), it does not set `Compiled::calls_r`, and it does not count in `R_CALLS`, which keeps a give-up after it a plain re-run in the interpreter. The one visible effect is a warning, so `ry_call_r` compares `interp::conditions::warnings_raised()` around a table call and counts the call when the number moved.
 - **Operators.** An arithmetic, comparison or logical operator with a table operand (`Expr.col("units") > 3`) is a table call of the base operator, which dispatches to the `Expr` method. The lowerer decides it from the syntax (`Lowerer::is_table`): a variable holding a table, a table function call, a parenthesis or operator over one, and a call of a typed function whose written result type starts with a table type's name (`lower::returns_table`). The runtime keeps no alias definitions, so a result type that is an alias of a table type is not seen there; the checker, which does resolve the alias, warns and asks for a variable.
 - **Arguments cross as for any R call.** An `I64` reaches a table function through `Num.to_r`, as the checker requires (`Expr.col("units") >= least` with an `I64` is a `type-mismatch`), so the lowerer has no table-only argument rule.
@@ -9821,7 +9821,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - The count kernel's body is `#[inline(always)] count_true`, compiled twice: `count_true_avx2` carries `#[target_feature(enable = "avx2")]`, and `ry_count_true` picks it when `is_x86_feature_detected!("avx2")` says so. Its helpers (`operand`, `compare_lanes`) are `#[inline(always)]` too, because a function without the attribute is not compiled with the caller's features.
   - The arithmetic kernel calls one step function per program step and chunk through a pointer chosen once per call (`Step<T>`: `step_dbl_avx2` or `step_dbl_baseline`, and the same pair for `I64`). The slices are parameters of the step, so they are known not to overlap and every operator's loop is vector code, with the `NaN` or overflow test folded into the same loop. The last step of a program that gives a list writes into the list, with no copy.
   - `Rows` holds the chunk buffers uninitialized. A kernel fills the rows of its scalar inputs, clears only the rows its program's steps write, and reads no other row.
-- **Why not `-C target-cpu`.** A released binary must run on any x86-64 machine, so the feature level is chosen at run time, per kernel. `crates/interp/src/vector_math.rs` does the same.
+- **Why not `-C target-cpu`.** A released binary must run on any x86-64 machine, so the feature level is chosen at run time, per kernel. `crates/numeric/src/vector_math.rs` does the same.
 - **Why two shapes of dispatch.** A call per step and chunk of 128 items costs nothing beside the chunk, and keeps one copy of the kernel's control code. The count kernel has the other shape, its whole body compiled twice; moving it to step functions is a cleanup, not a speed-up.
 - **Impact.** On the iterate build, `log_rank` runs at about 3.5 times its Rust twin's time (from about 8) and `vector_arith` at about 1.9 (from about 2.6). The remaining cost is in the backlog ("Typed ry against Rust").
 - **Pinned by** `fused_counts_follow_three_valued_logic` and `fused_arithmetic_agrees_with_one_item_at_a_time` in `crates/typed/tests/test_values.rs`, and the `typed-mask-counts` scenario.
@@ -9900,7 +9900,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why syntax and not the checker's resolved signature.** Handing the runtime the checker's scheme would need a serialized signature per function and a checker run before every lowering, and it would leave code the checker never saw without one. Two readers of one syntax-level rule cannot drift, and the one case where syntax is not enough is a signature that is only the name of a type alias (`#: Pick`, `f: Pick <- function(n) n`): the checker resolves it (`check::declared_function` peels transparent aliases), the runtime cannot, and `native::Uncompiled::AliasedSignature` reports it as an `interpreted` warning that asks for the function type in place of the alias. The warning is raised only when an alias was peeled and the written types are incomplete, so a signature that is incomplete for another reason (a parameter name the function does not have, which is a type error) is not blamed on an alias.
 - **Where the two readers differ.** The checker drops a block's whole payload on any lowering error (`Lowering::finish`), including errors only it can see, such as an unknown type name. The runtime reads no diagnostics, so it checks the types it recognizes in such a block. Every such block carries an error diagnostic, and strict mode refuses to run the file.
 - **Consequence for plain R code.** A `#:` comment is enforced on ry's runtime: a value whose storage type contradicts the comment is an error at the function's boundary, where GNU R (and `ry R`) reads a comment. This is the mandate's equality taken literally, and it applies to `ry check --annotate` output too. The check is first-order and looser than the checker, so it fails only on a value that really does not have the declared type.
-- **Where lowering needed the statement.** A lazy package definition lowers the binding's value alone, and the cached-index and kept-source paths lower it from file text. `loader::Code` carries `statement_start`, and `ry_runtime::lower_code` parses from the statement's line, extended over the `#:` lines directly above it, with the prefix masked by spaces so byte offsets and line numbers are the file's. A parse error inside a `#:` line does not fail the lowering, because such a line is a comment to R. The console is the other place: `syntax::input_is_unfinished` holds a command that ends in a `#:` block on its own lines until the next line arrives, and a blank line ends the wait, so a block typed before its function attaches as it does in a file.
+- **Where lowering needed the statement.** A lazy package definition lowers the binding's value alone, and the cached-index and kept-source paths lower it from file text. `loader::Code` carries `statement_start`, and `loader_backend::lower_code` parses from the statement's line, extended over the `#:` lines directly above it, with the prefix masked by spaces so byte offsets and line numbers are the file's. A parse error inside a `#:` line does not fail the lowering, because such a line is a comment to R. The console is the other place: `syntax::input_is_unfinished` holds a command that ends in a `#:` block on its own lines until the next line arrives, and a blank line ends the wait, so a block typed before its function attaches as it does in a file.
 - **Lazy definitions resolve at compile time.** `typed::lower::resolve_function` forces a loader lazy-definition promise (`ryLoaderForce`), so a native function that calls a not yet forced function of the same package compiles on its first call. The loader binds only function definitions and pure constants of strict files that way, so forcing one early is not observable.
 - **Impact.** Correctness: the checker and the runtime agree about what a function declares for every block the checker accepts, and the mandate's two forms count the same in scripts, the console, `ry load` and `ry install`. Simplicity: the warning, its flag and the inline-off special case are gone, and three private copies of the pairing rule became one. Performance: one walk back over trivia per function literal lowered, and comment-annotated functions gain the per-call check their inline twins already pay. Incremental analysis: unchanged, the checker reads the same nodes as before.
 - **Pinned by** `typing-strict/native.R.test` (`signature_written_in_a_comment`, `signature_from_a_type_alias`, `signature_alias_is_blamed_only_when_an_alias_is_the_cause`, `signature_in_a_comment_reports_what_blocks_it`), `crates/ry/tests/native/blocked-aliased-signature.R`, `crates/syntax/tests/test_annotation.rs`, `a_console_reads_on_only_when_the_input_ended_too_early`, and the scenario `typed-comment-signatures`.

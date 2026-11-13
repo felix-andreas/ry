@@ -14,12 +14,14 @@ General Public License below for more details.
 The parts of the repository carry these licences:
 
 - GPL-2.0-or-later: the crates that contain code translated from GNU R or link a crate that
-  does, which are interp, jit, libr, loader and ry-lang (the `ry` program), and the fuzz
-  targets in fuzz/. Each translated file names its GNU R source and keeps R's copyright lines.
+  does, which are numeric, interp, stats, graphics, frames, services, typed, jit and libr, and
+  the fuzz targets in fuzz/. Each translated file names its GNU R source and keeps R's
+  copyright lines. The released `ry` program carries the built libr, which is why the program
+  is under these terms.
 - LGPL-2.1-or-later: the C headers in crates/libr/include, which packages compile against, as
   GNU R's own public headers are. A package built against them may use any licence.
 - UPL-1.0: every other crate, which are syntax, semantics, format, ide, heap, table, sniff, rdb,
-  rcmd, repl and oracle, and everything else in the repository unless a file or directory says
+  rcmd, repl, loader, ry-lang (the sources of the `ry` program) and oracle, and everything else in the repository unless a file or directory says
   otherwise (the type stubs in types/, the tools, scripts and docs). UPL-1.0 is compatible with
   the GPL.
 - MIT: the editor extensions in editors/code and editors/zed.

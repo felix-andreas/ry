@@ -26,16 +26,19 @@ release archive carries it. The source code of a release is its git tag.
 
 | Part | Licence |
 | --- | --- |
+| `numeric`, the numeric kernels | GPL-2.0-or-later |
 | `interp`, the R interpreter | GPL-2.0-or-later |
+| `stats`, `graphics`, `frames`, `services`, the interpreter's leaf crates | GPL-2.0-or-later |
+| `typed`, the typed core | GPL-2.0-or-later |
 | `jit`, the compiler | GPL-2.0-or-later |
 | `libr`, R's C API as a `libR` shared library | GPL-2.0-or-later |
-| `loader`, the package loader, with its R scripts | GPL-2.0-or-later |
-| `ry-lang` (`crates/ry`), the `ry` program, with its R scripts | GPL-2.0-or-later |
 | the fuzz targets in `fuzz/` | GPL-2.0-or-later |
 | the C headers in `crates/libr/include` | LGPL-2.1-or-later |
 | `syntax`, `semantics`, `format`, `ide` | UPL-1.0 |
 | `heap`, `table`, `sniff`, `rdb` | UPL-1.0 |
 | `rcmd`, with its `install.R`, and `repl` | UPL-1.0 |
+| `loader`, the package loader, with its R scripts | UPL-1.0 |
+| `ry-lang` (`crates/ry`), the sources of the `ry` program, with its R scripts | UPL-1.0 |
 | `oracle`, the differential test harness | UPL-1.0 |
 | the type stubs in `types/`, the tools and scripts | UPL-1.0 |
 | the docs site in `docs/` | UPL-1.0 (its Geist fonts are OFL-1.1) |
@@ -44,7 +47,9 @@ release archive carries it. The source code of a release is its git tag.
 | third-party crates and C libraries in `ry` | their own; see [`THIRD_PARTY_NOTICES`](https://github.com/felix-andreas/ry/blob/main/THIRD_PARTY_NOTICES) |
 
 A crate is GPL exactly when it contains code translated from GNU R or depends on a crate that
-does. `repl` embeds the built `libR` as bytes but does not link it, so it is UPL-1.0. A VS Code
+does. `repl` embeds the built `libR` as bytes but does not link it, so it is UPL-1.0, and so are
+`loader` and `ry-lang`, which reach the runtime only through `repl`. The released `ry` binary
+carries that `libR`, which is why the program as a whole is GPL. A VS Code
 extension built for one platform bundles the `ry` binary, so its `LICENSE` holds the MIT licence
 for the extension's own code followed by ry's `LICENSE`, and it carries `THIRD_PARTY_NOTICES`.
 
@@ -55,24 +60,28 @@ the provenance headers below, and `just notices --check` fails when the file is 
 ## Code derived from GNU R
 
 Each file below starts with a header that names its GNU R sources and keeps their copyright lines.
-All of them are in `crates/interp/src`.
+The paths are relative to `crates/`.
 
 | File | GNU R sources |
 | --- | --- |
-| `rmath.rs` | `src/nmath/`: `toms708.c`, `pnorm.c`, `qnorm.c`, `ptukey.c`, `qtukey.c`, `pnt.c`, `pt.c`, `qt.c`, `qbeta.c`, `chebyshev.c`, `gamma.c`, `lgamma.c`, `pgamma.c`, `cospi.c`, `stirlerr.c`, `bd0.c`, `dbinom.c`, `dpois.c` |
-| `distributions.rs` | `src/nmath/`: `rgamma.c`, `rbeta.c`, `rpois.c`, `rbinom.c`, `rhyper.c` |
-| `random.rs` | `src/nmath/snorm.c`, `src/nmath/sexp.c`, `src/main/RNG.c`, `src/main/random.c` |
-| `arith.rs` | `src/main/complex.c` (complex `asin`, `acos`, `atan`) |
-| `plotmath.rs` | `src/main/plotmath.c` |
-| `graphics.rs` | `src/library/graphics/src/plot3d.c` (contour labels, `persp`) |
-| `graphics_engine.rs` | `src/main/xspline.c` |
-| `stats_tests.rs` | `src/library/stats/src/swilk.c`, `src/library/stats/src/prho.c` |
-| `stats_nlm.rs` | `src/appl/uncmin.c` |
-| `stats_optimize.rs` | `src/appl/integrate.c`, `src/library/stats/src/optimize.c` |
-| `register_s3_methods.R` | `src/library/base/R/namespace.R` (`registerS3methods`) |
+| `numeric/src/rmath.rs` | `src/nmath/`: `toms708.c`, `pnorm.c`, `qnorm.c`, `ptukey.c`, `qtukey.c`, `pnt.c`, `pt.c`, `qt.c`, `qbeta.c`, `chebyshev.c`, `gamma.c`, `lgamma.c`, `pgamma.c`, `cospi.c`, `stirlerr.c`, `bd0.c`, `dbinom.c`, `dpois.c` |
+| `numeric/src/fft.rs` | `src/library/stats/src/fft.c` |
+| `interp/src/distributions.rs` | `src/nmath/`: `rgamma.c`, `rbeta.c`, `rpois.c`, `rbinom.c`, `rhyper.c` |
+| `interp/src/random.rs` | `src/nmath/snorm.c`, `src/nmath/sexp.c`, `src/main/RNG.c`, `src/main/random.c` |
+| `interp/src/arith.rs` | `src/main/complex.c` (complex `asin`, `acos`, `atan`) |
+| `graphics/src/plotmath.rs` | `src/main/plotmath.c` |
+| `graphics/src/routines.rs` | `src/library/graphics/src/plot3d.c` (contour labels, `persp`) |
+| `graphics/src/engine.rs` | `src/main/xspline.c` |
+| `stats/src/hypothesis_tests.rs` | `src/library/stats/src/swilk.c`, `src/library/stats/src/prho.c` |
+| `stats/src/nlm.rs` | `src/appl/uncmin.c` |
+| `stats/src/optimize.rs` | `src/appl/integrate.c`, `src/library/stats/src/optimize.c` |
+| `stats/src/loess.rs` | `src/library/stats/src/loessf.f` |
+| `stats/src/routines.rs` | `src/library/stats/src/lowess.c` |
+| `stats/src/spline.rs` | `src/library/stats/src/sbart.c`, `src/library/stats/src/qsbart.f`, `src/appl/interv.c` |
+| `interp/src/register_s3_methods.R` | `src/library/base/R/namespace.R` (`registerS3methods`) |
 
-`stats_lbfgsb.rs` follows the BSD-licensed L-BFGS-B 3.0 reference code and keeps its notice, and
-the font metrics in `graphics.rs` and `graphics_render.rs` come from Adobe's AFM
+`stats/src/lbfgsb.rs` follows the BSD-licensed L-BFGS-B 3.0 reference code and keeps its notice, and
+the font metrics in `graphics/src/routines.rs` and `graphics/src/render.rs` come from Adobe's AFM
 files under Adobe's terms; both notices are in `THIRD_PARTY_NOTICES`. `register_s3_methods.R` is a copy of one base R function whose per-method loops run natively,
 and it replaces the installed function only when that is exactly the code it was copied from.
 

@@ -1778,8 +1778,11 @@ pub unsafe fn dispatch_evaluated_subject(
         eval::evaluate_args_into(arguments.cdr(), env, true, call, args)?;
         return Ok(None);
     }
-    if definition.name == "[" && crate::frame::is_frame(object) {
-        return crate::frame::run(call, object, env).map(Some);
+    if definition.name == "[" {
+        let tables = interp().extensions.tables;
+        if (tables.is_frame)(object) {
+            return (tables.subset)(call, object, env).map(Some);
+        }
     }
     let mut promised: Args = smallvec::smallvec![Arg {
         tag: arguments.tag(),

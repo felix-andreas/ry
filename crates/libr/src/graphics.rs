@@ -1,5 +1,5 @@
 //! The graphics engine and device API: the C entry points of R's graphics engine, over the
-//! engine in `interp::graphics_engine`, so that compiled graphics systems (grid) and devices
+//! engine in the `graphics` crate, so that compiled graphics systems (grid) and devices
 //! (ragg) run unchanged.
 
 use {
@@ -13,11 +13,11 @@ use {
         vectors::{int_elt, real_elt, sexp_elt, xlength},
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real},
-    interp::{
-        graphics,
-        graphics_engine::{self, DevDesc, GEContext, GEDevDesc, SystemCallback, Unit},
-        values,
+    ::graphics::{
+        engine::{self, DevDesc, GEContext, GEDevDesc, SystemCallback, Unit},
+        routines,
     },
+    interp::values,
     std::ffi::{c_char, c_int, c_uint, c_void},
 };
 
@@ -706,7 +706,7 @@ const COLOR_NAMES: &[(&str, u32)] = &[
 pub unsafe extern "C" fn GEregisterSystem(callback: Option<SystemCallback>, index: *mut c_int) {
     enter(|| {
         let callback = callback.ok_or_else(|| error("invalid graphics system callback"))?;
-        graphics_engine::register_system(callback, |claimed| {
+        engine::register_system(callback, |claimed| {
             if !index.is_null() {
                 *index = claimed as c_int;
             }
@@ -716,25 +716,25 @@ pub unsafe extern "C" fn GEregisterSystem(callback: Option<SystemCallback>, inde
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
-    enter(|| graphics_engine::unregister_system(index))
+    enter(|| engine::unregister_system(index))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEregisterWithDevice(dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::register_with_device(dd))
+    enter(|| engine::register_with_device(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEsystemState(dd: *mut GEDevDesc, index: c_int) -> *mut c_void {
     match usize::try_from(index) {
-        Ok(index) => graphics_engine::system_state(dd, index),
+        Ok(index) => engine::system_state(dd, index),
         Err(_) => std::ptr::null_mut(),
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEhandleEvent(event: c_int, dev: *mut DevDesc, data: Sexp) -> Sexp {
-    enter(|| graphics_engine::handle_event(event, dev, data))
+    enter(|| engine::handle_event(event, dev, data))
 }
 
 /// `GEcreateDD()`: a zeroed device description for a device to fill in. GNU R allocates it
@@ -757,23 +757,23 @@ pub unsafe extern "C" fn GEfreeDD(dev: *mut DevDesc) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEcreateDevDesc(dev: *mut DevDesc) -> *mut GEDevDesc {
-    enter(|| graphics_engine::create_device(dev))
+    enter(|| engine::create_device(dev))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEdestroyDevDesc(dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::destroy_device(dd))
+    enter(|| engine::destroy_device(dd))
 }
 
 /// `GEaddDevice(dd)`: adds a device named by the `.Device` variable its opener set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEaddDevice(dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::add_device_from_dot_device(dd))
+    enter(|| engine::add_device_from_dot_device(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEaddDevice2(dd: *mut GEDevDesc, name: *const c_char) {
-    enter(|| graphics_engine::add_device_named(dd, &text_of(name), None))
+    enter(|| engine::add_device_named(dd, &text_of(name), None))
 }
 
 #[unsafe(no_mangle)]
@@ -784,95 +784,95 @@ pub unsafe extern "C" fn GEaddDevice2f(
 ) {
     enter(|| {
         let file = (!file.is_null()).then(|| text_of(file));
-        graphics_engine::add_device_named(dd, &text_of(name), file.as_deref())
+        engine::add_device_named(dd, &text_of(name), file.as_deref())
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEkillDevice(dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::kill(dd))
+    enter(|| engine::kill(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEcurrentDevice() -> *mut GEDevDesc {
-    enter(|| graphics_engine::current_device())
+    enter(|| engine::current_device())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn GEgetDevice(number: c_int) -> *mut GEDevDesc {
     match usize::try_from(number) {
-        Ok(number) if number < graphics_engine::MAX_DEVICES => graphics_engine::device(number),
+        Ok(number) if number < engine::MAX_DEVICES => engine::device(number),
         _ => std::ptr::null_mut(),
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn GEdeviceNumber(dd: *mut GEDevDesc) -> c_int {
-    graphics_engine::device_number(dd) as c_int
+    engine::device_number(dd) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_desc2GEDesc(dev: *mut DevDesc) -> *mut GEDevDesc {
-    graphics_engine::desc_to_device(dev)
+    engine::desc_to_device(dev)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_ndevNumber(dev: *mut DevDesc) -> c_int {
-    graphics_engine::device_number(graphics_engine::desc_to_device(dev)) as c_int
+    engine::device_number(engine::desc_to_device(dev)) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_killDevice(number: c_int) {
     if let Ok(number) = usize::try_from(number) {
-        enter(|| graphics_engine::kill_device(number))
+        enter(|| engine::kill_device(number))
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_KillAllDevices() {
-    enter(|| graphics_engine::kill_all_devices())
+    enter(|| engine::kill_all_devices())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_nextDevice(from: c_int) -> c_int {
-    graphics_engine::next_device(usize::try_from(from).unwrap_or(0)) as c_int
+    engine::next_device(usize::try_from(from).unwrap_or(0)) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_prevDevice(from: c_int) -> c_int {
-    graphics_engine::previous_device(usize::try_from(from).unwrap_or(0)) as c_int
+    engine::previous_device(usize::try_from(from).unwrap_or(0)) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_selectDevice(number: c_int) -> c_int {
     let number = usize::try_from(number).unwrap_or(0);
-    enter(|| Ok(graphics_engine::select_device(number)? as c_int))
+    enter(|| Ok(engine::select_device(number)? as c_int))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_NoDevices() -> c_int {
-    c_int::from(graphics_engine::no_devices())
+    c_int::from(engine::no_devices())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_NumDevices() -> c_int {
-    graphics_engine::num_devices() as c_int
+    engine::num_devices() as c_int
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Rf_curDevice() -> c_int {
-    graphics_engine::current_number() as c_int
+    engine::current_number() as c_int
 }
 
 /// `R_CheckDeviceAvailable()`: an error when all 63 device slots are taken.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_CheckDeviceAvailable() {
-    enter(graphics_engine::check_device_available)
+    enter(engine::check_device_available)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn R_CheckDeviceAvailableBool() -> crate::Rboolean {
-    crate::Rboolean::from(graphics_engine::device_available())
+    crate::Rboolean::from(engine::device_available())
 }
 
 /// `NewFrameConfirm(dev)`: asks before a new page. A device that confirms itself does so, and
@@ -955,22 +955,22 @@ macro_rules! units {
         $(
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $from(value: f64, to: c_int, dd: *mut GEDevDesc) -> f64 {
-                graphics_engine::$engine_from(value, Unit::from_code(to), dd)
+                engine::$engine_from(value, Unit::from_code(to), dd)
             }
 
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $ge_from(value: f64, to: c_int, dd: *mut GEDevDesc) -> f64 {
-                graphics_engine::$engine_from(value, Unit::from_code(to), dd)
+                engine::$engine_from(value, Unit::from_code(to), dd)
             }
 
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $to(value: f64, from: c_int, dd: *mut GEDevDesc) -> f64 {
-                graphics_engine::$engine_to(value, Unit::from_code(from), dd)
+                engine::$engine_to(value, Unit::from_code(from), dd)
             }
 
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $ge_to(value: f64, from: c_int, dd: *mut GEDevDesc) -> f64 {
-                graphics_engine::$engine_to(value, Unit::from_code(from), dd)
+                engine::$engine_to(value, Unit::from_code(from), dd)
             }
         )*
     };
@@ -987,32 +987,32 @@ units! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GE_LENDpar(value: Sexp, index: c_int) -> c_int {
-    enter(|| graphics_engine::lend_par(value, index_of(index)))
+    enter(|| engine::lend_par(value, index_of(index)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GE_LENDget(lend: c_int) -> Sexp {
-    enter(|| values::string_vector(&[graphics_engine::lend_name(lend)?]))
+    enter(|| values::string_vector(&[engine::lend_name(lend)?]))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GE_LJOINpar(value: Sexp, index: c_int) -> c_int {
-    enter(|| graphics_engine::ljoin_par(value, index_of(index)))
+    enter(|| engine::ljoin_par(value, index_of(index)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GE_LJOINget(ljoin: c_int) -> Sexp {
-    enter(|| values::string_vector(&[graphics_engine::ljoin_name(ljoin)?]))
+    enter(|| values::string_vector(&[engine::ljoin_name(ljoin)?]))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GE_LTYpar(value: Sexp, index: c_int) -> c_uint {
-    enter(|| Ok(graphics_engine::lty_par(value, index_of(index))? as c_uint))
+    enter(|| Ok(engine::lty_par(value, index_of(index))? as c_uint))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GE_LTYget(lty: c_uint) -> Sexp {
-    enter(|| values::string_vector(&[graphics_engine::lty_name(lty as c_int)]))
+    enter(|| values::string_vector(&[engine::lty_name(lty as c_int)]))
 }
 
 /// `GEstring_to_pch(chr)`: the plotting symbol a one-character string names.
@@ -1020,20 +1020,20 @@ pub unsafe extern "C" fn GE_LTYget(lty: c_uint) -> Sexp {
 pub unsafe extern "C" fn GEstring_to_pch(text: Sexp) -> c_int {
     enter(|| {
         if text == runtime().heap.known().na_string {
-            return graphics_engine::string_to_pch(None);
+            return engine::string_to_pch(None);
         }
-        graphics_engine::string_to_pch(Some(&utf8_text(text)?))
+        engine::string_to_pch(Some(&utf8_text(text)?))
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GESetClip(x1: f64, y1: f64, x2: f64, y2: f64, dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::set_clip(x1, y1, x2, y2, dd))
+    enter(|| engine::set_clip(x1, y1, x2, y2, dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GENewPage(gc: *mut GEContext, dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::new_page(&*gc, dd))
+    enter(|| engine::new_page(&*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1045,7 +1045,7 @@ pub unsafe extern "C" fn GELine(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::line(x1, y1, x2, y2, &*gc, dd))
+    enter(|| engine::line(x1, y1, x2, y2, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1056,7 +1056,7 @@ pub unsafe extern "C" fn GEPolyline(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::polyline(slice(x, count), slice(y, count), &*gc, dd))
+    enter(|| engine::polyline(slice(x, count), slice(y, count), &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1067,7 +1067,7 @@ pub unsafe extern "C" fn GEPolygon(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::polygon(slice(x, count), slice(y, count), &mut *gc, dd))
+    enter(|| engine::polygon(slice(x, count), slice(y, count), &mut *gc, dd))
 }
 
 /// `GEXspline(n, x, y, s, open, repEnds, draw, gc, dd)`: the X-spline's points in device
@@ -1086,7 +1086,7 @@ pub unsafe extern "C" fn GEXspline(
     dd: *mut GEDevDesc,
 ) -> Sexp {
     enter(|| {
-        let (xs, ys) = graphics_engine::xspline(
+        let (xs, ys) = engine::xspline(
             slice(x, count),
             slice(y, count),
             slice(shape, count),
@@ -1109,7 +1109,7 @@ pub unsafe extern "C" fn GECircle(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::circle(x, y, radius, &mut *gc, dd))
+    enter(|| engine::circle(x, y, radius, &mut *gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1121,7 +1121,7 @@ pub unsafe extern "C" fn GERect(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::rect(x0, y0, x1, y1, &mut *gc, dd))
+    enter(|| engine::rect(x0, y0, x1, y1, &mut *gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1140,7 +1140,7 @@ pub unsafe extern "C" fn GEPath(
             .iter()
             .try_fold(0 as c_int, |total, count| total.checked_add(*count))
             .ok_or_else(|| error("invalid graphics path"))?;
-        graphics_engine::path(
+        engine::path(
             slice(x, total),
             slice(y, total),
             counts,
@@ -1173,7 +1173,7 @@ pub unsafe extern "C" fn GERaster(
         } else {
             std::slice::from_raw_parts_mut(raster, length)
         };
-        graphics_engine::raster(
+        engine::raster(
             pixels,
             columns,
             rows,
@@ -1191,12 +1191,12 @@ pub unsafe extern "C" fn GERaster(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GECap(dd: *mut GEDevDesc) -> Sexp {
-    enter(|| graphics_engine::capture(dd))
+    enter(|| engine::capture(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEMode(mode: c_int, dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::mode(mode, dd))
+    enter(|| engine::mode(mode, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1212,7 +1212,7 @@ pub unsafe extern "C" fn GEText(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::text(x, y, &decode(text, encoding), xc, yc, rotation, &*gc, dd))
+    enter(|| engine::text(x, y, &decode(text, encoding), xc, yc, rotation, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1224,17 +1224,17 @@ pub unsafe extern "C" fn GESymbol(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::symbol(x, y, pch, size, &mut *gc, dd))
+    enter(|| engine::symbol(x, y, pch, size, &mut *gc, dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEStroke(path: Sexp, gc: *mut GEContext, dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::stroke(path, &*gc, dd))
+    enter(|| engine::stroke(path, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEFill(path: Sexp, rule: c_int, gc: *mut GEContext, dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::fill(path, rule, &*gc, dd))
+    enter(|| engine::fill(path, rule, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1244,7 +1244,7 @@ pub unsafe extern "C" fn GEFillStroke(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::fill_stroke(path, rule, &*gc, dd))
+    enter(|| engine::fill_stroke(path, rule, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1261,7 +1261,7 @@ pub unsafe extern "C" fn GEGlyph(
     dd: *mut GEDevDesc,
 ) {
     enter(|| {
-        graphics_engine::glyph(
+        engine::glyph(
             slice_mut(glyphs, count),
             slice_mut(x, count),
             slice_mut(y, count),
@@ -1276,7 +1276,7 @@ pub unsafe extern "C" fn GEGlyph(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEPretty(low: *mut f64, high: *mut f64, divisions: *mut c_int) {
-    enter(|| graphics_engine::pretty_axis(&mut *low, &mut *high, &mut *divisions))
+    enter(|| engine::pretty_axis(&mut *low, &mut *high, &mut *divisions))
 }
 
 #[unsafe(no_mangle)]
@@ -1289,7 +1289,7 @@ pub unsafe extern "C" fn GEMetricInfo(
     dd: *mut GEDevDesc,
 ) {
     enter(|| {
-        let metrics = graphics_engine::metric_info(code, &*gc, dd)?;
+        let metrics = engine::metric_info(code, &*gc, dd)?;
         write_metrics(metrics, ascent, descent, width);
         Ok(())
     })
@@ -1302,7 +1302,7 @@ pub unsafe extern "C" fn GEStrWidth(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) -> f64 {
-    enter(|| graphics_engine::str_width(&decode(text, encoding), &*gc, dd))
+    enter(|| engine::str_width(&decode(text, encoding), &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1312,7 +1312,7 @@ pub unsafe extern "C" fn GEStrHeight(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) -> f64 {
-    enter(|| graphics_engine::str_height(&decode(text, encoding), &*gc, dd))
+    enter(|| engine::str_height(&decode(text, encoding), &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1327,7 +1327,7 @@ pub unsafe extern "C" fn GEStrMetric(
     dd: *mut GEDevDesc,
 ) {
     enter(|| {
-        let metrics = graphics_engine::str_metric(&decode(text, encoding), &*gc, dd)?;
+        let metrics = engine::str_metric(&decode(text, encoding), &*gc, dd)?;
         write_metrics(metrics, ascent, descent, width);
         Ok(())
     })
@@ -1339,7 +1339,7 @@ pub unsafe extern "C" fn GEExpressionWidth(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) -> f64 {
-    enter(|| graphics_engine::expression_width(expression, &*gc, dd))
+    enter(|| engine::expression_width(expression, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1348,7 +1348,7 @@ pub unsafe extern "C" fn GEExpressionHeight(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) -> f64 {
-    enter(|| graphics_engine::expression_height(expression, &*gc, dd))
+    enter(|| engine::expression_height(expression, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
@@ -1361,7 +1361,7 @@ pub unsafe extern "C" fn GEExpressionMetric(
     dd: *mut GEDevDesc,
 ) {
     enter(|| {
-        let metrics = graphics_engine::expression_metric(expression, &*gc, dd)?;
+        let metrics = engine::expression_metric(expression, &*gc, dd)?;
         write_metrics(metrics, ascent, descent, width);
         Ok(())
     })
@@ -1379,22 +1379,22 @@ pub unsafe extern "C" fn GEMathText(
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) {
-    enter(|| graphics_engine::math_text(x, y, expression, xc, yc, rotation, &*gc, dd))
+    enter(|| engine::math_text(x, y, expression, xc, yc, rotation, &*gc, dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEdeviceDirty(dd: *mut GEDevDesc) -> crate::Rboolean {
-    crate::Rboolean::from(graphics_engine::device_dirty(dd))
+    crate::Rboolean::from(engine::device_dirty(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEdirtyDevice(dd: *mut GEDevDesc) {
-    graphics_engine::dirty_device(dd)
+    engine::dirty_device(dd)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEcheckState(dd: *mut GEDevDesc) -> crate::Rboolean {
-    enter(|| Ok(crate::Rboolean::from(graphics_engine::check_state(dd)?)))
+    enter(|| Ok(crate::Rboolean::from(engine::check_state(dd)?)))
 }
 
 /// `GErecording(call, dd)`: whether an operation made by `call` goes on the display list.
@@ -1405,40 +1405,40 @@ pub unsafe extern "C" fn GErecording(call: Sexp, dd: *mut GEDevDesc) -> crate::R
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GErecordGraphicOperation(op: Sexp, args: Sexp, dd: *mut GEDevDesc) {
-    graphics_engine::record_operation(op, args, dd)
+    engine::record_operation(op, args, dd)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEinitDisplayList(dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::init_display_list(dd))
+    enter(|| engine::init_display_list(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEplayDisplayList(dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::play_display_list(dd))
+    enter(|| engine::play_display_list(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEcopyDisplayList(from: c_int) {
     enter(|| {
         let from = usize::try_from(from).map_err(|_| error("invalid device"))?;
-        graphics_engine::copy_display_list(from)
+        engine::copy_display_list(from)
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEcreateSnapshot(dd: *mut GEDevDesc) -> Sexp {
-    enter(|| graphics_engine::create_snapshot(dd))
+    enter(|| engine::create_snapshot(dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEplaySnapshot(snapshot: Sexp, dd: *mut GEDevDesc) {
-    enter(|| graphics_engine::play_snapshot(snapshot, dd))
+    enter(|| engine::play_snapshot(snapshot, dd))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEonExit() {
-    enter(|| graphics_engine::on_exit())
+    enter(|| engine::on_exit())
 }
 
 /// `GEcontourLines(x, nx, y, ny, z, levels, nl)`: the contour lines as `contourLines()` returns
@@ -1455,7 +1455,7 @@ pub unsafe extern "C" fn GEcontourLines(
 ) -> Sexp {
     enter(|| {
         let cells = columns.max(0).saturating_mul(rows.max(0));
-        graphics::contour_lines(
+        routines::contour_lines(
             slice(x, columns),
             slice(y, rows),
             slice(z, cells),
@@ -1477,13 +1477,13 @@ pub unsafe extern "C" fn Rf_GAxisPars(
     let swap = *min > *max;
     let (low, high) = if swap { (*max, *min) } else { (*min, *max) };
     let (mut first, mut last, intervals) = if log != 0 {
-        graphics::log_axis(
+        routines::log_axis(
             10f64.powf(low.max(-307.0)),
             10f64.powf(high.min(308.0)),
             *count,
         )
     } else {
-        graphics::linear_axis(low, high, *count)
+        routines::linear_axis(low, high, *count)
     };
     if swap {
         std::mem::swap(&mut first, &mut last);
@@ -1508,7 +1508,7 @@ pub unsafe extern "C" fn Rf_CreateAtVector(
         } else {
             [*usr, *usr.add(1)]
         };
-        values::real_vector(&graphics::at_vector(axp, usr, intervals, log != 0))
+        values::real_vector(&routines::at_vector(axp, usr, intervals, log != 0))
     })
 }
 
@@ -1554,21 +1554,21 @@ unsafe fn write_metrics([a, d, w]: [f64; 3], ascent: *mut f64, descent: *mut f64
 
 #[unsafe(no_mangle)]
 pub extern "C" fn R_GE_getVersion() -> c_int {
-    graphics_engine::engine_version()
+    engine::engine_version()
 }
 
 /// `R_GE_checkVersionOrDie(version)`: GNU R accepts only its own version, but ry's engine reads
 /// every device description from version 14 on, so packages built against R 4.1 to 4.6 run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GE_checkVersionOrDie(version: c_int) {
-    if !(graphics_engine::OLDEST_ENGINE_VERSION..=graphics_engine::NEWEST_ENGINE_VERSION)
+    if !(engine::OLDEST_ENGINE_VERSION..=engine::NEWEST_ENGINE_VERSION)
         .contains(&version)
     {
         raise(error(format!(
             "Graphics API version mismatch: the device expects version {version}, ry provides \
              versions {} to {}",
-            graphics_engine::OLDEST_ENGINE_VERSION,
-            graphics_engine::NEWEST_ENGINE_VERSION
+            engine::OLDEST_ENGINE_VERSION,
+            engine::NEWEST_ENGINE_VERSION
         )));
     }
 }

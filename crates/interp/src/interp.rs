@@ -57,7 +57,6 @@ pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
-pub mod dataframe;
 pub mod debugger;
 pub mod deparse;
 pub mod dispatch;
@@ -66,23 +65,17 @@ pub mod effects;
 pub mod element_access;
 pub mod envir;
 pub mod eval;
-mod fft;
+pub mod extensions;
 pub mod file_removal;
 #[cfg(unix)]
 pub mod fork;
 pub mod format;
-pub mod frame;
-pub mod graphics;
-pub mod graphics_engine;
-pub mod graphics_render;
 pub mod help_server;
 pub mod http;
 pub mod image;
 pub mod kernels;
 pub mod latex;
 pub mod linalg;
-pub mod linpack;
-pub mod long_double;
 pub mod lower;
 #[path = "../../rcmd/src/makeconf.rs"]
 mod makeconf;
@@ -96,30 +89,15 @@ pub mod parallel;
 pub mod parse_data;
 mod pcre;
 pub mod platform;
-pub mod plotmath;
 pub mod print;
 pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
-pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
 pub mod standard_library;
-pub mod stats;
-pub mod stats_arima;
-pub mod stats_cluster;
-pub mod stats_deriv;
-pub mod stats_lbfgsb;
-pub mod stats_loess;
-pub mod stats_models;
-pub mod stats_nlm;
-pub mod stats_optimize;
-pub mod stats_port;
-pub mod stats_port_minimizer;
-pub mod stats_spline;
-pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
@@ -128,10 +106,11 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
-pub mod vector_math;
-pub mod viewer;
 
-pub use crate::unwind::{Jump, RError};
+pub use {
+    crate::unwind::{Jump, RError},
+    numeric::{linpack, long_double, rmath, vector_math},
+};
 use {
     crate::{
         base_fast_paths::Entry,
@@ -633,6 +612,15 @@ pub struct Interp {
     pub interactive: bool,
     /// The default packages' libraries `dyn.load` loaded, with the paths it was given.
     pub builtin_libraries: Vec<(&'static str, String)>,
+    /// The native routine tables registered by crates above the interpreter, each with the
+    /// default package it implements ([`builtin_libraries::register_routines`]).
+    pub routine_tables: Vec<(
+        &'static str,
+        &'static [(&'static str, builtin_libraries::NativeFn)],
+    )>,
+    /// The implementation of each of the default packages' routines, in the order of the
+    /// routine list, filled on the first native call and emptied when a table is registered.
+    pub routine_implementations: Vec<Option<builtin_libraries::NativeFn>>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
     /// Values moved out of a caller's variable into a closure's parameter.
@@ -673,6 +661,9 @@ pub struct Interp {
     pub code_image: code_image::State,
     /// The records of typed-core values R holds unread ([`records::LazyRecords`]).
     pub lazy_records: records::LazyRecords,
+    /// The graphics system, the tables and the data viewer, which crates above this one
+    /// implement ([`extensions`]).
+    pub extensions: extensions::Extensions,
 }
 
 struct InterpState {
@@ -754,6 +745,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     }
     state.heap = heap_pointer;
     heap::set_pending_resolver(crate::eval::resolve_pending_read);
+    numeric::set_emulated_r_provider(system::emulated_r);
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
@@ -812,6 +804,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         command_args: Vec::new(),
         interactive: false,
         builtin_libraries: Vec::new(),
+        routine_tables: Vec::new(),
+        routine_implementations: Vec::new(),
         annotations: annotations::State::default(),
         moves: moves::State::default(),
         method_cache: dispatch::MethodCache::default(),
@@ -828,6 +822,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtins_env: None,
         code_image: code_image::State::default(),
         lazy_records: records::LazyRecords::default(),
+        extensions: extensions::Extensions::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -839,6 +834,12 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
 /// already registered is replaced, so the host's version wins.
 pub unsafe fn register_builtins(definitions: &[BuiltinDef]) {
     builtins::register(definitions);
+}
+
+/// Adds builtins that belong to ry's own values, which `package:ry` binds instead of base, so
+/// that plain R code which never names them sees exactly GNU R's base namespace.
+pub unsafe fn register_own_builtins(definitions: &[BuiltinDef]) {
+    builtins::register_own(definitions);
 }
 
 /// The default hooks: console output to the process's stdout and stderr, no ALTREP classes, no
@@ -982,7 +983,7 @@ impl RootSource for InterpRoots {
             }
             marker.mark(interp.srcref);
             dispatch::trace_method_cache(&mut interp.method_cache, marker);
-            graphics_engine::trace(marker);
+            (interp.extensions.graphics.trace)(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
             }

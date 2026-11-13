@@ -6,8 +6,9 @@
 //! The interpreter runs here without base R, so the setup defines the few functions base R would.
 
 use {
+    frames::{dataframe, frame},
     heap::{Heap, object::Sexp},
-    interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
+    interp::{eval, lower, print, standard_library, unwind::Unwind, values},
     std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
     syntax::testing::{SplitMix64, for_each_seed, replay_command},
 };
@@ -1484,6 +1485,7 @@ fn standard_library_at_runtime() {
         let mut hooks = interp::default_hooks();
         hooks.write_console = capture;
         interp::install(heap, hooks);
+        frames::install();
         interp::interp().show_error_messages = false;
         evaluate(SETUP).unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
         let mut failures = Vec::new();
