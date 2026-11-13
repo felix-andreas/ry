@@ -9732,7 +9732,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## Closure call setup: the 10x end shape
 
-**Status:** planned. Built so far: `eval::enter` and `eval::leave`, the `CallPlans` rows with `CallShape` and the default sources, and the reference pool.
+**Status:** planned. Built so far: `eval::enter` and `eval::leave`, tier-0 calls to a compiled body run in the dispatch loop, the planned fast path (`bytecode::call_fast` and `return_fast`, with arguments written once and one observer byte), the `CallPlans` rows with `CallShape` and the default sources, and the reference pool. Not built: the depth-indexed frame columns, the packed code header, pooled default promises with `u32` reference columns, `...` without cells, and promise forcing in the loop.
 
 - **Question.** Closure call setup is 22.4% of corpus time (frames, promises, argument matching, entry and exit). The 10x row asks for a tenth of that. This entry is the target every call-setup change builds toward; tier 0 (T0) and the JIT call through the contract at the end.
 - **Measured today** (callgrind, release, `RY_JIT=off`, a planned `h -> f` pair with one positional argument and a literal default, about 3,300 instructions, of which about 2,100 are call setup). The largest exclusive parts: `run_frame` 406, `run_call_generic` 263, `call_with_plan` 152, `run_at` 141, `execute_code` 121, a `Frame` memcpy 119, `effect_free` 111, `slot_args_into` 89, `slot_named` 68, `direct_plan` 67, and 76 in `heap()` accessor reads. The structural causes:
