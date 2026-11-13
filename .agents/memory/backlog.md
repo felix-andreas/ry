@@ -1198,6 +1198,40 @@ about 120 instructions per detach. Realistic gain: testthat 0.5 to 0.8%, every w
 take about 0.3 to 0.6%; lazy refill only moves the promise allocation to the next
 `pooled_reference` at that depth.
 
+**Fewer reified slot frames: what was measured, and what is left (B).** A slot frame reifies when
+something needs its environment. Callgrind Ir, cold plus 5 warm runs, each change switched off in
+one binary, against main with compile-time binding:
+
+| Change | validation | testthat_full | conditions |
+|---|---|---|---|
+| A: a builtin that may dispatch reifies only when a method is found and called | 1.57% | 2.04% | 0.95% |
+| C1+C2+C3 together | 0.33% | 0.35% | -0.85% |
+| A + C1 + C2 (no C3) | | 1.69% | |
+
+JIT on gives the same figures to within 0.05 points. C1 keeps an error return from holding the
+pending environment; C2 reads `..N` from a slot frame's dots (`inherits(..1, "condition")` in
+`stop` compiles `..1` to an uncompiled expression). C3 answered reads, called functions and
+promise code through a live frame's pending environment from its slots. None of it reached the bar
+(3% on a workload, or 2% on testthat_full), so it did not land; the oracle cases
+`dispatch__methods_from_slot_frames`, `conditions__handlers_over_slot_frames` and
+`control_flow__jumps_and_dots_through_frames` pin the semantics.
+
+- C3 loses on conditions because the frames it serves reify anyway: reify counts are identical
+  with and without it (136.7k), so each lookup pays a frame-stack scan and a slot-name scan on top
+  of the reify. It pays off only once B stops those reifies. It also broke three behaviors, each
+  pinned in `control_flow__jumps_and_dots_through_frames`: a `break` evaluated in
+  `parent.frame()` named the unreified frame's pending environment, which the loop did not take;
+  `..2` evaluated through `match.call` and `eval.parent` missed a forwarded `...`; a `break` in a
+  promise argument escaped its loop. First fixes (let the loop accept the pending environment, find
+  formals by position) did not fix the cases, so the cause was not understood. Redo C3 after B,
+  with the owner frame stored in the pending environment instead of scanned for.
+- B, the causes left after A: tryCatchOne's `return(expr)` promise, whose forcing ends in a
+  Return jump, still counts as an unforced promise outliving the frame (64k reifies on
+  conditions, 18k on validation), and vapply's reified frame keeps `FUN` referenced, so a closure
+  made by `FUN`'s caller outlives its frame (18k on validation, through `settings_key`). At about
+  3k Ir per reify, removing them is worth about 1.4% on conditions and 1.4% on validation, before
+  C3.
+
 **Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
 `mkPROMISE` and `NewEnvironment` calls under callgrind; ry counts heap objects freed by kind from
