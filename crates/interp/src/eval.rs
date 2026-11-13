@@ -719,27 +719,49 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let used = state.references_used as usize;
     let reference = match state.references.get(used) {
-        Some(&reference) => {
+        Some(&reference) if reference.refcount() <= 1 => {
             heap.set_cdr(reference, symbol);
             reference
         }
+        // A `...` list counts the references it collected until its frame is released
+        // (`Heap::release_frame`), which happens late for a frame that waits for a reconcile
+        // and never for the frame of a call that failed. Handed out with that count, the
+        // reference would not look held by its frame alone once a frame detached it
+        // ([`detach_reference`]), so the pool gives it up and makes another.
+        Some(&counted) => {
+            let (reference, target) = new_reference(symbol)?;
+            counted.decrement_refcount();
+            let state = interp();
+            state.reference_targets[used].decrement_refcount();
+            state.references[used] = reference;
+            state.reference_targets[used] = target;
+            reference
+        }
         None => {
-            let target = values::integer_vector(&[0, 0, 0])?;
-            heap.root(target);
-            let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
-            reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-            // The pool's own counts keep a reference that a slot releases, and a target that a
-            // code reference displaced, from being freed.
-            reference.increment_refcount();
-            target.increment_refcount();
+            let (reference, target) = new_reference(symbol)?;
+            let state = interp();
             state.references.push(reference);
             state.reference_targets.push(target);
             reference
         }
     };
-    state.references_used += 1;
+    interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
     Ok(reference)
+}
+
+/// An argument reference naming `symbol` and its target, each with the count the pool keeps on
+/// it: the pool's own counts keep a reference that a slot releases, and a target that a code
+/// reference displaced, from being freed.
+unsafe fn new_reference(symbol: Sexp) -> R<(Sexp, Sexp)> {
+    let heap = crate::heap();
+    let target = values::integer_vector(&[0, 0, 0])?;
+    heap.root(target);
+    let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
+    reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+    reference.increment_refcount();
+    target.increment_refcount();
+    Ok((reference, target))
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -1037,12 +1059,11 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
     heap.set_tag(reference, env);
     heap.set_attrib(reference, compiled);
     reference.set_gp_bits(gp::ARGUMENT_REFERENCE, false);
-    let target = values::integer_vector(&[0, 0, 0])?;
-    heap.root(target);
-    let fresh = heap.alloc_compiled_promise(unbound(), nil(), nil(), target)?;
-    fresh.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-    fresh.increment_refcount();
-    target.increment_refcount();
+    // The pool's count goes with the pool's place. A promise that kept it would never count as
+    // held by its frame alone, so the frame's release would leave it forced, and the value it
+    // holds would look shared for the rest of its life.
+    reference.decrement_refcount();
+    let (fresh, target) = new_reference(nil())?;
     let state = interp();
     state.references[index] = fresh;
     state.reference_targets[index] = target;
@@ -3949,6 +3970,12 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         Err(_) => None,
     };
     interp().returned_values.push(returned);
+    // The value is on its way to the caller and nothing counts it yet, so exit code that
+    // modifies a variable holding it would write into the value the caller receives. GNU R
+    // counts it for as long as the exit code runs.
+    if let Some(value) = returned {
+        value.increment_refcount();
+    }
     let mut outcome = result;
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
@@ -3978,6 +4005,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             }
             Ok(_) => {}
         }
+    }
+    if let Some(value) = returned {
+        value.decrement_refcount();
     }
     interp().returned_values.pop();
     crate::heap().release_handles(mark);

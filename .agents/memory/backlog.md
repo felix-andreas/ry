@@ -42,6 +42,24 @@ The quality bar is four things.
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
+- A temporary passed on through `...` is modified in place by the callee, and `..1` then reads
+  the modified value: `g <- function(v) { v[1] <- 99; v }; f1 <- function(...) { a <- g(...);
+  ..1 }; f1(c(1, 2))` gives `99 2`, and GNU R gives `1 2`. The cause is unverified; the
+  suspect is the count of a forwarded promise's value, which the `...` list still reaches.
+- `UseMethod` differs from GNU R in two ways, and the two together crash.
+  - Inside `try()` it dispatches: `g <- function(x) { r <- try(UseMethod("g"), silent = TRUE);
+    ... }` runs `g.default` in ry. GNU R raises "'UseMethod' used in an inappropriate fashion"
+    there without calling a method, because the call's function context is `try`'s, not `g`'s.
+  - It dispatches on the variable, not on the argument: `f <- function(x) { x <- structure(1,
+    class = "k"); UseMethod("f") }` called as `f(c(10, 20))` runs `f.k` in ry and `f.default`
+    in GNU R, which reads the class of the argument as passed.
+  - With `f <- function(x) { x <- structure(1, class = "k"); r <- try(UseMethod("f"), silent =
+    TRUE); UseMethod("f") }`, a method `f.k` that stops on its first call, and a caller `g <-
+    function() { w <- c(30, 40); f(w) }`, `g()` ends in a segmentation fault, and under
+    `RY_GC_STRESS=young` in the panic "a promise was forced after its last counted reference
+    was released" (`eval.rs`). Once the generic overwrites `x`, only the uncounted `frame_args`
+    entry holds the argument's promise, and the failed dispatch releases it. Matching GNU R on
+    the first point removes the path.
 
 ## Open: the evaluator's edit loop
 
@@ -119,7 +137,7 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 
 ## Open: tier 1 only ties tier 0 on small builtin calls with an element store
 
-`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. Ir per iteration under `--profile iterate`:
+`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. The allowance has no margin, so the test fails intermittently: the counts move by one instruction per iteration between runs of the same binary, and `x[k] <- list(5)` measures 881 or 882 in tier 0 against 951 or 952 compiled, where 881 against 952 is one instruction over the bound (881 + 70). Three of six runs failed that way. Ir per iteration under `--profile iterate`:
 
 | shape | tier 0 / compiled with guarded base calls | tier 0 / compiled with bound base calls |
 |---|---|---|
@@ -2991,18 +3009,48 @@ The end-to-end guard rests on the corpus suites.
     take 0.8 GB of bounds (derived from the rule, not measured). Bounding the range by the
     bucketed side's own rows would send such a join to the Polars plan, so it needs a hashed
     kernel path first. `test_memory.rs` has no step of this shape.
-- **`:=` on a row subset loses to data.table.** db-benchmark's loop
-  `for (step in 1:100) x[id4 == step, v1 := v1 + 1L]` at 1e7 rows takes 2.1 s from R and 0.7 to
-  0.9 s from the Rust driver against data.table's 0.5 s. `assign_filtered` in
-  `crates/table/src/query.rs` runs it as a Polars plan (filter, then a left join on a row index,
-  then `when/then`), which builds a new column and a join's scratch on every pass, while
-  data.table answers `id4 == step` from an automatic index and writes the matching rows in
-  place. The target shape is a kernel that evaluates the filter to a mask and the value on the
-  selected rows alone, and writes into the column's buffer when the column is uniquely held.
-  The gap between R and the Rust driver is system time and varies between runs (0.8 to 3.7 s
-  over 100 passes): the R process faults each pass's buffers in afresh, and with transparent
-  huge pages disabled for the process the loop takes 3.1 s. Find out why the driver does not pay
-  it before choosing between the in-place kernel alone and a pool of freed mappings.
+- **Only `:=` reads a column's row index.** A filtered update whose filter is `column == literal`
+  finds its rows in the index `Table::row_index` builds on the second such filter
+  (`decisions.md`, "A filtered `:=` reads a row index and writes in place"). A filtered select
+  (`x[id4 == 5L]`, `DataFrame.filter`), a filtered aggregate and a grouped `:=` still scan the
+  column, and so does every other filter shape: `%in%`, a range, or two equalities joined by
+  `&`. data.table's automatic index serves `==` and `%in%` wherever `i` uses them (its vignette
+  on secondary indices; not measured here). The index holds 4 bytes
+  per row until the column changes or the table is dropped, with no way for the user to drop it
+  earlier.
+- **Some calls leave one reference count on a frame, so the frame's next `:=` copies once.**
+  The copy is a fresh object, so the updates after it write in place; the cost is one column
+  copy, or one per pass when the call sits inside the loop. data.table never notices, since its
+  `:=` writes in place whatever the count says. `print`, `format`, `head`, `summary`,
+  `as.data.frame`, `nrow` and friends leave the count alone. Each of these was run and is
+  followed by a copy:
+  - A local list that held the frame: `capture.output(x)` (its `withVisible` result is a list),
+    `str(x)`, `nrow(list(x)[[1]])`, `do.call(nrow, list(x))`, `Map(nrow, list(x))`,
+    `for (y in list(x)) NULL`, and any `function(v) { kept <- list(v); ... }`. Five such calls on
+    a fresh vector read a count of 6 against 1, in ry and in GNU R alike, because neither lowers
+    an element's count when the list that held it dies with its frame; only a collection frees
+    the list, and a collection lowers no count. Closing this needs the heap to release a list's
+    elements when a frame's clearing drops the list to zero holders, which is sound only where
+    the list cannot be the frame's result or sit on the evaluation stack.
+  - The frame passed through `...` into a builtin: `(function(...) dim(...))(x)` and
+    `(function(...) length(list(...)))(x)`.
+  - A call that fails after forcing the argument: `try(f(x))` where `f` reads its parameter and
+    then stops.
+  - A function that updates its parameter, `function(a) { a[id == 1L, v := 5L]; NULL }`: the
+    parameter's update goes to a fork, as it must, and the caller's frame keeps one count.
+- **Releasing `...` lists and detached references at frame exit costs 0.6% of the testthat
+  workload's warm instructions** (`decisions.md`, "A filtered `:=` reads a row index and writes
+  in place", cost of the exact counts). The part that is not release work is the test
+  `release_slots` (`heap.rs`) makes on every slot for a `...` list. A compiled body knows which
+  slot can hold one, so the release could take that slot's index and test nothing else.
+- **A chained `:=` is an error.** `x[id == 1L, v := 5L][id == 2L, v := 6L]` applies the first
+  update and then fails with "`:=` updates a DataFrame stored in a variable", because the second
+  bracket's subject is a call. data.table code chains updates this way, and
+  `ry migrate data-table` does not split the chain.
+- **A `:=` whose value has the wrong length warns from R's `[<-`.** `x[id == 1L, v := 1:3]`
+  with two matching rows falls back to the R path, whose warning names
+  `.Primitive("[<-")(c(10L, 20L, 30L, 40L), c(1L, 3L), 1:3)` instead of the user's call, and then
+  recycles as R does. The kernel should report the length mismatch itself.
 - **An aggregate over a filter that keeps no rows gives one row.** `x[v > 5, .(s = sum(v))]`
   with no matching row prints one row with `s = 0`; data.table gives a table with no rows (and
   `x[v > 5, sum(v)]` gives `0` in both). The verb form, `DataFrame.filter` then
@@ -3063,11 +3111,6 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop is engine-bound** (`tools/bench/internal/table/ry.R`, "update subset", 1e6 rows:
-  0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
-  5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
-  engine code in a different process. Both run on the same allocator
-  (`crates/table/benches/allocator.rs`), so the gap is elsewhere and has not been profiled.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.

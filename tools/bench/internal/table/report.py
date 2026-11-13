@@ -9,10 +9,12 @@ The data is generated on first use. data.table must be installed in the library 
 RY_BENCH_RLIB (default ~/R/library). Build ry, libR and the Rust driver first (`just bench-table`
 does).
 
-Usage: tools/bench/internal/table/report.py <data-dir> [--rows 1e7] [--groupby-only | --joins-only] [--write]
+Usage: tools/bench/internal/table/report.py <data-dir> [--rows 1e7] [--groupby-only | --joins-only | --updates-only] [--write]
 
-A limited run writes between its own markers, `bench-table:<rows>-groupby` or
-`bench-table:<rows>-joins`.
+A limited run writes between its own markers, `bench-table:<rows>-groupby`,
+`bench-table:<rows>-joins` or `bench-table:<rows>-updates`. `--updates-only` runs the two `:=`
+loops that write existing columns, which fit in memory at a size where the loop that adds 100
+columns does not.
 """
 import argparse, json, math, os, pathlib, re, signal, subprocess, sys, tempfile
 
@@ -50,12 +52,18 @@ def main():
     limit = parser.add_mutually_exclusive_group()
     limit.add_argument("--groupby-only", action="store_true")
     limit.add_argument("--joins-only", action="store_true")
+    limit.add_argument("--updates-only", action="store_true")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     data = pathlib.Path(args.dir).resolve()
     rlib = os.environ.get("RY_BENCH_RLIB", os.path.expanduser("~/R/library"))
     env = dict(os.environ, RY_BENCH_RLIB=rlib)
-    only = ["groupby"] if args.groupby_only else ["joins"] if args.joins_only else []
+    only = (
+        ["groupby"] if args.groupby_only
+        else ["joins"] if args.joins_only
+        else ["updates"] if args.updates_only
+        else []
+    )
 
     prepare(data, args.rows, only, env)
     engines = [
@@ -138,7 +146,7 @@ def prepare(data, rows, only, env):
     needed = []
     if only != ["joins"]:
         needed += ["groupby.csv"]
-    if only != ["groupby"]:
+    if only not in (["groupby"], ["updates"]):
         needed += [f"join_{name}.csv" for name in ("x", "small", "medium", "big")]
     if not only:
         needed += ["rolljoin_prices.csv", "rolljoin_trades.csv"]
@@ -146,7 +154,9 @@ def prepare(data, rows, only, env):
     if stamp.exists() and int(stamp.read_text()) != int(float(rows)):
         sys.exit(f"{data} holds {stamp.read_text().strip()} rows, not {rows}")
     if not all((data / name).exists() for name in needed):
-        subprocess.run(["Rscript", str(here / "datagen.R"), str(data), rows, *only], env=env, check=True)
+        # The update loops read the group-by table.
+        parts = ["groupby"] if only == ["updates"] else only
+        subprocess.run(["Rscript", str(here / "datagen.R"), str(data), rows, *parts], env=env, check=True)
         stamp.write_text(f"{int(float(rows))}\n")
 
 

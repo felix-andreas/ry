@@ -3360,10 +3360,12 @@ first lines R had already read, leaving R mid-command.
   that returns `None` runs as R in a data mask that binds only the columns the expression
   mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
   for the grouping (row indices per group) and evaluates once per group.
-- **Copy-on-modify, not by-reference.** `:=` updates in place when the frame's refcount is at most
-  one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
-  call named, searching enclosing scopes, so a global updated inside a function is rebound where
-  it lives. An alias taken before the update keeps the old columns, as the checker models.
+- **Copy-on-modify, not by-reference.** `:=` updates in place when the variable the call names
+  holds the frame's only reference, and otherwise forks the table (cheap: Arrow buffers are
+  shared) and rebinds that variable, searching enclosing scopes, so a global updated inside a
+  function is rebound where it lives. The only reference reads as a count of two, because the
+  finalizer every frame carries counts as one (`assign` in `crates/frames/src/frame.rs`). An
+  alias taken before the update keeps the old columns, as the checker models.
   `DataFrame.set_key` always forks and rebinds.
 - **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
   `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
@@ -5059,6 +5061,136 @@ check` releases its trees once, and memoized records are compact" below).
   then gathers the other.
 - **Impact.** Every db-benchmark join at 1e8 rows runs in the kernel. The transient memory of a
   join is the bucket index and one side's row indices; `tests/test_memory.rs` pins it.
+
+## A filtered `:=` reads a row index and writes in place
+
+- **Previous shape.** `x[column == value, target := ...]` compared the whole filter column
+  against the literal on every call, and from R it also copied the whole target column on every
+  call. The copy was a reference-count mistake: the finalizer that `wrap` registers for a frame
+  holds one reference, so a frame that one variable refers to counts two, and `assign` in
+  `crates/frames/src/frame.rs` forked the table unless the count was one. The fork's column was
+  shared with the frame the variable still held, so `scatter` copied it, and the replaced frames
+  stayed allocated until the next collection.
+- **What was weak.** A loop of small updates cost the table's length per pass twice over, which
+  made db-benchmark's "`:=` on 1% of rows, 100 times" the one question data.table won. data.table
+  answers it with a secondary index it builds on the first `id4 == step`.
+- **Target shape.** `assign` writes in place when three things hold: the variable's own binding
+  cell holds the frame (so an active binding, whose function may return a frame out of a shared
+  list, never qualifies), the count is at most two, and no outer `x[i, j, by]` query of the same
+  frame is still running (`frame_queries` in the interpreter state lists the running subjects,
+  because an update nested in an argument of such a query would change rows the outer query is
+  reading). Otherwise the update goes to a fork that is assigned back to the variable, through
+  the active binding's function when there is one. Either way the update is stored before its
+  warnings are raised, so a handler that unwinds on the warning sees the same frame whether or
+  not it was shared. An update that fails changes nothing, and with no fork to drop that is each
+  path's own job: the kernels and the plan compute every column and check every removal before
+  they store one, and the path that evaluates the values in R (`fallback` in `frame.rs`) stores
+  its columns into a fork that replaces the table only after the last one, because a removal of
+  a missing column fails there after earlier columns are stored. The fork shares the columns it
+  keeps, so it costs a column list. `Table` keeps
+  `equality_filters`, a short list of columns with the state of each: scanned once, indexed, or
+  not indexable. `Table::row_index` builds a column's `RowIndex` on the second equality filter
+  since the column last changed, so a one-off update never pays for an index. A `RowIndex` is the
+  join's `Buckets` (`kernel.rs`) over the column's values, built with one stable parallel
+  counting sort, which keeps each value's rows ascending. An Integer column qualifies when its
+  value range is at most twice the rows plus 4,096, and a Factor column when its level count is
+  (a ten-row slice of a frame with three million levels would otherwise pay 12 MB of bucket
+  bounds). `assign_with_kernels` in `query.rs` checks every assignment's type before it selects
+  rows and every value's shape (`kernel::scatters`) before it writes, so an update the kernels
+  cannot run builds no index and leaves no half-written column. `indexed_rows` recognizes
+  `column == literal` in either order and reads the rows; every other filter scans as before.
+  `scatter_values` writes a long ascending row list on the worker pool by carving the column into
+  disjoint stretches, and takes the serial, bounds-checked path when the last row lies outside
+  the column.
+- **A builtin S3 method releases the promises its dispatch made.** `dim(x)`, `length(x)`,
+  `names(x)`, `x$v` and `x[["v"]]` on a frame dispatch to builtins, and the dispatch wraps each
+  argument in a forced promise that counts a reference to its value. No frame owns those
+  promises, and a collection that frees one does not lower its value's count, so every such
+  call left the frame looking shared and the next `:=` copied it. `apply_method` in
+  `dispatch.rs` clears them when the builtin returns (`Heap::release_argument`).
+- **A detached argument reference gives up the pool's count, and the pool hands out no
+  reference that something else still counts.** A compiled closure takes a variable argument as
+  a pooled reference, and a call that needs the frame's environment (`dim(x)` inside `nrow`, any
+  S3 dispatch) turns the reference into an ordinary promise in place (`detach_reference` in
+  `eval.rs`). A returning frame clears a promise only when the frame alone counts it. The
+  promise kept the count the pool held on it, so it stayed forced and the argument's count rose
+  by one per call: twenty `nrow(p)` calls on a classed list read a count of 20, and a loop that
+  called `nrow(x)` between updates copied the column in every pass (100 passes over 4e6 rows:
+  1.04 s, against 0.077 s with the count dropped at the detach and 0.071 s without the call).
+  `pooled_reference` also replaces a reference whose count is above the pool's own, which is one
+  that the `...` list of an unreleased frame still counts (next entry). The replacement costs
+  one promise and one three-integer target, and it is rare: only a frame whose call failed, or
+  one whose release waits for a reconcile, leaves such a count.
+- **A released frame empties its `...` list.** Previous shape: `clear_frame` and
+  `release_slots` (`heap.rs`) released a frame's promises but only read its `...` list to
+  release the promises inside, so the list kept its count on every argument. Weakness: the list
+  is garbage once its frame is released, and the collection that frees it lowers no count, so
+  the counts never came back. A pooled argument reference that `cat(a)`, `paste(a)` or
+  `list(...)` had collected stayed counted, and the next call that got the same reference from
+  the pool and detached it kept a promise no frame could release, with the argument's value
+  counted for good. Replacing every such reference in the pool hid that, at the price of a
+  promise and a target allocated on every call that followed a `...` call. Target shape:
+  `Heap::release_dots` walks the list of a frame being released, drops each cell's count on its
+  argument and empties the cell, and stops at a cell something else counts. Impact: a `...`
+  call returns the counts it took, so the pool reuses its references (a loop of 1e6 passes that
+  calls a `...` function and then a two-argument closure runs 26 collections, the same as
+  before the pool replaced anything), and a `:=` subject passed through `...` stays the sole
+  reference.
+- **Printing a value at top level rebinds it to `NULL` afterwards.** `print_value_top` and
+  `print_dispatch` (`print.rs`) bind the value as `x` in an environment made for the one
+  `print(x)` call. The collection that frees that environment lowers no count, so each printed
+  frame kept one count and the next `:=` copied it. `release_printed` rebinds `x` to `NULL` when
+  the call returns, as GNU R's `PrintObjectS3` does.
+- **A value on its way to the caller is counted while exit code runs.** Nothing counted a
+  function's result between the body and the caller, so `on.exit(x[1] <<- 0L); x` returned the
+  modified vector where GNU R returns the one the body produced, and under the in-place rule
+  exit code that updated a frame the function was returning changed the returned frame.
+  `run_on_exit` (`eval.rs`) raises the result's count before the exit expressions and lowers it
+  after them, as GNU R's `endcontext` does, so such exit code writes to a copy. Pinned by the
+  oracle case `environments__on_exit_keeps_returned_value` and the scenario.
+- **A locked binding takes the fork.** The in-place write stores nothing in the binding, so it
+  would have changed a frame behind `lockBinding` or a locked namespace. `assign` treats a
+  locked cell like an active one, and storing the fork raises R's "cannot change value of
+  locked binding" before the variable changes.
+- **A `...` list that outlives its frame keeps its arguments.** `get("...")` and
+  `environment()$...` return the list itself, uncounted. `clear_frame` asks its caller which
+  lists to keep: the call's result when the frame is released at return, a list a root holds
+  when a reconcile releases it, and a marked list when the sweep does. Pinned by the oracle
+  case `environments__dots_list_returned_from_its_frame`.
+- **An update nested in an update of the same frame is replaced by the outer one.**
+  `x[id == 1L, v := { x[id == 2L, v := 0L]; 5L }]` sends the nested update to a fork, because
+  the outer query is running. The outer update then finds another frame in its variable, forks
+  the frame it began with and stores that, which is what `x <- update(x)` does when computing
+  the update reassigns `x`. The scenario pins it.
+- **The index is a secondary index, not a cache of a slow path.** The first filter still scans,
+  and the scan is as fast as it was. The index answers a different question (all rows of a value)
+  that a repeated filter asks, the way `string_codes` answers a repeated join on a text column.
+  It has one owner and one invalidation point: `forget_column`, which every path that takes,
+  puts, replaces or drops a column already calls, plus `set_key`, which reorders the rows. Forks
+  share it through an `Arc`.
+- **Cost.** 4 bytes per row for the row list plus 4 bytes per distinct value, held until the
+  column changes or the table is dropped. `test_memory.rs` pins the loop at 5 bytes per row, both
+  at its peak and held afterwards (measured 4.1 and 4.0).
+- **Impact.** db-benchmark's "`:=` on 1% of rows, 100 times" on 4 cores, the faster of two runs:
+  at 1e7 rows 0.111 s from R and 0.105 s from Rust against data.table's 0.356 s (2.414 s and
+  0.628 s before), and at 1e8 rows 0.987 s and 1.040 s against 3.079 s. The run that builds the
+  index took 0.26 s at 1e7 rows and 3.0 s at 1e8, against 0.40 s and 4.1 s for data.table's
+  first run. The whole 1e7 suite's peak from R fell from 8.4 GB to 4.5 GB; which loop held the
+  difference was not isolated.
+- **Cost of the exact counts in the interpreter.** The testthat workload under callgrind runs
+  0.6% more instructions per warm repeat (548.3M to 551.7M, `RY_BENCH_REPEAT` 3 minus 1,
+  halved), with the same number of collections and the same resident memory. A per-function
+  comparison of the two builds puts it in the releases that were skipped before. Over a run of
+  three repeats, about 31,000 `...` lists are emptied (`release_dots`), about 120,000 more
+  values reach a count of zero when their frame returns instead of waiting for a collection
+  (`note_zero`), and `release_slots` makes one more comparison per slot, because it looks for a
+  `...` list beside a promise.
+- **Known limit of the count.** A holder the counts do not see, such as native code that keeps
+  the frame through `R_PreserveObject` or the protect stack, does not stop an in-place write.
+  No DataFrame builtin keeps a frame that way.
+- **Not done: a row index for a filter that runs once.** A single `x[id == value, ...]` scans.
+  Building the index reads the column twice and writes a row list as long as it, which is more
+  work than the one scan it would replace.
 
 ## A query without `by` aggregates in the kernel as one group
 

@@ -487,9 +487,11 @@ tables and queries and checks the native kernels against the Polars plans
 iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test-release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
-`just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
+`just bench-table <dir> [--rows 1e8 --groupby-only]` runs the db-benchmark questions under
 data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
 data.table's, and rewrites the matching results table in `development/design/r-runtime.md`.
+`--groupby-only`, `--joins-only` and `--updates-only` limit a run to the group-by questions, the
+join questions, or the two `:=` loops that write existing columns.
 
 `just bench-base [--rows 1e5,1e6 --only REGEX --memory]` times base R's own kernels (sorting,
 string formatting and regex, grouping, `merge`, `match`, matrix margins, cumulative sums, xts and
