@@ -707,7 +707,7 @@ unsafe fn reference_env(reference: Sexp) -> Option<Sexp> {
 
 /// The compiled code a code reference ([`code_reference`]) runs.
 #[inline]
-unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
+pub(crate) unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
     let tag = reference.tag();
     (tag.kind() == SexpType::Bytecode).then_some(tag)
 }
@@ -807,7 +807,7 @@ pub unsafe fn is_reference(value: Sexp) -> bool {
 
 /// The frame position and slot an argument reference names. A reference is released before
 /// its frame returns, so one that names another frame is a broken invariant.
-unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
+pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
     let &[owner, slot, header] = values::ints(reference.attrib()) else {
         panic!("an argument reference lost its target");
     };
@@ -2168,31 +2168,78 @@ pub unsafe fn apply_closure_owning(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    let entered = apply_closure_entering(call, function, args, sys_parent, supplied)?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let slots = bytecode::slot_count(function.cdr());
+    let result = on_large_stack(|| bytecode::run_slots(function, entered.header as usize, slots));
+    leave(entered.depth as usize, result)
+}
+
+/// [`apply_closure_owning`] up to the point where the body would run, so that an interpreter
+/// loop can run it in place rather than recursing ([`enter`]). A call that does not get a slot
+/// frame, or that the general path has to run whole, comes back with its value and
+/// [`crate::NO_SLOTS`].
+// Inlined so that the Rust path, which runs the body right after, does not pay for a second
+// function's frame and for passing `Entered` through memory.
+#[inline]
+pub unsafe fn apply_closure_entering(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Entered> {
+    let whole = |value: Sexp| Entered {
+        value,
+        header: crate::NO_SLOTS,
+        depth: 0,
+    };
     if function.has_gp(gp::NATIVE_ENTRY)
         && supplied.is_none()
         && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
     {
-        return Ok(value);
+        return Ok(whole(value));
     }
     if crate::annotations::is_typed(function)
         && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
     {
-        return value;
+        return Ok(whole(value?));
     }
+    let method_vars = supplied.unwrap_or(&[]);
     if let Some(frame) = bind_slots(call, function, args)? {
-        let method_vars = supplied.unwrap_or(&[]);
-        return run_frame(
+        let CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        } = frame
+        else {
+            let value = run_frame_general(
+                call,
+                function,
+                frame,
+                sys_parent,
+                args,
+                Entry::Unchecked,
+                method_vars,
+            )?;
+            return Ok(whole(value));
+        };
+        return enter(
             call,
             function,
-            frame,
             sys_parent,
             args,
-            Entry::Unchecked,
             method_vars,
+            header,
+            missing,
+            promised,
         );
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+    let value = run_closure(call, function, env, sys_parent, args, Entry::Unchecked)?;
+    Ok(whole(value))
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
@@ -2549,14 +2596,40 @@ pub unsafe fn call_with_plan(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
+    let entered = bind_plan(call, function, shape, sources, args, sys_parent)?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let result =
+        on_large_stack(|| bytecode::run_slots(function, entered.header as usize, shape.slots as usize));
+    leave(entered.depth as usize, result)
+}
+
+/// The first half of [`call_with_plan`]: binds the arguments into a new slot frame and pushes
+/// the call's frame ([`enter`]), leaving the body to the caller, which runs the code
+/// [`Entered::value`] on the slots and then calls [`leave`]. A call that takes the generic
+/// path runs whole here.
+pub unsafe fn bind_plan(
+    call: Sexp,
+    function: Sexp,
+    shape: CallShape,
+    sources: &[i32],
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Entered> {
     let state = interp();
     if state.debugger.is_some()
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        return crate::scope(|| {
+        let value = crate::scope(|| {
             detach_references(args)?;
             apply_closure(call, function, args, sys_parent, None)
+        })?;
+        return Ok(Entered {
+            value,
+            header: crate::NO_SLOTS,
+            depth: 0,
         });
     }
     let count = shape.slots as usize;
@@ -2604,7 +2677,7 @@ pub unsafe fn call_with_plan(
     for index in sources.len()..count {
         *registers.add(1 + index) = unbound;
     }
-    let entered = enter(
+    enter(
         call,
         function,
         sys_parent,
@@ -2613,12 +2686,7 @@ pub unsafe fn call_with_plan(
         header as u32,
         missing,
         promised,
-    )?;
-    if entered.header == crate::NO_SLOTS {
-        return Ok(entered.value);
-    }
-    let result = on_large_stack(|| bytecode::run_slots(function, header, count));
-    leave(entered.depth as usize, result)
+    )
 }
 
 /// Runs a call of `function` without running its body: `run` does what the body would, from a
@@ -3755,7 +3823,7 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// Replaces the default of each formal in `promised`, which the binding
 /// put in its slot as the bare expression, with a promise of its code over the slot frame at
 /// `owner`.
-unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
+pub(crate) unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
     if promised == 0 {
         return Ok(());
     }

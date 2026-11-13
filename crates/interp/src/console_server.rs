@@ -133,7 +133,7 @@ pub unsafe fn read_line(prompt: &str) -> Option<String> {
         .as_ref()
         .is_some_and(|adapter| adapter.is_detached() || adapter.is_browse())
     {
-        state.debugger = None;
+        state.debugger.set(None);
     }
     // A command may have changed a viewed object in place, so its sorted and filtered rows are
     // derived again on the next page.
@@ -1060,10 +1060,10 @@ mod platform {
         // An editor that initializes again replaces its adapter. The old adapter's transport
         // frees the connection as it drops, so it goes before the connection is claimed, or the
         // new adapter would run on a connection the console no longer counts as the debugger's.
-        interp().debugger = None;
+        interp().debugger.set(None);
         *lock(&DEBUG_CONNECTION) = Some(connection);
         let transport = Box::new(ConsoleTransport { connection });
-        interp().debugger = Some(Box::new(Adapter::for_console(transport)));
+        interp().debugger.set(Some(Box::new(Adapter::for_console(transport))));
         debug_request(request, false);
     }
 
@@ -1077,7 +1077,7 @@ mod platform {
         adapter.answer_running(request);
         if adapter.is_detached() && !(running && adapter.is_terminating()) {
             // Dropping the adapter drops its transport, which frees the debug connection.
-            state.debugger = None;
+            state.debugger.set(None);
         }
     }
 
@@ -1108,7 +1108,7 @@ mod platform {
 
     unsafe fn closed(connection: u64) {
         if *lock(&DEBUG_CONNECTION) == Some(connection) {
-            interp().debugger = None;
+            interp().debugger.set(None);
             *lock(&DEBUG_CONNECTION) = None;
         }
         forget(connection);
