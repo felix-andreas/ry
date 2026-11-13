@@ -57,6 +57,7 @@ pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
+pub mod crash;
 pub mod dataframe;
 pub mod debugger;
 pub mod deparse;
@@ -287,6 +288,13 @@ impl FrameStack {
 
     pub fn clear(&mut self) {
         self.truncate(0);
+    }
+
+    /// The frames' address and count for a crash report, which reads them without trusting
+    /// either: the count never exceeds the allocated slots, as the report must tolerate a
+    /// corrupted stack.
+    pub fn crash_view(&self) -> (*const Frame, usize) {
+        (self.slots.as_ptr(), self.depth.min(self.slots.len()))
     }
 }
 

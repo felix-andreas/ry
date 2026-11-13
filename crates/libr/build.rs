@@ -84,6 +84,8 @@ fn link_linux(out_dir: &Path, exported: &[String]) {
     // dynamic linker satisfies that from ry's already loaded libR instead of searching for
     // GNU R's.
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libR.so");
+    // glibc 2.41 and later refuse to load a library without a PT_GNU_STACK header.
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-z,noexecstack");
     // GNU R's libR depends on zlib, bzip2 and xz, and package binaries that call zlib
     // without linking it themselves (gert, httpuv) find it through that dependency. ry's
     // libR records the same dependencies, which the linker would otherwise drop as unused.

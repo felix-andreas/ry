@@ -2793,17 +2793,26 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
                 continue;
             }
             let shown = if full {
-                path.display().to_string()
+                slashed(&path)
             } else {
-                path.strip_prefix(&directory)
-                    .map(|relative| relative.display().to_string())
-                    .unwrap_or(name)
+                path.strip_prefix(&directory).map(slashed).unwrap_or(name)
             };
             names.push(shown);
         }
     }
     crate::sort::sort_strings(&mut names);
     string_vector(&names)
+}
+
+/// A path as R names it: separated by `/` on every platform, as GNU R's listings are, so that
+/// code that takes the names apart on `/` (`dir.create(recursive = TRUE)`, `dirname`) works.
+fn slashed(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
 }
 
 unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
@@ -2828,10 +2837,10 @@ unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
         walk(Path::new(&directory), recursive, true, &mut paths, true);
         for path in paths.into_iter().filter(|path| path.is_dir()) {
             names.push(if full {
-                path.display().to_string()
+                slashed(&path)
             } else {
                 path.strip_prefix(&directory)
-                    .map(|relative| relative.display().to_string())
+                    .map(slashed)
                     .unwrap_or_default()
             });
         }
@@ -3103,7 +3112,10 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
     // GNU R makes each parent in turn and then the path itself, so `dir.create("a/.",
     // recursive = TRUE)` makes `a` and still reports that `a/.` exists.
     if recursive {
-        for (index, _) in path.match_indices('/').filter(|(index, _)| *index > 0) {
+        for (index, _) in path
+            .match_indices(|character| character == '/' || (cfg!(windows) && character == '\\'))
+            .filter(|(index, _)| *index > 0)
+        {
             let parent = &path[..index];
             match std::fs::create_dir(parent) {
                 Err(failure) if failure.kind() != std::io::ErrorKind::AlreadyExists => {

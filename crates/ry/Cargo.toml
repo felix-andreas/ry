@@ -45,6 +45,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tree.workspace = true
 
+crash = { path = "../crash" }
 format = { path = "../format" }
 ide = { path = "../ide" }
 loader = { path = "../loader" }
