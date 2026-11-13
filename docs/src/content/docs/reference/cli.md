@@ -439,6 +439,35 @@ a workspace and reports where time and memory go, and `ry debug erase FILE...` r
 place as the plain R that `ry R` runs, with every inline annotation removed. All three are developer
 aids for working on ry itself.
 
+## Crash reports
+
+A process that dies from SIGSEGV, SIGBUS or SIGABRT prints a report on standard error first, then dies by the same signal, so exit statuses (139 for SIGSEGV in a shell) and core dumps are unchanged. This script calls a package's compiled code, which writes through a null pointer:
+
+```text
+*** ry caught SIGSEGV (segmentation fault) ***
+ry 0.4.4
+address 0x0, cause 'memory not mapped' (si_code 1)
+
+R call stack, innermost call first:
+ 1: .Call(...)
+ 2: write_through_null(...)
+ 3: caller(...)
+
+Native stack, innermost first, starting in the crash handler (module(symbol+offset) [address]):
+/usr/local/bin/ry(+0x1d68262)[0x558889e1a262]
+/usr/local/bin/ry(+0x1d6882f)[0x558889e1a82f]
+/lib/x86_64-linux-gnu/libc.so.6(+0x45330)[0x7f864da45330]
+/home/user/library/crashpkg/libs/crashpkg.so(write_c+0x4)[0x7f864dc3c124]
+/usr/local/bin/libR.so(+0x4cbc8ae)[0x7f2e2a3b08ae]
+...
+```
+
+- **Header.** The version, the signal, and for a fault the address and its cause: `memory not mapped`, `invalid permissions`, or a bus error's cause. A signal sent with `kill` or `abort` says so instead.
+- **R call stack.** The function of each call in progress, innermost first, as `traceback()` numbers them, with `.Call` and its relatives between the closures that made them. It lists at most 50 calls and then counts the rest (`... 73 more`). A frame whose memory cannot be read prints as `<unreadable frame>` instead of causing a second crash.
+- **Native stack.** The addresses with their module and offset. A release `ry` is stripped, so its frames show `module(+offset)` and no symbol; keep the matching binary to look an offset up with `addr2line -e BINARY OFFSET`. The first frames belong to the handler.
+
+The report is written without allocating, on a signal stack of its own, so a stack overflow is reported too. A handler that was installed before it still runs afterwards, which is how Rust's `thread has overflowed its stack` line still appears. It covers every command that starts ry's runtime (`run`, `R`, `repl`, `test` and its workers, `load`, `document`, `build`, `install`) and `check`, `fmt` and `server`; with `--runtime gnu-r`, GNU R prints its own report. Windows prints no report.
+
 ## Exit codes
 
 - **0**: nothing found, or nothing to reformat.

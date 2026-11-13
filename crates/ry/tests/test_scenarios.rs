@@ -968,7 +968,7 @@ fn missing_requirement(
     let mut packages = Vec::new();
     for requirement in requirements {
         match requirement.as_str() {
-            "gnu-r" | "ry-runtime" => {}
+            "gnu-r" | "ry-runtime" | "unix" => {}
             other => {
                 let Some(package) = other.strip_prefix("r-package:") else {
                     return Err(format!("unknown requirement `{other}`"));
@@ -994,6 +994,9 @@ fn missing_requirement(
         return Err(format!(
             "`r-package:{name}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
         ));
+    }
+    if requires("unix") && !cfg!(unix) {
+        return Ok(Some("the scenario needs a Unix system".to_owned()));
     }
     if requires("gnu-r") {
         let gnu_r = match gnu_r() {
@@ -1487,9 +1490,19 @@ fn single_ry() -> Result<&'static PathBuf, String> {
 }
 
 struct Run {
+    /// The exit code, or the negated signal number of a process a signal ended, as Python
+    /// reports it: `expect exit -11` means SIGSEGV.
     code: i32,
     stdout: String,
     stderr: String,
+}
+
+fn status_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return -signal;
+    }
+    status.code().unwrap_or(-1)
 }
 
 struct Journey {
@@ -2101,7 +2114,7 @@ impl Journey {
                     .output()
                     .map_err(|error| format!("running ry: {error}"))?;
                 self.last_run = Some(Run {
-                    code: output.status.code().unwrap_or(-1),
+                    code: status_code(output.status),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 });

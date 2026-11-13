@@ -1,0 +1,13 @@
+[package]
+name = "crash"
+description = "The crash report ry prints when a fatal signal ends the process"
+edition = "2024"
+version.workspace = true
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+path = "crash.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
