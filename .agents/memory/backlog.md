@@ -91,6 +91,15 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
 
+## Open: tier 1 only ties tier 0 on small builtin calls with an element store
+
+`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. Ir per iteration under `--profile iterate`:
+
+| shape | tier 0 / compiled with guarded base calls | tier 0 / compiled with bound base calls |
+|---|---|---|
+| `x[k] <- list(5)` | 1043 / 1006 | 956 / 1003 |
+| `w <- c(1, 2); w[[3L]] <- k` | 2116 / 2108 | 1999 / 2108 |
+
 ## Parked: cheaper global bindings in top-level loops (tier 0)
 
 Branch `perf/global-loop-tier0` holds the work, which is not merged and not gated.

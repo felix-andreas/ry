@@ -23,7 +23,7 @@ use {
         arena::{Arena, Watermark},
         object::{Sexp, SexpType},
     },
-    interp::unwind::INTERRUPTS_SUSPENDED,
+    interp::{conditions::SetAside, unwind::INTERRUPTS_SUSPENDED},
     rustc_hash::FxHashMap,
     std::{
         any::Any,
@@ -836,7 +836,10 @@ pub unsafe extern "C" fn ry_handlers_enter(classes: Sexp) -> Sexp {
             state.show_error_messages = true;
         }
         runtime.heap.preserve(token);
-        HANDLER_CONTEXTS.with_borrow_mut(|contexts| contexts.push((token, saved)));
+        // With no classes the saved stacks are referenced from nowhere else until the context
+        // ends, so they are set aside for the collector to trace.
+        let traced = interp::conditions::set_aside(saved.0.clone(), saved.1.clone());
+        HANDLER_CONTEXTS.with_borrow_mut(|contexts| contexts.push((token, saved, traced)));
         Ok(token)
     })
 }
@@ -846,9 +849,9 @@ pub unsafe extern "C" fn ry_handlers_leave(token: Sexp) {
     let saved = HANDLER_CONTEXTS.with_borrow_mut(|contexts| {
         let position = contexts
             .iter()
-            .rposition(|(candidate, _)| *candidate == token)?;
+            .rposition(|(candidate, _, _)| *candidate == token)?;
         let entries = contexts.split_off(position);
-        entries.into_iter().next().map(|(_, saved)| saved)
+        entries.into_iter().next().map(|(_, saved, _)| saved)
     });
     if let Some((handlers, restarts, show)) = saved {
         let state = interp::interp();
@@ -866,7 +869,7 @@ type SavedStacks = (
 );
 
 thread_local! {
-    static HANDLER_CONTEXTS: std::cell::RefCell<Vec<(Sexp, SavedStacks)>> =
+    static HANDLER_CONTEXTS: std::cell::RefCell<Vec<(Sexp, SavedStacks, SetAside)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 

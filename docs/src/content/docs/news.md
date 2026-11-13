@@ -17,7 +17,6 @@ description: Release announcements and project news
 
 A scalar `formatC()` call takes about 40% fewer instructions: its native path calls the formatting code directly instead of building R arguments for it, and reads `options(OutDec)` without calling `getOption()` when `decimal.mark` is left out. The report benchmark, which formats 20,000 account numbers with `formatC()`, takes 12% fewer instructions.
 
-
 ## ry 0.4.4
 
 *Released in November 2026.*
