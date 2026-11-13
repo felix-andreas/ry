@@ -1961,6 +1961,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         pending_shared: false,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
+        default_references: crate::NO_SLOTS,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);

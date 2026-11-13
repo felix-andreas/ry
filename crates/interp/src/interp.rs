@@ -210,6 +210,10 @@ pub struct Frame {
     pub handle_mark: u32,
     /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
     pub previous_owner: u32,
+    /// Where the references standing for the frame's left-out code defaults start in
+    /// [`Interp::references`] ([`eval::enter`]), or [`NO_SLOTS`] when it made none. The frame
+    /// owns them, so [`eval::leave`] releases them down to here.
+    pub default_references: u32,
 }
 
 impl Frame {

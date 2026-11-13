@@ -1996,6 +1996,7 @@ pub fn check_frame_stack(entropy: &mut impl Entropy) {
             closures: 0,
             handle_mark: 0,
             previous_owner: 0,
+            default_references: crate::NO_SLOTS,
         };
         let mut stack = FrameStack::new();
         // Each live frame's id and whether it holds the shared handler entry.

@@ -999,6 +999,20 @@ pub unsafe fn materialize_references(index: usize) -> R<()> {
             detach_reference(reference)?;
         }
     }
+    // The frame's own default references ([`default_references`]), forced or not: the pool
+    // clears a forced one too once the frame returns.
+    let frame = &interp().frames[index];
+    if frame.default_references != crate::NO_SLOTS {
+        let (header, mut missing) = (frame.slots as usize, frame.missing);
+        while missing != 0 {
+            let slot = missing.trailing_zeros() as usize;
+            missing &= missing - 1;
+            let value = *bytecode::register_address(header + 1 + slot);
+            if is_reference(value) {
+                detach_reference(value)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3162,7 +3176,7 @@ pub unsafe fn enter(
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),
-        _ => default_promises(depth - 1, function, header as usize, promised),
+        _ => default_references(depth - 1, function, header as usize, promised),
     });
     match defaults {
         Ok(()) => {
@@ -3226,8 +3240,12 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
     }
     state.slot_owner = owner;
     let result = finish_frame(call, depth, None, result);
+    let references = interp().frames[depth - 1].default_references;
     let result = pop_frame(function, depth, result);
     release_window(header);
+    if references != crate::NO_SLOTS && interp().references_used > references {
+        release_references(references);
+    }
     result
 }
 
@@ -3564,6 +3582,7 @@ unsafe fn push_frame(
         pending_shared: false,
         handle_mark,
         previous_owner,
+        default_references: crate::NO_SLOTS,
     });
     let sampled = if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)
@@ -3680,6 +3699,42 @@ unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised
         crate::heap().store_slot(
             &mut *bytecode::register_address(header + 1 + index),
             promise,
+        );
+    }
+    Ok(())
+}
+
+/// [`default_promises`] for a frame [`enter`] pushed: each default in `promised` gets a code
+/// reference ([`code_reference`]), or for a name an argument reference
+/// ([`argument_reference`]), to the frame itself instead of a promise, so a default that
+/// is forced and never escapes needs neither a promise nor the frame's pending environment.
+/// The frame owns the references until [`leave`] releases them, and anything that hands the
+/// frame's variables on first turns them into promises ([`materialize_references`]).
+unsafe fn default_references(
+    owner: usize,
+    function: Sexp,
+    header: usize,
+    promised: u64,
+) -> R<()> {
+    let defaults = bytecode::slot_defaults(function)?;
+    interp().frames[owner].default_references = interp().references_used;
+    let mut pending = promised;
+    while pending != 0 {
+        let index = pending.trailing_zeros() as usize;
+        pending &= pending - 1;
+        let default = defaults.element(index);
+        let reference = if default.kind() == SexpType::Bytecode {
+            code_reference(owner, default)?
+        } else {
+            let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+            let slot = (0..values::length(names))
+                .find(|&slot| names.element(slot) == default)
+                .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
+            argument_reference(owner, slot, default)?
+        };
+        crate::heap().store_slot(
+            &mut *bytecode::register_address(header + 1 + index),
+            reference,
         );
     }
     Ok(())
@@ -5687,6 +5742,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         pending_shared: false,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
+        default_references: crate::NO_SLOTS,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
