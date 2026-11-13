@@ -404,6 +404,9 @@ pub mod gp {
     /// frame instead of an environment, and its attribute holds the frame's position, the slot
     /// and the frame's header register (`interp::eval::argument_reference`).
     pub const ARGUMENT_REFERENCE: u16 = 1 << 13;
+    /// Byte code that binds base functions when it compiles, as GNU R's compiled code does,
+    /// instead of guarding each name (`interp::bytecode`'s `Compiler::bound_base`).
+    pub const BINDING_CODE: u16 = 1 << 0;
     /// A closure `debug()` flagged, GNU R's `RDEBUG`: every call stops at its first statement
     /// while a debugger is attached.
     pub const CLOSURE_DEBUG: u16 = 1 << 15;
@@ -411,10 +414,19 @@ pub mod gp {
     pub const CLOSURE_STEP: u16 = 1 << 14;
     /// A closure `trace()` flagged, GNU R's `RTRACE`.
     pub const CLOSURE_TRACE: u16 = 1 << 13;
+    /// A closure whose body compiles at its next call, GNU R's `MAYBEJIT`: a function of the
+    /// global environment with a small body, or any other function with a large one, waits one
+    /// call (`R_CheckJIT`).
+    pub const CLOSURE_MAYBE_JIT: u16 = 1 << 6;
+    /// A closure GNU R's JIT never compiles, its `NOJIT`: a small body of a function that is not
+    /// the global environment's.
+    pub const CLOSURE_NO_JIT: u16 = 1 << 5;
     /// Every bit a closure can carry. Each means something different, so no two may share a
     /// position.
-    pub const CLOSURE_BITS: [u16; 5] = [
+    pub const CLOSURE_BITS: [u16; 7] = [
         S4_OBJECT,
+        CLOSURE_NO_JIT,
+        CLOSURE_MAYBE_JIT,
         NATIVE_ENTRY,
         CLOSURE_TRACE,
         CLOSURE_STEP,

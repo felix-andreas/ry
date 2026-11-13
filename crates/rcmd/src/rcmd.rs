@@ -17,6 +17,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::{OsStr, OsString},
     fmt,
     fs::{self, File, TryLockError},
     io,
@@ -2505,17 +2506,14 @@ fn libs_directory(package: &Path, platform: Platform) -> PathBuf {
     package.join(format!("libs{}", platform.arch()))
 }
 
-fn extension_of(platform: Platform) -> Option<&'static std::ffi::OsStr> {
-    Some(std::ffi::OsStr::new(
-        platform.shlib_ext().trim_start_matches('.'),
-    ))
+fn extension_of(platform: Platform) -> Option<&'static OsStr> {
+    Some(OsStr::new(platform.shlib_ext().trim_start_matches('.')))
 }
 
-/// `directory` put in front of the `PATH` this process runs with.
-fn path_with(directory: &Path) -> Result<String> {
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
+/// `directory` put in front of the search path `inherited`.
+fn path_with(directory: &Path, inherited: &OsStr) -> Result<String> {
     std::env::join_paths(
-        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited)),
+        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(inherited)),
     )
     .map(|joined| joined.to_string_lossy().into_owned())
     .map_err(|error| {
@@ -2546,7 +2544,13 @@ fn build_environment(
     paths: &[PathBuf],
 ) -> Result<BTreeMap<String, String>> {
     let mut environment = BTreeMap::new();
-    environment.insert("PATH".to_owned(), path_with(&home.join("bin"))?);
+    environment.insert(
+        "PATH".to_owned(),
+        path_with(
+            &home.join("bin"),
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )?,
+    );
     environment.insert("R_HOME".to_owned(), shell_path(home));
     environment.insert("R_ARCH".to_owned(), platform.arch().to_owned());
     environment.insert("R_PACKAGE_NAME".to_owned(), name.to_owned());
@@ -2648,13 +2652,20 @@ pub fn shlib(
     // which puts Rtools ahead of other toolchains on `PATH`. Building base R calls this without
     // the front end, and another toolchain's `as` rejects the flags Rtools' GCC passes it.
     let r_home = home.display().to_string().replace('\\', "/");
-    command.envs(command_environment(home, |name| {
+    let environment = command_environment(home, |name| {
         if name == "R_HOME" {
             Some(r_home.clone())
         } else {
             std::env::var(name).ok()
         }
-    })?);
+    })?;
+    let search_path = environment
+        .iter()
+        .rfind(|(name, _)| name == "PATH")
+        .map(|(_, value)| OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    command.envs(environment);
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
@@ -2701,7 +2712,7 @@ pub fn shlib(
         command.arg(format!("CLINK_CPPFLAGS={}", include_flags.join(" ")));
     }
     command.env("R_HOME", home);
-    command.env("PATH", path_with(&home.join("bin"))?);
+    command.env("PATH", path_with(&home.join("bin"), &search_path)?);
     run_make(&mut command)?;
     Ok(directory.join(output))
 }
@@ -3398,6 +3409,44 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
             Some("E:/tools/bin;C:/bin/")
         );
         fs::remove_dir_all(&home).expect("remove home");
+    }
+
+    /// Building base R runs `shlib` without the front end, so `shlib` itself must search the
+    /// `PATH` that `etc/Rcmd_environ` sets: there the toolchain's `make` comes first.
+    #[cfg(unix)]
+    #[test]
+    fn shlib_runs_make_on_the_path_rcmd_environ_sets() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ry-rcmd-shlib-path-{}", std::process::id()));
+        let (home, tools, source) = (root.join("home"), root.join("tools"), root.join("src"));
+        for directory in [home.join("etc"), tools.clone(), source.clone()] {
+            fs::create_dir_all(&directory).expect("create directory");
+        }
+        write(
+            &home.join("etc/Makeconf"),
+            &makeconf(&home, &Toolchain::default(), Platform::Linux),
+        )
+        .expect("write Makeconf");
+        write(
+            &home.join("etc/Rcmd_environ"),
+            &format!("PATH=\"{}:${{PATH}}\"\n", tools.display()),
+        )
+        .expect("write Rcmd_environ");
+        let make = tools.join("make");
+        write(
+            &make,
+            "#!/bin/sh\nprintf '%s' \"$PATH\" > seen-path\n: > probe.so\n",
+        )
+        .expect("write make");
+        fs::set_permissions(&make, fs::Permissions::from_mode(0o755)).expect("make executable");
+        write(&source.join("probe.c"), "").expect("write source");
+
+        let built = shlib(&home, &source, &[], Some("probe.so"), &[], &[]).expect("shlib");
+        assert_eq!(built, source.join("probe.so"));
+        let seen = fs::read_to_string(source.join("seen-path")).expect("make ran");
+        let expected = format!("{}:{}:", home.join("bin").display(), tools.display());
+        assert!(seen.starts_with(&expected), "make saw PATH={seen}");
+        fs::remove_dir_all(&root).expect("remove root");
     }
 
     #[test]

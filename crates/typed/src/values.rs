@@ -1102,6 +1102,7 @@ pub unsafe extern "C" fn ry_count_true(
 /// [`count_true`] compiled for AVX2, whose 256-bit integer compares and byte operations the
 /// chunk loops vectorize with. The baseline x86-64 instruction set has no 64-bit integer
 /// compare, so there the loops over `I64` items stay scalar.
+#[allow(clippy::too_many_arguments)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn count_true_avx2(
@@ -1126,7 +1127,9 @@ unsafe fn count_true_avx2(
     )
 }
 
-/// The body of [`ry_count_true`], inlined into one copy per instruction set.
+/// The body of [`ry_count_true`], inlined into one copy per instruction set. Both copies take
+/// the C entry point's arguments unchanged, which is why they have as many.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 unsafe fn count_true(
     program: *const u32,

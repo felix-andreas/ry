@@ -3210,8 +3210,7 @@ unsafe fn summary_args(call: &Call<'_>, read: SequenceRead) -> R<(SmallVec<[Sexp
 unsafe fn summary_na_rm(call: &Call<'_>) -> bool {
     call.args
         .iter()
-        .filter(|arg| arg.tag == symbols().na_rm)
-        .last()
+        .rfind(|arg| arg.tag == symbols().na_rm)
         .is_some_and(|arg| values::as_logical_scalar(arg.value) == 1)
 }
 
