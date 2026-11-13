@@ -112,7 +112,8 @@ ry's native fast paths for base closures (`crates/interp/src/base_fast_paths.rs`
 the GNU R release whose code they follow, recognised by a hash. Against an older GNU R, such as a
 container's 4.3.3, ry runs that release's base R and most fast paths stay out, so only CI, which
 pins the matching release, checks them against GNU R. Locally, `RY_FAST_PATHS=0` turns off the
-paths that skip R frames (`message`, `signalCondition`, the unhandled-warning shortcut), and running
+paths that skip R frames (`message`, `signalCondition`, and the warning shortcuts for no handler,
+an exiting handler and `suppressWarnings`), and running
 a case with and without it on ry's own base R compares them with the R bodies they stand for.
 
 ## The plot gallery
