@@ -3336,6 +3336,16 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ n <- -1i64; FUNCTION(n) }",
             ],
         ),
+        // A list of doubles holds no `NaN`, so a mapped `NaN` gives up the call although the
+        // list it would have been stored in is never built.
+        (
+            "function(xs: List<F64>) -> F64 { a <- List.map(xs, \\(x) x / x)\n \
+             List.walk(a, 0.5, \\(acc, v) acc + v) + Num.to_f64(List.len(a)) }",
+            &[
+                "{ x <- [1.5, 2, 4]; FUNCTION(x) }",
+                "{ x <- [1.5, 0, 4]; FUNCTION(x) }",
+            ],
+        ),
         // A walk that assigns what the loop before it reads is not moved into it.
         (
             "function(xs: List<I64>) -> I64 { seen <- 0i64\n a <- List.map(xs, \\(x) x + seen)\n \

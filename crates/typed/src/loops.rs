@@ -17,7 +17,8 @@
 //! - One counted loop, the producer, fills it: with a `Push` onto a list that starts empty,
 //!   or with a `Set` at the loop's own counter into a list as long as the one the loop
 //!   counts over, once per iteration. Making the list cannot fail, so its capacity, if it
-//!   has one, is known not to be negative.
+//!   has one, is known not to be negative. Storing a `NaN` in a ry list of doubles gives up
+//!   the call, and that test stays where the store was.
 //! - Another counted loop, the consumer, reads it from the first position to the last, and
 //!   never leaves early. Nothing else reads the list but its length.
 //! - The consumer comes after the producer on one straight path, on which the only branches
@@ -37,7 +38,7 @@
 
 use {
     crate::{
-        ir::{Block, BlockId, Constant, Function, Inst, Local, Op, Terminator, Type},
+        ir::{Block, BlockId, Constant, Function, Inst, Item, Local, Op, Terminator, Type},
         ownership::Bits,
     },
     smallvec::SmallVec,
@@ -469,9 +470,20 @@ fn match_fusion(
         (&Op::Push(_, item), &Op::EmptyList(_, capacity)) if never_negative(shape, capacity) => {
             (item, None)
         }
-        (&Op::Set(_, position, item), &Op::NewVector(_, length))
+        (&Op::Set(into, position, item), &Op::NewVector(_, length))
             if creation.0 == producer.guard =>
         {
+            // Storing into a ry list gives up the call for a missing number. `rewrite` keeps
+            // that test for a double and has none for R's integers and logicals.
+            if matches!(
+                shape.function.ty(into),
+                Type::Vector {
+                    array: true,
+                    item: Item::Int | Item::Lgl
+                }
+            ) {
+                return None;
+            }
             let source = set_source(shape, &producer, producer_blocks, fill, creation, length)?;
             if position != producer.counter {
                 return None;
@@ -809,7 +821,6 @@ fn rewrite(original: &Function, fusion: &Fusion) -> Option<Function> {
         }
     }
 
-    // What each loop reads and assigns, and what the consumer needs to be set before it runs.
     let locals = function.locals.len();
     let sets = |blocks: &Bits| {
         let (mut reads, mut writes) = (Bits::new(locals), Bits::new(locals));
@@ -916,7 +927,6 @@ fn rewrite(original: &Function, fusion: &Fusion) -> Option<Function> {
         }
     }
 
-    // The checks passed: move what the consumer needs, and join the blocks.
     let mut hoisted: Vec<Inst> = Vec::with_capacity(moved.len());
     for &block in &fusion.between {
         let body = &mut function.blocks[block as usize];
@@ -950,6 +960,25 @@ fn rewrite(original: &Function, fusion: &Fusion) -> Option<Function> {
             .insts
             .push(Inst::new(Some(consumer.counter), Op::Copy(position)));
     }
+    // A ry list of doubles holds no `NaN`, and storing one gave up the call. The list is gone,
+    // so the test is what stays of the store, where the store was.
+    let holds_no_nan = matches!(
+        original.ty(fusion.list),
+        Type::Vector {
+            array: true,
+            item: Item::Dbl
+        }
+    );
+    let not_a_number = holds_no_nan.then(|| {
+        function.locals.push(Type::Bool);
+        Local(function.locals.len() as u32 - 1)
+    });
+    let filling = &mut function.blocks[fusion.fill.0 as usize];
+    if let Some(not_a_number) = not_a_number {
+        filling
+            .insts
+            .push(Inst::new(Some(not_a_number), Op::IsNan(item)));
+    }
     let continues = std::mem::replace(
         &mut filling.terminator,
         Terminator::Jump(BlockId(consumer.header)),
@@ -959,6 +988,17 @@ fn rewrite(original: &Function, fusion: &Fusion) -> Option<Function> {
         terminator: continues,
     });
     let second_half = BlockId(function.blocks.len() as u32 - 1);
+    if let Some(condition) = not_a_number {
+        function.blocks.push(Block {
+            insts: Vec::new(),
+            terminator: Terminator::Fail,
+        });
+        function.blocks[fusion.fill.0 as usize].terminator = Terminator::Branch {
+            condition,
+            then: BlockId(function.blocks.len() as u32 - 1),
+            otherwise: BlockId(consumer.header),
+        };
+    }
     function.blocks[consumer.latch as usize].terminator = Terminator::Jump(BlockId(consumer.step));
     function.blocks[consumer.step as usize].terminator = Terminator::Jump(second_half);
     function.blocks[consumer.guard as usize].terminator = Terminator::Jump(BlockId(consumer.exit));

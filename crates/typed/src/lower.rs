@@ -1296,7 +1296,6 @@ impl Lowering<'_> {
         ))
     }
 
-    /// A direct call of the compiled typed closure `function`.
     /// Calls the typed closure `function`, which `name` names, with `values`.
     ///
     /// A small function lowers into its caller, where its records need no allocation and its
@@ -1334,6 +1333,7 @@ impl Lowering<'_> {
         self.typed_call(function, values).map(Some)
     }
 
+    /// A direct call of the compiled typed closure `function`.
     unsafe fn typed_call(&mut self, function: Sexp, values: &[Local]) -> Result<Local, Refusal> {
         let types: SmallVec<[Type; 4]> =
             values.iter().map(|&value| self.builder.ty(value)).collect();
