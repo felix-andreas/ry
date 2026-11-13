@@ -107,7 +107,7 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 
 ## Open: tier 1 only ties tier 0 on small builtin calls with an element store
 
-`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. Ir per iteration under `--profile iterate`:
+`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. The allowance has no margin, so the test fails intermittently: the counts move by one instruction per iteration between runs of the same binary, and `x[k] <- list(5)` measures 881 or 882 in tier 0 against 951 or 952 compiled, where 881 against 952 is one instruction over the bound (881 + 70). Three of six runs failed that way. Ir per iteration under `--profile iterate`:
 
 | shape | tier 0 / compiled with guarded base calls | tier 0 / compiled with bound base calls |
 |---|---|---|
