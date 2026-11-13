@@ -3,8 +3,8 @@
 # one deletes its entry in the same change. Add an entry only for a failure that main already
 # has, never for one your own change introduces. `provisional = true` marks a failure seen on a
 # branch whose runtime code matches main but not yet confirmed on main itself.
-# `intermittent = true` marks a crash under a gctorture engine that depends on the host or on
-# timing: a run where the case passes counts it on its own summary line instead of failing.
+# A crash under a gctorture engine is never listed: it is a memory-safety bug, so it blocks until
+# it is fixed, however rarely it reproduces.
 #
 # Each entry: `case` (the file name in cases/ without `.R`), `engine` (as `--engine` names it),
 # `area` (the part of ry the bug lives in), and a one-line `reason`.

@@ -1,0 +1,59 @@
+# Every push to main runs what needs no GNU R: the fixture suites and the other tests of the crates
+# that build without the runtime, and a bounded libFuzzer pass over every target. The release
+# workflow calls this file, so a release fails on the same checks. Each job runs one `just` recipe,
+# so each one also runs locally; to change what a job runs, edit its recipe in the justfile. The
+# full gate, which compares ry with GNU R, is ci.yml.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+# A push while a run is in flight waits for it and replaces any older waiting push, so main always
+# gets a finished run however often it moves.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    name: fixture suites and fast crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      # Reads rust-toolchain.toml and caches the build. An empty `rustflags` keeps the action's
+      # `-D warnings` out of a test run, which `just clippy` owns.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - name: just test-push
+        run: just test-push
+
+  fuzz:
+    name: bounded fuzz pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # The runtime targets link libR, which links zlib, bzip2 and xz (crates/libr/build.rs).
+      - name: link libraries
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+      - name: just fuzz-all
+        run: just fuzz-all 20

@@ -157,7 +157,7 @@ fn second_engine_matches_gnu_r() {
                 "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
                 case.display()
             )),
-            Verdict::Passed | Verdict::IntermittentPassed => {}
+            Verdict::Passed => {}
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -171,73 +171,27 @@ fn known_failures_are_valid() {
     }
 }
 
-/// A crash that depends on the host or on timing is listed as intermittent, and its case passing
-/// does not fail the run, while any other listed case that passes does, so its fix deletes it.
+/// A listed case that passes fails the run, so its fix deletes its entry, and no mark exempts a
+/// crash under a collector-stress engine from that.
 #[test]
-fn a_passing_intermittent_entry_does_not_fail_the_run() {
-    let known = parse_known_failures(
-        r#"
-[[failure]]
-case = "base__match_arg_native"
-engine = "ry-jit-gctorture"
-area = "jit"
-reason = "aborts under the collector on some hosts"
-intermittent = true
-
-[[failure]]
-case = "base__match_arg_native"
-engine = "ry-gctorture"
-area = "gc"
-reason = "aborts under the collector"
-"#,
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+fn a_passing_listed_case_fails_the_run() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"ry-jit-gctorture\"\n\
+                 area = \"gc\"\nreason = \"aborts under the collector\"\n";
+    let known = parse_known_failures(entry, directory).unwrap_or_else(|error| panic!("{error}"));
     let case = case_directory().join("base__match_arg_native.R");
-    let intermittent = known_failure(&known, &case, "ry-jit-gctorture");
-    let plain = known_failure(&known, &case, "ry-gctorture");
+    let listed = known_failure(&known, &case, "ry-jit-gctorture");
 
-    assert_eq!(verdict(false, intermittent), Verdict::IntermittentPassed);
-    assert!(!fails_run(verdict(false, intermittent)));
-    assert_eq!(verdict(true, intermittent), Verdict::Known);
-    assert!(!fails_run(verdict(true, intermittent)));
-
-    assert_eq!(verdict(false, plain), Verdict::ListedButPassing);
-    assert!(fails_run(verdict(false, plain)));
-    assert_eq!(verdict(true, plain), Verdict::Known);
-    assert!(!fails_run(verdict(true, plain)));
+    assert_eq!(verdict(false, listed), Verdict::ListedButPassing);
+    assert!(fails_run(verdict(false, listed)));
+    assert_eq!(verdict(true, listed), Verdict::Known);
+    assert!(!fails_run(verdict(true, listed)));
 
     assert!(fails_run(verdict(true, None)));
     assert!(!fails_run(verdict(false, None)));
-}
 
-/// Only a collector-stress engine's crash may be intermittent: a failure under any other engine
-/// reproduces on every host, so the file refuses the mark there.
-#[test]
-fn intermittent_is_refused_outside_the_gctorture_engines() {
-    let entry = |engine: &str| {
-        format!(
-            "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"{engine}\"\n\
-             area = \"jit\"\nreason = \"crashes\"\nintermittent = true\n"
-        )
-    };
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for engine in ["ry", "ry-tier0", "ry-jit"] {
-        let error = parse_known_failures(&entry(engine), directory)
-            .expect_err("an intermittent entry under an engine without gctorture");
-        assert!(
-            error.contains(&format!(
-                "`base__match_arg_native` under `{engine}` is marked intermittent, which only an \
-                 entry under ry-gctorture, ry-gctorture-young, ry-jit-gctorture may be"
-            )),
-            "{error}"
-        );
-    }
-    for engine in ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"] {
-        if let Err(error) = parse_known_failures(&entry(engine), directory) {
-            panic!("{error}");
-        }
-    }
+    let marked = parse_known_failures(&format!("{entry}intermittent = true\n"), directory);
+    assert!(marked.is_err(), "an entry marked intermittent must be refused");
 }
 
 /// An explicit `R_LIBS` comes before the corpus library, the corpus library fills in when

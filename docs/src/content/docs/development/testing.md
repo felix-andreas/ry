@@ -49,7 +49,20 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check. CI runs `just ci`, which
+behavior. `just gate` runs every test plus clippy and a formatting check.
+
+Two workflows run tests. Every push to main starts `test.yml`, which needs no GNU R and has two
+jobs:
+
+| Job | Recipe | What it runs |
+| --- | --- | --- |
+| `tests` | `just test-push` | The suites of the crates that build without the runtime (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `features`) and the language server's suites in `ry-lang`: every fixture suite, the property fuzzers' bounded passes, the simulator and the scenarios that need no R |
+| `fuzz` | `just fuzz-all 20` | Every libFuzzer target for 20 seconds, stopping at the first failure |
+
+The release workflow calls `test.yml`, and its `publish` job needs it, so a release with a failing
+test publishes nothing.
+
+The full gate is `ci.yml`. It runs `just ci`, which
 builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
 flake's `ci` dev shell. That shell pins everything the tests touch (the Rust toolchain, GNU R 4.6.2
 built as the oracle recorded it, GCC 13.3, glibc and the oracle's locales), so this command
@@ -59,9 +72,9 @@ reproduces a CI run on any machine with nix:
 nix develop .#ci -c just ci
 ```
 
-To change what CI runs, edit the `ci` recipe or the shell in `flake.nix`; the workflow file only
-calls them. CI runs only when started by hand: the orchestrating agent starts it on main at its
-hourly check when main has new commits, so a push or a pull request gets no CI run of its own.
+To change what a workflow runs, edit its recipe or the shell in `flake.nix`; the workflow files only
+call them. The full gate runs only when started by hand: the orchestrating agent starts it on main
+at its hourly check when main has new commits. A pull request gets no run of its own.
 
 ### Blessing expectations
 
@@ -442,20 +455,10 @@ ry-jit-gctorture: 409 passed, 16 failed (16 known, 0 new), 0 skipped
 ```
 
 A crash under a gctorture engine (`ry-gctorture`, `ry-gctorture-young` or `ry-jit-gctorture`) can
-depend on the host or on timing, because it depends on where the collector happens to run. For
-such an entry, `intermittent = true` makes a passing case not fail the run. The case prints as
-`ok ... (listed as intermittent)`, counts as passed, and is tallied on its own line:
-
-```
-ok      cases/print__deparse_undefined_s4_class.R [ry-jit-gctorture] (listed as intermittent)
-known   cases/base__match_arg_native.R [ry-jit-gctorture]: aborts: after a deopt exit, ... (area jit)
-ry-jit-gctorture: 1 passed, 1 failed (1 known, 0 new), 0 skipped
-ry-jit-gctorture: intermittent, passed here: 1
-```
-
-A run where it fails reports it as known. The oracle refuses `intermittent` under any other
-engine, because a failure there reproduces on every host. A beta release requires the file to be
-empty, intermittent entries included.
+depend on the host or on timing, because it depends on where the collector happens to run. The
+file has no mark that lets such a case pass on some runs and fail on others: a crash under the
+collector is a memory-safety bug, so it blocks until it is fixed. A beta release requires the file
+to be empty.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
 a case needs a package that is not installed or a locale that is not generated. A case names them
@@ -476,7 +479,7 @@ PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
 The oracle refuses a file whose entry names an unknown engine, a missing case, the same case and
-engine twice, or `intermittent` outside the gctorture engines, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+engine twice, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
 
 ### The table engine
 
@@ -620,7 +623,7 @@ targets on a machine with little memory.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
 cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` runs every target
-for two minutes each after seeding the corpora. Without `just`, from `fuzz/`:
+for two minutes each after seeding the corpora. Every push to main runs `just fuzz-all 20`. Without `just`, from `fuzz/`:
 
 ```sh
 cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources

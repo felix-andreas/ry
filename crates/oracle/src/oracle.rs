@@ -118,17 +118,7 @@ pub struct KnownFailure {
     /// Seen failing on a branch but not yet on main.
     #[serde(default)]
     pub provisional: bool,
-    /// A crash under a collector-stress engine that depends on the host or on timing, so a run
-    /// where the case passes is not a stale entry.
-    #[serde(default)]
-    pub intermittent: bool,
 }
-
-/// The engines that collect before every allocation. Only their failures may be
-/// [`KnownFailure::intermittent`]: a crash there depends on where the collector happens to run,
-/// while a failure under any other engine reproduces on every host.
-pub const GC_TORTURE_ENGINES: [&str; 3] =
-    ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"];
 
 /// How one case's result under one engine counts against [`KNOWN_FAILURES_FILE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,15 +130,12 @@ pub enum Verdict {
     New,
     /// A listed case that passes, so its entry is stale.
     ListedButPassing,
-    /// An intermittent entry whose case passed this time.
-    IntermittentPassed,
 }
 
 /// The verdict for a case that `failed` or passed, given its entry in the known failures.
 pub fn verdict(failed: bool, entry: Option<&KnownFailure>) -> Verdict {
     match (failed, entry) {
         (false, None) => Verdict::Passed,
-        (false, Some(entry)) if entry.intermittent => Verdict::IntermittentPassed,
         (false, Some(_)) => Verdict::ListedButPassing,
         (true, Some(_)) => Verdict::Known,
         (true, None) => Verdict::New,
@@ -182,8 +169,8 @@ pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
 }
 
 /// Parses the known failures in `text`, the file in `directory`, refusing an entry that names an
-/// unknown engine, a case missing from `directory/cases`, the same case and engine twice, or
-/// `intermittent` outside [`GC_TORTURE_ENGINES`], so a stale or mistyped entry cannot hide.
+/// unknown engine, a case missing from `directory/cases` or the same case and engine twice, so a
+/// stale or mistyped entry cannot hide.
 pub fn parse_known_failures(text: &str, directory: &Path) -> Result<Vec<KnownFailure>, String> {
     let path = directory.join(KNOWN_FAILURES_FILE);
     let file: KnownFailuresFile =
@@ -196,16 +183,6 @@ pub fn parse_known_failures(text: &str, directory: &Path) -> Result<Vec<KnownFai
                 entry.case,
                 entry.engine,
                 ENGINES.join(", ")
-            ));
-        }
-        if entry.intermittent && !GC_TORTURE_ENGINES.contains(&entry.engine.as_str()) {
-            return Err(format!(
-                "{}: `{}` under `{}` is marked intermittent, which only an entry under {} may be, \
-                 because a failure under any other engine reproduces on every host",
-                path.display(),
-                entry.case,
-                entry.engine,
-                GC_TORTURE_ENGINES.join(", ")
             ));
         }
         if !directory

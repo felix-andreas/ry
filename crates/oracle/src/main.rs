@@ -635,11 +635,6 @@ fn compare(
                     println!("ok      {shown}");
                     tally.passed += 1;
                 }
-                Verdict::IntermittentPassed => {
-                    println!("ok      {shown} (listed as intermittent)");
-                    tally.passed += 1;
-                    tally.intermittent_passed += 1;
-                }
                 Verdict::ListedButPassing => {
                     println!(
                         "PASSES  {shown}: listed in {KNOWN_FAILURES_FILE}, so delete its entry"
@@ -652,9 +647,6 @@ fn compare(
                         let mut notes = vec![format!("area {}", entry.area)];
                         if entry.provisional {
                             notes.push("provisional".to_string());
-                        }
-                        if entry.intermittent {
-                            notes.push("intermittent".to_string());
                         }
                         println!("known   {shown}: {} ({})", entry.reason, notes.join(", "));
                     }
@@ -713,13 +705,6 @@ fn compare(
             ));
         }
         println!("{line}");
-        if tally.intermittent_passed > 0 {
-            println!(
-                "{partial}{}: intermittent, passed here: {}",
-                engine.name(),
-                tally.intermittent_passed
-            );
-        }
         failed |= tally.fails;
     }
     if selection.missing > 0 {
@@ -744,7 +729,6 @@ struct Tally {
     known: usize,
     new: usize,
     listed_but_passing: usize,
-    intermittent_passed: usize,
     unavailable: usize,
     /// Whether any case's [`Verdict`] fails the run.
     fails: bool,

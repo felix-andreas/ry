@@ -80,6 +80,13 @@ ci:
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
 
+# What every push runs (.github/workflows/test.yml, job `tests`): the suites of the crates that
+# build without the runtime, so it needs no GNU R and no base R. The language server's suites are
+# named one by one because `ry-lang`'s other test targets start an R.
+test-push:
+    cargo test -p syntax -p format -p semantics -p ide -p sniff -p loader -p heap -p numeric -p ssa -p rdb -p crash -p features
+    cargo test -p ry-lang --lib --bins --test test_cli --test test_command_line --test test_debug_framing --test test_docs --test test_fuzz --test test_lsp --test test_release_metadata --test test_scenarios --test test_simulation
+
 clippy:
     cargo clippy --workspace --exclude zed_ry --all-targets -- -D warnings
 
