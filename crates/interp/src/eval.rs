@@ -429,115 +429,6 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     settled
 }
 
-/// Forces `promise` when forcing it can run no R code and cannot fail, and returns its value: it
-/// is forced already, or it is a promise of a name whose variable holds a value or another such
-/// promise. Compiled code that runs a call without a frame forces these itself, because nothing
-/// can observe the missing frame while it does. Any other promise is left as it is.
-pub unsafe fn force_quietly(promise: Sexp) -> Option<Sexp> {
-    if !forces_quietly(promise, 0) {
-        return None;
-    }
-    match force_promise(promise) {
-        Ok(value) => Some(value),
-        Err(_) => panic!("forcing a promise of a bound name failed"),
-    }
-}
-
-/// The longest chain of promises, each of a name whose variable holds the next, that
-/// [`force_quietly`] follows.
-const QUIET_CHAIN: usize = 16;
-
-/// Whether [`force_promise`] would only read variables to force `promise`. The lookup mirrors
-/// the one forcing does for each kind of promise, and declines wherever that could run code
-/// or raise an error.
-unsafe fn forces_quietly(promise: Sexp, depth: usize) -> bool {
-    if promise.car() != unbound() {
-        return true;
-    }
-    let symbol = promise.cdr();
-    let reference = promise.has_gp(gp::ARGUMENT_REFERENCE);
-    let compiled = if reference {
-        reference_code(promise).is_some()
-    } else {
-        promise.attrib().kind() == SexpType::Bytecode
-    };
-    if depth == QUIET_CHAIN
-        || compiled
-        || promise.has_gp(PROMISE_SEEN)
-        || promise.has_gp(gp::CHECKED_PROMISE)
-        || symbol.kind() != SexpType::Symbol
-        || symbol == symbols().dots
-        || symbol == missing_arg()
-        || dot_dot_index(symbol).is_some()
-        || moves::tracking()
-    {
-        return false;
-    }
-    // A promise over a live slot frame reads the frame's slot first, and then the closure's
-    // environment.
-    let (slot, env) = if reference {
-        match reference_env(promise) {
-            Some(env) => (None, env),
-            None => {
-                let (owner, slot) = reference_target(promise);
-                let frame = &interp().frames[owner];
-                if frame.env != nil() {
-                    (None, frame.env)
-                } else if slot == NO_REFERENCE_SLOT {
-                    (None, frame.function.tag())
-                } else {
-                    let value =
-                        *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-                    ((value != unbound()).then_some(value), frame.function.tag())
-                }
-            }
-        }
-    } else {
-        let env = promise.tag();
-        if env.kind() != SexpType::Environment {
-            return false;
-        }
-        if env.has_gp(gp::PENDING_FRAME) {
-            let frame = &interp().frames[pending_owner(env)];
-            (
-                slot_content(frame.function, frame.slots as usize, symbol),
-                frame.function.tag(),
-            )
-        } else {
-            (None, env)
-        }
-    };
-    let value = match slot {
-        Some(value) => value,
-        None => {
-            let heap = crate::heap();
-            let empty = heap.known().empty_env;
-            let mut env = env;
-            loop {
-                // A pending environment has no bindings of its own to search.
-                if env == empty
-                    || env.kind() != SexpType::Environment
-                    || env.has_gp(gp::PENDING_FRAME)
-                {
-                    return false;
-                }
-                if let Some(cell) = heap.frame_cell(env, symbol) {
-                    if cell.has_gp(gp::ACTIVE_BINDING) || cell.cdr() == unbound() {
-                        return false;
-                    }
-                    break cell.cdr();
-                }
-                env = env.enclosure();
-            }
-        }
-    };
-    if value.kind() == SexpType::Promise {
-        forces_quietly(value, depth + 1)
-    } else {
-        value != missing_arg()
-    }
-}
-
 /// Forces a promise over the slots of the live slot frame whose pending environment is `env`:
 /// compiled code runs on the slots, a name reads its slot, and anything else, or a name whose
 /// slot holds an empty argument, gets the frame's environment and evaluates there.
@@ -2709,8 +2600,9 @@ pub unsafe fn call_with_plan(
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
     }
-    let result =
-        on_large_stack(|| bytecode::run_slots(function, entered.header as usize, shape.slots as usize));
+    let result = on_large_stack(|| {
+        bytecode::run_slots(function, entered.header as usize, shape.slots as usize)
+    });
     leave(entered.depth as usize, result)
 }
 
@@ -3932,7 +3824,12 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// Replaces the default of each formal in `promised`, which the binding
 /// put in its slot as the bare expression, with a promise of its code over the slot frame at
 /// `owner`.
-pub(crate) unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
+pub(crate) unsafe fn default_promises(
+    owner: usize,
+    function: Sexp,
+    header: usize,
+    promised: u64,
+) -> R<()> {
     if promised == 0 {
         return Ok(());
     }

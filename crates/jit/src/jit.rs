@@ -679,8 +679,9 @@ unsafe fn compile_in<'a>(
             speculations,
             osr,
             exits,
-            handoffs: Cell::new(0),
+            declined_frames: Cell::new(0),
             declined_loads: Cell::new(0),
+            retired: Cell::new(false),
         });
         // Everything the machine code and the speculations point to stays reachable from the
         // external pointer while the enclosure lives, so the collector never frees an object

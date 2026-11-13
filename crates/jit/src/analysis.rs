@@ -26,7 +26,7 @@ pub use interp::effects::{Speculation, base_builtin, resolve_function};
 use {
     crate::{
         native::{self, Native},
-        runtime::{UNFORCED_FORMALS, elidable},
+        runtime::{NO_FRAMES, UNFORCED_FORMALS, elidable},
     },
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
@@ -950,12 +950,18 @@ pub enum Action<'a> {
     /// runs nothing that could look at the missing frame: every point where it would hands
     /// the call to tier 0 through a frame state, which gives the call its real frame first.
     /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
+    ///
+    /// `forces[i]` is a bitset, by position, of the planning body's own formals whose promises
+    /// the callee's first read of its formal `i` forces: the argument is that formal, or an
+    /// expression that always reads it. Only a body that is itself inlined records them,
+    /// because its formals are bound to no promise that could record the force itself.
     Frame {
         steps: &'a [(Action<'a>, StateId)],
         callee: &'a Plan<'a>,
         function: Sexp,
         call: Sexp,
         args: &'a [Passing],
+        forces: &'a [u64],
         dst: (usize, Ty),
     },
     /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
@@ -1249,6 +1255,11 @@ struct Lowering<'a> {
     /// its own locals, rather than this activation's code (a call's arguments), whose
     /// assignments write this frame's variables.
     inlined: bool,
+    /// Whether the expression being lowered is one R evaluates only on some paths (a branch
+    /// of `if`, anything inside a closure call), although its steps run every time.
+    conditional: bool,
+    /// The planning body's formals the steps so far read on every path, by position.
+    forces: u64,
 }
 
 impl Lowering<'_> {
@@ -1517,6 +1528,7 @@ unsafe fn plan_at<'a>(
         Frame::Global { env } => (values::nil(), env, FxHashSet::default(), true),
     };
     let insts = decode(arena, code)?;
+    let tier_state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
     let loops = bytecode::loop_count(code);
     let mut builder = Builder {
@@ -1539,11 +1551,12 @@ unsafe fn plan_at<'a>(
         declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         callees: Map::with_hasher_in(FxBuildHasher, arena),
-        formals,
-        lazy_formals: depth == 0 && {
-            let state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
-            state >= 0 && state & UNFORCED_FORMALS != 0
-        },
+        formals: values::pairlist_items(formals)
+            .iter()
+            .map(|&(symbol, _)| symbol)
+            .collect(),
+        lazy_formals: depth == 0 && tier_state >= 0 && tier_state & UNFORCED_FORMALS != 0,
+        no_frames: depth == 0 && tier_state >= 0 && tier_state & NO_FRAMES != 0,
         depth,
         budget,
         closure_code: Map::with_hasher_in(FxBuildHasher, arena),
@@ -1818,12 +1831,15 @@ struct Builder<'a> {
     /// its value, or `None` for one that cannot be, so each body is planned once however many
     /// calls of it the body makes.
     callees: Map<'a, Sexp, Result<(&'a Plan<'a>, Ty), &'static str>>,
-    /// The closure's formals, the variables that may hold a promise nothing has forced.
-    formals: Sexp,
+    /// The closure's formals in order, the variables that may hold a promise nothing has
+    /// forced.
+    formals: SmallVec<[Sexp; 8]>,
     /// Whether inlined code must not read a formal compiled code has not loaded: the body's
     /// formals kept arriving unforced ([`UNFORCED_FORMALS`]), and each such read hands the
     /// instruction to tier 0.
     lazy_formals: bool,
+    /// Whether no call of the body gets an inlined frame ([`NO_FRAMES`]).
+    no_frames: bool,
     /// How many inlined calls surround the body being planned.
     depth: usize,
     /// The bytecode words of callees the compilation may still plan as inlined frames.
@@ -1910,15 +1926,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    unsafe fn is_formal(&self, symbol: Sexp) -> bool {
-        let mut formal = self.formals;
-        while formal.kind() == SexpType::Pairlist {
-            if formal.tag() == symbol {
-                return true;
-            }
-            formal = formal.cdr();
-        }
-        false
+    /// The position of `symbol` among the closure's formals.
+    fn formal(&self, symbol: Sexp) -> Option<usize> {
+        self.formals.iter().position(|&formal| formal == symbol)
     }
 
     fn slot(&self, symbol: Sexp) -> usize {
@@ -3115,6 +3125,8 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed: None,
             inlined: false,
+            conditional: false,
+            forces: 0,
         };
         let result = self.lower_call(&mut lowering, call, formals, body, closed, 0)?;
         let ty = lowering.state.registers[result];
@@ -3226,6 +3238,8 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed,
             inlined: true,
+            conditional: false,
+            forces: 0,
         };
         let mut accumulator = None;
         if let Some(initial) = initial {
@@ -3467,6 +3481,8 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed: None,
             inlined: false,
+            conditional: false,
+            forces: 0,
         };
         let mut args = List::new_in(self.arena);
         for (tag, expression) in values::pairlist_items(call.cdr()) {
@@ -3560,6 +3576,9 @@ impl<'a> Builder<'a> {
         function: Sexp,
         dst: usize,
     ) -> Result<Action<'a>, &'static str> {
+        if self.no_frames {
+            return Err("the body's calls kept being unable to start without their frames");
+        }
         let formals = values::pairlist_items(function.car());
         let arguments = values::pairlist_items(call.cdr());
         if arguments.len() != formals.len() {
@@ -3581,13 +3600,23 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed: None,
             inlined: false,
+            conditional: false,
+            forces: 0,
         };
         let mut args = List::new_in(self.arena);
+        let mut forces = List::new_in(self.arena);
         for (&(_, expression), &(formal, _)) in arguments.iter().zip(&formals) {
+            // An argument that is one of this body's formals forces that formal's promise
+            // where the callee first reads it. A body with a frame has a real promise there,
+            // which records the force itself.
+            let own = self
+                .formal(expression)
+                .filter(|_| self.depth > 0)
+                .map_or(0, |position| 1 << position);
             // Reading the variable before the call would have to leave a promise unforced,
             // and a formal the caller passes on before it reads it is exactly that.
             if !self.lazy_formals
-                && self.is_formal(expression)
+                && self.formal(expression).is_some()
                 && !self.defaulted.contains_key(&expression)
                 && self
                     .slot_of
@@ -3595,6 +3624,7 @@ impl<'a> Builder<'a> {
                     .is_none_or(|&slot| lowering.state.slots[slot].status & status::LOADED == 0)
             {
                 args.push(Passing::Variable(expression));
+                forces.push(own);
                 continue;
             }
             if expression.kind() == SexpType::Symbol
@@ -3607,11 +3637,13 @@ impl<'a> Builder<'a> {
                     return Err("an argument that is a number of either kind");
                 }
                 args.push(Passing::Value(Argument::Slot(slot)));
+                forces.push(own);
                 continue;
             }
             let slot = callee.slots.iter().position(|&symbol| symbol == formal);
             let (state, steps, next) =
                 (lowering.state.clone(), lowering.steps.len(), lowering.next);
+            lowering.forces = 0;
             let Some(register) = self.lower_expression(&mut lowering, expression, 0) else {
                 // The argument stays a promise, which only tier 0 forces, so the call is
                 // worth inlining only while the callee has not read the formal.
@@ -3622,8 +3654,10 @@ impl<'a> Builder<'a> {
                 lowering.steps.truncate(steps);
                 lowering.next = next;
                 args.push(Passing::Promise);
+                forces.push(0);
                 continue;
             };
+            forces.push(lowering.forces);
             let ty = lowering.state.registers[register];
             // The callee's loads of the formal expect what its own calls have passed. An
             // unboxed argument is never checked against that, so it must be that type, or
@@ -3661,6 +3695,7 @@ impl<'a> Builder<'a> {
             function,
             call,
             args: args.leak(),
+            forces: forces.leak(),
             dst: (dst, result),
         })
     }
@@ -3678,8 +3713,6 @@ impl<'a> Builder<'a> {
 
     unsafe fn plan_callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
         let (formals, code, enclosure) = (function.car(), function.cdr(), function.tag());
-        // A frame whose environment is still pending belongs to a running slot frame, which a
-        // real call of the closure would give its environment.
         if self.depth >= MAX_INLINE_DEPTH {
             return Err("the call is nested too deep");
         }
@@ -3693,6 +3726,8 @@ impl<'a> Builder<'a> {
         if code == self.code {
             return Err("the call is recursive");
         }
+        // An environment that is still pending belongs to a running slot frame, which a real
+        // call of the closure would give its environment.
         if enclosure.has_gp(gp::PENDING_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
             return Err("the callee's environment may not outlive the code");
         }
@@ -3722,6 +3757,10 @@ impl<'a> Builder<'a> {
         });
         if !numbered {
             return Err("the callee takes `...`");
+        }
+        // Compiled code records which formals a call has forced in one word.
+        if parameters.len() > u64::BITS as usize {
+            return Err("the callee has more than 64 formals");
         }
         if shape(code).loops {
             return Err("the callee loops");
@@ -3871,6 +3910,9 @@ impl<'a> Builder<'a> {
             return None;
         }
         let outer = std::mem::take(&mut lowering.scope);
+        // The closure forces an argument only where its body reads the formal, which may be on
+        // some paths only.
+        let outer_conditional = std::mem::replace(&mut lowering.conditional, true);
         let mut scope: SmallVec<[usize; 4]> = SmallVec::with_capacity(args.len());
         for (_, expression) in &args {
             let register = self.lower_expression(lowering, *expression, depth);
@@ -3878,6 +3920,7 @@ impl<'a> Builder<'a> {
                 Some(register) => scope.push(register),
                 None => {
                     lowering.scope = outer;
+                    lowering.conditional = outer_conditional;
                     return None;
                 }
             }
@@ -3903,6 +3946,7 @@ impl<'a> Builder<'a> {
         lowering.scope = outer;
         lowering.closed = outer_closed;
         lowering.inlined = outer_inlined;
+        lowering.conditional = outer_conditional;
         let result = result?;
         // Inlined code has no frame to check annotations in, so a typed closure is inlined only
         // when its checks are known to pass; tier 0 runs any other call and reports the failure.
@@ -3951,6 +3995,18 @@ impl<'a> Builder<'a> {
                 if lowering.closed.is_some() {
                     return None;
                 }
+                // The steps read the variable whether or not R would evaluate this expression,
+                // which is right only while the read tells nobody. In an inlined body a read
+                // of a formal is what forces its promise, so the formal must be one R reads on
+                // every path too.
+                if self.depth > 0
+                    && let Some(position) = self.formal(expression)
+                {
+                    if lowering.conditional {
+                        return None;
+                    }
+                    lowering.forces |= 1 << position;
+                }
                 let slot = self.peek_slot(lowering, expression, false)?;
                 let ty = lowering.state.slots[slot].ty;
                 if !ty.is_unboxed() {
@@ -3994,6 +4050,10 @@ impl<'a> Builder<'a> {
                 if lowering.closed.is_none()
                     && let Some(&slot) = self.slot_of.get(&head)
                 {
+                    // Calling an inlined body's formal forces its promise.
+                    if self.depth > 0 && self.formal(head).is_some() {
+                        return None;
+                    }
                     // A closure this activation made, called from inlined code: inline it too.
                     self.peek_slot(lowering, head, false)?;
                     let Ty::Closure(formals, body) = lowering.state.slots[slot].ty else {
@@ -4017,10 +4077,18 @@ impl<'a> Builder<'a> {
                 if name == "{" {
                     return self.lower_block(lowering, &args, depth);
                 }
+                let outer_conditional = lowering.conditional;
                 let registers = args
                     .iter()
-                    .map(|&arg| self.lower_expression(lowering, arg, depth))
-                    .collect::<Option<SmallVec<[usize; 4]>>>()?;
+                    .enumerate()
+                    .map(|(index, &arg)| {
+                        // Both branches of `if` are lowered, and R evaluates one.
+                        lowering.conditional = outer_conditional || (name == "if" && index > 0);
+                        self.lower_expression(lowering, arg, depth)
+                    })
+                    .collect::<Option<SmallVec<[usize; 4]>>>();
+                lowering.conditional = outer_conditional;
+                let registers = registers?;
                 let types: SmallVec<[Ty; 4]> = registers
                     .iter()
                     .map(|&register| lowering.state.registers[register])
@@ -4203,7 +4271,7 @@ impl<'a> Builder<'a> {
         }
         let current = lowering.state.slots[slot];
         if current.may_be(status::NOT_LOADED) {
-            if self.lazy_formals && self.is_formal(symbol) {
+            if self.lazy_formals && self.formal(symbol).is_some() {
                 return None;
             }
             let ty = if current.may_be(status::LOADED) {

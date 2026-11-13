@@ -22,8 +22,8 @@ use {
         },
         native,
         runtime::{
-            self, Activation, Exit, Inlined, Layout, NO_SLOT, offset, outcome, quiet, reason,
-            representation,
+            self, Activation, ArgumentSource, Exit, Inlined, Layout, offset, outcome, quiet,
+            reason, representation,
         },
     },
     heap::object::{
@@ -44,7 +44,7 @@ use {
         Value, Variable,
         types::{F64, I8, I32, I64},
     },
-    std::sync::atomic::AtomicBool,
+    std::{cell::Cell, sync::atomic::AtomicBool},
 };
 
 /// The compiled entry point.
@@ -155,6 +155,10 @@ struct Translator<'p> {
     exits: Vec<Exit>,
     /// The frames translated so far, the body's own first.
     layouts: Vec<Layout>,
+    /// Whether the actions being translated evaluate an inlined call's arguments ahead of the
+    /// call. Their reads of a formal force nothing: the callee's own read of the argument is
+    /// where R forces what the argument mentions ([`Action::Frame`]'s `forces`).
+    evaluating_arguments: bool,
     nil: i64,
 }
 
@@ -182,6 +186,11 @@ struct Frame<'p> {
     edges: Vec<PendingEdge>,
     /// The position of the first instruction of the block being translated.
     block_start: usize,
+    /// For an inlined call, a bitset by position of the formals whose promises the call has
+    /// forced so far, had it bound promises. A slot's status cannot say this: an argument
+    /// read ahead of the callee loads the slot without forcing anything, and a callee further
+    /// in forces a formal this frame passed on without loading this frame's slot.
+    forced: Variable,
     /// The call the frame belongs to, or `None` for the body's own frame.
     call: Option<InlinedCall>,
 }
@@ -191,20 +200,32 @@ struct InlinedCall {
     /// The caller's frame state after the call. An exit inside the call runs the call to its
     /// end in tier 0, so that is where the caller continues.
     caller: FrameState,
-    /// What the call passes for each formal of the callee.
-    passed: Vec<(Sexp, Passed)>,
+    /// What the call passes for each formal of the callee, by position.
+    passed: SmallVec<[Passed; 4]>,
+    /// By slot of the callee's plan, the position of the formal the slot holds, or
+    /// [`NO_FORMAL`].
+    formals: SmallVec<[u8; 16]>,
+    /// The `forced` words of the inlined callers and the bits a read of each formal sets in
+    /// them, because forcing the argument forces formals of theirs. Those of formal `i` are
+    /// `forces[force_ranges[i]..force_ranges[i + 1]]`.
+    forces: SmallVec<[(Variable, u64); 4]>,
+    force_ranges: SmallVec<[u32; 5]>,
     /// Where the caller continues, which takes the call's value.
     continuation: Label,
     /// The type every `Return` of the callee hands the continuation.
     result: Ty,
 }
 
+const NO_FORMAL: u8 = u8::MAX;
+
 /// An argument of an inlined call. The callee's first load of the formal reads what the
-/// caller evaluated, which is where a promise of the argument would have been forced.
+/// caller evaluated, which is where a promise of the argument would have been forced. A
+/// value is in a variable defined once, at the call, so that every exit of the call can save
+/// it.
 #[derive(Clone, Copy)]
 enum Passed {
-    Object(Value),
-    Unboxed(Value, Ty),
+    Object(Variable),
+    Unboxed(Variable, Ty),
     /// The formal `symbol` of the caller, whose activation is `caller`
     /// ([`Passing::Variable`]).
     Variable {
@@ -260,19 +281,15 @@ impl<'p> Frame<'p> {
             labels: Vec::new(),
             edges: Vec::new(),
             block_start: 0,
+            forced: builder.declare_var(I64),
             call: None,
         }
     }
 
-    /// What the inlined call this frame runs passed for the formal in `slot`.
-    fn passed(&self, slot: usize) -> Option<Passed> {
-        let symbol = *self.plan.slots.get(slot)?;
-        self.call
-            .as_ref()?
-            .passed
-            .iter()
-            .find(|(formal, _)| *formal == symbol)
-            .map(|&(_, passed)| passed)
+    /// The position of the formal `slot` holds in the inlined call this frame runs.
+    fn formal(&self, slot: usize) -> Option<usize> {
+        let formal = *self.call.as_ref()?.formals.get(slot)?;
+        (formal != NO_FORMAL).then_some(formal as usize)
     }
 }
 
@@ -306,6 +323,7 @@ impl<'p> Translator<'p> {
             loop_steps,
             exits: Vec::new(),
             layouts: Vec::new(),
+            evaluating_arguments: false,
             nil: values::nil().as_ptr() as i64,
         }
     }
@@ -406,6 +424,8 @@ impl<'p> Translator<'p> {
         for slot in 0..self.frame.plan.slots.len() {
             self.set_status(slot, zero32);
         }
+        let zero = self.builder.ins().iconst(I64, 0);
+        self.builder.def_var(self.frame.forced, zero);
         self.frame.labels = self
             .frame
             .plan
@@ -638,6 +658,11 @@ impl<'p> Translator<'p> {
                         self.load_slot(position, &before, slot, ty, forcing, volatile, Some(dst))?;
                     }
                 }
+                if !self.evaluating_arguments
+                    && let Some(formal) = self.frame.formal(slot)
+                {
+                    self.force(formal);
+                }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.in_variables() {
                     let value = self.use_slot(slot, ty);
@@ -729,9 +754,12 @@ impl<'p> Translator<'p> {
                 function,
                 call,
                 args,
+                forces,
                 dst,
             } => {
-                self.inlined_call(position, before, steps, callee, function, call, args, dst)?;
+                self.inlined_call(
+                    position, before, steps, callee, function, call, args, forces, dst,
+                )?;
             }
             Action::NativeCall {
                 steps,
@@ -1743,33 +1771,54 @@ impl<'p> Translator<'p> {
         function: Sexp,
         call: Sexp,
         args: &[Passing],
+        forces: &[u64],
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
         let plan = self.frame.plan;
         let pc = plan.insts[position].pc;
+        self.evaluating_arguments = true;
         for &(step, state) in steps {
             if self.action(position, plan.state(state), step)? {
                 return Err(Refusal("an argument that leaves compiled code"));
             }
         }
-        let mut passed = Vec::with_capacity(args.len());
-        let mut formals = Vec::with_capacity(args.len());
-        for (argument, (formal, _)) in args.iter().zip(values::pairlist_items(function.car())) {
-            let slot = callee.slots.iter().position(|&symbol| symbol == formal);
-            formals.push(slot.map_or(NO_SLOT, |slot| slot as u32));
+        self.evaluating_arguments = false;
+        let mut passed: SmallVec<[Passed; 4]> = SmallVec::new();
+        let mut sources: SmallVec<[ArgumentSource; 4]> = SmallVec::new();
+        let mut formals: SmallVec<[u8; 16]> = SmallVec::from_elem(NO_FORMAL, callee.slots.len());
+        let mut forwarded: SmallVec<[(Variable, u64); 4]> = SmallVec::new();
+        let mut force_ranges: SmallVec<[u32; 5]> = SmallVec::new();
+        force_ranges.push(0);
+        let parameters = values::pairlist_items(function.car());
+        for (index, ((argument, &mask), &(formal, _))) in
+            args.iter().zip(forces).zip(&parameters).enumerate()
+        {
+            if let Some(slot) = callee.slots.iter().position(|&symbol| symbol == formal)
+                && let Some(holder) = formals.get_mut(slot)
+            {
+                *holder = index as u8;
+            }
             let argument = match *argument {
-                Passing::Value(Argument::Slot(slot)) => Passed::Object(self.load_slot_cell(slot)),
+                Passing::Value(Argument::Slot(slot)) => {
+                    let variable = self.builder.declare_var(I64);
+                    let value = self.load_slot_cell(slot);
+                    self.builder.def_var(variable, value);
+                    Passed::Object(variable)
+                }
                 Passing::Value(Argument::Unboxed { register, ty }) => {
-                    Passed::Unboxed(self.use_register(register, ty), ty)
+                    let variable = self
+                        .builder
+                        .declare_var(if ty == Ty::Dbl { F64 } else { I32 });
+                    let value = self.use_register(register, ty);
+                    self.builder.def_var(variable, value);
+                    Passed::Unboxed(variable, ty)
                 }
                 // An inlined caller has no frame that holds its formal, so the callee reads
-                // what the caller itself was passed.
+                // what the caller itself was passed. The argument's mask names that formal.
                 Passing::Variable(symbol) => match &self.frame.call {
-                    Some(call) => call
+                    Some(call) => *call
                         .passed
-                        .iter()
-                        .find(|(formal, _)| *formal == symbol)
-                        .map(|&(_, passed)| passed)
+                        .get(mask.trailing_zeros() as usize)
                         .ok_or(Refusal("a formal the inlined call was not passed"))?,
                     None => Passed::Variable {
                         caller: self.frame.activation,
@@ -1778,7 +1827,34 @@ impl<'p> Translator<'p> {
                 },
                 Passing::Promise => Passed::Lazy,
             };
-            passed.push((formal, argument));
+            sources.push(match argument {
+                Passed::Object(_) => ArgumentSource::Saved(representation::BOXED),
+                Passed::Unboxed(_, ty) => ArgumentSource::Saved(exit_kind(ty)),
+                Passed::Variable { symbol, .. } => ArgumentSource::Root(symbol),
+                Passed::Lazy => ArgumentSource::Unread,
+            });
+            passed.push(argument);
+            // Forcing this argument forces the caller's formals in `mask`, and with each of
+            // those whatever forcing it forces further out.
+            if let Some(call) = self.frame.call.as_ref().filter(|_| mask != 0) {
+                let start = forwarded.len();
+                forwarded.push((self.frame.forced, mask));
+                for position in (0..u64::BITS as usize).filter(|&bit| mask >> bit & 1 != 0) {
+                    let range = call.force_ranges.get(position).copied().unwrap_or(0) as usize
+                        ..call.force_ranges.get(position + 1).copied().unwrap_or(0) as usize;
+                    for &(variable, bits) in call.forces.get(range).unwrap_or(&[]) {
+                        match forwarded
+                            .iter_mut()
+                            .skip(start)
+                            .find(|(known, _)| *known == variable)
+                        {
+                            Some((_, known)) => *known |= bits,
+                            None => forwarded.push((variable, bits)),
+                        }
+                    }
+                }
+            }
+            force_ranges.push(forwarded.len() as u32);
         }
         let next = self.next_pc(position)?;
         let after = self.after(position)?;
@@ -1813,6 +1889,9 @@ impl<'p> Translator<'p> {
         child.call = Some(InlinedCall {
             caller,
             passed,
+            formals,
+            forces: forwarded,
+            force_ranges,
             continuation,
             result: dst.1,
         });
@@ -1824,7 +1903,9 @@ impl<'p> Translator<'p> {
             parent: parent.index,
             call_pc: pc as u32,
             dst: dst.0 as u32,
-            formals: formals.into_boxed_slice(),
+            formals: sources.into_boxed_slice(),
+            entries: Cell::new(0),
+            handoffs: Cell::new(0),
         }));
         self.layouts.push(layout);
         let translated = match self.start_frame() {
@@ -1843,6 +1924,26 @@ impl<'p> Translator<'p> {
             self.store_register(dst.0, result);
         }
         Ok(())
+    }
+
+    /// Records that the inlined call being translated read its formal at `formal`, which is
+    /// where the promise the call's real frame would hold is forced, and with it the promises
+    /// of the callers' formals the argument reads.
+    fn force(&mut self, formal: usize) {
+        let Some(call) = &self.frame.call else {
+            return;
+        };
+        let range = call.force_ranges.get(formal).copied().unwrap_or(0) as usize
+            ..call.force_ranges.get(formal + 1).copied().unwrap_or(0) as usize;
+        let mut words: SmallVec<[(Variable, u64); 4]> = SmallVec::new();
+        words.push((self.frame.forced, 1 << formal));
+        words.extend_from_slice(call.forces.get(range).unwrap_or(&[]));
+        for (variable, bits) in words {
+            let word = self.builder.use_var(variable);
+            let bits = self.builder.ins().iconst(I64, bits as i64);
+            let word = self.builder.ins().bor(word, bits);
+            self.builder.def_var(variable, word);
+        }
     }
 
     /// Ends an inlined call with the value in `src`. The call had no frame, so no variable is
@@ -3996,16 +4097,21 @@ impl<'p> Translator<'p> {
         }
         self.builder.switch_to_block(load);
         let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-        let passed = self.frame.passed(slot);
+        let passed = self
+            .frame
+            .formal(slot)
+            .and_then(|formal| self.frame.call.as_ref()?.passed.get(formal).copied());
         let loaded = match passed {
-            Some(Passed::Unboxed(value, from)) if from == ty => {
+            Some(Passed::Unboxed(variable, from)) if from == ty => {
+                let value = self.builder.use_var(variable);
                 match ty {
                     Ty::Dbl => self.builder.def_var(self.frame.slot_doubles[slot], value),
                     _ => self.builder.def_var(self.frame.slot_integers[slot], value),
                 }
                 None
             }
-            Some(Passed::Unboxed(value, from)) if ty == Ty::Num && from != Ty::Lgl => {
+            Some(Passed::Unboxed(variable, from)) if ty == Ty::Num && from != Ty::Lgl => {
+                let value = self.builder.use_var(variable);
                 let double = if from == Ty::Int {
                     self.integer_as_double(value)
                 } else {
@@ -4016,12 +4122,14 @@ impl<'p> Translator<'p> {
                 self.builder.def_var(self.frame.slot_integers[slot], flag);
                 None
             }
-            Some(Passed::Unboxed(value, from)) => {
+            Some(Passed::Unboxed(variable, from)) => {
+                let value = self.builder.use_var(variable);
                 let boxed = self.box_value(from, value);
                 self.store_slot_cell(slot, boxed);
                 Some((boxed, local))
             }
-            Some(Passed::Object(value)) => {
+            Some(Passed::Object(variable)) => {
+                let value = self.builder.use_var(variable);
                 self.store_slot_cell(slot, value);
                 Some((value, local))
             }
@@ -4524,8 +4632,9 @@ impl<'p> Translator<'p> {
     }
 
     /// The frame state of the current frame at `pc`, as [`Self::deopt`] describes it. In an
-    /// inlined call its parent is the caller's state after the call, and it also saves each
-    /// formal, whose status says whether the call read the argument.
+    /// inlined call its parent is the caller's state after the call, and it also saves which
+    /// formals the call has forced and each argument the caller evaluated, which is what
+    /// binding the formals in the call's real frame needs.
     fn exit_state(
         &mut self,
         pc: usize,
@@ -4552,9 +4661,7 @@ impl<'p> Translator<'p> {
             .slots
             .iter()
             .enumerate()
-            .filter(|&(slot, current)| {
-                current.may_be(status::DIRTY) || self.frame.passed(slot).is_some()
-            })
+            .filter(|&(_, current)| current.may_be(status::DIRTY))
             .map(|(slot, current)| (slot as u32, exit_kind(current.ty)))
             .collect();
         // SAFETY: the code object is rooted while it compiles, and its loop table is an
@@ -4605,6 +4712,15 @@ impl<'p> Translator<'p> {
                 Source::Variable(self.loop_firsts[index]),
                 Source::Variable(self.loop_steps[index]),
             ]);
+        }
+        if let Some(call) = call {
+            sources.push(Source::Variable(self.frame.forced));
+            sources.extend(call.passed.iter().filter_map(|passed| match *passed {
+                Passed::Object(variable) | Passed::Unboxed(variable, _) => {
+                    Some(Source::Variable(variable))
+                }
+                Passed::Variable { .. } | Passed::Lazy => None,
+            }));
         }
         let frame_state = self.builder.frame_state(parent, &sources);
         debug_assert_eq!(frame_state.as_u32() as usize, self.exits.len());
