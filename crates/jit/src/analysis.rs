@@ -1796,8 +1796,8 @@ impl<'a> Builder<'a> {
         // variable must already see it as modified.
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
-            let bits =
-                self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32) & !feedback::ACTIVE_BINDING;
+            let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32)
+                & !feedback::ACTIVE_BINDING;
             if inst.op == Op::GetVar && bits != 0 {
                 let slot = self.slot_of[&self.constant(inst.operand(1))];
                 self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
@@ -2186,8 +2186,8 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                let forcing = load.is_some()
-                    && (volatile || self.defaulted.contains_key(&self.slots[slot]));
+                let forcing =
+                    load.is_some() && (volatile || self.defaulted.contains_key(&self.slots[slot]));
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;

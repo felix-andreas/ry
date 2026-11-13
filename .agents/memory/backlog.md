@@ -39,6 +39,12 @@ The quality bar is four things.
   'lattice'`) and the `timeseries` workload of `just bench applications` fails.
 - Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
+- `ry check` does not hold a function literal's body to its declared return type, though the typing
+  reference says an explicit return "is enforced": `f <- function(x: integer) -> character x`,
+  `-> NULL x`, and `#: fn(x: integer) -> NULL` over `function(x) x` all check clean (calls
+  included), while ry's runtime stops each call with "the function must return ...". Passing such
+  a function where a function type is expected is reported (`typing-scripts/functions.R.test`,
+  `function_argument_with_wrong_return_is_rejected`).
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
@@ -330,6 +336,55 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Measured and not taken: libdeflate for lazy-load records
 
 - **Inflating whole records with libdeflate saves 1.1% of testthat, under the 2% bar.** A lazy-load record states its decompressed length, so one `libdeflate_zlib_decompress` call can replace the streaming zlib-rs inflater in `serialize::decompress_record`. On `tools/bench/applications/testthat.R` with packages installed by GNU R 4.6.2 (callgrind, `RY_BENCH_REPEAT=1`), inflation fell from 41.5M to 18.3M instructions and the whole run from 1,525.1M to 1,508.0M (-1.1%), with the same saving at any repeat count, because every fetch happens in the first repetition. Only packages GNU R installed benefit, because ry-installed packages read records uncompressed from the code image. It adds a C dependency and about 157 net lines, so it is not taken. The branch `perf/libdeflate-records` holds the change, a size check that refuses headers past deflate's 1032:1 expansion, and a bounded fuzz test. Revisit it if lazy-load inflation becomes a larger share.
+
+## Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack
+
+- **Even removing all of it stays under the 3% bar on timeseries.** xts's `xts_get_attrs` (`src/attr.c`) runs `eval(lang2(install("attributes"), x), R_GlobalEnv)` about 97k times per repeat, and its code protects about 780k objects per repeat (callgrind, profiling build, threads 1, warm Ir 5.77G per repeat, `RY_BENCH_REPEAT` 5 minus 2):
+
+  | Piece | Ir per call | Warm Ir | Share |
+  |---|---:|---:|---:|
+  | `Rf_eval` of the call, all of it | 1,685 | 165.6M | 2.87% |
+  | of which the `attributes` builtin (`do_attributes`) | 867 | 86.0M | 1.49% |
+  | of which the evaluator around it: `enter`, `normalize_argument_cells`, `find_called_fun` from the global environment, `evaluate_args_into`, hand-out | 818 | 79.6M | 1.38% |
+  | `Rf_protect` | 48 | 40.0M | 0.69% |
+  | `Rf_unprotect` | 38 | 16.7M | 0.29% |
+  | `R_Reprotect` | | 8.8M | 0.15% |
+
+  A direct builtin path still has to look the function up from `rho` (shadowing), enter the boundary and hand the result out, so it keeps a few hundred Ir of the 818. Protect at about 10 Ir saves about 0.8%. The realistic total is about 1.8%, and removing every evaluator and protect instruction would give 2.5%. `do_attributes` itself is two allocations and their element writes (B2's allocation path), not evaluator cost.
+
+## Measured and not taken: `format()` on the validation workload
+
+- **About 2.5% of validation's warm Ir is within reach, under the 3% bar, and ry is already about 7x faster than GNU R per call.** Validation calls `format(round(v, 3), nsmall = 3)` 12k times per repeat on an integer scalar, a double scalar, a named double pair and `2L`. A micro script of exactly those calls, under callgrind (N=12000 minus N=2000, minus the same script without `format()`), gives per call:
+
+  | | ry | GNU R 4.6.2 (-O2) |
+  |---|---:|---:|
+  | whole `format()` call | about 16k Ir | about 111k Ir (`format.default` and `prettyNum` run as R code) |
+  | `.Internal(format())` | 3.76k Ir | 8.25k Ir (`formatReal` 473, `EncodeReal0` 2.95k) |
+
+  Inside ry's call, with shares of validation's warm Ir:
+
+  | Piece | Ir per call | Share | Realistic saving |
+  |---|---:|---:|---:|
+  | S3 dispatch to `format.default` and its call | about 6.6k | about 6% | the call path's work (`resolve_s3`), not format's |
+  | `format.default`'s fast path (`do_format_default`), all of it | 7.3k | 7.0% | |
+  | of which `argument` and `is_default`: 15 linear walks over 17 formals (1.4k), forcing defaults such as `getOption("OutDec")` (1.04k) | 2.47k | | about 1.0% from one pass, 0.2% from constant defaults |
+  | of which `do_format` | 3.76k | 3.41% | |
+  | of which `real_format_candidates` (`scientific()` on the emulated long double, against GNU's 473 for all of `formatReal`) | 1.13k | 1.03% | about 1.3% together with a leaner text buffer |
+  | of which the text buffer | 1.19k | 1.07% | |
+
+## Measured and not taken: one pass over the formals for the base fast paths
+
+- **Under the bar on every workload.** The fast-path helpers `argument`, `is_default`, `is_supplied` and `dots` (`crates/interp/src/base_fast_paths.rs`) each walk the closure's formals pairlist again through `eval::slot_formal`. Their self cost, which holds the inlined walk (forcing an argument is excluded, because a single pass would still force it), as a share of warm Ir (callgrind, profiling build, threads 1, `RY_BENCH_REPEAT` 5 minus 2):
+
+  | Workload | Self share | Main caller |
+  |---|---:|---|
+  | report | 5.15% | `formatC()` (`do_format_c`: 11 lookups per call, about 48 Ir each) |
+  | validation | 1.88% | `format.default` (15 lookups over 17 formals) |
+  | strings | 0.58% | |
+  | objects, testthat, conditions, functional | 0.47%, 0.43%, 0.37%, 0.26% | |
+  | the other seven | 0.06% or less | |
+
+  A table built in one walk still pays the walk (about 75 Ir for 15 formals), and each lookup still re-resolves the frame, because forcing an argument can give a slot frame an environment, and roots the value (about 20 Ir). That saves about 40%: about 2.1% on report and 0.9% on validation.
 
 ## Open: one probe to intern a new string (Track C, strings)
 
