@@ -10,6 +10,8 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "git+https://github.com/ipetkov/crane?shallow=1";
+    # Only for GCC 13.3.0, the compiler of the oracle's recordings (`lib.gnuR`).
+    nixpkgs-gcc13-3.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-24.11&shallow=1";
   };
 
   # .github/workflows/cachix.yml pushes the x86_64-linux package and dev shell here.
@@ -25,6 +27,7 @@
       nixpkgs,
       rust-overlay,
       crane,
+      nixpkgs-gcc13-3,
     }:
     {
       lib = {
@@ -47,9 +50,9 @@
             );
           };
         # GNU R as the oracle recorded it (crates/oracle/cases/gnu-r.txt): the release ry bundles,
-        # built the way Posit's ubuntu-2404 package is, so that every numeric digit matches. nixpkgs
-        # ships another release with another BLAS, compiler and glibc, and each of those moves digits
-        # (.agents/memory/decisions.md, "CI runs in the flake's dev shell").
+        # built as tools/reference-r.sh builds it on Ubuntu 24.04, so that every digit matches.
+        # nixpkgs ships another release with another BLAS, compiler and glibc, and each of those
+        # moves digits (.agents/memory/decisions.md, "CI runs in the flake's dev shell").
         gnuR =
           pkgs:
           let
@@ -57,6 +60,13 @@
             # Ubuntu 24.04's reference LAPACK, the very binary the recordings loaded: La_library()
             # names liblapack.so.3.12.0. It calls BLAS through libblas.so.3, which R's own libRblas
             # shadows once R has loaded it, as on Ubuntu.
+            # Ubuntu 24.04's GCC is 13.3, and 13.4 no longer pairs up the two halves of a complex
+            # sum into one vector add, which swaps the operands and so whether NA or NaN wins
+            # (kernels__complex_na_nan_sums). The compiler comes from an older nixpkgs, wrapped
+            # against this one's glibc and libraries.
+            stdenv = pkgs.overrideCC pkgs.stdenv (
+              pkgs.wrapCC (import nixpkgs-gcc13-3 { inherit (pkgs.stdenv.hostPlatform) system; }).gcc13.cc
+            );
             lapack = pkgs.stdenv.mkDerivation {
               pname = "ubuntu-lapack";
               version = "3.12.0-3build1.1";
@@ -98,7 +108,7 @@
               sha256 = "1717ckqcn0xm31jhhwp5lp587xca28v8jpm18gs6a8p795ym7al0";
             };
           in
-          pkgs.gcc13Stdenv.mkDerivation {
+          stdenv.mkDerivation {
             pname = "gnu-r";
             version = self.lib.baseRVersion;
             src = self.lib.baseRSource pkgs;
@@ -106,9 +116,12 @@
               pkgs.gfortran13
               pkgs.pkg-config
               pkgs.perl
-              pkgs.which
               # configure checks date-time conversions against the time zone database.
               pkgs.tzdata
+              # The tools configure records in Renviron: PAGER for help pages, zip and unzip.
+              pkgs.less
+              pkgs.zip
+              pkgs.unzip
             ];
             # tools/dev-setup.sh's libraries for R; png() draws through cairo only with pango.
             buildInputs = with pkgs; [
@@ -138,9 +151,10 @@
               "--with-x"
               "--without-recommended-packages"
               "--disable-java"
-              "CC=${pkgs.gcc13}/bin/gcc"
-              "CXX=${pkgs.gcc13}/bin/g++"
               "FC=${pkgs.gfortran13}/bin/gfortran"
+              # Sys.which() runs the `which` configure found. Debian's prints a match the way PATH
+              # spells it (`./tool`), where GNU which prints an absolute path.
+              "WHICH=${pkgs.debianutils}/bin/which.debianutils"
               # glibc 2.41 added these, and R calls glibc's where it finds them; the recordings'
               # glibc 2.39 had none, so R used its own, which round differently.
               "ac_cv_func_atanpi=no"
@@ -154,6 +168,7 @@
             postInstall = ''
               HOME="$TMPDIR" "$out/bin/R" CMD INSTALL ${rlang}
             '';
+            passthru = { inherit stdenv; };
             meta = {
               mainProgram = "R";
               platforms = lib.platforms.linux;
@@ -364,11 +379,10 @@
         let
           pkgs = self.lib.makePkgs system nixpkgs;
           gnuR = self.lib.gnuR pkgs;
-          # GCC 13, the compiler of the ubuntu-2404 GNU R the oracle recorded, so that C an oracle
-          # case compiles orders NA and NaN as there.
+          # GNU R's own compiler, so that C a test compiles orders NA and NaN as GNU R does.
           makeShell =
             rustToolchain: packages:
-            (pkgs.mkShell.override { stdenv = pkgs.gcc13Stdenv; }) {
+            (pkgs.mkShell.override { inherit (gnuR) stdenv; }) {
               # libR links zlib, bzip2 and xz (crates/libr/build.rs).
               buildInputs = [
                 pkgs.zlib
