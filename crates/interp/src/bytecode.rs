@@ -1299,7 +1299,8 @@ unsafe fn compiler_locals(formals: Sexp, body: Sexp, enclosure: Sexp) -> R<FxHas
         .collect();
     let mut shadowed: SmallVec<[&str; 3]> = quoting.into_iter().collect();
     loop {
-        let found = assigned_names(formals, body, &shadowed)?;
+        let mut quoted = false;
+        let found = assigned_names(formals, body, &shadowed, &mut quoted)?;
         let previous = shadowed.len();
         shadowed = quoting
             .into_iter()
@@ -1310,7 +1311,8 @@ unsafe fn compiler_locals(formals: Sexp, body: Sexp, enclosure: Sexp) -> R<FxHas
             .map(|(name, _)| name)
             .collect();
         // GNU R stops when the count of shadowed names repeats, not the names themselves.
-        if shadowed.len() == previous {
+        // Without a `local`, `quote` or `expression` call the next pass would find the same.
+        if shadowed.len() == previous || !quoted {
             let mut locals = found;
             let mut formal = formals;
             while formal.kind() == SexpType::Pairlist {
@@ -1338,8 +1340,14 @@ unsafe fn is_base_variable(symbol: Sexp, enclosure: Sexp) -> bool {
 }
 
 /// One pass of GNU R's `findLocalsList1` over a function's formals' defaults and body, with the
-/// names in `shadowed` searched inside.
-unsafe fn assigned_names(formals: Sexp, body: Sexp, shadowed: &[&str]) -> R<FxHashSet<Sexp>> {
+/// names in `shadowed` searched inside. Sets `quoting` when it meets a call of one of those
+/// names, without which the result does not depend on `shadowed`.
+unsafe fn assigned_names(
+    formals: Sexp,
+    body: Sexp,
+    shadowed: &[&str],
+    quoting: &mut bool,
+) -> R<FxHashSet<Sexp>> {
     let mut found = FxHashSet::default();
     let mut todo: Vec<Sexp> = Vec::new();
     let mut formal = formals;
@@ -1355,10 +1363,8 @@ unsafe fn assigned_names(formals: Sexp, body: Sexp, shadowed: &[&str]) -> R<FxHa
         let head = expression.car();
         let arguments = expression.cdr();
         let name = match head.kind() {
-            SexpType::Symbol => Some(symbol_name(head).to_string()),
-            SexpType::String if values::length(head) >= 1 => {
-                values::first_string(head).map(|text| text.to_string())
-            }
+            SexpType::Symbol => Some(symbol_name(head)),
+            SexpType::String if values::length(head) >= 1 => values::first_string(head),
             _ => None,
         };
         let Some(name) = name else {
@@ -1366,7 +1372,7 @@ unsafe fn assigned_names(formals: Sexp, body: Sexp, shadowed: &[&str]) -> R<FxHa
             push_items(arguments, &mut todo);
             continue;
         };
-        match name.as_str() {
+        match &*name {
             "=" | "<-" => {
                 if let Some(symbol) = assigned_variable(arguments.car()) {
                     found.insert(symbol);
@@ -1392,12 +1398,14 @@ unsafe fn assigned_names(formals: Sexp, body: Sexp, shadowed: &[&str]) -> R<FxHa
             }
             "function" | "~" => {}
             "local" => {
+                *quoting = true;
                 if shadowed.contains(&"local") || values::pairlist_length(arguments) != 1 {
                     push_items(arguments, &mut todo);
                 }
             }
             "expression" | "quote" => {
-                if shadowed.contains(&name.as_str()) {
+                *quoting = true;
+                if shadowed.contains(&&*name) {
                     push_items(arguments, &mut todo);
                 }
             }
@@ -1568,11 +1576,13 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         sites: None,
         hoisted: Vec::new(),
         preguarded: Vec::new(),
-        binding: promise_binding(function)?,
+        binding: None,
+        deferred_binding: function,
     };
+    let items = values::pairlist_items(arguments);
     let heap = crate::heap();
     let mut list = nil();
-    for (tag, value) in values::pairlist_items(arguments).iter().rev() {
+    for (tag, value) in items.iter().rev() {
         let value = if compiles_as_promise(*value) {
             compiler.code.clear();
             compiler.constants.clear();
@@ -2102,6 +2112,10 @@ struct Compiler {
     /// ([`Compiler::bound_base`]) and compiles its nested functions at once. `None` keeps a
     /// guard on every base function, which looks the name up as the code runs.
     binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
+    /// For promise code, the function whose frame it runs in, until [`Compiler::force_binding`]
+    /// fills `binding` from that function's locals, and `NULL` otherwise. Finding the locals
+    /// walks the function's whole body, so it waits for a call that could bind.
+    deferred_binding: Sexp,
 }
 
 /// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
@@ -2272,6 +2286,7 @@ unsafe fn compile_unreported(
         hoisted: Vec::new(),
         preguarded: Vec::new(),
         binding,
+        deferred_binding: nil(),
     };
     if compiler.local_symbols.is_some() {
         let mut formals = Vec::new();
@@ -3346,17 +3361,34 @@ impl Compiler {
     /// looks the name up as it runs: always for code compiled at a time GNU R would not have
     /// compiled it, and otherwise when the name is one of the function's locals or of an
     /// enclosing function's, or [`base_binding_at_compile`] or [`handler_binds`] says so.
-    unsafe fn bound_base(&self, call: Sexp, head: Sexp) -> R<Option<Sexp>> {
-        let Some(frames) = &self.binding else {
-            return Ok(None);
-        };
-        if head.kind() != SexpType::Symbol || frames.iter().any(|frame| frame.contains(&head)) {
+    unsafe fn bound_base(&mut self, call: Sexp, head: Sexp) -> R<Option<Sexp>> {
+        if head.kind() != SexpType::Symbol
+            || (self.binding.is_none() && self.deferred_binding == nil())
+        {
             return Ok(None);
         }
         let Some(value) = base_binding_at_compile(head, self.enclosure) else {
             return Ok(None);
         };
-        Ok(handler_binds(&symbol_name(head), call, self.enclosure).then_some(value))
+        if !handler_binds(&symbol_name(head), call, self.enclosure) {
+            return Ok(None);
+        }
+        self.force_binding()?;
+        let Some(frames) = &self.binding else {
+            return Ok(None);
+        };
+        Ok((!frames.iter().any(|frame| frame.contains(&head))).then_some(value))
+    }
+
+    /// Fills `binding` for promise code from its function's locals, the first time a call
+    /// could bind (see `deferred_binding`).
+    unsafe fn force_binding(&mut self) -> R<()> {
+        if self.deferred_binding != nil() {
+            let function = self.deferred_binding;
+            self.deferred_binding = nil();
+            self.binding = promise_binding(function)?;
+        }
+        Ok(())
     }
 
     /// Compiles what runs when one of `guards` fails: the general evaluation of `call` into
@@ -5518,6 +5550,7 @@ impl Compiler {
     /// code that binds its base functions, the body compiled now against this function's
     /// compile-time frames, as GNU R's compiler compiles a function's nested functions with it.
     unsafe fn nested_body(&mut self, formals: Sexp, body: Sexp, srcref: Sexp) -> R<u32> {
+        self.force_binding()?;
         let Some(frames) = &self.binding else {
             return Ok(self.constant(body));
         };
