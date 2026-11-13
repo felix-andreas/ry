@@ -195,7 +195,7 @@ class TypedSuite(unittest.TestCase):
         self.assertEqual(result["checksum"], "42")
         self.assertGreater(runner.compile_seconds(program)["rust"], 0.0)
         self.assertNotIn("ry_typed", runner.compile_seconds(program))
-        self.assertGreaterEqual(result["cold"], 0.0)
+        self.assertGreaterEqual(result["first"], 0.0)
         self.assertGreaterEqual(result["seconds"], 0.0)
         refused = runner.run(program, bench.Engine("rust", "Rust", None, dict(os.environ, RY_BENCH_REPEAT="none")))
         self.assertEqual(refused, {"seconds": None, "reason": "RY_BENCH_REPEAT must be a positive whole number, not `none`"})
@@ -216,7 +216,7 @@ class PublicSuite(unittest.TestCase):
         program = {"id": "loop_2", "source": str(directory / "loop_2.R"),
                    "typed_source": str(directory / "loop.typed.R")}
         # The engine prints a line for each name, so only the right one gives these numbers.
-        engine = argparse.Namespace(typed=True, env=dict(os.environ), command=[
+        engine = argparse.Namespace(typed=True, ahead=False, env=dict(os.environ), command=[
             sys.executable, "-c", "print('loop 1:2 0.5'); print('loop_2 3:4 9.0')"])
         runner = bench.PublicRunner("public", None)
         self.addCleanup(runner.close)
