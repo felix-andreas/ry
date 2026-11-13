@@ -109,6 +109,17 @@ the host's store", has the shape and the measurements behind this list.
   cloned sets per file. Keys should be `Symbol`s.
 - **The server mirrors a tracked query by hand** (`attached_by_file` in `Worker`,
   `server.rs`). Read `file_attached_namespaces` instead.
+- **`item_links` sorts its names and edges by `Symbol::index()`**, which is interning order, and
+  parallel workers intern in a different order on every run. Every reader is order-insensitive
+  today. Sort by the name's text, or by first use in the item, before a reader depends on the
+  order.
+- **Two per-body facts in `check.rs` are sized to the whole item**: the `superassign_seeds`
+  column and the `callees` bitset are allocated at the item's binding count for every function
+  body or bracket query that asks. Size them to the body, or collect once per item.
+- **`TreeStore` is one process-wide mutex**, taken by every `parse` and `item_node`, and two
+  workers that miss the same file both parse it. Shard the store by file id and let the second
+  worker wait for the first one's tree. Not measured as a cost on the finance bench at four
+  cores.
 
 ## Open: one switch for every fast path
 
