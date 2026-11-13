@@ -170,11 +170,16 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 optional: *optional,
                 default: None,
             })
-            .collect();
-        let function = FunctionType::declared(&[], &named, rest.map(|element| RestParameter {
+            .collect::<Vec<_>>();
+        let function = FunctionType::declared(
+            &[],
+            &named,
+            rest.map(|element| RestParameter {
                 element,
                 preceding_named: params.len(),
-            }), ret.unwrap_or_else(|| unknown(db)));
+            }),
+            ret.unwrap_or_else(|| unknown(db)),
+        );
         annotation.declared = Some(TypeScheme {
             binders: lowering.scheme_binders(forall),
             body: Ty::new(db, TyKind::Function(&function)),
@@ -1164,8 +1169,8 @@ impl<'db> Lowering<'db> {
                     .children()
                     .filter(|c| is_type_kind(c.kind()))
                     .map(|item| self.lower_type(&item))
-                    .collect();
-                Ty::new(self.db, TyKind::Tuple(items))
+                    .collect::<Vec<_>>();
+                Ty::new(self.db, TyKind::Tuple(&items))
             }
             SyntaxKind::TYPE_RECORD => {
                 let frame = frame_kind(node);
@@ -1229,13 +1234,13 @@ impl<'db> Lowering<'db> {
                             optional: false,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 Ty::new(
                     self.db,
                     if let Some(kind) = frame {
-                        TyKind::Frame(kind, Some(fields))
+                        TyKind::Frame(kind, Some(&fields))
                     } else {
-                        TyKind::Record(fields)
+                        TyKind::Record(&fields)
                     },
                 )
             }
@@ -1309,8 +1314,8 @@ impl<'db> Lowering<'db> {
             .children()
             .filter(|c| is_type_kind(c.kind()))
             .map(|item| self.lower_type(&item))
-            .collect();
-        Ty::new(self.db, TyKind::NativeTuple(items))
+            .collect::<Vec<_>>();
+        Ty::new(self.db, TyKind::NativeTuple(&items))
     }
 
     fn lower_native_fields(&mut self, node: &SyntaxNode, container: &str) -> Ty<'db> {

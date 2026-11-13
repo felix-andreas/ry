@@ -1,5 +1,5 @@
 use {
-    crate::{Db, hir::Symbol},
+    crate::{Db, hir::Symbol, intern::IdTable},
     bumpalo::Bump,
     rustc_hash::{FxBuildHasher, FxHashMap},
     smallvec::SmallVec,
@@ -10,11 +10,6 @@ use {
         marker::PhantomData,
         mem,
         num::NonZeroU32,
-        ptr,
-        sync::{
-            Mutex,
-            atomic::{AtomicPtr, AtomicU64, Ordering},
-        },
     },
     thin_vec::ThinVec,
 };
@@ -620,7 +615,6 @@ pub struct RestParameter<'db> {
     pub preceding_named: usize,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, salsa::SalsaValue)]
 pub enum Constraint {
     #[default]
@@ -1155,8 +1149,7 @@ fn rebuilt_type<'db>(
             TyKind::Frame(*frame, Some(&mapped_fields(columns, map))),
         ),
         TyKind::Function(function) => {
-            let positional: TypeList<'db> =
-                function.positional.iter().map(|&ty| map(ty)).collect();
+            let positional: TypeList<'db> = function.positional.iter().map(|&ty| map(ty)).collect();
             let named: SmallVec<[Parameter<'db>; 8]> = function
                 .named
                 .iter()
@@ -1323,96 +1316,35 @@ struct TypeFacts {
     applied_names: &'static [Name<'static>],
 }
 
-/// Kind to id. A lookup reads it without a lock, and the table in use is replaced, never
-/// changed in place beyond filling an empty slot, when it grows.
-static TYPE_TABLE: AtomicPtr<TypeTable> = AtomicPtr::new(ptr::null_mut());
-
-/// The one writer of the store. A type is built once and found ever after, so the lock is
-/// taken a few thousand times in a whole project check.
-static TYPE_WRITER: Mutex<Option<TypeWriter>> = Mutex::new(None);
-
-struct TypeWriter {
-    /// Holds every stored type's children. Never reset, which is what makes a slice into it
-    /// valid for the life of the process.
-    arena: Bump,
-    count: usize,
-}
-
-/// An open-addressing table. A slot is empty (0) or holds the upper half of a kind's hash
-/// above the type's id, so a probe compares kinds only where the hashes agree. At most half
-/// the slots are ever filled, so every probe ends at an empty one.
-struct TypeTable {
-    slots: Box<[AtomicU64]>,
-}
-
-impl TypeTable {
-    fn find(&self, hash: u64, kind: &TyKind<'_>) -> Option<Ty<'static>> {
-        let mask = self.slots.len() - 1;
-        let mut position = hash as usize & mask;
-        loop {
-            let slot = self.slots[position].load(Ordering::Acquire);
-            if slot == 0 {
-                return None;
-            }
-            if slot >> 32 == hash >> 32 {
-                let candidate = Ty::from_bits(slot as u32);
-                if candidate.kind(&()) == kind {
-                    return Some(candidate);
-                }
-            }
-            position = (position + 1) & mask;
-        }
-    }
-
-    fn place(&self, hash: u64, ty: Ty<'_>) {
-        let mask = self.slots.len() - 1;
-        let mut position = hash as usize & mask;
-        while self.slots[position].load(Ordering::Relaxed) != 0 {
-            position = (position + 1) & mask;
-        }
-        // A reader that sees the slot may read the columns at this id, which the writer
-        // filled before this store.
-        self.slots[position].store(
-            (hash >> 32) << 32 | u64::from(ty.bits.get()),
-            Ordering::Release,
-        );
-    }
-}
-
-const INITIAL_TYPE_SLOTS: usize = 1 << 12;
+/// Kind to id, and behind its lock the arena that holds every stored type's children. The
+/// arena is never reset, which is what makes a slice into it valid for the life of the
+/// process. A type is built once and found ever after, so the lock is taken a few thousand
+/// times in a whole project check.
+static TYPES: IdTable<Option<Bump>> = IdTable::new(None);
 
 fn intern_type<'db>(kind: TyKind<'_>) -> Ty<'db> {
     let hash = FxBuildHasher.hash_one(kind);
-    // SAFETY: a published table is leaked, so the pointer is null or valid forever.
-    let table = unsafe { TYPE_TABLE.load(Ordering::Acquire).as_ref() };
-    match table.and_then(|table| table.find(hash, &kind)) {
-        Some(found) => found,
+    let holds = |bits: NonZeroU32| *Ty::<'static>::from_bits(bits.get()).kind(&()) == kind;
+    match TYPES.find(hash, holds) {
+        Some(bits) => Ty::from_bits(bits.get()),
         None => insert_type(kind, hash),
     }
 }
 
 #[cold]
 fn insert_type<'db>(kind: TyKind<'_>, hash: u64) -> Ty<'db> {
-    // A poisoned lock means another thread died inside this function. Every step that
-    // can panic comes before the columns and the table change, so they are still coherent.
-    let mut writer = TYPE_WRITER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let writer = writer.get_or_insert_with(|| TypeWriter {
-        arena: Bump::new(),
-        count: 0,
-    });
-    // SAFETY: as in `intern_type`.
-    let mut table = unsafe { TYPE_TABLE.load(Ordering::Acquire).as_ref() };
-    // Another thread may have stored the kind between this thread's lookup and the lock.
-    if let Some(found) = table.and_then(|table| table.find(hash, &kind)) {
-        return found;
+    let mut writer = TYPES.write();
+    let holds = |bits: NonZeroU32| *Ty::<'static>::from_bits(bits.get()).kind(&()) == kind;
+    if let Some(bits) = writer.find(hash, holds) {
+        return Ty::from_bits(bits.get());
     }
-    let index = writer.count + LEAVES;
+    let count = writer.count();
+    let index = count + LEAVES;
     assert!(
         index <= INDEX_BITS as usize,
         "the type store is full: it holds at most 2^28 distinct types"
     );
+    let arena: &Bump = writer.state().get_or_insert_with(Bump::new);
 
     let mut size: u32 = 1;
     let mut contents = match kind {
@@ -1448,32 +1380,14 @@ fn insert_type<'db>(kind: TyKind<'_>, hash: u64) -> Ty<'db> {
     let applied_names = if applied.len() == widest.len() {
         widest
     } else {
-        let stored: &[Name<'static>] = writer.arena.alloc_slice_copy(&applied);
+        let stored: &[Name<'static>] = arena.alloc_slice_copy(&applied);
         // SAFETY: the arena lives in a static and is never reset, so the slice is immortal.
         unsafe { mem::transmute::<&[Name<'static>], &'static [Name<'static>]>(stored) }
     };
-    let stored = stored_kind(&writer.arena, kind);
+    let stored = stored_kind(arena, kind);
     // SAFETY: the kind's slices now point into the arena, which is immortal as above, and
     // the lifetimes of `Ty` and `Name` are phantom.
     let stored = unsafe { mem::transmute::<TyKind<'_>, TyKind<'static>>(stored) };
-
-    if (writer.count + 1) * 2 > table.map_or(0, |table| table.slots.len()) {
-        let slots = table.map_or(INITIAL_TYPE_SLOTS, |table| table.slots.len() * 2);
-        // The table it replaces stays allocated, because a lookup on another thread may
-        // still be probing it. The retired tables together are smaller than the live one.
-        let grown: &'static TypeTable = Box::leak(Box::new(TypeTable {
-            slots: (0..slots).map(|_| AtomicU64::new(0)).collect(),
-        }));
-        for slot in table.iter().flat_map(|table| table.slots.iter()) {
-            let slot = slot.load(Ordering::Relaxed);
-            if slot != 0 {
-                let ty = Ty::<'static>::from_bits(slot as u32);
-                grown.place(FxBuildHasher.hash_one(*ty.kind(&())), ty);
-            }
-        }
-        TYPE_TABLE.store(ptr::from_ref(grown).cast_mut(), Ordering::Release);
-        table = Some(grown);
-    }
 
     let pushed = KINDS.push(stored);
     let pushed_facts = FACTS.push(TypeFacts {
@@ -1481,15 +1395,16 @@ fn insert_type<'db>(kind: TyKind<'_>, hash: u64) -> Ty<'db> {
         applied_names,
     });
     debug_assert!(
-        pushed == writer.count && pushed_facts == writer.count,
+        pushed == count && pushed_facts == count,
         "the store's columns are pushed together under the writer lock"
     );
-    writer.count += 1;
-    let ty = Ty::from_bits(index as u32 | contents);
-    if let Some(table) = table {
-        table.place(hash, ty);
-    }
-    ty
+    let Some(bits) = NonZeroU32::new(index as u32 | contents) else {
+        unreachable!("a stored type's index starts past the leaves")
+    };
+    writer.insert(hash, bits, |held| {
+        FxBuildHasher.hash_one(*Ty::<'static>::from_bits(held.get()).kind(&()))
+    });
+    Ty::from_bits(bits.get())
 }
 
 /// `kind` with every list it borrows copied into `arena`.
@@ -1758,28 +1673,29 @@ mod tests {
             (var, pair, function)
         }
 
-        let per_thread: Vec<Vec<(Ty<'static>, Ty<'static>, Ty<'static>)>> = thread::scope(|scope| {
-            let workers: Vec<_> = (0..THREADS)
-                .map(|worker| {
-                    scope.spawn(move || {
-                        let mut built = vec![None; TYPES as usize];
-                        // A stride coprime to the count visits every step once, in an
-                        // order that differs per thread.
-                        let stride = [1, 3, 7, 9, 11, 13, 17, 19][worker];
-                        let mut step = worker as u32 * 97 % TYPES;
-                        for _ in 0..TYPES {
-                            built[step as usize] = Some(build(step));
-                            step = (step + stride) % TYPES;
-                        }
-                        built.into_iter().flatten().collect::<Vec<_>>()
+        let per_thread: Vec<Vec<(Ty<'static>, Ty<'static>, Ty<'static>)>> =
+            thread::scope(|scope| {
+                let workers: Vec<_> = (0..THREADS)
+                    .map(|worker| {
+                        scope.spawn(move || {
+                            let mut built = vec![None; TYPES as usize];
+                            // A stride coprime to the count visits every step once, in an
+                            // order that differs per thread.
+                            let stride = [1, 3, 7, 9, 11, 13, 17, 19][worker];
+                            let mut step = worker as u32 * 97 % TYPES;
+                            for _ in 0..TYPES {
+                                built[step as usize] = Some(build(step));
+                                step = (step + stride) % TYPES;
+                            }
+                            built.into_iter().flatten().collect::<Vec<_>>()
+                        })
                     })
-                })
-                .collect();
-            workers
-                .into_iter()
-                .map(|worker| worker.join().expect("an interning thread panicked"))
-                .collect()
-        });
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("an interning thread panicked"))
+                    .collect()
+            });
 
         let first = &per_thread[0];
         assert_eq!(first.len(), TYPES as usize);
@@ -1801,7 +1717,7 @@ mod tests {
             assert_eq!(signature.positional, &[pair, var]);
             assert_eq!(signature.ret, pair);
             assert!(contains_inference_var_bits(function));
-            assert_eq!(stored_size(function), 9);
+            assert_eq!(stored_size(function), 8);
         }
     }
 

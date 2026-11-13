@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod exhaustiveness;
 pub mod hir;
 pub mod infer;
+mod intern;
 pub mod lints;
 pub mod load_index;
 pub mod metadata;

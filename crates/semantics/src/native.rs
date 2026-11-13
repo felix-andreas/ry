@@ -565,7 +565,7 @@ pub struct Judged<'a, 'db> {
     /// Each expression's resolved type, where the check recorded one.
     pub types: &'a dyn Fn(ExprId) -> Option<Ty<'db>>,
     /// The declared signature of each function literal that has one.
-    pub signatures: &'a Column<'a, ExprId, FunctionType<'db>>,
+    pub signatures: &'a Column<'a, ExprId, &'db FunctionType<'db>>,
     /// The function literals whose signature only a type alias gives, so that no type is
     /// written where the runtime reads one (see `Annotation::written_signature`).
     pub aliased: &'a Bitset<'a, ExprId>,

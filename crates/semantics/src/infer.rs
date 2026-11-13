@@ -11,10 +11,11 @@ use {
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar, Ty,
             TyKind, array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
-            map_child_types, native_scalar, scalar, substitute_rigid, union_of, unknown,
+            map_child_types, native_scalar, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{
         cell::{Cell, RefCell},
         mem,
@@ -67,17 +68,21 @@ pub struct InferenceTable<'db> {
     /// Declared bounds of rigid binders in scope (`<T: numeric>`): a rigid `T` is
     /// not a numeric atom, so constraint admission needs its declared bound.
     pub rigid_constraints: FxHashMap<Name<'db>, Constraint>,
-    /// Valid for one binding epoch; only subtrees whose resolution hit no cycle
-    /// cut are stored.
-    resolve_cache: RefCell<(u64, FxHashMap<Ty<'db>, Ty<'db>>)>,
-    epoch: Cell<u64>,
-    /// The variables and aliases `resolve` is expanding, kept between calls so the millions of
-    /// resolutions an item check runs do not each allocate a stack.
-    resolve_stack: RefCell<Vec<InferenceVar>>,
-    /// `definitions` answers through two salsa fetches and a scan of the file's
-    /// definitions, and relations ask about the same few names hundreds of times per item.
-    definition_cache: RefCell<FxHashMap<Name<'db>, Option<&'db NamedDefinition<'db>>>>,
+    named_types: RefCell<NamedTypes<'db>>,
 }
+
+/// What each type name the item has asked about is, in the order it first asked. An item
+/// names a handful of types and asks about each hundreds of times, while `definitions`
+/// answers through two salsa fetches and a scan of the file's definitions, so the answers
+/// are kept for the item: two parallel lists, searched front to back.
+#[derive(Debug, Default)]
+struct NamedTypes<'db> {
+    names: SmallVec<[Name<'db>; 8]>,
+    definitions: SmallVec<[Option<&'db NamedDefinition<'db>>; 8]>,
+}
+
+/// The variables and aliases one resolution is inside of, innermost last.
+type ResolutionStack = SmallVec<[InferenceVar; 16]>;
 
 thread_local! {
     /// Per thread, because a counter every checking thread bumps on each step costs more
@@ -93,6 +98,11 @@ pub fn resolve_calls() -> u64 {
 
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
+
+/// Types share subtrees, so a resolution that keeps no table of the subtrees it has done
+/// walks a shared one once per path, exponential in depth. The tree size bounds that walk,
+/// and up to this size it costs less than the table.
+const UNMEMOIZED_RESOLUTION_SIZE: u64 = 64;
 
 /// The name of the type an overload probe substitutes for an unchecked argument. Only `Any`
 /// and an unconstrained type variable accept it, and no source annotation can spell it.
@@ -148,7 +158,6 @@ impl<'db> InferenceTable<'db> {
     }
 
     pub fn rollback(&mut self, snapshot: Snapshot) {
-        self.epoch.set(self.epoch.get() + 1);
         while self.undo.len() > snapshot.undo {
             let (var, previous) = self.undo.pop().expect("undo length checked");
             if (var.0 as usize) < snapshot.entries {
@@ -167,7 +176,6 @@ impl<'db> InferenceTable<'db> {
     }
 
     fn set(&mut self, var: InferenceVar, entry: Entry<'db>) {
-        self.epoch.set(self.epoch.get() + 1);
         let previous = mem::replace(&mut self.entries[var.0 as usize], entry);
         self.undo.push((var, previous));
     }
@@ -192,11 +200,13 @@ impl<'db> InferenceTable<'db> {
         name: Name<'db>,
     ) -> Option<&'db NamedDefinition<'db>> {
         let table = self.definitions?;
-        if let Some(cached) = self.definition_cache.borrow().get(&name) {
-            return *cached;
+        let mut named_types = self.named_types.borrow_mut();
+        if let Some(position) = named_types.names.iter().position(|&seen| seen == name) {
+            return named_types.definitions[position];
         }
         let definition = table.get(db, name);
-        self.definition_cache.borrow_mut().insert(name, definition);
+        named_types.names.push(name);
+        named_types.definitions.push(definition);
         definition
     }
 
@@ -240,40 +250,41 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
-    /// Sizes the resolution cache up front, for a table about to check `expressions`
-    /// expressions: grown from empty, it rehashes several times in every item check.
-    pub fn reserve_resolutions(&mut self, expressions: usize) {
-        self.resolve_cache.get_mut().1.reserve(expressions);
-    }
-
     /// Also expands aliases. Self-referential bindings and aliases cut to
     /// `Unknown` instead of expanding forever.
     pub fn resolve(&self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
-        if !ty.may_resolve() {
+        if !self.resolves(db, ty) {
             return ty;
         }
-        {
-            let mut cache = self.resolve_cache.borrow_mut();
-            if cache.0 != self.epoch.get() {
-                cache.0 = self.epoch.get();
-                cache.1.clear();
-            }
+        let mut visiting = ResolutionStack::new();
+        if type_size(db, ty) <= UNMEMOIZED_RESOLUTION_SIZE {
+            return self.resolve_rec(db, ty, &mut visiting, None).0;
         }
-        // Taken rather than borrowed, so a resolution nested inside this one gets its own stack.
-        let mut visiting = mem::take(&mut *self.resolve_stack.borrow_mut());
-        let resolved = self.resolve_rec(db, ty, &mut visiting).0;
-        visiting.clear();
-        *self.resolve_stack.borrow_mut() = visiting;
-        resolved
+        self.resolve_rec(db, ty, &mut visiting, Some(&mut FxHashMap::default()))
+            .0
     }
 
-    /// The bool is whether the subtree is clean (no cycle cut beneath it): only
-    /// clean results are position-independent enough to memoize.
+    /// Whether resolving can change `ty`: it holds a variable, or applies a name that is an
+    /// alias in this item's view. Both are answered from the type's id and the names it
+    /// applies, without walking it.
+    fn resolves(&self, db: &'db dyn Db, ty: Ty<'db>) -> bool {
+        ty.may_resolve()
+            && (contains_inference_var(db, ty)
+                || ty.applied_names().iter().any(|&name| {
+                    self.definition(db, name)
+                        .is_some_and(|definition| definition.alias)
+                }))
+    }
+
+    /// The bool is whether the subtree is clean (no cycle cut beneath it): only clean results
+    /// are the same wherever the subtree occurs, so only those enter `done`, the subtrees
+    /// this resolution has finished.
     fn resolve_rec(
         &self,
         db: &'db dyn Db,
         ty: Ty<'db>,
-        visiting: &mut Vec<InferenceVar>,
+        visiting: &mut ResolutionStack,
+        mut done: Option<&mut FxHashMap<Ty<'db>, Ty<'db>>>,
     ) -> (Ty<'db>, bool) {
         RESOLVE_CALLS.set(RESOLVE_CALLS.get() + 1);
         if let TyKind::Var(var) = ty.kind(db) {
@@ -283,24 +294,24 @@ impl<'db> InferenceTable<'db> {
                 return (shallow, true);
             }
             if visiting.contains(&root) {
-                return (Ty::new(db, TyKind::Unknown), false);
+                return (unknown(db), false);
             }
             visiting.push(root);
-            let resolved = self.resolve_rec(db, shallow, visiting);
+            let resolved = self.resolve_rec(db, shallow, visiting, done);
             visiting.pop();
             return resolved;
         }
 
-        if !ty.may_resolve() {
+        if !self.resolves(db, ty) {
             return (ty, true);
         }
-        if let Some(&hit) = self.resolve_cache.borrow().1.get(&ty) {
-            return (hit, true);
+        if let Some(&finished) = done.as_deref().and_then(|done| done.get(&ty)) {
+            return (finished, true);
         }
 
         let mut clean = true;
         let resolved = map_child_types(db, ty, &mut |child| {
-            let (child, child_clean) = self.resolve_rec(db, child, visiting);
+            let (child, child_clean) = self.resolve_rec(db, child, visiting, done.as_deref_mut());
             clean &= child_clean;
             child
         });
@@ -318,7 +329,8 @@ impl<'db> InferenceTable<'db> {
                 let expanded = apply_definition(db, definition, arguments);
                 // Sentinel slot: alias depth counts against the variable cycle stack.
                 visiting.push(InferenceVar(u32::MAX));
-                let (expanded, expanded_clean) = self.resolve_rec(db, expanded, visiting);
+                let (expanded, expanded_clean) =
+                    self.resolve_rec(db, expanded, visiting, done.as_deref_mut());
                 visiting.pop();
                 (expanded, clean && expanded_clean)
             }
@@ -326,8 +338,8 @@ impl<'db> InferenceTable<'db> {
             Some(_) => (resolved, false),
             None => (resolved, clean),
         };
-        if clean {
-            self.resolve_cache.borrow_mut().1.insert(ty, resolved);
+        if clean && let Some(done) = done {
+            done.insert(ty, resolved);
         }
         (resolved, clean)
     }
@@ -548,10 +560,10 @@ impl<'db> InferenceTable<'db> {
                 {
                     return Err(UnifyError::Mismatch(a, b));
                 }
-                for (&left, &right) in left.positional.iter().zip(&right.positional.iter()) {
+                for (&left, &right) in left.positional.iter().zip(right.positional.iter()) {
                     self.unify(db, left, right)?;
                 }
-                for (left, right) in left.named.iter().zip(&right.named.iter()) {
+                for (left, right) in left.named.iter().zip(right.named.iter()) {
                     self.unify(db, left.ty, right.ty)?;
                 }
                 if let (Some(left), Some(right)) = (&left.variadic, &right.variadic) {
@@ -872,15 +884,14 @@ impl<'db> InferenceTable<'db> {
                 }
             )
         {
-            let members = members.clone();
             let snapshot = self.snapshot();
             if self.unify(db, actual, expected).is_ok() {
                 return true;
             }
             self.rollback(snapshot);
             return members
-                .into_iter()
-                .any(|member| self.compatible_probe(db, actual, member, depth + 1));
+                .iter()
+                .any(|&member| self.compatible_probe(db, actual, member, depth + 1));
         }
         // A scalar is a length-one vector in R, so a variable that a scalar use bounded (`1:n`)
         // fills a vector parameter as its element, as a scalar argument does.
@@ -1662,7 +1673,7 @@ pub fn apply_definition<'db>(
     if definition.parameters.is_empty() {
         return definition.body;
     }
-    let substitution: Vec<_> = definition
+    let substitution: SmallVec<[(Name<'db>, Ty<'db>); 4]> = definition
         .parameters
         .iter()
         .enumerate()
@@ -2120,22 +2131,32 @@ mod tests {
         let int = scalar(&db, Atomic::Integer);
         let chr = scalar(&db, Atomic::Character);
         let var = table.fresh_ty(&db, Constraint::Unconstrained);
-        let tuple_with_var = Ty::new(&db, TyKind::Tuple(vec![var, chr]));
-        let tuple_expected = Ty::new(&db, TyKind::Tuple(vec![int, int]));
+        let tuple_with_var = Ty::new(&db, TyKind::Tuple(&[var, chr]));
+        let tuple_expected = Ty::new(&db, TyKind::Tuple(&[int, int]));
         assert!(!table.compatible(&db, tuple_with_var, tuple_expected));
         assert!(matches!(table.resolve(&db, var).kind(&db), TyKind::Var(_)));
         let named_lambda = Ty::new(
             &db,
-            TyKind::Function(&FunctionType::declared(&[], &[Parameter {
+            TyKind::Function(&FunctionType::declared(
+                &[],
+                &[Parameter {
                     name: Name::new(&db, "x"),
                     ty: int,
                     optional: false,
                     default: None,
-                }], None, int)),
+                }],
+                None,
+                int,
+            )),
         );
         let positional_interface = Ty::new(
             &db,
-            TyKind::Function(&FunctionType::declared(&[int], &[], None, scalar(&db, Atomic::Double))),
+            TyKind::Function(&FunctionType::declared(
+                &[int],
+                &[],
+                None,
+                scalar(&db, Atomic::Double),
+            )),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
     }

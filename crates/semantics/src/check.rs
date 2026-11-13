@@ -31,10 +31,11 @@ use {
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
             Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter, RecordField,
-            ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, array,
-            array_element, column_type, conflicting_tags, contains_inference_var, erase_vars,
-            for_each_child_type, is_ry_value_type, is_tag_type, map_child_types, native_record,
-            native_scalar, null, scalar, substitute_rigid, type_size, union_of, unknown,
+            ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeList, TypeScheme, any,
+            array, array_element, column_type, conflicting_tags, contains_inference_var,
+            erase_vars, for_each_child_type, is_ry_value_type, is_tag_type, map_child_types,
+            native_record, native_scalar, null, scalar, substitute_rigid, type_size, union_of,
+            unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -799,7 +800,6 @@ fn check_item_in<'db>(
     let mut table = InferenceTable::default();
     let expressions = module.expression_count();
     let bindings = naming.bindings.len();
-    table.reserve_resolutions(expressions);
     if let Some(globals) = globals {
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
@@ -901,7 +901,7 @@ fn check_item_in<'db>(
         let declared_fn = annotation.filter(|a| !a.trusted).and_then(|a| {
             let declared = a.declared.as_ref()?;
             match declared.body.kind(db) {
-                TyKind::Function(function) => Some((declared.clone(), function.clone())),
+                TyKind::Function(function) => Some((declared.clone(), *function)),
                 _ => None,
             }
         });
@@ -1098,7 +1098,8 @@ fn check_item_in<'db>(
     let native_blockers = if context.record_strict_origins {
         // The declaration as written decides whether a function is judged, so a formal the
         // author left untyped keeps the function out.
-        let mut signatures: Column<ExprId, FunctionType<'db>> = Column::new_in(arena, expressions);
+        let mut signatures: Column<ExprId, &'db FunctionType<'db>> =
+            Column::new_in(arena, expressions);
         let mut aliased_signatures: Bitset<ExprId> = Bitset::new_in(arena, expressions);
         let declared_function = |annotation: &Annotation<'db>| {
             if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
@@ -1125,10 +1126,9 @@ fn check_item_in<'db>(
                 through_alias = true;
             }
             match body.kind(db) {
-                TyKind::Function(function) if !has_r_bound(declared) => Some((
-                    function.clone(),
-                    through_alias && !annotation.written_signature,
-                )),
+                TyKind::Function(function) if !has_r_bound(declared) => {
+                    Some((*function, through_alias && !annotation.written_signature))
+                }
                 _ => None,
             }
         };
@@ -3247,7 +3247,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     return None;
                 };
                 let expected_fields = unique_member(self.db, &candidates, |kind| match kind {
-                    TyKind::NativeRecord(fields) => Some(fields.clone()),
+                    TyKind::NativeRecord(fields) => Some(*fields),
                     _ => None,
                 })?;
                 if expected_fields.len() != found_fields.len() {
@@ -3275,15 +3275,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                     return None;
                 };
                 let expected_items = unique_member(self.db, &candidates, |kind| match kind {
-                    TyKind::NativeTuple(items) => Some(items.clone()),
+                    TyKind::NativeTuple(items) => Some(*items),
                     _ => None,
                 })?;
                 if expected_items.len() != found_items.len() || items.len() != found_items.len() {
                     return None;
                 }
                 let mut differing = Vec::new();
-                for ((&item, &expected_ty), &found_ty) in
-                    module[items].iter().zip(&expected_items.iter()).zip(&found_items.iter())
+                for ((&item, &expected_ty), &found_ty) in module[items]
+                    .iter()
+                    .zip(expected_items.iter())
+                    .zip(found_items.iter())
                 {
                     let expected_ty = self.table.resolve(self.db, expected_ty);
                     let found_ty = self.table.resolve(self.db, found_ty);
@@ -3815,27 +3817,27 @@ impl<'db, 'a> Checker<'db, 'a> {
                     self.db,
                     TyKind::Function(&FunctionType {
                         positional: &[],
-                        &named,
+                        named: &named,
                         variadic,
                         ret: return_ty,
                         inferred: true,
                         flag_return,
-                        quoted: module[parameters]
+                        quoted: &module[parameters]
                             .iter()
                             .filter(|parameter| uses.quotes(parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
-                            .collect(),
-                        &default_reads,
-                        missing_tested: module[parameters]
+                            .collect::<Vec<_>>(),
+                        default_reads: &default_reads,
+                        missing_tested: &module[parameters]
                             .iter()
                             .filter(|parameter| uses.missing_tested.contains(&parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
-                            .collect(),
-                        condition_only: self
+                            .collect::<Vec<_>>(),
+                        condition_only: &self
                             .condition_only_names(*body, &module[parameters])
                             .into_iter()
                             .map(|name| Name::new(self.db, name))
-                            .collect(),
+                            .collect::<Vec<_>>(),
                         null_unless,
                         reduces,
                         from_calls: false,
@@ -3901,8 +3903,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let items = module[items]
                     .iter()
                     .map(|&item| self.component(item))
-                    .collect();
-                Ty::new(self.db, TyKind::NativeTuple(items))
+                    .collect::<TypeList<'db>>();
+                Ty::new(self.db, TyKind::NativeTuple(&items))
             }
             ExpressionKind::Array(items) => self.infer_array_literal(&module[items]),
             ExpressionKind::Record(fields) => {
@@ -3913,7 +3915,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         name: Name::new(self.db, field.name),
                         ty: self.component(field.value),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 native_record(self.db, fields)
             }
             ExpressionKind::Tag { name, payload, .. } => {
@@ -5023,9 +5025,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             )
         {
             let written = members
-                .clone()
-                .into_iter()
-                .map(|member| {
+                .iter()
+                .map(|&member| {
                     self.write_replacement_step(lhs, step.clone(), value_expression, member, value)
                 })
                 .collect::<Vec<_>>();
@@ -5038,8 +5039,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             _ => None,
         };
         if let Some(field_name) = field_name {
-            return match prior.kind(self.db).clone() {
-                TyKind::Record(mut fields) => {
+            return match *prior.kind(self.db) {
+                TyKind::Record(fields) => {
+                    let mut fields = fields.to_vec();
                     match fields
                         .iter_mut()
                         .find(|field| field.name.text(self.db) == field_name)
@@ -5051,13 +5053,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                             optional: false,
                         }),
                     }
-                    Ty::new(self.db, TyKind::Record(fields))
+                    Ty::new(self.db, TyKind::Record(&fields))
                 }
                 // R's `f$x <- NULL` drops the column, as `:=` does.
                 TyKind::Frame(
                     kind @ (FrameKind::DataFrame | FrameKind::DataTable),
-                    Some(mut columns),
+                    Some(columns),
                 ) => {
+                    let mut columns = columns.to_vec();
                     let position = columns
                         .iter()
                         .position(|column| column.name.text(self.db) == field_name);
@@ -5077,7 +5080,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             optional: false,
                         }),
                     }
-                    Ty::new(self.db, TyKind::Frame(kind, Some(columns)))
+                    Ty::new(self.db, TyKind::Frame(kind, Some(&columns)))
                 }
                 // `x <- NULL; x$a <- 1` and `list()` both grow into a one-field list.
                 TyKind::Null => Ty::new(
@@ -5171,9 +5174,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             (&step, prior.kind(self.db))
             && *position < items.len()
         {
-            let mut items = items.clone();
+            let mut items = TypeList::from_slice(items);
             items[*position] = value;
-            return Ty::new(self.db, TyKind::Tuple(items));
+            return Ty::new(self.db, TyKind::Tuple(&items));
         }
         // R coerces the whole vector when the written value has a wider type, so
         // `prob <- rep(NA, n); prob[i] <- 0.5` leaves `prob` a `double[]`.
@@ -5563,8 +5566,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let items = self.module[items]
                     .iter()
                     .map(|_| self.fresh(Constraint::Unconstrained))
-                    .collect();
-                Some(Ty::new(self.db, TyKind::NativeTuple(items)))
+                    .collect::<TypeList<'db>>();
+                Some(Ty::new(self.db, TyKind::NativeTuple(&items)))
             }
             PatternKind::Record { fields, rest: None } => {
                 let fields = self.module[fields]
@@ -5573,7 +5576,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         name: Name::new(self.db, field.name),
                         ty: self.fresh(Constraint::Unconstrained),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 Some(native_record(self.db, fields))
             }
             _ => None,
@@ -5668,9 +5671,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             range: name_range,
         } = self.module[name];
         let subject = self.table.resolve(self.db, subject);
-        let members = match subject.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
-            _ => vec![subject],
+        let single = [subject];
+        let members: &[Ty<'db>] = match subject.kind(self.db) {
+            TyKind::Union(members) => members,
+            _ => &single,
         };
         let tags: Vec<(&str, Option<Ty<'db>>)> = members
             .iter()
@@ -5811,12 +5815,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         subject: Ty<'db>,
         component: impl Fn(&'db dyn Db, Ty<'db>) -> Option<Ty<'db>>,
     ) -> Ty<'db> {
-        let members = match subject.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
-            _ => vec![subject],
+        let single = [subject];
+        let members: &[Ty<'db>] = match subject.kind(self.db) {
+            TyKind::Union(members) => members,
+            _ => &single,
         };
         let mut found = Vec::with_capacity(members.len());
-        for member in members {
+        for &member in members {
             match component(self.db, member) {
                 Some(ty) => found.push(ty),
                 None => return unknown(self.db),
@@ -5839,9 +5844,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         if let TyKind::Union(members) = subject.kind(self.db) {
             return members
-                .clone()
-                .into_iter()
-                .any(|member| self.pattern_admits(pattern, member));
+                .iter()
+                .any(|&member| self.pattern_admits(pattern, member));
         }
         match &module.pattern(pattern).kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => true,
@@ -6034,8 +6038,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let items = module[*items]
                     .iter()
                     .map(|&item| self.infer(item))
-                    .collect();
-                Ty::new(self.db, TyKind::NativeTuple(items))
+                    .collect::<TypeList<'db>>();
+                Ty::new(self.db, TyKind::NativeTuple(&items))
             }
             ExpressionKind::Record(fields) => {
                 let fields = module[*fields]
@@ -6044,7 +6048,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         name: Name::new(self.db, field.name),
                         ty: self.infer(field.value),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 native_record(self.db, fields)
             }
             _ => return self.infer(payload),
@@ -6119,14 +6123,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         let operand_range = self.blame_range(operand);
         let inferred = self.infer(operand);
         let resolved = self.settle_literals(inferred);
-        let members = match resolved.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
+        let single = [resolved];
+        let members: &[Ty<'db>] = match resolved.kind(self.db) {
+            TyKind::Union(members) => members,
             TyKind::Unknown | TyKind::Any => return resolved,
-            _ => vec![resolved],
+            _ => &single,
         };
         let mut oks = Vec::new();
         let mut errs = Vec::new();
-        for member in members {
+        for &member in members {
             match member.kind(self.db) {
                 TyKind::Tag(name, Some(payload)) if name.text(self.db) == "Ok" => {
                     match payload.kind(self.db) {
@@ -6176,7 +6181,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let inferred = self.infer(base);
         let resolved = self.table.resolve(self.db, inferred);
         let native = match resolved.kind(self.db) {
-            TyKind::NativeRecord(native) => Some(native.clone()),
+            TyKind::NativeRecord(native) => Some(*native),
             TyKind::Unknown | TyKind::Any | TyKind::Var(_) => None,
             _ => {
                 for field in fields {
@@ -7648,10 +7653,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         self.errors.truncate(errors_mark);
         self.strict_origins.truncate(origins_mark);
-        Ty::new(
-            self.db,
-            TyKind::Named(Name::new(self.db, "formula"), &[]),
-        )
+        Ty::new(self.db, TyKind::Named(Name::new(self.db, "formula"), &[]))
     }
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
@@ -8484,11 +8486,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             } => {
                 let (name, payload) = (*name, *payload);
                 let name = module.name(name);
-                let members = match expected.kind(self.db) {
-                    TyKind::Union(members) => members.clone(),
-                    _ => vec![expected],
+                let single = [expected];
+                let members: &[Ty<'db>] = match expected.kind(self.db) {
+                    TyKind::Union(members) => members,
+                    _ => &single,
                 };
-                let Some(member) = members.into_iter().find(|member| {
+                let Some(member) = members.iter().copied().find(|member| {
                     matches!(member.kind(self.db), TyKind::Tag(tag, Some(_)) if tag.text(self.db) == name.as_str())
                 }) else {
                     return LiteralFit::NotLiteral;
@@ -8823,7 +8826,6 @@ impl<'db, 'a> Checker<'db, 'a> {
             else {
                 continue;
             };
-            let members = members.clone();
             let has_class = members
                 .iter()
                 .any(|member| matches!(member.kind(self.db), TyKind::Named(..)));
@@ -8832,7 +8834,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let origins_before = self.strict_origins.len();
             let snapshot = self.table.snapshot();
             let mut results = Vec::with_capacity(members.len());
-            for member in members {
+            for &member in members.iter() {
                 let (member_left, member_right) = match index {
                     0 => (member, right),
                     _ => (left, member),
@@ -9057,7 +9059,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         // open members (a parameter rebound on one path) are bound to `logical` as a lone open
         // value would be.
         if let TyKind::Union(members) = resolved.kind(self.db) {
-            let members = members.clone();
             let values: Vec<_> = members
                 .iter()
                 .copied()
@@ -9758,15 +9759,16 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut positional_index = 0usize;
         let mut used_named = Bitset::new_in(self.arena, declared.named.len());
         let mut formal_types: Vec<(Ty<'db>, bool)> = Vec::with_capacity(parameters.len());
-        let mut signature = FunctionType::declared(&[], &[], None, declared.ret);
+        let mut named: Vec<Parameter<'db>> = Vec::with_capacity(parameters.len());
+        let mut variadic = None;
         for (parameter, paired) in module[parameters].iter().zip(paired) {
             if paired == Paired::Rest {
-                signature.variadic = Some(RestParameter {
+                variadic = Some(RestParameter {
                     element: declared
                         .variadic
                         .as_ref()
                         .map_or_else(|| any(self.db), |rest| rest.element),
-                    preceding_named: signature.named.len(),
+                    preceding_named: named.len(),
                 });
                 formal_types.push((self.fresh(Constraint::Unconstrained), false));
                 continue;
@@ -9794,13 +9796,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             };
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
-            signature.named.push(Parameter {
+            named.push(Parameter {
                 name: Name::new(self.db, parameter.name),
                 ty: parameter_ty,
                 optional,
                 default: parameter.default.map(|default| self.infer(default)),
             });
         }
+        let mut signature = FunctionType::declared(&[], &named, variadic, declared.ret);
 
         // A declared optional needs a real default, `...` must sit at the same boundary on
         // both sides, and every declared type needs a formal. The body still checks under
@@ -9940,8 +9943,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         // An `Unknown` declared return (elided `->`) is inferred from the body, so
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
-            signature.ret = self.join_early_returns(&early_returns, trailing_ty, *body);
-            self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
+            let ret = self.join_early_returns(&early_returns, trailing_ty, *body);
+            signature.ret = ret;
+            self.record_untyped_parameters(function_id, &untyped_candidates, ret);
         } else {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
             // Each `return` is checked at its own site, not as one union blamed on the tail.
@@ -11274,14 +11278,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 Some(Constraint::Unconstrained) => Callable::Untyped,
                 _ => Callable::No,
             },
-            TyKind::Union(members) => {
-                let members = members.clone();
-                members
-                    .into_iter()
-                    .map(|member| self.callable(member))
-                    .max()
-                    .unwrap_or(Callable::No)
-            }
+            TyKind::Union(members) => members
+                .iter()
+                .map(|&member| self.callable(member))
+                .max()
+                .unwrap_or(Callable::No),
             TyKind::Null
             | TyKind::Scalar(_)
             | TyKind::Vector(_)
@@ -11341,7 +11342,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         Some(Ty::new(
             self.db,
-            TyKind::Frame(FrameKind::DataFrame, columns),
+            TyKind::Frame(FrameKind::DataFrame, columns.as_deref()),
         ))
     }
 
@@ -11683,10 +11684,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         // `on` names each key once for both frames, so a key missing from both is reported once,
         // against the left frame.
         let mut reported: Vec<TextRange> = Vec::new();
-        for (keys, columns, name) in [
-            (&left_keys, left, frame),
-            (&right_keys, right, other_name),
-        ] {
+        for (keys, columns, name) in [(&left_keys, left, frame), (&right_keys, right, other_name)] {
             for (key, range) in keys {
                 if !columns.iter().any(|column| column.name.text(db) == key)
                     && !reported.contains(range)
@@ -12954,9 +12952,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 TyKind::Vector(element) | TyKind::NamedVector(element) => open(*element),
                 _ => open(ty),
             };
-            let members = match resolved.kind(self.db) {
-                TyKind::Union(members) => members.clone(),
-                _ => vec![resolved],
+            let single = [resolved];
+            let members: &[Ty<'db>] = match resolved.kind(self.db) {
+                TyKind::Union(members) => members,
+                _ => &single,
             };
             if members.iter().any(|&member| open_vector(member)) {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -13027,7 +13026,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn list_element_type(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
         match ty.kind(self.db) {
             TyKind::List(element) | TyKind::NamedList(element) => Some(*element),
-            TyKind::Tuple(items) => Some(union_of(self.db, items.clone())),
+            TyKind::Tuple(items) => Some(union_of(self.db, items.iter().copied())),
             TyKind::Record(fields) => Some(union_of(self.db, fields.iter().map(|field| field.ty))),
             _ => None,
         }
@@ -13801,7 +13800,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         scheme: &TypeScheme<'db>,
         call_arguments: &[CallArgument<'db>],
         courtesy: bool,
-    ) -> Result<(Ty<'db>, FunctionType<'db>), Vec<TypeError<'db>>> {
+    ) -> Result<(Ty<'db>, &'db FunctionType<'db>), Vec<TypeError<'db>>> {
         // Instantiation renames type variables and keeps the parameter list, so a candidate
         // the arguments cannot land on fails the same way uninstantiated. A courtesy probe
         // records expectations as it checks, so it always runs in full.
@@ -14480,8 +14479,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let expected = Ty::new(
                     self.db,
                     TyKind::Function(&FunctionType {
-                        &positional,
-                        named: arguments
+                        positional: &positional,
+                        named: &arguments
                             .iter()
                             .filter_map(|argument| {
                                 argument.name.as_ref().map(|name| Parameter {
@@ -14491,7 +14490,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     default: None,
                                 })
                             })
-                            .collect(),
+                            .collect::<Vec<_>>(),
                         variadic: forwards_dots.then(|| RestParameter {
                             element: any(self.db),
                             preceding_named: 0,
@@ -14584,12 +14583,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                     )
                 }) =>
             {
-                let members = members.clone();
-                let functions: Vec<FunctionType<'db>> = members
+                let functions: Vec<&'db FunctionType<'db>> = members
                     .iter()
                     .filter_map(|&member| {
                         match self.table.shallow_resolve(self.db, member).kind(self.db) {
-                            TyKind::Function(function) => Some(function.clone()),
+                            TyKind::Function(function) => Some(*function),
                             _ => None,
                         }
                     })
@@ -15225,8 +15223,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 (self.item_variable(*item)?, found)
             }
             TyKind::Named(name, items) if name.text(db) == "List" => {
-                let (TyKind::Named(found_name, found_items), [item]) =
-                    (found.kind(db), items)
+                let (TyKind::Named(found_name, found_items), [item]) = (found.kind(db), items)
                 else {
                     return None;
                 };
@@ -15551,8 +15548,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let snapshot = self.table.snapshot();
         let verdict = 'probe: {
-            let mut open_positionals = actual_callback.positional.clone();
-            let mut open_named = actual_callback.named.clone();
+            let mut open_positionals = actual_callback.positional.to_vec();
+            let mut open_named = actual_callback.named.to_vec();
             let mut pre_rest_open = match &actual_callback.variadic {
                 Some(rest) => rest.preceding_named,
                 None => open_named.len(),
@@ -15893,10 +15890,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if double || slots != 2 {
             return (slots >= 1).then(|| any(self.db));
         }
-        let matrix = Ty::new(
-            self.db,
-            TyKind::Named(Name::new(self.db, "matrix"), &[]),
-        );
+        let matrix = Ty::new(self.db, TyKind::Named(Name::new(self.db, "matrix"), &[]));
         if keep_dimensions {
             return Some(matrix);
         }
@@ -16156,7 +16150,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             collect_callees(module, value, &mut callees);
         }
         let i_value = i.and_then(|argument| argument.value);
-        let mut source_columns = subject_columns.clone();
+        let mut source_columns = subject_columns.map(<[_]>::to_vec);
         let mut join = None;
         let mut layout = None;
         let each_i = by.and_then(|argument| argument.value).is_some_and(
@@ -16175,7 +16169,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 )) => {
                     // Under `.EACHI`, `i.col` reads one row of `i`, like a bare column of `i`.
                     join = Some(JoinSides {
-                        x: subject_columns.clone(),
+                        x: subject_columns.map(<[_]>::to_vec),
                         i: joined_columns.as_ref().map(|columns| {
                             columns
                                 .iter()
@@ -16219,7 +16213,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             }
                             layout = self.join_columns(
                                 &keys,
-                                (frame, subject_columns.as_deref()),
+                                (frame, subject_columns),
                                 (joined_name, joined_columns.as_deref()),
                             );
                             layout.as_ref().map(|layout| {
@@ -16329,7 +16323,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }),
             (None, None) => None,
         };
-        let subset_data = Ty::new(db, TyKind::Frame(kind, subset_columns));
+        let subset_data = Ty::new(db, TyKind::Frame(kind, subset_columns.as_deref()));
         if let Some(scope) = self.column_scopes.last_mut() {
             scope.subset_data = subset_data;
         }
@@ -16351,7 +16345,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                         &module[update],
                         subject_columns,
                         i_value.is_some() || by.is_some(),
-                    ),
+                    )
+                    .as_deref(),
                 ),
             ),
             // `with = FALSE` and a `..name` `j` read `j` as column names or positions, which ry
@@ -16374,7 +16369,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 groups,
                 by.is_some(),
             ),
-            None => Ty::new(db, TyKind::Frame(kind, source_columns)),
+            None => Ty::new(db, TyKind::Frame(kind, source_columns.as_deref())),
         };
         for argument in arguments {
             let handled = [i, j, by, on, named(".SDcols")]
@@ -16821,7 +16816,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let subset_data = self.column_scopes.last()?.subset_data;
         let columns = match subset_data.kind(db) {
-            TyKind::Frame(_, Some(columns)) if !columns.is_empty() => columns.clone(),
+            TyKind::Frame(_, Some(columns)) if !columns.is_empty() => *columns,
             _ => {
                 self.infer(value);
                 return Some(None);
@@ -16853,7 +16848,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         } else {
             for column in columns.iter() {
                 if let Some(scope) = self.column_scopes.last_mut() {
-                    scope.subset_data = Ty::new(db, TyKind::Record(vec![column.clone()]));
+                    scope.subset_data = Ty::new(db, TyKind::Record(&[*column]));
                 }
                 let recorded_errors = self.errors.len();
                 let ty = self.infer(value);
@@ -17316,7 +17311,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .all(|other| other.name != column.name)
                 })
             });
-            Ty::new(db, TyKind::Frame(kind, columns))
+            Ty::new(db, TyKind::Frame(kind, columns.as_deref()))
         };
         if let Some(applied) = self.subset_apply(j) {
             return frame_of(groups.zip(applied).map(|(mut groups, applied)| {
@@ -17388,7 +17383,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             (None, TyKind::Frame(_, Some(computed))) => columns.extend(computed.iter().cloned()),
             (None, TyKind::Record(fields)) => {
-                for field in fields.clone() {
+                for field in fields.iter() {
                     let name = field.name.text(db).to_owned();
                     columns.push(self.column_field(&name, field.ty));
                 }
@@ -17408,7 +17403,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn column_update(
         &mut self,
         arguments: &[Argument],
-        base: Option<Vec<RecordField<'db>>>,
+        base: Option<&[RecordField<'db>]>,
         partial: bool,
     ) -> Option<Vec<RecordField<'db>>> {
         let module = self.module;
@@ -17505,7 +17500,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
         }
-        let mut columns = base?;
+        let mut columns = base?.to_vec();
         for (name, ty, value) in updates? {
             let resolved = self.table.resolve(db, ty);
             let single = value.is_some_and(|value| is_literal(module, value));
@@ -18655,9 +18650,9 @@ fn is_literal(module: &Module, id: ExprId) -> bool {
     }
 }
 
-fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<RecordField<'db>>> {
+fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<&'db [RecordField<'db>]> {
     match ty.kind(db) {
-        TyKind::Frame(_, columns) => columns.clone(),
+        TyKind::Frame(_, columns) => *columns,
         _ => None,
     }
 }

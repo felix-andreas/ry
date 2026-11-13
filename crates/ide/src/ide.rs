@@ -26,7 +26,7 @@ use {
             outside_prelude, stub_declaration, stubs,
         },
         types::{
-            Atomic, Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
+            Atomic, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind, TypeScheme,
             contains_inference_var, union_of,
         },
     },
@@ -4763,7 +4763,7 @@ fn string_subscript_completion(
             .get(&target)
             .map(|ty| ty.kind(db))
     }) {
-        Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
+        Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => *fields,
         Some(_) => return None,
         None => dataframe_columns_for(db, file, hir, check, string_range)?,
     };
@@ -4838,7 +4838,7 @@ fn dataframe_columns_for<'db>(
     // A frame typed by a named definition, such as a parameter of type `Sales`, has the
     // columns of the definition's body.
     match representation(db, file, *check.editor().expression_types.get(&subject)?).kind(db) {
-        TyKind::Frame(_, Some(columns)) => Some(columns.as_slice()),
+        TyKind::Frame(_, Some(columns)) => Some(*columns),
         _ => None,
     }
 }
@@ -5491,7 +5491,7 @@ fn pattern_completions(
         let TyKind::NativeRecord(fields) = member.kind(db) else {
             continue;
         };
-        for field in fields {
+        for field in fields.iter() {
             let name = field.name.text(db);
             if named.iter().any(|used| used == name) {
                 continue;
@@ -5859,7 +5859,7 @@ fn literal_expected_fields(
         let TyKind::NativeRecord(fields) = member.kind(db) else {
             continue;
         };
-        for field in fields {
+        for field in fields.iter() {
             let name = field.name.text(db);
             if items.iter().any(|item: &CompletionItem| item.label == name) {
                 continue;
@@ -6803,10 +6803,10 @@ fn render_signature<'db>(
     function: &FunctionType<'db>,
 ) -> (String, Vec<TextRange>) {
     let mut parts: Vec<String> = Vec::new();
-    for ty in &function.positional {
+    for ty in function.positional {
         parts.push(renderer.render(db, *ty));
     }
-    for field in &function.named {
+    for field in function.named {
         let name = if field.optional {
             format!("[{}]", field.name.text(db))
         } else {
@@ -6959,19 +6959,32 @@ fn without_impossible_vectors<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
             match kept.as_slice() {
                 [] => ty,
                 [single] => *single,
-                _ => Ty::new(db, TyKind::Union(kept)),
+                _ => Ty::new(db, TyKind::Union(&kept)),
             }
         }
         TyKind::Function(function) => {
-            let mut function = function.clone();
-            for positional in &mut function.positional {
-                *positional = without_impossible_vectors(db, *positional);
-            }
-            for parameter in &mut function.named {
-                parameter.ty = without_impossible_vectors(db, parameter.ty);
-            }
-            function.ret = without_impossible_vectors(db, function.ret);
-            Ty::new(db, TyKind::Function(function))
+            let positional: Vec<Ty<'db>> = function
+                .positional
+                .iter()
+                .map(|&positional| without_impossible_vectors(db, positional))
+                .collect();
+            let named: Vec<Parameter<'db>> = function
+                .named
+                .iter()
+                .map(|parameter| Parameter {
+                    ty: without_impossible_vectors(db, parameter.ty),
+                    ..*parameter
+                })
+                .collect();
+            Ty::new(
+                db,
+                TyKind::Function(&FunctionType {
+                    positional: &positional,
+                    named: &named,
+                    ret: without_impossible_vectors(db, function.ret),
+                    ..**function
+                }),
+            )
         }
         _ => ty,
     }
