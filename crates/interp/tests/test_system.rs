@@ -89,6 +89,22 @@ const CASES: &[(&str, &str)] = &[
         r#".Internal(system("true", 21L, NULL, "", "", 0L, TRUE))"#,
         "character string expected as third argument",
     ),
+    // `tools:::.install_packages` escapes the install directory's backslashes with a fixed
+    // `gsub`, then splices it into the `inst` paths with a regular-expression `gsub`.
+    (
+        r#".Internal(gsub("^inst", .Internal(gsub("\\", "\\\\", "C:\\Users\\a", FALSE, FALSE, TRUE, FALSE)), "inst/doc", FALSE, FALSE, FALSE, FALSE))"#,
+        r#""C:\\Users\\a/doc""#,
+    ),
+    // `list.dirs` separates names with `/` on every platform, so `dir.create` and `gsub` can
+    // take them apart the same way.
+    (
+        r#".Internal(list.dirs("DIR/tree", FALSE, TRUE))"#,
+        r#"c("", "a", "a/b")"#,
+    ),
+    (
+        r#".Internal(list.dirs("DIR/tree", TRUE, TRUE))"#,
+        r#"/tree/a/b")"#,
+    ),
 ];
 
 const SETUP: &str = r#"
@@ -106,6 +122,7 @@ fn windows_system_redirects_captures_and_reports_status() {
         "echo out\necho err >&2\nexit 3\n",
     )
     .expect("write the script");
+    fs::create_dir_all(scratch.join("tree").join("a").join("b")).expect("create the tree");
     fs::write(scratch.join("input.txt"), "first\r\nsecond\n").expect("write the input");
     let directory = scratch.to_string_lossy().replace('\\', "/");
     // SAFETY: the heap is leaked, so it outlives the interpreter, and this is the only test in

@@ -824,6 +824,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f016b9994e39cad68107f33fa5b8dcee8fb7e38332bde3f97690e5e8abe1b10"
 
 [[package]]
+name = "crash"
+version = "0.4.4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3662,6 +3669,7 @@ dependencies = [
 name = "repl"
 version = "0.4.4"
 dependencies = [
+ "crash",
  "crossterm 0.28.1",
  "dirs",
  "libc",
@@ -3848,6 +3856,7 @@ dependencies = [
  "async-lsp",
  "clap",
  "console",
+ "crash",
  "dirs",
  "format",
  "futures",

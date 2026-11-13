@@ -104,7 +104,8 @@ def summary_block(suites):
         speeds = [ratio(geomean["ry"]["median"]) if "ry" in geomean else "not measured"]
         if "ry_typed" in geomean:
             speeds.append(f"{ratio(geomean['ry_typed']['median'])} in typed ry")
-        lines.append(f"- **{short_name(suite['name'])}: {', '.join(speeds)}.** {len(suite['results']['programs'])} {suite['summary']}.")
+        title = f"[{short_name(suite['name'])}](https://ry-lang.org/benchmarks#{section_anchor(suite['name'])})"
+        lines.append(f"- **{title}: {', '.join(speeds)}.** {len(suite['results']['programs'])} {suite['summary']}.")
     paragraphs = [" ".join([measured_sentence(compared)] + mixed_machines(compared))]
     paragraphs += [slowdown_paragraph(suite) for suite in suites if suite not in compared]
     paragraphs[-1] += " [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured."
@@ -192,6 +193,11 @@ def chart_svg(suites, theme):
     out.append(f'<line x1="{left}" x2="{width - right}" y1="{base:.1f}" y2="{base:.1f}" stroke="{colors["rule"]}" stroke-width="1" stroke-dasharray="4 4"/>')
     out.append("</svg>")
     return "\n".join(out) + "\n"
+
+def section_anchor(name):
+    """The id of a suite's section on the benchmarks page, as `sectionAnchor` in docs/src/lib/benchmarks.ts
+    computes it for the `<h2>` of `BenchmarkSection.astro`."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 def short_name(name):
     """Chart labels and bullets drop the `(ours)` marker, because the summaries say "we wrote"."""

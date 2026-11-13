@@ -1260,6 +1260,19 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
     concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
 }
 
+/// Prints the R call stack for the executable's crash report (`crates/crash`), which calls it
+/// from a signal handler and passes the writer and the memory probe it wants used.
+///
+/// # Safety
+/// Both functions are async-signal-safe, as the crash handler's are.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_crash_traceback(
+    emit: interp::crash::Emit,
+    readable: interp::crash::Readable,
+) {
+    unsafe { interp::crash::write_traceback(emit, readable) }
+}
+
 /// Whether the start-up image at the NUL-terminated `path` is one this library loads: 1 when it
 /// is, 0 when it is missing, of another format, or written by another build.
 ///

@@ -921,7 +921,43 @@ pub(crate) unsafe fn direct_subset(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>>
     {
         return Ok(Some(element));
     }
+    if indices.len() >= 2
+        && let Some(element) = scalar_cell(object, indices)?
+    {
+        return Ok(Some(element));
+    }
     subset(object, indices, true, call).map(Some)
+}
+
+/// `a[i, j, k]` with one plain in-range position per dimension of an array without dimnames:
+/// the element as a length-one vector, found without building index vectors. `None` otherwise.
+unsafe fn scalar_cell(object: Sexp, indices: &[Sexp]) -> R<Option<Sexp>> {
+    if !matches!(
+        object.kind(),
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String
+    ) {
+        return Ok(None);
+    }
+    let dim = get_attr(object, symbols().dim);
+    if dim.kind() != SexpType::Integer
+        || dim.length() as usize != indices.len()
+        || get_attr(object, symbols().dimnames) != nil()
+    {
+        return Ok(None);
+    }
+    let (mut offset, mut stride) = (0usize, 1usize);
+    for (&index, &extent) in indices.iter().zip(dim.slice::<i32>()) {
+        let extent = extent.max(0) as usize;
+        let Some(position) = matrix_position(index, extent) else {
+            return Ok(None);
+        };
+        offset += position * stride;
+        stride *= extent;
+    }
+    if offset >= length(object) {
+        return Ok(None);
+    }
+    vector_element(object, offset).map(Some)
 }
 
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {
@@ -4215,7 +4251,7 @@ unsafe fn dims_total(call: &Call<'_>, dims: Sexp) -> R<i64> {
 }
 
 unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
-    let object = values::materialize(call.arg(0))?;
+    let object = call.arg(0);
     let (rows, cols, dimnames) = match values::dims(object) {
         Some(dims) if dims.len() == 2 => (dims[0], dims[1], get_attr(object, symbols().dimnames)),
         Some(dims) if dims.len() == 1 => (dims[0], 1, get_attr(object, symbols().dimnames)),
@@ -4230,12 +4266,7 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(call.error("argument is not a matrix")),
     };
-    let result = alloc(object.kind(), rows * cols)?;
-    for row in 0..rows {
-        for col in 0..cols {
-            copy_element(object, row + col * rows, result, col + row * cols)?;
-        }
-    }
+    let result = permuted_copy(object, &[rows, cols], &[1, 0])?;
     let dim = values::integer_vector(&[cols as i32, rows as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
     if dimnames != nil() {
@@ -4318,8 +4349,133 @@ unsafe fn do_asplit(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// A fresh vector of `object`'s elements with the dimensions `dims` permuted into the order
+/// `order` (result dimension `k` is source dimension `order[k]`), without attributes. Typed
+/// kinds are copied straight from their slices.
+unsafe fn permuted_copy(object: Sexp, dims: &[usize], order: &[usize]) -> R<Sexp> {
+    let total: usize = dims.iter().product();
+    // C code can set a `dim` that disagrees with the length, which would index out of bounds.
+    if total > length(object) {
+        return Err(error("dims do not match the length of object"));
+    }
+    match object.kind() {
+        SexpType::Real => {
+            let result = values::alloc_uninit(SexpType::Real, total)?;
+            let source = &values::reals(object)[..total];
+            permute(source, values::reals_mut(result), dims, order);
+            Ok(result)
+        }
+        SexpType::Integer | SexpType::Logical => {
+            let result = values::alloc_uninit(object.kind(), total)?;
+            let source = &values::ints(object)[..total];
+            permute(source, values::ints_mut(result), dims, order);
+            Ok(result)
+        }
+        SexpType::Complex => {
+            let result = alloc(SexpType::Complex, total)?;
+            let source = &values::complexes(object)[..total];
+            permute(source, values::complexes_mut(result), dims, order);
+            Ok(result)
+        }
+        SexpType::Raw => {
+            let result = alloc(SexpType::Raw, total)?;
+            let source = &values::raws(object)[..total];
+            permute(source, values::raws_mut(result), dims, order);
+            Ok(result)
+        }
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            let source = values::materialize(object)?;
+            let mut moved = vec![nil(); total];
+            permute(&source.slice::<Sexp>()[..total], &mut moved, dims, order);
+            let result = alloc(object.kind(), total)?;
+            for (index, &element) in moved.iter().enumerate() {
+                values::set_elt(result, index, element);
+            }
+            Ok(result)
+        }
+        _ => {
+            let result = alloc(object.kind(), total)?;
+            for position in 0..total {
+                copy_element(object, position, result, position)?;
+            }
+            Ok(result)
+        }
+    }
+}
+
+const TILE: usize = 32;
+
+/// Writes `source`, a column-major array with extents `dims`, into `target` with the dimensions
+/// permuted by `order`. The source's first dimension is contiguous in `source` and the result's
+/// first dimension, `order[0]`, is contiguous in `target`, so those two are walked as blocked
+/// tiles to keep both streams in cache; the other dimensions step an offset pair. When the two
+/// are the same dimension, each step copies one contiguous run.
+fn permute<T: Copy>(source: &[T], target: &mut [T], dims: &[usize], order: &[usize]) {
+    let total: usize = dims.iter().product();
+    assert!(source.len() >= total && target.len() >= total);
+    if total == 0 {
+        return;
+    }
+    let rank = dims.len();
+    let mut source_stride: SmallVec<[usize; 4]> = SmallVec::with_capacity(rank);
+    let mut stride = 1usize;
+    for &extent in dims {
+        source_stride.push(stride);
+        stride *= extent;
+    }
+    let mut target_stride: SmallVec<[usize; 4]> = smallvec![0; rank];
+    stride = 1;
+    for &dimension in order {
+        target_stride[dimension] = stride;
+        stride *= dims[dimension];
+    }
+    let fast = order[0];
+    let rows = dims[0];
+    let columns = dims[fast];
+    let others: SmallVec<[usize; 4]> = (0..rank)
+        .filter(|&dimension| dimension != 0 && dimension != fast)
+        .collect();
+    let mut counters: SmallVec<[usize; 4]> = smallvec![0; others.len()];
+    let (mut from, mut to) = (0usize, 0usize);
+    let tile_count = total / (rows * if fast == 0 { 1 } else { columns });
+    for _ in 0..tile_count {
+        if fast == 0 {
+            target[to..to + rows].copy_from_slice(&source[from..from + rows]);
+        } else {
+            let column_stride = source_stride[fast];
+            let row_stride = target_stride[0];
+            for row_block in (0..rows).step_by(TILE) {
+                let row_end = (row_block + TILE).min(rows);
+                for column_block in (0..columns).step_by(TILE) {
+                    let column_end = (column_block + TILE).min(columns);
+                    for row in row_block..row_end {
+                        let start = from + row + column_block * column_stride;
+                        let strided = &source[start..];
+                        let destination = &mut target[to + row * row_stride + column_block..]
+                            [..column_end - column_block];
+                        for (step, slot) in destination.iter_mut().enumerate() {
+                            *slot = strided[step * column_stride];
+                        }
+                    }
+                }
+            }
+        }
+        for (slot, &dimension) in others.iter().enumerate() {
+            counters[slot] += 1;
+            from += source_stride[dimension];
+            to += target_stride[dimension];
+            if counters[slot] < dims[dimension] {
+                break;
+            }
+            from -= source_stride[dimension] * dims[dimension];
+            to -= target_stride[dimension] * dims[dimension];
+            counters[slot] = 0;
+        }
+    }
+}
+
 unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
-    let object = values::materialize(call.arg(0))?;
+    let object = call.arg(0);
     let permutation = call.arg(1);
     let resize = values::as_logical_scalar(call.arg(2)) != 0;
     let Some(dims) = values::dims(object) else {
@@ -4369,30 +4525,7 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
         order
     };
     let new_dims: Vec<usize> = order.iter().map(|&dimension| dims[dimension]).collect();
-    let total: usize = dims.iter().product();
-    let result = alloc(object.kind(), total)?;
-    let mut counters = vec![0usize; rank];
-    for position in 0..total {
-        // `counters` indexes the result; map back to the source.
-        let mut source = 0usize;
-        let mut stride = 1usize;
-        let mut source_counters = vec![0usize; rank];
-        for (new_dimension, &old_dimension) in order.iter().enumerate() {
-            source_counters[old_dimension] = counters[new_dimension];
-        }
-        for (dimension, &counter) in source_counters.iter().enumerate() {
-            source += counter * stride;
-            stride *= dims[dimension];
-        }
-        copy_element(object, source, result, position)?;
-        for (dimension, counter) in counters.iter_mut().enumerate() {
-            *counter += 1;
-            if *counter < new_dims[dimension] {
-                break;
-            }
-            *counter = 0;
-        }
-    }
+    let result = permuted_copy(object, &dims, &order)?;
     if resize {
         let dim_values: Vec<i32> = new_dims.iter().map(|&extent| extent as i32).collect();
         let dim = values::integer_vector(&dim_values)?;

@@ -391,6 +391,10 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
         ))
     })?;
     let library: &'static RuntimeLibrary = Box::leak(Box::new(library));
+    // An older runtime without the printer still gets a report, only without the R call stack.
+    if let Ok(traceback) = runtime_entry::<crash::Traceback>(library, "ry_crash_traceback") {
+        crash::set_traceback(traceback);
+    }
     let built_from = runtime_id(library);
     if built_from.as_deref() != Some(RUNTIME_ID) {
         return Err(ReplError(stale_runtime_message(

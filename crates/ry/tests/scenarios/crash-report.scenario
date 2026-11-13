@@ -1,0 +1,30 @@
+# A fatal signal prints a report on standard error, with the version, the R call stack and the
+# native stack, and the process still dies by that signal. The script signals itself from three
+# nested calls, as a crash in native code would.
+
+requires ry-runtime unix
+
+file crash.R
+| inner <- function(n) tools::pskill(Sys.getpid(), n)
+| middle <- function(n) inner(n)
+| outer_function <- function(n) middle(n)
+| outer_function(as.integer(Sys.getenv("CRASH_SIGNAL")))
+
+env CRASH_SIGNAL 11
+run ry run --runtime ry crash.R
+expect exit -11
+expect stderr "*** ry caught SIGSEGV (segmentation fault) ***"
+expect stderr "ry 0."
+expect stderr "R call stack, innermost call first:"
+expect stderr "tools::pskill(...)"
+expect stderr ": inner(...)"
+expect stderr ": middle(...)"
+expect stderr ": outer_function(...)"
+expect stderr "Native stack"
+
+env CRASH_SIGNAL 6
+run ry run --runtime ry crash.R
+expect exit -6
+expect stderr "*** ry caught SIGABRT (abort) ***"
+expect stderr ": outer_function(...)"
+expect stderr "Native stack"
