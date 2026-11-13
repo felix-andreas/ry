@@ -1185,7 +1185,10 @@ A ry type asks in three places:
   function decides: an operand beside a ry number, an argument to a typed parameter, or an annotated
   binding. In `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
   `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Any other read gives the
-  variable R's type, as does a function that never decides it.
+  variable R's type, as does a function that never decides it. A literal written as a tuple item
+  or a record field is decided the same way: in `pair <- ("a", 1)`, the read
+  `Str.concat(s, pair[[1]])` makes `"a"` a `Str`, and with no such use `pair` is a
+  `Tuple{character, double}`.
 - **A top-level binding in a typed file.** In a strict file, or a file written with ry syntax (an
   inline annotation, a record, tuple, tag, `List` or `match`), a literal bound outside any function
   is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
@@ -4620,7 +4623,7 @@ interpreted
 | a function with `...` | name each parameter, or take one `List` |
 | a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
 | a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
-| a standard library function without native code, such as `List.reverse` | a loop or another standard library function |
+| a standard library function without native code, such as `List.drop_at` | a loop or another standard library function |
 | parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
 | a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
 | a standard library function called with a `ry::` prefix | the name without the prefix |

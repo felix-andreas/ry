@@ -3860,7 +3860,10 @@ impl<'db> Checker<'db, '_> {
             ExpressionKind::Break | ExpressionKind::Next => unknown(self.db),
             ExpressionKind::Tuple(items) => {
                 let items = *items;
-                let items = module[items].iter().map(|&item| self.infer(item)).collect();
+                let items = module[items]
+                    .iter()
+                    .map(|&item| self.component(item))
+                    .collect();
                 Ty::new(self.db, TyKind::NativeTuple(items))
             }
             ExpressionKind::Array(items) => self.infer_array_literal(&module[items]),
@@ -3870,14 +3873,16 @@ impl<'db> Checker<'db, '_> {
                     .iter()
                     .map(|field| NativeField {
                         name: Name::new(self.db, field.name),
-                        ty: self.infer(field.value),
+                        ty: self.component(field.value),
                     })
                     .collect();
                 native_record(self.db, fields)
             }
             ExpressionKind::Tag { name, payload, .. } => {
                 let (name, payload) = (*name, *payload);
-                let payload = payload.map(|payload| self.infer(payload));
+                // A payload's literals are decided now: tags join by their payload types,
+                // which an open literal would leave undecided.
+                let payload = payload.map(|payload| self.infer_payload(payload));
                 Ty::new(
                     self.db,
                     TyKind::Tag(Name::new(self.db, module.name(name).as_str()), payload),
@@ -5954,6 +5959,64 @@ impl<'db> Checker<'db, '_> {
             self.record(item, ty);
         }
         Some(ty)
+    }
+
+    /// A tag's payload, a tuple or a record whose own items are inferred as written.
+    fn infer_payload(&mut self, payload: ExprId) -> Ty<'db> {
+        let module = self.module;
+        let ty = match module.kind(payload) {
+            ExpressionKind::Tuple(items) => {
+                let items = module[*items].iter().map(|&item| self.infer(item)).collect();
+                Ty::new(self.db, TyKind::NativeTuple(items))
+            }
+            ExpressionKind::Record(fields) => {
+                let fields = module[*fields]
+                    .iter()
+                    .map(|field| NativeField {
+                        name: Name::new(self.db, field.name),
+                        ty: self.infer(field.value),
+                    })
+                    .collect();
+                native_record(self.db, fields)
+            }
+            _ => return self.infer(payload),
+        };
+        self.record(payload, ty)
+    }
+
+    /// A tuple item or a record field. A literal there is open, as a literal bound
+    /// to a variable is: a later use decides it (`Str.concat(s, pair[[1]])` makes `"a"` in
+    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type.
+    fn component(&mut self, value: ExprId) -> Ty<'db> {
+        let module = self.module;
+        let mut inner = value;
+        while let ExpressionKind::Paren(paren) = module.kind(inner) {
+            inner = *paren;
+        }
+        let ty = if let Some(literal) = number_literal(module, inner) {
+            let constraint = if literal.is_fraction() {
+                Constraint::FracLiteral
+            } else {
+                Constraint::WholeLiteral {
+                    integer: literal.integer,
+                }
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record_literal(inner, ty);
+            ty
+        } else {
+            let constraint = match module.kind(inner) {
+                ExpressionKind::Literal(LiteralKind::String(_)) => Constraint::StrLiteral,
+                ExpressionKind::Literal(LiteralKind::Logical(_)) => Constraint::BoolLiteral,
+                _ => return self.infer(value),
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record(inner, ty)
+        };
+        if inner != value {
+            self.record(value, ty);
+        }
+        ty
     }
 
     /// A `List` holds ry values only. An R value would bring `NA`, attributes and recycling
@@ -8047,6 +8110,8 @@ impl<'db> Checker<'db, '_> {
             },
         };
         if !fits {
+            let left = self.settle_literals(left);
+            let right = self.settle_literals(right);
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::NumberOperands {
@@ -14128,7 +14193,19 @@ impl<'db> Checker<'db, '_> {
                             .enumerate()
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                if accumulators.get(index).copied().unwrap_or(false)
+                                // An accumulator whose initial state is a settled ry value keeps
+                                // that type, because only a tag union widens among ry types. In `List.walk(xs,
+                                // List.repeat(0f64, n), \(sums, x) sums + x)` the state is
+                                // `List<F64>` before the body reads `sums + x`.
+                                let widening_accumulator =
+                                    accumulators.get(index).copied().unwrap_or(false)
+                                        && !(is_ry_value_type(self.db, formal)
+                                            && !matches!(
+                                                formal.kind(self.db),
+                                                TyKind::Tag(..) | TyKind::Union(_)
+                                            )
+                                            && !self.table.contains_unbound_var(self.db, formal));
+                                if widening_accumulator
                                     || (index < declared_count
                                         && matches!(
                                             formal.kind(self.db),
