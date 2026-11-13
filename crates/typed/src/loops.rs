@@ -29,8 +29,8 @@
 //!   neither assigns a variable the other reads or assigns.
 //!
 //! What the consumer needs before its first iteration, such as its own empty result list or a
-//! starting state, moves to the end of the block that enters the producer. The list's length becomes a counter, so a
-//! later `List.len` still has its answer.
+//! starting state, moves to the end of the block that enters the producer. The list's length
+//! becomes a counter, so a later `List.len` still has its answer.
 //!
 //! The pass runs before the reference counts are inserted, while a list is still a value and
 //! `Push` and `Set` still return a new one.
