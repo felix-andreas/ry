@@ -1,0 +1,22 @@
+[stdout]
+| [1] "3000"    "integer"
+| [1] "1800"    "integer"
+| [1] "1200"    "integer"
+| [1] "2400"    "integer"
+| [1] "1200"    "integer"
+| [1] "1650"   "double"
+| [1] "-644245089600" "integer"      
+| [1] "NA/NaN argument"
+| [1] "NA/NaN argument"
+| [1] "argument of length 0"
+| [1] 3022
+| [1] a:x b:y
+| Levels: a:x a:y b:x b:y
+| [1] 60100     0
+| [1] 1350
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1350

@@ -37,17 +37,6 @@ esac
 """
 
 
-def start_image(identity):
-    """A start-up image header: the magic, the header's length, then the identity with its length."""
-    name = identity.encode()
-    return b"RYSTART\0" + (16 + len(name)).to_bytes(8, "little") + len(name).to_bytes(8, "little") + name
-
-
-def code_image(identity):
-    name = identity.encode()
-    return b"RYCODE\0\0" + len(name).to_bytes(8, "little") + name
-
-
 class ReleaseArchive(unittest.TestCase):
     def setUp(self):
         self.directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
@@ -69,10 +58,13 @@ class ReleaseArchive(unittest.TestCase):
         (payload / "library/base/R").mkdir(parents=True)
         (payload / "library/stats/R").mkdir(parents=True)
         source = self.directory / "id.c"
-        source.write_text(f'const char *ry_runtime_id(void) {{ return "{IDENTITY}"; }}\n')
+        # bench.py refuses a runtime that cannot report an unused image, which it detects by the
+        # name of the variable that turns the report on.
+        source.write_text(f'const char *ry_runtime_id(void) {{ return "{IDENTITY}"; }}\n'
+                          'const char *ry_image_log(void) { return "RY_IMAGE_LOG"; }\n')
         subprocess.run(["cc", "-shared", "-fPIC", "-o", payload / "libR.so", source], check=True)
-        (payload / "library/base/R/ry-start.image").write_bytes(start_image(IDENTITY))
-        (payload / "library/stats/R/stats.ryc").write_bytes(code_image(IDENTITY))
+        (payload / f"library/base/R/ry-start.{IDENTITY}.image").write_bytes(b"RYSTART\0")
+        (payload / f"library/stats/R/stats.{IDENTITY}.ryc").write_bytes(b"RYCODE\0\3")
         ry = stage / "ry"
         ry.write_text(FAKE_RY.format(version=version))
         ry.chmod(0o755)
@@ -101,13 +93,13 @@ class ReleaseArchive(unittest.TestCase):
 
     def test_refuses_a_library_image_another_build_wrote(self):
         ry, _ = bench.unpack_release(self.archive())
-        foreign = self.corpus_library / "zoo/R/zoo.ryc"
+        foreign = self.corpus_library / "zoo/R/zoo.otherbuild.ryc"
         foreign.parent.mkdir(parents=True)
-        foreign.write_bytes(code_image("otherbuild"))
+        foreign.write_bytes(b"RYCODE\0\3")
         with self.assertRaises(SystemExit) as refusal, redirect_stdout(io.StringIO()):
             bench.refuse_foreign_images([ry])
-        self.assertIn(f"{foreign} (otherbuild)", str(refusal.exception))
         self.assertIn(f"runtime {IDENTITY}", str(refusal.exception))
+        self.assertTrue(str(refusal.exception).endswith("reinstall them with this build: zoo"))
 
 
 class NoRefusals:
@@ -159,7 +151,8 @@ class TypedSuite(unittest.TestCase):
         self.assertEqual(results["geomean"]["ry_typed"], {"median": 1.0, "low": 1.0, "high": 1.0, "programs": 2})
         self.assertEqual(results["programs"][0]["seconds"], {"rust": 0.011, "ry_typed": 0.022})
         self.assertEqual(bench.ratio_label(results, "ry_typed"), "ry typed / Rust")
-        self.assertNotIn("peak_mib", results["programs"][0])
+        # `VmHWM` starts afresh at `exec`, so a Rust program's peak is its own and is recorded.
+        self.assertEqual(results["programs"][0]["peak_mib"], {"rust": 1.0, "ry_typed": 1.0})
         self.assertEqual(results["programs"][0]["compile_seconds"], {"rust": 0.25, "ry_typed": 0.002})
 
     def test_a_program_rust_finishes_too_fast_to_time_stays_out_of_the_mean(self):

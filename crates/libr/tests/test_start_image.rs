@@ -34,10 +34,10 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
         .expect("ry's base R is not built; build it with `just base-r`, or set RY_BASE_R");
     let base = scratch.join("base-r");
     run(Command::new("cp").arg("-a").arg(&installed).arg(&base));
-    let image = base.join("library/base/R/ry-start.image");
     let libr = library_path();
     let rcmd = ry_rcmd();
-    rcmd::base::write_start_image(&base, &rcmd, &libr, None).expect("write the start-up image");
+    let image =
+        rcmd::base::write_start_image(&base, &rcmd, &libr, None).expect("write the start-up image");
     let current = fs::read(&image).expect("read the start-up image");
     assert_eq!(&current[..8], interp::image::MAGIC);
     let identity_length = u64::from_le_bytes(

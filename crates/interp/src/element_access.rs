@@ -8,7 +8,7 @@ use {
         attribute_access::same_text,
         builtins::is_native_value,
         eval::reuse_permitted,
-        moves,
+        interp, moves,
         subset::{int_to_real, vector_element},
         unwind::R,
         values::{self, length, na_string, nil, symbols},
@@ -96,9 +96,11 @@ pub(crate) unsafe fn element_value<const STRING: bool>(
 /// `x[i]` for an attribute-free atomic vector `x` and a plain numeric scalar `i` within bounds:
 /// the element as a length-one vector. `None` otherwise.
 pub(crate) unsafe fn scalar_subset(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if object.is_altrep() {
+        return altrep_element(object, index);
+    }
     if !matches!(index.kind(), SexpType::Integer | SexpType::Real)
         || !object.kind().is_atomic()
-        || object.is_altrep()
         || index.is_altrep()
         || values::has_attributes(object)
         || values::has_attributes(index)
@@ -115,6 +117,46 @@ pub(crate) unsafe fn scalar_subset(object: Sexp, index: Sexp) -> R<Option<Sexp>>
         return vector_element(object, position as usize - 1).map(Some);
     }
     Ok(None)
+}
+
+/// `x[i]` or `x[[i]]` for an ALTREP integer, logical, double or character vector `x` without
+/// attributes and a plain numeric scalar `i` within bounds: the element as a length-one vector,
+/// read through the class's `Elt` method, so a compact sequence or a deferred string vector is
+/// never expanded to read one element. `None` otherwise. The plain paths decline ALTREP with a
+/// single bit test and come here, out of line, only when it is set.
+#[cold]
+#[inline(never)]
+pub(crate) unsafe fn altrep_element(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    let kind = object.kind();
+    if !matches!(
+        kind,
+        SexpType::Integer | SexpType::Logical | SexpType::Real | SexpType::String
+    ) || !matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        || object.is_object()
+        || index.is_altrep()
+        || values::has_attributes(object)
+        || values::has_attributes(index)
+        || index.length() != 1
+    {
+        return Ok(None);
+    }
+    let position = match index.kind() {
+        SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+        _ => index.slice::<f64>()[0],
+    };
+    let count = (interp().hooks.altrep_length)(object)?;
+    // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
+    if !(position >= 1.0 && position < count as f64 + 1.0) {
+        return Ok(None);
+    }
+    let at = position as usize - 1;
+    let element = match kind {
+        SexpType::Integer => values::scalar_integer(values::int_elt(object, at)?)?,
+        SexpType::Logical => values::scalar_logical(values::int_elt(object, at)?)?,
+        SexpType::Real => values::scalar_real(values::real_elt(object, at)?)?,
+        _ => values::scalar_string_charsxp(values::altrep_string_elt(object, at)?)?,
+    };
+    Ok(Some(element))
 }
 
 /// `x[[i]]` for a vector or list `x` that is not an object and a scalar `i` that selects an
