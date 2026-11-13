@@ -3424,7 +3424,7 @@ unsafe fn arith(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
         release(b);
         return null_mut();
     };
-    if !side_has(a, kind) || !side_has(b, kind) || op > MAX2 || (kind == I64) != lists {
+    if !side_has(a, kind) || !side_has(b, kind) || op > MAX2 || (kind == I64 && !lists) {
         release(a);
         release(b);
         return null_mut();
