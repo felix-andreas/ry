@@ -5,10 +5,9 @@ execute <- function(n: I64) -> List<Str> {
   lim <- 2f64
   iter <- 50
   fn <- Num.to_f64(n)
-  n_mod8 <- n % 8
-  pads <- List.repeat(0, if (n_mod8 > 0) 8 - n_mod8 else 0)
-  p <- List.map(List.range(0, n - 1), \(x) Num.pow_int(2, 7 - x % 8))
-  hex <- Str.to_utf8("0123456789abcdef")
+  n_mod8 <- n %% 8
+  pads <- List.repeat(0i64, if (n_mod8 > 0) 8 - n_mod8 else 0i64)
+  p <- List.map(List.range(0, n - 1), \(x) Num.pow_int(2i64, 7 - x %% 8))
 
   output <- ["P4\n", f"{n} {n} \n"]
   for (y in List.range(0, n - 1)) {
@@ -23,8 +22,8 @@ execute <- function(n: I64) -> List<Str> {
       zr <- next_zr
       i <- i + 1
     }
-    bits <- List.map2(zr, zi, \(r, im) if (Num.sqrt(r * r + im * im) <= lim) 1 else 0)
-    bytes <- List.map(List.chunks_of(List.concat(bits * p, pads), 8), List.sum)
+    bits <- List.map2(zr, zi, \(r, im) if (Num.sqrt(r * r + im * im) <= lim) 1i64 else 0i64)
+    bytes <- List.map(List.chunks_of(List.concat(bits * p, pads), 8), \(chunk) List.sum(chunk))
   }
   output
 }

@@ -5,7 +5,7 @@
 # distinct k-mer, and never reads it; the port grows a list the same way.
 execute <- function(lines: List<Str>) -> List<Str> {
   count <- List.len(lines)
-  i <- 1
+  i <- 1i64
   while (i <= count && !Str.starts_with(lines[[i]], ">TH")) i <- i + 1
   i <- i + 1
   parts <- []
@@ -40,15 +40,15 @@ find_seq <- function(sequence: List<I64>, s: Str) -> I64 {
   freqs <- gen_freq(sequence, List.len(Str.to_utf8(s)))$freqs
   match (List.find_first_index(freqs, \(entry) entry[[1]] == s)) {
     :Ok(index) => freqs[[index]][[2]]
-    :Err(_) => 0
+    :Err(_) => 0i64
   }
 }
 
 gen_freq <- function(sequence: List<I64>, frame: I64) -> Record{freqs: List<Tuple{Str, I64}>, slots: List<I64>} {
   freqs <- []
-  n <- 0
-  cap <- 16
-  slots <- List.repeat(0, cap)
+  n <- 0i64
+  cap <- 16i64
+  slots <- List.repeat(0i64, cap)
   for (i in List.range(1, List.len(sequence) - frame + 1)) {
     subseq <- Str.from_utf8_lossy(List.sublist(sequence, i, frame))
     match (List.find_first_index(freqs, \(entry) entry[[1]] == subseq)) {
@@ -59,10 +59,10 @@ gen_freq <- function(sequence: List<I64>, frame: I64) -> Record{freqs: List<Tupl
         n <- n + 1
         if (cap < n) {
           cap <- 2 * cap
-          slots <- List.concat(slots, List.repeat(0, cap - List.len(slots)))
+          slots <- List.concat(slots, List.repeat(0i64, cap - List.len(slots)))
         }
-        slots[[cap]] <- 0
-        freqs <- List.append(freqs, (subseq, 1))
+        slots[[cap]] <- 0i64
+        freqs <- List.append(freqs, (subseq, 1i64))
       }
     }
   }

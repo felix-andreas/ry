@@ -65,7 +65,7 @@ random_fasta <- function(lines: List<Str>, genes: List<Gene>, count: I64, seed: 
     line <- Num.min(width, remaining)
     rs <- List.repeat(0, line)
     for (i in List.range(1, line)) {
-      seed <- (seed * 3877 + 29573) % 139968
+      seed <- (seed * 3877 + 29573) %% 139968
       rs[[i]] <- Num.to_f64(seed) / 139968
     }
 

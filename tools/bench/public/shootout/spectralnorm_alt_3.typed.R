@@ -5,14 +5,13 @@ execute <- function(n: I64) -> F64 {
   for (i in List.range(1, n))
     for (j in List.range(1, n))
       cache[[(j - 1) * n + i]] <- 1 / Num.to_f64((i + j - 2) * (i + j - 1) %/% 2 + i)
-  eval_a <- \(i, j) cache[[(j - 1) * n + i]]
 
-  # Both products copy the cache element by element, as the R program does.
+  # Both products copy the cache element by element, as the R program does through eval_A.
   copy <- \() {
     m <- List.repeat(0f64, n * n)
     for (i in List.range(1, n))
       for (j in List.range(1, n))
-        m[[(j - 1) * n + i]] <- eval_a(i, j)
+        m[[(j - 1) * n + i]] <- cache[[(j - 1) * n + i]]
     m
   }
   ata <- \(u) times(times(u, transpose(copy(), n), n), copy(), n)

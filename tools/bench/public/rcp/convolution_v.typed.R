@@ -5,14 +5,14 @@ execute <- function(n: I64) -> F64 {
   convolve_v <- function(x: List<F64>, y: List<F64>) -> List<F64> {
     nx <- List.len(x)
     ny <- List.len(y)
-    xy <- List.join_map(y, \(yj) List.concat(x * yj, List.repeat(0, nx)))
+    xy <- List.join_map(y, \(yj) List.concat(x * yj, List.repeat(0f64, nx)))
     nxy <- nx + ny - 1
     xy <- List.take_first(xy, nxy * ny)
-    List.walk(List.range(0, ny - 1), List.repeat(0, nxy), \(sums, column) sums + List.sublist(xy, column * nxy + 1, nxy))
+    List.walk(List.range(0, ny - 1), List.repeat(0f64, nxy), \(sums, column) sums + List.sublist(xy, column * nxy + 1, nxy))
   }
 
-  a <- List.map(List.range(1, n), Num.to_f64)
-  b <- List.map(List.range(1, n), Num.to_f64)
+  a <- List.map(List.range(1, n), \(i) Num.to_f64(i))
+  b <- List.map(List.range(1, n), \(i) Num.to_f64(i))
   checksum <- 0
   for (i in List.range(1, 10)) {
     checksum <- checksum + convolve_v(a, b)[[n]]

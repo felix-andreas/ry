@@ -1,28 +1,30 @@
 execute <- function(n: I64) -> F64 {
-  n1 <- n - 1
-  eval_a <- \(i, j) 1 / Num.to_f64((i + j) * (i + j + 1) %/% 2 + i + 1)
-  times_a <- \(u) {
-    ret <- List.repeat(0f64, n)
-    for (i in List.range(1, n))
-      for (j in List.range(0, n1))
-        ret[[i]] <- ret[[i]] + u[[j + 1]] * eval_a(i - 1, j)
-    ret
-  }
-  times_at <- \(u) {
-    ret <- List.repeat(0f64, n)
-    for (i in List.range(1, n))
-      for (j in List.range(0, n1))
-        ret[[i]] <- ret[[i]] + u[[j + 1]] * eval_a(j, i - 1)
-    ret
-  }
-  ata <- \(u) times_at(times_a(u))
   u <- List.repeat(1f64, n)
   v <- List.repeat(0f64, n)
   for (itr in List.range(1, 10)) {
-    v <- ata(u)
-    u <- ata(v)
+    v <- times_at(times_a(u, n), n)
+    u <- times_at(times_a(v, n), n)
   }
   Num.sqrt(List.sum(u * v) / List.sum(v * v))
+}
+
+eval_a <- function(i: I64, j: I64) -> F64
+  1 / Num.to_f64((i + j) * (i + j + 1) %/% 2 + i + 1)
+
+times_a <- function(u: List<F64>, n: I64) -> List<F64> {
+  ret <- List.repeat(0f64, n)
+  for (i in List.range(1, n))
+    for (j in List.range(0, n - 1))
+      ret[[i]] <- ret[[i]] + u[[j + 1]] * eval_a(i - 1, j)
+  ret
+}
+
+times_at <- function(u: List<F64>, n: I64) -> List<F64> {
+  ret <- List.repeat(0f64, n)
+  for (i in List.range(1, n))
+    for (j in List.range(0, n - 1))
+      ret[[i]] <- ret[[i]] + u[[j + 1]] * eval_a(j, i - 1)
+  ret
 }
 
 # ---------------------------------------------------------------------------

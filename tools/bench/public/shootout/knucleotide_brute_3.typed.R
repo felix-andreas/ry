@@ -4,7 +4,7 @@
 # doubling capacity, growing it when needed; that write can land on a counted k-mer, as in R.
 execute <- function(lines: List<Str>) -> List<Str> {
   count <- List.len(lines)
-  i <- 1
+  i <- 1i64
   while (i <= count && !Str.starts_with(lines[[i]], ">TH")) i <- i + 1
   i <- i + 1
   parts <- []
@@ -40,27 +40,27 @@ find_seq <- function(sequence: List<I64>, s: Str) -> I64 {
   freqs <- gen_freq(sequence, List.len(Str.to_utf8(s)))
   match (List.find_first_index(freqs$names, \(name) name == s)) {
     :Ok(index) => freqs$counts[[index]]
-    :Err(_) => 0
+    :Err(_) => 0i64
   }
 }
 
 gen_freq <- function(sequence: List<I64>, frame: I64) -> Record{names: List<Str>, counts: List<I64>} {
-  n <- 0
-  cap <- 16
+  n <- 0i64
+  cap <- 16i64
   names <- List.repeat("", cap)
-  counts <- List.repeat(0, cap)
+  counts <- List.repeat(0i64, cap)
   for (i in List.range(1, List.len(sequence) - frame + 1)) {
     subseq <- Str.from_utf8_lossy(List.sublist(sequence, i, frame))
-    index <- Result.with_default(List.find_first_index(names, \(name) name == subseq), 0)
-    cnt <- if (index == 0) 0 else counts[[index]]
-    if (index == 0) {
+    index <- Result.with_default(List.find_first_index(names, \(name) name == subseq), 0i64)
+    cnt <- if (index == 0i64) 0i64 else counts[[index]]
+    if (index == 0i64) {
       n <- n + 1
       if (cap < n) cap <- 2 * cap
       if (cap > List.len(counts)) {
         names <- List.concat(names, List.repeat("", cap - List.len(names)))
-        counts <- List.concat(counts, List.repeat(0, cap - List.len(counts)))
+        counts <- List.concat(counts, List.repeat(0i64, cap - List.len(counts)))
       }
-      counts[[cap]] <- 0
+      counts[[cap]] <- 0i64
       names <- List.append(names, subseq)
       counts <- List.append(counts, cnt + 1)
     } else {

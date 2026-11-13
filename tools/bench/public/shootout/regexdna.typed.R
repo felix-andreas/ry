@@ -44,9 +44,9 @@ execute <- function(lines: List<Str>) -> List<Str> {
 # gsub(">.*\n|\n", "", str)
 drop_headers <- function(str: Str) -> Str {
   bytes <- Str.to_utf8(str)
-  newline <- 10
+  newline <- 10i64
   kept <- List.with_capacity(List.len(bytes))
-  i <- 1
+  i <- 1i64
   while (i <= List.len(bytes)) {
     if (bytes[[i]] == 62) {
       while (i <= List.len(bytes) && bytes[[i]] != newline) i <- i + 1
@@ -62,7 +62,7 @@ parse_pattern <- function(pattern: Str) -> List<Alternative> {
   List.map(Str.split_on(pattern, "|"), \(alternative) {
     bytes <- Str.to_utf8(alternative)
     positions <- []
-    i <- 1
+    i <- 1i64
     while (i <= List.len(bytes)) {
       if (bytes[[i]] == 91) {
         class <- []
@@ -84,9 +84,9 @@ parse_pattern <- function(pattern: Str) -> List<Alternative> {
 # The R program's match_count(gregexpr(pat, str)): the number of non-overlapping matches, except
 # that a single match counts as its position, as written upstream.
 match_count <- function(bytes: List<I64>, alternatives: List<Alternative>) -> I64 {
-  count <- 0
-  first <- 0
-  i <- 1
+  count <- 0i64
+  first <- 0i64
+  i <- 1i64
   while (i <= List.len(bytes)) {
     found <- List.find_first(alternatives, \(alternative) matches_at(bytes, i, alternative))
     match (found) {
@@ -105,7 +105,7 @@ match_count <- function(bytes: List<I64>, alternatives: List<Alternative>) -> I6
 
 matches_at <- function(bytes: List<I64>, start: I64, alternative: Alternative) -> Bool {
   if (start + List.len(alternative) - 1 > List.len(bytes)) return(Bool.false)
-  k <- 1
+  k <- 1i64
   while (k <= List.len(alternative)) {
     if (!List.contains(alternative[[k]], bytes[[start + k - 1]])) return(Bool.false)
     k <- k + 1

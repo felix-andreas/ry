@@ -193,20 +193,20 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 ### Gaps the typed public ports found
 
-Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Each was left as found, with no workaround in the port.
+Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these, and each port spells around them as noted, so its checksum matches GNU R and it runs natively.
 
-- **Not compiled natively; the whole function runs in the interpreter:**
-  - `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure");
-  - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
+- **Not compiled natively; the whole function runs in the interpreter:** a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
   - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
   - An annotation does not reach the literals inside a list literal: `bodies: List<Body> <- [(x = 0, ...)]` reports `double` fields, so nbody and fasta spell `0f64`.
   - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
   - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
-- **Nominal items do not fit an empty list.** `children <- []` then `List.append(children, @Tree(...))` is "expected `T`, found `Tree`", and `children: List<Tree> <- []` is "expected `List<Tree>`, found `List<T>`". A recursive `alias` is refused instead, with a message that prints an enormous expanded type. This blocks a typed awfy `storage`.
+- **A recursive `alias` is refused**, with a message that prints an enormous expanded type; a nominal `type` works.
+- **A walk accumulator types its lambda only once settled.** `List.walk(rows, List.repeat(0f64, n), \(sums, row) sums + row)` checks, but `List.repeat(0, n)` leaves the literal open, so the formal gets no hint and the body reports `T` against the row type. The ports spell `0f64`.
+- **A standard library function passed by name** (`List.map(rows, List.sum)`, `List.map(xs, Num.to_f64)`) is not a typed closure to the typed core, so the ports wrap it in a lambda (`\(row) List.sum(row)`).
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
-- **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
+- **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes.
 
 ## Parked: ahead-of-time compilation of typed ry
 

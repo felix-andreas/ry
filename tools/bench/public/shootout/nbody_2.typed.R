@@ -65,7 +65,7 @@ times_vector <- function(m: List<F64>, rows: I64, x: List<F64>) -> List<F64>
 
 # drr[i, j, ] <- body_r[, i] - body_r[, j]
 differences <- function(r: List<F64>) -> List<F64> {
-  n_bodies <- 5
+  n_bodies <- 5i64
   drr <- List.repeat(0f64, n_bodies * n_bodies * 3)
   for (i in List.range(1, n_bodies)) {
     for (j in List.range(1, n_bodies)) {
@@ -80,11 +80,11 @@ differences <- function(r: List<F64>) -> List<F64> {
 # sqrt(t(colSums(aperm(drr * drr)))): the distance between bodies i and j at [i, j].
 distances <- function(drr: List<F64>) -> List<F64> {
   squares <- drr * drr
-  List.map(List.sublist(squares, 1, 25) + List.sublist(squares, 26, 25) + List.sublist(squares, 51, 25), Num.sqrt)
+  List.map(List.sublist(squares, 1, 25) + List.sublist(squares, 26, 25) + List.sublist(squares, 51, 25), \(square) Num.sqrt(square))
 }
 
 advance <- function(state: State, mass: List<F64>, dt: F64) -> State {
-  n_bodies <- 5
+  n_bodies <- 5i64
   drr <- differences(state$r)
   distance <- distances(drr)
   mag <- List.map(distance, \(x) dt / (x * x * x))
@@ -98,7 +98,7 @@ advance <- function(state: State, mass: List<F64>, dt: F64) -> State {
 }
 
 energy <- function(state: State, mass: List<F64>) -> F64 {
-  n_bodies <- 5
+  n_bodies <- 5i64
   distance <- distances(differences(state$r))
   squares <- state$v * state$v
   speeds <- List.map(List.range(1, n_bodies), \(i) List.sum(List.sublist(squares, (i - 1) * 3 + 1, 3)))

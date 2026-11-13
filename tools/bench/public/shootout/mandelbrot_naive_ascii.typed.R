@@ -6,8 +6,8 @@ execute <- function(n: I64) -> List<Str> {
   fn <- Num.to_f64(n)
   output <- ["P4\n", f"{n} {n} \n"]
   for (y in List.range(0, n - 1)) {
-    bits <- 0
-    x <- 0
+    bits <- 0i64
+    x <- 0i64
     while (x < n) {
       cr <- 2 * Num.to_f64(x) / fn - 1.5
       ci <- 2 * Num.to_f64(y) / fn - 1
@@ -20,16 +20,16 @@ execute <- function(n: I64) -> List<Str> {
         zr <- next_zr
         i <- i + 1
       }
-      bits <- 2 * bits + (if (Num.sqrt(zr * zr + zi * zi) <= lim) 1 else 0)
+      bits <- 2 * bits + (if (Num.sqrt(zr * zr + zi * zi) <= lim) 1i64 else 0i64)
       x <- x + 1
       if (x %% 8 == 0) {
         output <- List.append(output, Str.concat(Str.from_utf8_lossy([hex[[bits %/% 16 + 1]], hex[[bits %% 16 + 1]]]), " \n"))
-        bits <- 0
+        bits <- 0i64
       }
     }
     xmod <- x %% 8
     if (xmod != 0) {
-      byte <- bits * Num.pow_int(2, 8 - xmod)
+      byte <- bits * Num.pow_int(2i64, 8 - xmod)
       output <- List.append(output, Str.concat(Str.from_utf8_lossy([hex[[byte %/% 16 + 1]], hex[[byte %% 16 + 1]]]), " \n"))
     }
   }

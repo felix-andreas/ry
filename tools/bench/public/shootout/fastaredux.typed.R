@@ -60,7 +60,7 @@ repeat_fasta <- function(lines: List<Str>, s: Str, count: I64) -> List<Str> {
 
 random_fasta <- function(lines: List<Str>, genes: List<Gene>, count: I64, seed: I64) -> Record{lines: List<Str>, seed: I64} {
   width <- 60
-  lookup_size <- 4096
+  lookup_size <- 4096i64
   lookup_scale <- Num.to_f64(lookup_size - 1)
   n <- List.len(genes)
   cprob_lookup <- List.map(genes, \(gene) gene$probability * lookup_scale)
@@ -78,7 +78,7 @@ random_fasta <- function(lines: List<Str>, genes: List<Gene>, count: I64, seed: 
     line <- Num.min(width, remaining)
     rs <- List.repeat(0, line)
     for (i in List.range(1, line)) {
-      seed <- (seed * 3877 + 29573) % 139968
+      seed <- (seed * 3877 + 29573) %% 139968
       rs[[i]] <- Num.to_f64(seed) * (lookup_scale / 139968)
     }
 

@@ -3,7 +3,7 @@
 # same way.
 execute <- function(lines: List<Str>) -> List<Str> {
   count <- List.len(lines)
-  i <- 1
+  i <- 1i64
   while (i <= count && !Str.starts_with(lines[[i]], ">TH")) i <- i + 1
   i <- i + 1
   parts <- []
@@ -38,7 +38,7 @@ find_seq <- function(sequence: List<I64>, s: Str) -> I64 {
   freqs <- gen_freq(sequence, List.len(Str.to_utf8(s)))
   match (List.find_first_index(freqs, \(entry) entry[[1]] == s)) {
     :Ok(index) => freqs[[index]][[2]]
-    :Err(_) => 0
+    :Err(_) => 0i64
   }
 }
 
@@ -51,7 +51,7 @@ gen_freq <- function(sequence: List<I64>, frame: I64) -> List<Tuple{Str, I64}> {
         freqs[[index]] <- (subseq, freqs[[index]][[2]] + 1)
       }
       :Err(_) => {
-        freqs <- List.append(freqs, (subseq, 1))
+        freqs <- List.append(freqs, (subseq, 1i64))
       }
     }
   }
