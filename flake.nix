@@ -82,6 +82,7 @@
                 mkdir -p "$out/lib"
                 cp -P usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3* usr/lib/x86_64-linux-gnu/blas/libblas.so.3* "$out/lib/"
                 ln -s liblapack.so.3 "$out/lib/liblapack.so"
+                ln -s libblas.so.3 "$out/lib/libblas.so"
               '';
             };
             # rlang at exactly the release ry's native trace_back follows (FAST_PATHS in
