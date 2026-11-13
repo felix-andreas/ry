@@ -5123,10 +5123,16 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     if !matches!(formals.kind(), SexpType::Nil | SexpType::Pairlist) {
         return Err(error("invalid formal argument list for \"function\""));
     }
-    let closure = triple(SexpType::Closure, formals, body, env)?;
-    if srcref != nil() {
-        values::set_attr(closure, symbols().srcref, srcref)?;
-    }
+    let closure = match crate::ahead::take(formals, body, env) {
+        Some(closure) => closure,
+        None => {
+            let closure = triple(SexpType::Closure, formals, body, env)?;
+            if srcref != nil() {
+                values::set_attr(closure, symbols().srcref, srcref)?;
+            }
+            closure
+        }
+    };
     moves::created_closure(closure)?;
     let state = interp();
     if let Some(frame) = state.frames.last()

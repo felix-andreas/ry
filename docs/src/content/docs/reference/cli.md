@@ -182,6 +182,68 @@ With standard input piped (`echo '1 + 1' | ry run`), the console skips the edito
 the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves
 like `R --no-echo`, except that it keeps going after an error.
 
+### Compiling ahead of time
+
+`ry run --aot script.R` compiles the script's typed functions before the script starts, so no
+function compiles in the middle of the run. Without the flag, each typed function compiles at its
+first call. The script prints the same either way, and its warnings and errors arrive at the same
+points.
+
+```r
+total <- function(n: I64) -> I64 {
+  sum <- 0
+  for (i in List.range(1, n)) sum <- sum + square(i)
+  sum
+}
+square <- function(x: I64) -> I64 x * x
+cat("started\n", file = stderr())
+print(total(10))
+```
+
+`RY_TYPED_LOG=1` prints each compilation on standard error. With `--aot`, both functions are
+compiled before the script writes `started`:
+
+```console
+$ RY_TYPED_LOG=1 ry run totals.R
+started
+typed: compiled for [I64] -> I64 in 733 us
+385i64
+$ RY_TYPED_LOG=1 ry run --aot totals.R
+typed: compiled for [I64] -> I64 in 1044 us
+typed: compiled for [I64] -> I64 in 319 us
+typed: compiled 2 functions ahead of time in 1419 us
+started
+385i64
+```
+
+A function compiles ahead when it is defined at the top level of the script as
+`name <- function(...)` and each parameter's annotation says which values arrive from R: a number,
+`Bool`, `Str`, a `List` of those, a tag union or a table such as `DataFrame` or
+`DataFrame{price: double[]}`. The typed functions it calls compile with it, whatever their
+parameters. These compile at their first call instead:
+
+- a function defined inside a block, another function or a file the script sources, and a function
+  of a package;
+- a function defined after the script set `options(keep.source = TRUE)`, or in a statement that
+  holds a literal R warns about, such as `1.5L`;
+- a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no typed
+  function compiled ahead calls;
+- a function that calls a name the script binds to something else later. It was compiled for the
+  first definition of the name, and compiles again at its next call after the rebinding;
+- a function that converts an R value with `Num.from_r`, or with a `List.from_r` whose item type
+  the checker does not know, such as `List.from_r(get("prices"))`. Its first call runs in the
+  interpreter to see the type;
+- a function that calls into a namespace R has not loaded yet, such as `tools::file_ext`. Loading
+  a namespace runs its code, so the first call runs in the interpreter, which loads it.
+
+[Typed code at run time](/reference/type-system#annotations-at-run-time) describes both waits.
+
+Untyped R code is not compiled ahead of time. It runs in the interpreter and its hot functions
+compile while the script runs, with or without the flag.
+
+`--aot` needs a script and ry's runtime: `ry run --aot` without a file, `--aot` beside `-i`,
+`--keybindings` or `--no-load`, and `--aot --runtime gnu-r` are usage errors.
+
 ### Profile summary
 
 `ry run --profile-summary FILE script.R` runs the script and, when it ends, writes a Markdown

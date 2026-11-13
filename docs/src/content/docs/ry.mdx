@@ -275,7 +275,8 @@ strict
 
 `ry check --annotate` writes the inferred types into the file. Under strict mode, `ry run` and
 `ry load` refuse code with a strict-mode error, and a typed function compiles to native code before
-its first call. Typed ry is strict: a typed function's call of another typed function computes every
+its first call. `ry run --aot` compiles every typed function of the script before the script
+starts. Typed ry is strict: a typed function's call of another typed function computes every
 argument before the call, while an argument written in R code stays lazy. A function whose signature
 is written entirely in ry types runs natively, and strict mode says where one would not: an R value
 used outside a conversion such as `Num.from_r` is an error with the code `native`, and a construct

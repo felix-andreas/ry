@@ -1,7 +1,9 @@
 # Typed code calls an R function on native code when it uses the call as a statement or converts
-# its value with `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`. The first call runs
-# in the interpreter, which loads `stats` and records the type `List.from_r` gives, and the calls
-# after it run natively with the same results, R's random number generator included.
+# its value with `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`. The checker knows
+# that `stats::rnorm` gives doubles, so `List.from_r` needs no interpreted call to learn its item
+# type, and the function a lazy-loaded namespace binds is read from the package database when the
+# code compiles. Every call runs natively, the first included, with R's random number generator
+# giving what it gives the interpreter.
 
 requires ry-runtime
 
@@ -28,5 +30,75 @@ expect exit 0
 expect stdout "sum of 5 \n[1] 0.6463495"
 expect stdout "sum of 5 \n[1] 0.6463495"
 expect stdout "sum of 5 \n[1] -0.3348475"
-expect stderr "typed: `walk` runs in the interpreter: no code for [I64, I64]: it waits on the interpreter to run `"
 expect stderr "typed: compiled for [I64, I64] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+# A conversion whose type the checker does not know waits for the interpreter to run the call
+# once: `Num.from_r` of a call into R code that declares no result type.
+
+file scale.R
+| factor <- function() 2.5
+| scale <- function(x: F64) -> F64 {
+|   x * Num.from_r(factor())
+| }
+| print(scale(2))
+| print(scale(4))
+
+run ry run --runtime ry scale.R
+expect exit 0
+expect stdout "[1] 5\n[1] 10"
+expect stderr "typed: `scale` runs in the interpreter: no code for [Dbl]: it waits on the interpreter to run `"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+
+# The checker reads `whole` and `prices` and types both conversions as a `List<F64>`. R gives an
+# integer vector for `abs(-3:3)`, which the conversion widens as R would, and the empty integer
+# vector `abs(-3:3)[0]` becomes an empty `List<F64>`. The interpreter and compiled code give the same list.
+
+file widened.R
+| whole <- function() abs(-3:3)
+| none <- function() abs(-3:3)[0]
+| total <- function(extra: F64) -> F64 {
+|   listed <- List.from_r(whole())
+|   List.sum(listed) + List.sum(List.from_r(none())) + extra
+| }
+| print(total(0.5))
+| print(total(1.5))
+
+run ry run --runtime ry widened.R
+expect exit 0
+expect stdout "[1] 12.5\n[1] 13.5"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+run ry run --runtime ry --aot widened.R
+expect exit 0
+expect stdout "[1] 12.5\n[1] 13.5"
+expect stderr "typed: compiled 1 function ahead of time in "
+
+env RY_JIT off
+run ry run --runtime ry widened.R
+expect exit 0
+expect stdout "[1] 12.5\n[1] 13.5"
+
+# A vector no widening turns into the checker's type stops the conversion: R code rebinds
+# `prices` after the check, and the strings it gives are no `List<F64>`. The interpreter and
+# compiled code stop with the same error.
+
+file rebound.R
+| prices <- function() c(1.5, 2.5)
+| count <- function(extra: F64) -> F64 {
+|   listed <- List.from_r(prices())
+|   Num.to_f64(List.len(listed)) + extra
+| }
+| assign("prices", function() c("1.5", "2.5"))
+| print(count(3))
+
+unset RY_JIT
+run ry run --runtime ry rebound.R
+expect exit 1
+expect stderr "`List.from_r(prices())` gave a `List<Str>` where the type checker expects a `List<F64>`, the type of the R code it read: convert the vector to that type in R first, for example with `as.numeric()`"
+
+env RY_JIT off
+run ry run --runtime ry rebound.R
+expect exit 1
+expect stderr "`List.from_r(prices())` gave a `List<Str>` where the type checker expects a `List<F64>`, the type of the R code it read: convert the vector to that type in R first, for example with `as.numeric()`"

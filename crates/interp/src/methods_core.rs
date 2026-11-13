@@ -1020,7 +1020,7 @@ unsafe fn basic_classes<'a>() -> R<Vec<&'a [u8]>> {
 
 /// Whether `value` is an unforced promise of `lazyLoadDBfetch()`, the binding a lazy-loaded
 /// namespace or its imports hold until first use.
-unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
+pub unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
     Ok(value.kind() == SexpType::Promise
         && value.car() == unbound()
         && value.cdr().kind() == SexpType::Language

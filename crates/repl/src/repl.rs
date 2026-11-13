@@ -209,6 +209,8 @@ pub struct RuntimeFlags {
     pub strict: bool,
     /// The standard library's names resolve bare; off, only as `std::List.map`.
     pub prelude: bool,
+    /// A script's definitions compile before its first expression runs (`ry run --aot`).
+    pub ahead: bool,
 }
 
 impl RuntimeFlags {
@@ -219,6 +221,7 @@ impl RuntimeFlags {
             | (std::ffi::c_int::from(self.object_systems) << 1)
             | (std::ffi::c_int::from(self.strict) << 2)
             | (std::ffi::c_int::from(!self.prelude) << 5)
+            | (std::ffi::c_int::from(self.ahead) << 6)
     }
 }
 

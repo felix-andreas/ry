@@ -22,7 +22,7 @@ use {
     smallvec::SmallVec,
     syntax::{
         NodeRef, NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
-        TextSize, Unexpected, split_number_suffix,
+        TextSize, Unexpected, annotation, split_number_suffix,
     },
 };
 
@@ -95,6 +95,40 @@ pub struct Script<'text> {
     text: &'text str,
     root: SyntaxNode,
     pub expressions: Vec<SyntaxNode>,
+}
+
+impl Script<'_> {
+    /// The types the script names at its top level with `type` or `alias`, inline or in a `#:`
+    /// block, each with the text of its definition. A definition with type parameters names a
+    /// family of types and is left out.
+    pub fn named_types(&self) -> Vec<(String, String)> {
+        let mut named = Vec::new();
+        let mut define = |definition: &SyntaxNode| {
+            let mut types = definition
+                .children()
+                .filter(|child| annotation::is_type_kind(child.kind()));
+            if let (Some(name), Some(ty)) = (annotation::name_text(definition), types.next())
+                && ty.kind() != SyntaxKind::TYPE_BINDER_LIST
+            {
+                named.push((name, ty.text().to_string()));
+            }
+        };
+        for child in self.root.children() {
+            match child.kind() {
+                SyntaxKind::TYPE_DEFINITION => define(&child),
+                SyntaxKind::ANNOTATION => {
+                    for directive in child.children().filter(|node| {
+                        node.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
+                            && matches!(&*annotation::directive_name(node), "type" | "alias")
+                    }) {
+                        define(&directive);
+                    }
+                }
+                _ => {}
+            }
+        }
+        named
+    }
 }
 
 /// A script's first syntax error: where it is in the text, and GNU R's message for it without
@@ -2007,18 +2041,23 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
             let decimal = body.contains('.');
             if value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
                 let hex = body.starts_with("0x") || body.starts_with("0X");
-                if decimal && (hex || !body.contains(['e', 'E'])) {
+                if decimal
+                    && (hex || !body.contains(['e', 'E']))
+                    && !crate::ahead::holds_back_warning()
+                {
                     crate::conditions::warning(format!(
                         "integer literal {text} contains unnecessary decimal point"
                     ))?;
                 }
                 values::scalar_integer(value as i32)
             } else {
-                crate::conditions::warning(if decimal {
-                    format!("integer literal {text} contains decimal; using numeric value")
-                } else {
-                    format!("non-integer value {text} qualified with L; using numeric value")
-                })?;
+                if !crate::ahead::holds_back_warning() {
+                    crate::conditions::warning(if decimal {
+                        format!("integer literal {text} contains decimal; using numeric value")
+                    } else {
+                        format!("non-integer value {text} qualified with L; using numeric value")
+                    })?;
+                }
                 values::scalar_real(value)
             }
         }

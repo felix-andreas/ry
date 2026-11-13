@@ -23,6 +23,7 @@
     clippy::unnecessary_cast
 )]
 
+pub mod ahead;
 pub mod backend;
 pub mod fusion;
 pub mod ir;
@@ -49,8 +50,13 @@ use {
         strings::Encoding,
     },
     interp::{
-        annotations::decline, builtins::Arg, bytecode::TypedCall, records::NativeValues,
-        unwind::Unwind, values as rvalues,
+        annotations::decline,
+        arrays::{Items, checked_conversion},
+        builtins::Arg,
+        bytecode::TypedCall,
+        records::NativeValues,
+        unwind::Unwind,
+        values as rvalues,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
@@ -132,7 +138,8 @@ struct Running {
     sys_parent: Sexp,
 }
 
-/// How many closures a session compiles at most, since each keeps its closure alive.
+/// How many closures a session compiles at most, since each keeps its closure alive. The
+/// functions compiled before a script starts are not counted ([`ahead::compiled_ahead`]).
 const MAX_COMPILED: usize = 4096;
 
 /// How many refusals the table keeps before it forgets them. A refusal is keyed by a closure
@@ -311,8 +318,9 @@ unsafe fn compiled_or_refusal(
         }
         None => {}
     }
-    if COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
-        >= MAX_COMPILED
+    if !ahead::compiling_ahead()
+        && COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
+            >= MAX_COMPILED + ahead::compiled_ahead()
     {
         decline(|| format!("the session compiled its limit of {MAX_COMPILED} typed functions"));
         return Err(Refusal::new(
@@ -389,16 +397,25 @@ pub fn has_compiled(function: Sexp) -> bool {
     })
 }
 
-/// Whether every function lookup `compiled` assumes still finds the same function.
+/// Whether every function lookup `compiled` assumes still finds the same function. A lookup
+/// that found a definition its script had not run yet assumed no binding, only the function
+/// ([`ahead::defined_later`]).
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
+    let functions = if ahead::compiling_ahead() {
+        lower::find_function
+    } else {
+        lower::resolve_function
+    };
     compiled.speculations.iter().all(|assumed| {
         let resolve = if interp::values::is_function(assumed.function) {
-            lower::resolve_function
+            functions
         } else {
             lower::resolve_value
         };
-        resolve(assumed.symbol, assumed.env)
-            .is_some_and(|now| now.cell == assumed.cell && now.function == assumed.function)
+        resolve(assumed.symbol, assumed.env).is_some_and(|now| {
+            (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
+                && now.function == assumed.function
+        })
     })
 }
 
@@ -1443,13 +1460,26 @@ unsafe fn write_converted(
     value: Sexp,
     out: *mut u64,
 ) -> Result<(), Unwind> {
+    let value = match conversion.checked {
+        Some(item) if value.is_array() => {
+            let expected = match item {
+                Item::I64 => Items::I64,
+                Item::Dbl => Items::Double,
+                _ => Items::Character,
+            };
+            let list = checked_conversion(conversion.call, value, expected)?;
+            interp::heap().root(list);
+            list
+        }
+        _ => value,
+    };
     let expected = storage(ty).map(|(kind, _)| kind);
     if expected != Some(value.kind())
         || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
     {
         return Err(interp::unwind::error(format!(
-            "`{}` gave a value of type `{}`, and the typed function was compiled for the type it \
-             gave before, {ty:?}: convert the value to one type in R first",
+            "`{}` gave a value of type `{}`, and the typed function was compiled for the type \
+             it gave before: convert the value to one type in R first",
             interp::deparse::deparse_first_line(conversion.call),
             value.kind().name()
         )));
