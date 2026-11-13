@@ -8,7 +8,7 @@ use {
     crate::{
         Interp,
         builtins::{BuiltinDef, Call, internal},
-        deparse, eval, interp,
+        bytecode, deparse, eval, interp,
         unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
         values::{
             self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
@@ -536,6 +536,9 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     {
         return default_warning(call, &message);
     }
+    if crate::base_fast_paths::fast_paths_enabled() && muffled_by_suppress_warnings()? {
+        return Ok(());
+    }
     if crate::heap()
         .frame_cell(values::base_namespace(), hook)
         .is_some()
@@ -551,6 +554,125 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
         return Ok(());
     }
     default_warning(call, &message)
+}
+
+/// Whether `base::suppressWarnings` muffles a simple warning signalled now: the topmost handler
+/// for `simpleWarning`, `warning` or `condition` is the calling handler that `suppressWarnings`
+/// establishes, and its `classes` name one of those three. That handler only tests the class and
+/// invokes the `muffleWarning` restart, so nothing it would run is observable, and the frames of
+/// `.signalSimpleWarning` and `withRestarts` are seen only by handlers that do run. Any other
+/// handler, or a `classes` whose value is still an unevaluated expression, takes the R route.
+unsafe fn muffled_by_suppress_warnings() -> R<bool> {
+    let Some(handler) = find_handler(
+        &interp().handlers,
+        &[b"simpleWarning", b"warning", b"condition"],
+    ) else {
+        return Ok(false);
+    };
+    let closure = handler.handler;
+    if !handler.calling || closure.kind() != SexpType::Closure {
+        return Ok(false);
+    }
+    // The handler is recognised by its body being the function literal inside the
+    // `suppressWarnings` the base namespace binds now, which rules out a handler that only looks
+    // alike, and by that body having the stock shape, which rules out a redefined binding.
+    let body = bytecode::closure_body(closure);
+    if !is_stock_muffle(closure.car(), body) {
+        return Ok(false);
+    }
+    let heap = crate::heap();
+    let Some(cell) = heap.frame_cell(values::base_namespace(), symbols().suppress_warnings) else {
+        return Ok(false);
+    };
+    let suppress = cell.cdr();
+    if suppress.kind() != SexpType::Closure
+        || !holds_function_body(
+            bytecode::closure_body(suppress),
+            body,
+            SUPPRESS_WARNINGS_DEPTH,
+        )
+    {
+        return Ok(false);
+    }
+    let Some(cell) = heap.frame_cell(closure.tag(), symbols().classes) else {
+        return Ok(false);
+    };
+    let mut classes = cell.cdr();
+    if classes.kind() == SexpType::Promise {
+        if classes.car() != values::unbound() {
+            classes = classes.car();
+        } else if classes.cdr().kind() == SexpType::String {
+            // A literal default such as `"warning"`: forcing it has no effect but its value,
+            // as when the handler forces it.
+            classes = eval::force_promise(classes)?;
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(classes.kind() == SexpType::String
+        && (0..length(classes)).any(|index| {
+            matches!(
+                classes.element(index).bytes(),
+                b"simpleWarning" | b"warning" | b"condition"
+            )
+        }))
+}
+
+/// How deep in `suppressWarnings`'s body its handler's function literal sits.
+const SUPPRESS_WARNINGS_DEPTH: u32 = 4;
+
+/// Whether a handler with these formals and body is `function(w) if (inherits(w, classes))
+/// tryInvokeRestart("muffleWarning")`, the handler base R's `suppressWarnings` establishes.
+unsafe fn is_stock_muffle(formals: Sexp, body: Sexp) -> bool {
+    let symbols = symbols();
+    let is_call = |call: Sexp, function: Sexp, arity: usize| {
+        call.kind() == SexpType::Language && call.car() == function && {
+            let mut argument = call.cdr();
+            let mut count = 0;
+            while argument.kind() == SexpType::Pairlist && argument.tag() == nil() {
+                count += 1;
+                argument = argument.cdr();
+            }
+            argument == nil() && count == arity
+        }
+    };
+    if formals.kind() != SexpType::Pairlist || formals.tag() != symbols.w || formals.cdr() != nil()
+    {
+        return false;
+    }
+    if !is_call(body, symbols.if_, 2) {
+        return false;
+    }
+    let test = body.cdr().car();
+    let action = body.cdr().cdr().car();
+    is_call(test, symbols.inherits, 2)
+        && test.cdr().car() == symbols.w
+        && test.cdr().cdr().car() == symbols.classes
+        && is_call(action, symbols.try_invoke_restart, 1)
+        && {
+            let restart = action.cdr().car();
+            restart.kind() == SexpType::String
+                && length(restart) == 1
+                && restart.element(0).bytes() == b"muffleWarning"
+        }
+}
+
+/// Whether `expression` contains a `function` literal whose body is `body`.
+unsafe fn holds_function_body(expression: Sexp, body: Sexp, depth: u32) -> bool {
+    if depth == 0 || expression.kind() != SexpType::Language {
+        return false;
+    }
+    if expression.car() == symbols().function && expression.cdr().cdr().car() == body {
+        return true;
+    }
+    let mut argument = expression.cdr();
+    while argument.kind() == SexpType::Pairlist {
+        if holds_function_body(argument.car(), body, depth - 1) {
+            return true;
+        }
+        argument = argument.cdr();
+    }
+    false
 }
 
 /// `base::quote(call)`, the form in which GNU R hands a condition's call to the R-level hooks

@@ -1,0 +1,142 @@
+[stdout]
+| -- coercion 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- coercions 
+| List of 2
+|  $ value  : num [1:3] NA NaN NaN
+|  $ visible: logi TRUE
+| -- warning value 
+| List of 2
+|  $ value  : chr "x"
+|  $ visible: logi FALSE
+| -- nested visibility 
+| List of 2
+|  $ value  :List of 2
+|   ..$ value  : chr "x"
+|   ..$ visible: logi FALSE
+|  $ visible: logi TRUE
+| -- classes foo 
+| outer saw: x 
+| List of 2
+|  $ value  : chr "x"
+|  $ visible: logi FALSE
+| -- classes foo, warning 
+| List of 2
+|  $ value  : chr "x"
+|  $ visible: logi FALSE
+| -- classes condition 
+| List of 2
+|  $ value  : chr "x"
+|  $ visible: logi FALSE
+| -- classes simpleWarning 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- classes message 
+| outer saw: y 
+| List of 2
+|  $ value  : chr "y"
+|  $ visible: logi FALSE
+| -- promise classes 
+| classes forced
+| List of 2
+|  $ value  : chr "p"
+|  $ visible: logi FALSE
+| -- variable classes 
+| List of 2
+|  $ value  : chr "v"
+|  $ visible: logi FALSE
+| -- custom class 
+| List of 2
+|  $ value  : chr "m"
+|  $ visible: logi FALSE
+| -- custom class, plain warning 
+| outer saw: plain 
+| List of 2
+|  $ value  : chr "plain"
+|  $ visible: logi FALSE
+| -- lookalike handler 
+| lookalike ran
+| List of 2
+|  $ value  : chr "look"
+|  $ visible: logi FALSE
+| -- handler outside 
+| List of 2
+|  $ value  : chr "in"
+|  $ visible: logi FALSE
+| -- handler inside 
+| inner handler ran
+| List of 2
+|  $ value  : chr "in2"
+|  $ visible: logi FALSE
+| -- tryCatch inside 
+| List of 2
+|  $ value  : chr "caught"
+|  $ visible: logi TRUE
+| -- tryCatch outside 
+| List of 2
+|  $ value  : chr "tc2"
+|  $ visible: logi FALSE
+| -- warning in a handler 
+| handler continues
+| List of 2
+|  $ value  : NULL
+|  $ visible: logi FALSE
+| -- warning in an outer handler 
+| outer handler continues
+| List of 2
+|  $ value  : chr "first"
+|  $ visible: logi FALSE
+| -- warn 2 coercion 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- warn 2 warning 
+| List of 2
+|  $ value  : chr "w2"
+|  $ visible: logi FALSE
+| -- warn 1 
+| List of 2
+|  $ value  : chr "w1"
+|  $ visible: logi FALSE
+| -- in a function 
+| List of 2
+|  $ value  : language f()
+|  $ visible: logi TRUE
+| -- frames 
+| List of 2
+|  $ value  : int 14
+|  $ visible: logi TRUE
+| last.warning exists: FALSE 
+| -- later warning 
+| List of 2
+|  $ value  : num 1
+|  $ visible: logi TRUE
+| hot loop: 1500 
+| -- local redefinition 
+| local redefinition ran
+| List of 2
+|  $ value  : chr "r"
+|  $ visible: logi FALSE
+| -- base redefinition 
+| base redefinition ran
+| List of 2
+|  $ value  : chr "b"
+|  $ visible: logi FALSE
+| -- original after redefinition 
+| List of 2
+|  $ value  : chr "o"
+|  $ visible: logi FALSE
+| -- restored 
+| List of 2
+|  $ value  : chr "restored"
+|  $ visible: logi FALSE
+[messages]
+[warnings]
+- after (in g())
+[errors]
+[value]
+NULL
+| NULL
