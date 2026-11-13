@@ -526,7 +526,6 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     WARNINGS.set(WARNINGS.get() + 1);
     let call = resolve_call(call);
     let message = message.into();
-    let hook = values::install(".signalSimpleWarning")?;
     // Without a handler for the warning, `.signalSimpleWarning` only runs the default handler.
     // Its frames are then observable only when `options(warn = 2)` turns the warning into an
     // error, whose handlers and traceback see them.
@@ -539,6 +538,7 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     if crate::base_fast_paths::fast_paths_enabled() && muffled_by_suppress_warnings()? {
         return Ok(());
     }
+    let hook = values::install(".signalSimpleWarning")?;
     if crate::heap()
         .frame_cell(values::base_namespace(), hook)
         .is_some()
