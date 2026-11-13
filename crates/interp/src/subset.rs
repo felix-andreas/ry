@@ -111,6 +111,18 @@ pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
     }
 }
 
+/// [`modifiable`] for a builtin that changes only attributes, as GNU R's `names<-`,
+/// `dimnames<-` and `attributes<-` are: a shared long vector is copied under a wrapper, so its
+/// data is not copied at all.
+pub unsafe fn modifiable_attributes(object: Sexp) -> R<Sexp> {
+    crate::moves::modifying(object)?;
+    if values::maybe_shared(object) {
+        values::shallow_duplicate_attr(object)
+    } else {
+        Ok(object)
+    }
+}
+
 /// Element `index` of any vector as a length-one vector (or, for lists, the element).
 pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
     // String and list elements read through the ALTREP class's `Elt` method on their own, and
@@ -285,9 +297,9 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
     }
 }
 
-/// A vector of the elements at `indices` (`usize::MAX` gives NA).
 /// Whether [`select_positions`] reads `count` elements of `vector` one at a time instead of
-/// expanding it: for a long ALTREP number vector, such as a compact sequence, of which the
+/// expanding it: always for a compact sequence, whose elements are arithmetic and which GNU R
+/// leaves compact when it is subset, and for another long ALTREP number vector of which the
 /// selection is a small part. A short one expands cheaply, and its class keeps the expansion.
 unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
     vector.is_altrep()
@@ -295,10 +307,11 @@ unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
             vector.kind(),
             SexpType::Logical | SexpType::Integer | SexpType::Real
         )
-        && length(vector) >= 1 << 16
-        && count <= length(vector) / 8
+        && (values::compact_sequence(vector).is_some()
+            || (length(vector) >= 1 << 16 && count <= length(vector) / 8))
 }
 
+/// A vector of the elements at `indices` (`usize::MAX` gives NA).
 pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     select_positions(vector, indices.iter().copied(), indices.len())
 }
@@ -333,6 +346,21 @@ pub unsafe fn select_positions(
     if reads_sparsely(vector, count) {
         let extent = length(vector);
         let result = alloc(vector.kind(), count)?;
+        if let Some((_, first, increment)) = values::compact_sequence(vector) {
+            for (slot, index) in positions.enumerate() {
+                let number = first + increment * index as f64;
+                if vector.kind() == SexpType::Real {
+                    values::reals_mut(result)[slot] = if index < extent { number } else { NA_REAL };
+                } else {
+                    values::ints_mut(result)[slot] = if index < extent {
+                        number as i32
+                    } else {
+                        NA_INTEGER
+                    };
+                }
+            }
+            return Ok(result);
+        }
         for (slot, index) in positions.enumerate() {
             if vector.kind() == SexpType::Real {
                 values::reals_mut(result)[slot] = if index < extent {
@@ -425,6 +453,10 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let object = values::materialize(object)?;
+    if let Some((_, offsets)) = sequence_offsets(index) {
+        let count = offsets.len();
+        return Ok(Some(gather_kind(object, offsets, count)?));
+    }
     let index = values::materialize(index)?;
     match index.kind() {
         SexpType::Integer => {
@@ -495,6 +527,25 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         _ => Ok(None),
     }
+}
+
+/// The zero-based offsets a compact sequence subscript selects, computed from its `c(n, n1,
+/// inc)` info instead of expanding it, as GNU R reads a compact subscript through `*_ELT`, and
+/// the highest of them. `None` unless every element is a whole number of at least one, the only
+/// case that needs no further rules; offsets past the end are the caller's to check.
+unsafe fn sequence_offsets(index: Sexp) -> Option<(usize, impl ExactSizeIterator<Item = usize>)> {
+    let (count, first, increment) = values::compact_sequence(index)?;
+    let last = first + increment * count.saturating_sub(1) as f64;
+    if first.min(last) < 1.0 || first.fract() != 0.0 || increment.abs() != 1.0 {
+        return None;
+    }
+    let start = first as usize - 1;
+    let step = increment as isize;
+    let highest = first.max(last) as usize - 1;
+    Some((
+        highest,
+        (0..count).map(move |slot| start.wrapping_add_signed(step * slot as isize)),
+    ))
 }
 
 /// One bit per element, inline for vectors of up to 256 elements.
@@ -1584,9 +1635,13 @@ unsafe fn subset2_level(
     if object.kind() == SexpType::I64 {
         return Err(error_in(call, "an I64 is a number and cannot be indexed"));
     }
-    // String and list elements read through the class's `Elt` method, so `x[[i]]` asks for
-    // element `i` alone, as GNU R does; other vectors are read as slices.
-    let object = if matches!(object.kind(), SexpType::String | SexpType::List) {
+    // String, list and number elements read through the class's `Elt` method, so `x[[i]]` asks
+    // for element `i` alone and leaves a compact sequence compact, as GNU R does; other vectors
+    // are read as slices.
+    let object = if matches!(
+        object.kind(),
+        SexpType::String | SexpType::List | SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) {
         object
     } else {
         values::materialize(object)?
@@ -2322,6 +2377,36 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     subassign(object, &indices, value_arg.value, call.call)
 }
 
+/// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
+/// selects nothing and `value` needs no change of type. GNU R then returns `x` itself, so
+/// `x[FALSE] <- 1` keeps an ALTREP vector, such as a wrapper, unexpanded.
+unsafe fn selects_nothing(object: Sexp, indices: &[Sexp], value: Sexp) -> bool {
+    let &[index] = indices else {
+        return false;
+    };
+    let empty = match index.kind() {
+        SexpType::Nil => true,
+        SexpType::Logical => values::ints(index).iter().all(|&flag| flag == 0),
+        SexpType::Integer | SexpType::Real | SexpType::String => length(index) == 0,
+        _ => false,
+    };
+    let atomic = |kind| {
+        matches!(
+            kind,
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::String
+        )
+    };
+    let fits = value.kind() == object.kind()
+        || (atomic(value.kind())
+            && atomic(object.kind())
+            && coerce::higher_type(object.kind(), value.kind()) == object.kind());
+    empty && fits && !value.is_object() && index.attrib() == nil()
+}
+
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
     // `s[o] <- s` writes into the vector it reads from, so the value must be a copy, as in GNU
@@ -2342,6 +2427,9 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else {
         object
     };
+    if object.is_altrep() && selects_nothing(object, indices, value) {
+        return Ok(object);
+    }
     let object = values::materialize(object)?;
     let mut value = values::materialize(value)?;
     // A pairlist value assigns its elements into a list, as a list would, but has no atomic
@@ -2679,6 +2767,9 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         return Ok(false);
     }
     let count = length(target);
+    if let Some((highest, offsets)) = sequence_offsets(index) {
+        return Ok(highest < count && scatter_offsets(target, offsets, value, value_count));
+    }
     let index = values::materialize(index)?;
     let offsets: Vec<usize> = match index.kind() {
         SexpType::Integer => {
@@ -2710,29 +2801,39 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         }
         _ => return Ok(false),
     };
+    Ok(scatter_offsets(
+        target,
+        offsets.iter().copied(),
+        value,
+        value_count,
+    ))
+}
+
+/// Writes `value`, recycled, to `offsets` of `target`, which share its type and lie inside it.
+/// False, having written nothing, unless the number of offsets is a multiple of `value_count`.
+unsafe fn scatter_offsets(
+    target: Sexp,
+    offsets: impl ExactSizeIterator<Item = usize>,
+    value: Sexp,
+    value_count: usize,
+) -> bool {
     if !offsets.len().is_multiple_of(value_count) {
-        return Ok(false);
+        return false;
     }
-    match kind {
-        SexpType::Real => recycle_into(
-            values::reals_mut(target),
-            offsets.iter().copied(),
-            values::reals(value),
-        ),
-        SexpType::Logical | SexpType::Integer => recycle_into(
-            values::ints_mut(target),
-            offsets.iter().copied(),
-            values::ints(value),
-        ),
+    match target.kind() {
+        SexpType::Real => recycle_into(values::reals_mut(target), offsets, values::reals(value)),
+        SexpType::Logical | SexpType::Integer => {
+            recycle_into(values::ints_mut(target), offsets, values::ints(value))
+        }
         _ => {
             let source = value.slice::<Sexp>();
             let heap = crate::heap();
-            for (position, &offset) in offsets.iter().enumerate() {
+            for (position, offset) in offsets.enumerate() {
                 heap.set_element(target, offset, source[position % value_count]);
             }
         }
     }
-    Ok(true)
+    true
 }
 
 /// A logical subscript longer than the vector stretches it on assignment to the subscript's
@@ -3715,7 +3816,7 @@ unsafe fn do_dimnames(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_set_dimnames(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable(call.arg(0))?;
+    let object = modifiable_attributes(call.arg(0))?;
     set_dimnames(object, call.arg(1), call.call)?;
     Ok(object)
 }
@@ -3890,7 +3991,7 @@ pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     let attributes = call.arg(1);
     // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
     let object = match call.arg(0) {
-        object if object != nil() => modifiable(object)?,
+        object if object != nil() => modifiable_attributes(object)?,
         _ if attributes == nil() => return Ok(nil()),
         _ => alloc(SexpType::List, 0)?,
     };
@@ -4332,7 +4433,7 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
     if kept.len() == dims.len() {
         return Ok(object);
     }
-    let result = values::shallow_duplicate(object)?;
+    let result = values::shallow_duplicate_attr(object)?;
     let dimnames = get_attr(object, symbols().dimnames);
     values::remove_attr(result, symbols().dim);
     values::remove_attr(result, symbols().dimnames);
