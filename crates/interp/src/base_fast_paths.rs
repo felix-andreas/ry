@@ -3310,7 +3310,18 @@ unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()
     let outer = interp().frames[index].function.cdr();
     let closure = crate::bytecode::inner_closure(outer, formals, body, srcref, env)?;
     crate::heap().root(closure);
-    eval::define(nth(statement, 1), closure, env)
+    define_local(nth(statement, 1), closure, env)
+}
+
+/// `eval::define` with one probe of `env`'s frame instead of two: the fast paths bind names
+/// their frames have not bound yet, so the probe almost always finds nothing.
+unsafe fn define_local(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
+    let heap = crate::heap();
+    if heap.frame_cell(env, symbol).is_some() {
+        return eval::define(symbol, value, env);
+    }
+    heap.define_unbound(env, symbol, value)?;
+    Ok(())
 }
 
 /// The element at `position` of the pairlist or call `list`.
@@ -3488,7 +3499,7 @@ unsafe fn do_with_restarts(call: &Call<'_>) -> R<Sexp> {
     for position in 0..5 {
         define_inner_closure(index, nth(statements, position), frame)?;
     }
-    let make_restart = eval::value_of(eval::find_var_in_frame(install("makeRestart")?, frame)?)?;
+    let make_restart = eval::value_of(eval::find_var_in_frame(symbols().make_restart, frame)?)?;
     if make_restart.kind() != SexpType::Closure {
         return decline();
     }
@@ -3498,7 +3509,7 @@ unsafe fn do_with_restarts(call: &Call<'_>) -> R<Sexp> {
         let restart = make_restart_for(make_restart, tag.car(), spec)?;
         heap.set_element(restarts, position, restart);
     }
-    eval::define(symbols().restarts, restarts, frame)?;
+    define_local(symbols().restarts, restarts, frame)?;
     let value = eval::eval(nth(statements, 6), frame)?;
     finish(ClosureFrame::Env(frame), value, interp().visible)
 }
@@ -3516,15 +3527,23 @@ unsafe fn make_restart_for(make_restart: Sexp, name: Sexp, spec: Sexp) -> R<Sexp
     let mut position = 0;
     while formal.kind() == SexpType::Pairlist {
         let symbol = formal.tag();
+        let default = formal.car();
         let value = if (symbol == names.handler && spec.kind() != SexpType::String)
             || (symbol == names.description && spec.kind() == SexpType::String)
         {
             spec
+        } else if default.kind() == SexpType::Language && default.car() == names.function {
+            // `function(...) NULL` and `function(c) TRUE`, made as `function` makes them.
+            let srcref = match default.cdr().cdr().cdr() {
+                rest if rest.kind() == SexpType::Pairlist => rest.car(),
+                _ => nil(),
+            };
+            eval::make_closure(nth(default, 1), nth(default, 2), srcref, env)?
         } else {
-            eval::eval(formal.car(), env)?
+            eval::eval(default, env)?
         };
         heap.root(value);
-        eval::define(symbol, value, env)?;
+        define_local(symbol, value, env)?;
         let field = if position == 0 { 0 } else { position + 1 };
         if field >= fields.len() {
             return Err(crate::unwind::error("makeRestart has unexpected formals"));
@@ -3535,24 +3554,39 @@ unsafe fn make_restart_for(make_restart: Sexp, name: Sexp, spec: Sexp) -> R<Sexp
     }
     fields[0] = values::scalar_string_charsxp(name)?;
     let restart = values::list_vector(&fields)?;
-    let field_names = values::alloc(SexpType::String, fields.len())?;
-    for (position, label) in [
-        "name",
-        "exit",
-        "handler",
-        "description",
-        "test",
-        "interactive",
-    ]
-    .iter()
-    .enumerate()
-    {
-        heap.set_element(field_names, position, values::mkchar(label)?);
-    }
+    let [field_names, class] = restart_attributes()?;
     values::set_attr(restart, names.names, field_names)?;
-    values::set_attr(restart, names.class, values::scalar_string("restart")?)?;
+    values::set_attr(restart, names.class, class)?;
     Ok(restart)
 }
+
+/// The `names` and `class` attributes of a restart object, `c("name", "exit", "handler",
+/// "description", "test", "interactive")` and `"restart"`, which every restart the prologue
+/// builds shares.
+unsafe fn restart_attributes() -> R<[Sexp; 2]> {
+    if let Some(attributes) = interp().globals.restart_attributes {
+        return Ok(attributes);
+    }
+    let heap = crate::heap();
+    let field_names = values::alloc(SexpType::String, RESTART_FIELDS.len())?;
+    for (position, label) in RESTART_FIELDS.iter().enumerate() {
+        heap.set_element(field_names, position, values::mkchar(label)?);
+    }
+    let class = values::scalar_string("restart")?;
+    field_names.mark_not_mutable();
+    class.mark_not_mutable();
+    interp().globals.restart_attributes = Some([field_names, class]);
+    Ok([field_names, class])
+}
+
+const RESTART_FIELDS: [&str; 6] = [
+    "name",
+    "exit",
+    "handler",
+    "description",
+    "test",
+    "interactive",
+];
 
 /// `doWithOneRestart(expr, restart)`: sets the restart's `exit` to the frame, establishes it
 /// and evaluates `expr`, whose `return(expr)` returns from `withOneRestart`.
@@ -3572,9 +3606,17 @@ unsafe fn do_do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     let field_names = values::get_attr(restart, names.names);
-    let Some(exit) = (0..length(field_names).min(length(restart)))
-        .find(|&position| field_names.element(position).bytes() == b"exit")
-    else {
+    let shared = interp()
+        .globals
+        .restart_attributes
+        .map(|[shared, _]| shared);
+    let exit = if shared == Some(field_names) && length(restart) == RESTART_FIELDS.len() {
+        Some(1)
+    } else {
+        (0..length(field_names).min(length(restart)))
+            .find(|&position| field_names.element(position).bytes() == b"exit")
+    };
+    let Some(exit) = exit else {
         return decline();
     };
     let copy = values::shallow_duplicate(restart)?;
@@ -3592,16 +3634,22 @@ unsafe fn do_do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
 /// Whether `restart` is a list of class `restart` alone, whose `$` and `$<-` no method
 /// visible from `frame` takes over.
 unsafe fn is_plain_restart(restart: Sexp, frame: Sexp) -> R<bool> {
-    let class = values::get_attr(restart, symbols().class);
-    if class.kind() != SexpType::String
-        || length(class) != 1
-        || class.element(0).bytes() != b"restart"
+    let names = symbols();
+    let class = values::get_attr(restart, names.class);
+    let shared = interp()
+        .globals
+        .restart_attributes
+        .map(|[_, shared]| shared);
+    if shared != Some(class)
+        && (class.kind() != SexpType::String
+            || length(class) != 1
+            || class.element(0).bytes() != b"restart")
     {
         return Ok(false);
     }
     let base = values::base_namespace();
-    for method in [&b"$.restart"[..], b"$<-.restart"] {
-        if crate::dispatch::lookup_method(values::install_bytes(method)?, frame, base)?.is_some() {
+    for method in [names.dollar_restart, names.dollar_assign_restart] {
+        if crate::dispatch::lookup_method(method, frame, base)?.is_some() {
             return Ok(false);
         }
     }

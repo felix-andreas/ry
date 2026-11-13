@@ -249,6 +249,9 @@ symbol_table! {
     nh = "nh",
     r = "r",
     restart_args = "restartArgs",
+    make_restart = "makeRestart",
+    dollar_restart = "$.restart",
+    dollar_assign_restart = "$<-.restart",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.
@@ -280,6 +283,10 @@ pub struct Globals {
     /// The environment the host's sessions attach beside base R, as a start-up image carries it
     /// ([`crate::image::ImageHost::environment`]); nil when the session started without one.
     pub host_environment: Sexp,
+    /// The `names` and `class` attributes every restart object `withRestarts` builds natively
+    /// shares, made at the first such restart and marked not mutable, so a restart whose names
+    /// or class R code changes gets its own copy.
+    pub restart_attributes: Option<[Sexp; 2]>,
 }
 
 impl Globals {
@@ -295,6 +302,7 @@ impl Globals {
             implicit_classes: rustc_hash::FxHashMap::default(),
             deferred_definitions: Vec::new(),
             host_environment: Sexp::dangling(),
+            restart_attributes: None,
         }
     }
 
@@ -310,6 +318,9 @@ impl Globals {
         marker.mark(self.methods_namespace);
         marker.mark(self.methods_templates);
         marker.mark(self.host_environment);
+        for &attribute in self.restart_attributes.iter().flatten() {
+            marker.mark(attribute);
+        }
         for methods in self.primitive_methods.values() {
             marker.mark(methods.generic);
             marker.mark(methods.methods);

@@ -671,6 +671,7 @@ unsafe fn restore_state(
 
     let globals = &mut interp().globals;
     globals.host_environment = root(&mut input)?;
+    globals.restart_attributes = None;
     globals.methods_namespace = root(&mut input)?;
     globals.methods_templates = root(&mut input)?;
     globals.methods_dispatch = input.u8()? != 0;
