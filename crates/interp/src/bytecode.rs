@@ -7412,6 +7412,11 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     if *word as u32 == op_word(Op::CallBuiltin) {
         quicken_call_builtin(word, call, count);
     }
+    // The step table, which the optimizing tier runs single instructions through, sends a
+    // quickened site here too.
+    if *word as u32 & OP_MASK == POSITIONAL_CALL_BUILTIN as u32 {
+        return op_call_builtin_positional(state, instruction);
+    }
     let definition = eval::builtin_def(function)?;
     if count == 1
         && let Some(unary) = definition.unary
