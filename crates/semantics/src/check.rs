@@ -461,7 +461,7 @@ pub struct ItemCheck<'db> {
     /// (`preflight` in the `ry` crate). In id order.
     pub typed_empties: ThinVec<(ExprId, Empty)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
-    /// one-shot check keeps no per-item slots for them.
+    /// command's check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
 }
 

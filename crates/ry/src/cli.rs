@@ -1313,7 +1313,7 @@ fn install_environment(
             .map(|stub| (stub.stem.clone(), stub.text.clone())),
     );
 
-    // A one-shot check changes one input after analysis starts: the attached namespaces,
+    // A command's check changes one input after analysis starts: the attached namespaces,
     // known only once every file is parsed. Every other input is high durability, so a memo
     // that never read the attached set skips verification in the revision that sets it.
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())

@@ -614,7 +614,7 @@ thin wrapper around a battery its crate exports, which the crate's in-tree harne
 | `unserialize` | `R::serialize::check_unserialize_input` |
 
 The `semantics` target derives its document kind and an incremental edit from the input bytes, so a
-single byte stream drives the full battery, the splice cache included. The generator-driven targets
+single byte stream drives the full battery, the spliced reparse of the edit included. The generator-driven targets
 (`lsp`, `reload`, `bytecode`) read the generator's choices from the input through
 `syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session. The
 runtime targets link polars, so `cargo fuzz build --no-default-features` builds only the analysis
