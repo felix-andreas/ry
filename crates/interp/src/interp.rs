@@ -534,8 +534,10 @@ pub struct Interp {
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
-    /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
-    /// the collector still sees them.
+    /// Stacks set aside while others are in effect, kept here so the collector still sees them:
+    /// a calling handler runs with the handlers below its own entry, and code run as if at top
+    /// level (`R_ToplevelExec`, `R_tryEval`, a help server handler) sees none. An entry set aside
+    /// may hold the only reference to its handler closure. See [`conditions::set_aside`].
     pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
     /// Handler entries a frame exit released, which the next handlers established reuse, so a
     /// `tryCatch` in a loop makes no Rust allocation ([`conditions::restore_handlers`]).
