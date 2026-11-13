@@ -7329,6 +7329,7 @@ fast_paths! {
     fast_jump_unless: JumpUnless, jump_unless_fast;
     fast_set_srcref: SetSrcref, set_srcref_fast;
     fast_jump: Jump, jump_fast;
+    fast_for_step: ForStep, for_step_fast;
     fast_constant: Constant, constant_fast;
     fast_end_statement: EndStatement, end_statement_fast;
     fast_branch_unless_same: BranchUnlessSame, branch_unless_same_fast;
@@ -7569,18 +7570,74 @@ unsafe fn set_srcref_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     Some(at + 1 + operand_count(Op::SetSrcref))
 }
 
-/// `Jump` forward, and backward while no optimizing tier counts back edges and no interrupt is
-/// pending.
+/// `Jump` forward, and backward while no interrupt is pending and the back edge does not reach
+/// a count at which `back_edge` acts, so the count is the only work.
 #[inline(always)]
 unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let target = *state.code.add(at + 1) as usize;
-    if target < at
-        && ((*state.interp).bytecode.tier.is_some()
-            || crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed))
-    {
-        return None;
+    if target < at {
+        if crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(tier) = &(*state.interp).bytecode.tier {
+            let count = pool_entry(state.constants, PROFILE)
+                .data()
+                .cast::<i32>()
+                .add(profile::BACK_EDGES);
+            let next = (*count).saturating_add(1);
+            if next >= tier.back_edge_threshold || next == tier.back_edge_threshold / 2 {
+                return None;
+            }
+            *count = next;
+        }
     }
     Some(target)
+}
+
+/// `ForStep` over an arithmetic sequence (`1:n`, `seq_len`), when the loop variable's binding
+/// holds the previous element alone, as a plain scalar it may overwrite: in a slot frame its
+/// slot, in the global environment the cell `op_for_step` cached under the variable's lookup
+/// stamp. Everything else, including the step past the end, goes to `op_for_step`.
+#[inline(always)]
+unsafe fn for_step_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let loop_state = state.machine.loops.get_mut(*code.add(at + 1) as usize)?;
+    let index = loop_state.index;
+    if index >= loop_state.count || loop_state.step == 0.0 {
+        return None;
+    }
+    let heap = &*state.heap;
+    let header = *state.header;
+    let constant = *code.add(at + 3) as usize;
+    let value = if header == heap.known().nil {
+        let by_constant = *pool_entry(state.constants, SLOTS).data().cast::<Sexp>().add(3);
+        if by_constant == heap.known().nil || constant >= by_constant.length() as usize {
+            return None;
+        }
+        let slot = *by_constant.data().cast::<i32>().add(constant);
+        if slot < 0 {
+            return None;
+        }
+        *state.header.add(1 + slot as usize)
+    } else if header == heap.known().global_env {
+        let cell = loop_state.binding?;
+        let variable = *state.constants.data().cast::<Sexp>().add(constant);
+        if loop_state.stamp != heap.lookup_stamp(variable)
+            || cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        {
+            return None;
+        }
+        cell.cdr()
+    } else {
+        return None;
+    };
+    let sequence = *state.registers.add(*code.add(at + 2) as usize);
+    let number = loop_state.first + loop_state.step * index as f64;
+    if !overwrite_scalar(value, sequence.kind(), number) {
+        return None;
+    }
+    loop_state.index = index + 1;
+    Some(at + 1 + operand_count(Op::ForStep))
 }
 
 #[inline(always)]
