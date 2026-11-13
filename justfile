@@ -172,7 +172,7 @@ perf:
     cargo test -p semantics --profile iterate --test test_perf -- --ignored --nocapture
     cargo test -p ry-lang --profile iterate --test test_perf -- --ignored --nocapture
 
-# Times one published benchmark suite (public, packages, kernels, applications, typed, or all). The first four
+# Times one published benchmark suite (public, packages, kernels, applications, codebases, typed, or all). The first five
 # run on GNU R, ry and, where a program has a typed version, ry typed in strict mode; `typed` runs every typed
 # program against its Rust twin and needs rustc, not GNU R. Rounds are paired and shuffled, with a checksum
 # gate against the suite's baseline, e.g. `just bench kernels --rounds 3 --filter fib` on target/release,

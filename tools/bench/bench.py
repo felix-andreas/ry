@@ -107,7 +107,7 @@ sys.path.insert(0, str(here))
 import packages as corpus  # noqa: E402
 from evict import evict  # noqa: E402
 
-SUITES = ["public", "packages", "kernels", "applications", "typed"]
+SUITES = ["public", "packages", "kernels", "applications", "codebases", "typed"]
 # The suites whose programs may have a typed version, which the `ry typed` engine runs.
 TYPED_SUITES = ("public", "kernels", "applications")
 # The suite that times typed ry against Rust, where every other suite times ry against GNU R.
@@ -121,6 +121,11 @@ SCHEMA = 1
 PUBLISHED_ROUNDS = 10
 # Below this many seconds a time mostly measures start-up and the timer.
 SHORT = 0.1
+# The codebases suite compares each test block's time, and only blocks GNU R runs in at least this
+# long count: a shorter one measures the timer.
+PER_TEST_FLOOR = 0.001
+# A code base's run takes minutes on each engine.
+CODEBASE_TIMEOUT = 7200
 # The same floor for the typed suite. Both of its harnesses time a warm run inside the process, so
 # start-up is not in the time, and both print it to the microsecond: 0.1 ms is 100 of those steps.
 RUST_SHORT = 0.0001
@@ -283,7 +288,7 @@ def engines(args, suite):
     if typed:
         table.append(Engine("ry_typed", "ry typed", ry, ry_env, typed=True))
         table.append(Engine("ry_typed_aot", "ry typed, AOT", ry + ["--aot"], ry_env, typed=True, ahead=True))
-    if args.jit_off:
+    if args.jit_off or suite == "codebases":
         table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
         baseline = [args.baseline, "run", "--runtime", "ry"]
@@ -481,7 +486,7 @@ def run_suite(suite, manifest, missing, args, meta):
         meta = dict(meta, partial={"missing_packages": missing})
     table = engines(args, suite)
     programs = selected(manifest, args)
-    runners = {"public": PublicRunner, "packages": PackageRunner, RUST_SUITE: RustRunner}
+    runners = {"public": PublicRunner, "packages": PackageRunner, "codebases": CodebaseRunner, RUST_SUITE: RustRunner}
     runner = runners.get(suite, WorkloadRunner)(suite, args)
     samples_path = samples_file(args, suite)
     state = load_samples(samples_path, args, table, programs)
@@ -518,6 +523,10 @@ def run_suite(suite, manifest, missing, args, meta):
     finally:
         runner.close()
     print_table(results, table)
+    for row in results["programs"]:
+        for key, found in row.get("per_block", {}).items():
+            print(f"{row['display']}, {results['engines'][key]}: per-block geometric mean of GNU R / engine "
+                  f"{found['geomean']:.2f}x over {found['blocks']} of {found['of']} blocks")
     if missing:
         print(f"\nPARTIAL RUN: the corpus library lacks {', '.join(missing)}, so programs that load "
               "them failed or were measured without them")
@@ -922,6 +931,75 @@ class PackageRunner:
         subprocess.run(["rm", "-rf", str(self.work)], check=True)
 
 
+class CodebaseRunner:
+    """The benchmark code bases: `oracle bench` runs one code base's test blocks on one engine and
+    reports each block's time, and the sum of those is the program's time."""
+
+    def __init__(self, suite, args):
+        self.network = []
+        self.oracle = root / "target/release/oracle"
+        if not self.oracle.exists():
+            sys.exit("error: the codebases suite runs through the oracle; build it with "
+                     "`cargo build --release -p oracle`")
+        if not (corpus.corpus / "library").is_dir():
+            sys.exit("error: no corpus library; run `just bench-packages install` first")
+        self.ry = args.ry
+        # `ry load --runtime gnu-r` loads libR.so itself, which finds libRblas.so only through the
+        # loader path that R's own launcher script would set.
+        lib = subprocess.run([args.rscript, "--vanilla", "-e", "cat(R.home('lib'))"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.environment = {"ORACLE_R_RSCRIPT": args.rscript, "LD_LIBRARY_PATH": lib}
+        self.work = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-codebases-"))
+        generator = load_suite(suite)["generator"]
+        subprocess.run([sys.executable, "-I", str(here / "tooling/generate.py"), "--out", str(self.work),
+                        "--lines", str(generator["lines"]), "--files", str(generator["files"]),
+                        "--seed", str(generator["seed"]), "--ry", self.ry],
+                       check=True, stdout=subprocess.DEVNULL)
+
+    def run(self, program, engine):
+        report = self.work / f"{program['id']}-{engine.key}.json"
+        side = "--gnu-r-only" if engine.key == "gnu_r" else "--ry-only"
+        command = [str(self.oracle), "bench", "--ry", self.ry, side, "--json", str(report),
+                   str(self.work / program["id"])]
+        status, out, err, seconds, _ = spawn(command, dict(engine.env, **self.environment),
+                                             timeout=CODEBASE_TIMEOUT, check_images=False)
+        # The oracle exits 1 when the engines' tests do not all match, which a single-engine run
+        # never satisfies, so the report decides.
+        if status not in (0, 1) or not report.exists():
+            return {"seconds": None, "reason": failure_reason(out, err)}
+        summary = json.loads(report.read_text())[0]
+        report.unlink()
+        prefix = "gnu_r" if engine.key == "gnu_r" else "ry"
+        suite_seconds = summary[f"{prefix}_suite_seconds"]
+        if suite_seconds is None:
+            return {"seconds": None, "reason": f"the run never finished ({summary['ry_exit']})"}
+        return {"seconds": round(suite_seconds, 3),
+                "checksum": f"{summary['tests']} tests, {summary[prefix + '_passing']} passing",
+                "wall": round(seconds, 1),
+                "blocks": [comparison[f"{prefix}_seconds"] for comparison in summary["comparisons"]]}
+
+    def close(self):
+        subprocess.run(["rm", "-rf", str(self.work)], check=True)
+
+
+def per_block(state, name, table, engine):
+    """GNU R's median time over the engine's, geometrically averaged over the blocks GNU R runs in
+    `PER_TEST_FLOOR` or more, or None when the runs disagree on the blocks."""
+    def medians(key):
+        runs = [round_[name][key]["blocks"] for round_ in state["rounds"] if key in round_.get(name, {})]
+        if not runs or len({len(blocks) for blocks in runs}) > 1:
+            return None
+        return [statistics.median(times) for times in zip(*runs)]
+    reference, measured = medians(table[0].key), medians(engine.key)
+    if reference is None or measured is None or len(reference) != len(measured):
+        return None
+    counted = [(base, time) for base, time in zip(reference, measured) if base >= PER_TEST_FLOOR and time > 0]
+    if not counted:
+        return None
+    return {"blocks": len(counted), "of": len(reference),
+            "geomean": round(geomean([base / time for base, time in counted]), 4)}
+
+
 # Samples.
 
 def samples_file(args, suite):
@@ -1083,6 +1161,9 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
             row["paired"][new] = {"median": round(median, 4), "low": round(low, 4), "high": round(high, 4)}
             if not any(flag["kind"] == "too_short" and flag["engine"] in (old, new) for flag in row["flags"]):
                 paired_included[new].append(ratios)
+        if suite == "codebases" and not failures:
+            row["per_block"] = {engine.key: found for engine in table[1:]
+                                if (found := per_block(state, name, table, engine))}
         typed = next((engine for engine in table if engine.typed), None)
         if typed is not None and "typed_source" in program and not failures:
             reason = runner.typed_refusal(program, typed)

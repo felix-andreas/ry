@@ -224,6 +224,7 @@ static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) 
 static REIFICATIONS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
+static FRAME_BODIES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 /// The deepest closure frame the sampler sees; a sample deeper than this is attributed to the
@@ -420,20 +421,23 @@ pub struct FrameScope {
 
 /// Publishes a closure call for the sampler: `owner` is a [`label`] for the package (or other top
 /// level) the closure belongs to, and `name` is the address of the symbol the call used, which is
-/// never freed, or 0 for an anonymous function.
+/// never freed, or 0 for an anonymous function. `body` is the address of the closure's body, which
+/// tells closures of one name apart and counts a body's entries however many closures share it.
 ///
 /// The sampler reads the stack without synchronizing with the R thread, so a sample taken during
 /// a push or pop can see one frame too many or too few. That is noise of one sample, and it keeps
 /// the push to three stores.
 #[inline(always)]
-pub fn push_frame(owner: u32, name: usize) -> FrameScope {
+pub fn push_frame(owner: u32, name: usize, body: usize) -> FrameScope {
     let depth = FRAME_DEPTH.load(Ordering::Relaxed);
-    if let (Some(owner_slot), Some(name_slot)) = (
+    if let (Some(owner_slot), Some(name_slot), Some(body_slot)) = (
         FRAME_OWNERS.get(depth as usize),
         FRAME_NAMES.get(depth as usize),
+        FRAME_BODIES.get(depth as usize),
     ) {
         owner_slot.store(owner, Ordering::Relaxed);
         name_slot.store(name, Ordering::Relaxed);
+        body_slot.store(body, Ordering::Relaxed);
     }
     FRAME_DEPTH.store(depth + 1, Ordering::Release);
     FrameScope {
@@ -461,13 +465,15 @@ impl Drop for FrameScope {
     }
 }
 
-/// Copies the published closure frames, outermost first, into `owners` and `names`.
-pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>) {
+/// Copies the published closure frames, outermost first, into `owners`, `names` and `bodies`.
+pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>, bodies: &mut Vec<usize>) {
     owners.clear();
     names.clear();
+    bodies.clear();
     let depth = (FRAME_DEPTH.load(Ordering::Acquire) as usize).min(FRAME_SLOTS);
     for index in 0..depth {
         owners.push(FRAME_OWNERS[index].load(Ordering::Relaxed));
         names.push(FRAME_NAMES[index].load(Ordering::Relaxed));
+        bodies.push(FRAME_BODIES[index].load(Ordering::Relaxed));
     }
 }
