@@ -132,6 +132,28 @@ pub(crate) unsafe fn trace_restarts(stack: &RestartStack, marker: &mut Marker<'_
     }
 }
 
+/// Keeps `handlers` and `restarts` traced while other stacks are in effect, until the guard is
+/// dropped. Dropping truncates the set-aside list to its length before the call, so a guard
+/// dropped by an error return also releases any stack set aside after it and not yet released.
+pub fn set_aside(handlers: HandlerStack, restarts: RestartStack) -> SetAside {
+    let state = interp();
+    let depth = state.suspended_handlers.len();
+    state.suspended_handlers.push((handlers, restarts));
+    SetAside { depth }
+}
+
+/// The guard [`set_aside`] returns.
+#[must_use = "the stacks are traced only while the guard lives"]
+pub struct SetAside {
+    depth: usize,
+}
+
+impl Drop for SetAside {
+    fn drop(&mut self) {
+        interp().suspended_handlers.truncate(self.depth);
+    }
+}
+
 /// Whether a handler on the stack takes a condition of one of `classes`. When none does,
 /// signalling such a condition runs no R code, so nothing can observe the frames GNU R pushes to
 /// signal it, and a fast path may skip them and go straight to the default handler.
@@ -180,8 +202,8 @@ pub unsafe fn signal_error(failure: RError) -> Unwind {
     activity::count(Counter::ConditionsSignalled);
     let call = resolve_call(failure.call);
     let message = failure.message;
-    let state = interp();
-    let saved = state.handlers.clone();
+    let saved = interp().handlers.clone();
+    let _saved = set_aside(saved.clone(), None);
     let classes: [&[u8]; 3] = [b"simpleError", b"error", b"condition"];
     while let Some(entry) = find_handler(&interp().handlers, &classes) {
         interp().handlers = entry.next.clone();
@@ -906,6 +928,7 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
 pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
     activity::count(Counter::ConditionsSignalled);
     let saved = interp().handlers.clone();
+    let _saved = set_aside(saved.clone(), None);
     // A calling handler may change the condition's class, which GNU R reads afresh for each
     // handler it looks for.
     while let Some(entry) = find_handler_where(&interp().handlers, |wanted| {
@@ -1120,6 +1143,7 @@ pub unsafe fn signal_interrupt() -> Unwind {
             values::string_vector(&["interrupt", "condition"])?,
         )?;
         let saved = interp().handlers.clone();
+        let _saved = set_aside(saved.clone(), None);
         let classes: [&[u8]; 2] = [b"interrupt", b"condition"];
         while let Some(entry) = find_handler(&interp().handlers, &classes) {
             interp().handlers = entry.next.clone();

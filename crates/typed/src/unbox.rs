@@ -56,6 +56,53 @@ pub fn unbox(function: &mut Function) {
     }
 }
 
+/// Removes every instruction whose result nothing reads and that neither fails nor does
+/// anything else, and then those whose results only removed instructions read. A record that
+/// became its fields leaves such instructions behind: the value of a field no read asks for
+/// is still computed, and for a string that is an allocation.
+pub fn remove_unread(function: &mut Function) {
+    let mut reads = vec![0u32; function.locals.len()];
+    for block in &function.blocks {
+        for inst in &block.insts {
+            for operand in inst.op.operands() {
+                reads[operand.0 as usize] += 1;
+            }
+        }
+        match block.terminator {
+            Terminator::Branch { condition, .. } => reads[condition.0 as usize] += 1,
+            Terminator::Return(value) => reads[value.0 as usize] += 1,
+            Terminator::Jump(_) | Terminator::Fail => {}
+        }
+    }
+    // An instruction is read only by instructions after it or around a loop, so a few passes
+    // from the back remove a chain of them.
+    for _ in 0..MAX_ROUNDS {
+        let mut removed = false;
+        for block in function.blocks.iter_mut().rev() {
+            let mut index = block.insts.len();
+            while index > 0 {
+                index -= 1;
+                let inst = &block.insts[index];
+                let assigned = inst.assigned();
+                if assigned.is_empty()
+                    || inst.op.can_fail()
+                    || assigned.iter().any(|local| reads[local.0 as usize] != 0)
+                {
+                    continue;
+                }
+                for operand in inst.op.operands() {
+                    reads[operand.0 as usize] -= 1;
+                }
+                block.insts.remove(index);
+                removed = true;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+}
+
 /// The largest position a read of a replaced split list may have. It bounds the stack room one
 /// split takes for its offsets, and a set of read positions fits one word.
 const MAX_PIECES: i64 = 32;
