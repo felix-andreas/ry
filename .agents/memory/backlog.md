@@ -171,8 +171,8 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
 - Inlined closure calls without a frame are built (`decisions.md`, "Tier 1 leaves compiled code
-  through frame states"). On `just bench applications` they move one program, `orders` (87 ms
-  against 155 ms, 1.78x), because a call is only inlined into a caller tier 1 compiles, and tier 1
+  through frame states"). On `just bench applications` they move one program, `orders` (85 ms
+  against 154 ms, 1.82x), because a call is only inlined into a caller tier 1 compiles, and tier 1
   compiles 0 to 4 bodies per program (11 on `functional`). Three of those bodies get a frame:
   one in `orders`, one in `conditions` and one in `timeseries`. In order of expected gain on the
   applications:
