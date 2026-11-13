@@ -1,10 +1,12 @@
 //! The start-up image: the session as it stands once base R and the default packages have
 //! loaded, built with ry's base R tree and shipped in it read-only, at
-//! `library/base/R/ry-start.image`. A start the image applies to loads it in place of base R's
+//! `library/base/R/ry-start.<build>.image`, so builds that share a tree each keep their own
+//! (`rcmd::images`). A start the image applies to loads it in place of base R's
 //! loader, the namespace loads and attaching the default packages, then runs the start-up steps
 //! that read the process environment, so those always see this process's values. Nothing writes
 //! an image at run time: `ry-rcmd write-start-image` writes it while the base tree is built
-//! (`crates/rcmd/src/base.rs`), in a fixed environment.
+//! (`crates/rcmd/src/base.rs`), or when a home is assembled over a tree that has none of this
+//! build, in a fixed environment.
 //!
 //! Base R's profile and the options-setting `.onLoad` hooks of utils, grDevices and stats read
 //! the environment, and they run again after every load. The image is for one set of namespaces
@@ -50,7 +52,7 @@ pub unsafe fn host_environment() -> Option<Sexp> {
 /// The start-up image's format stamp. Its last byte goes up whenever what an image holds or
 /// how it lays it out changes, so that an image from an older format reads as stale and is
 /// written again rather than misread.
-pub const MAGIC: &[u8; 8] = b"RYSTART\x07";
+pub const MAGIC: &[u8; 8] = b"RYSTART\x08";
 
 /// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
 /// format that the same build wrote. A missing or unreadable file is not.
@@ -85,9 +87,10 @@ const LOADING_VARIABLES: &[&str] = &[
     "_R_METHODS_DONT_CHECKSUBCLASSES",
 ];
 
-/// The image of the R home `home`.
-pub fn path(home: &str) -> PathBuf {
-    Path::new(home).join("library/base/R/ry-start.image")
+/// The image the runtime build `identity` loads in the R home `home`
+/// (`library/base/R/ry-start.<identity>.image`, `rcmd::images`).
+pub fn path(home: &str, identity: &str) -> PathBuf {
+    rcmd::images::start_image(Path::new(home), identity)
 }
 
 /// Whether a start can load the image: it is not interactive, sources no profile, does not turn
@@ -103,21 +106,44 @@ pub(crate) fn applies(interactive: bool, profiles: bool) -> bool {
             .all(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
 }
 
+/// Reports on standard error, when `RY_IMAGE_LOG` is set, why a start-up or code image built
+/// for this R home went unused, so a benchmark can refuse a run that measured a slow start
+/// (`tools/bench/bench.py`). Images are tied to the build that wrote them, so two builds sharing
+/// one R home could otherwise differ eightfold in start-up instructions without a visible sign.
+/// A deliberate opt-out ([`applies`], `RY_CODE_IMAGE=0`) and a package installed without a code
+/// image are not reported: neither is a build mismatch.
+pub(crate) fn report_unused(reason: &str) {
+    static LOGGING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *LOGGING
+        .get_or_init(|| std::env::var_os("RY_IMAGE_LOG").is_some_and(|value| !value.is_empty()))
+    {
+        crate::write_console(format!("ry: image unused: {reason}\n").as_bytes(), true);
+    }
+}
+
 /// Why an image did not load.
 pub(crate) enum LoadError {
-    /// Nothing changed yet, so the start can go the slow way.
+    /// The home has no image for this build: there is none, or another build of the runtime or
+    /// an older format wrote it. The start goes the slow way without a word, unless `RY_IMAGE_LOG` asks.
+    Absent(String),
+    /// The image is unreadable or damaged; nothing changed yet, so the start can go the slow way.
     Untouched(String),
     /// The image failed partway, after the heap took some of it, so the session cannot start.
     Partial(String),
 }
 
-/// Loads the image of the R home `home`. `Ok(false)` means there is none, or another build of
-/// the runtime or an older format wrote it, and the caller starts the slow way.
-pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadError> {
-    let path = &path(home);
+/// Loads the image of the R home `home`. On any error but [`LoadError::Partial`] the caller
+/// starts the slow way.
+pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<(), LoadError> {
+    let path = &path(home, host.identity);
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoadError::Absent(format!(
+                "the start-up image {} does not exist",
+                path.display()
+            )));
+        }
         Err(failure) => {
             return Err(LoadError::Untouched(format!(
                 "cannot read {}: {failure}",
@@ -136,7 +162,10 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
         // An image of an older format is stale like one another build wrote: the start is slow
         // until the home is assembled again, which writes it anew.
         if prefix[..MAGIC.len() - 1] == MAGIC[..MAGIC.len() - 1] {
-            return Ok(false);
+            return Err(LoadError::Absent(format!(
+                "the start-up image {} has an older file format",
+                path.display()
+            )));
         }
         return Err(not_an_image());
     }
@@ -147,14 +176,30 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     if header_length as u64 > file_length {
         return Err(not_an_image());
     }
-    let mut header = vec![0u8; header_length];
-    read_at(&file, &mut header, prefix.len() as u64).map_err(cannot_read)?;
-    let mut input = Reader { bytes: &header };
+    // The header is mapped rather than read, so its bytes stay the page cache's and leave the
+    // process when the load ends, instead of a buffer the allocator keeps.
+    #[cfg(unix)]
+    let mapped = ImageFile::map(&file).map_err(cannot_read)?;
+    #[cfg(unix)]
+    let header = mapped
+        .bytes()
+        .get(prefix.len()..prefix.len() + header_length)
+        .ok_or_else(not_an_image)?;
+    #[cfg(not(unix))]
+    let mut read = vec![0u8; header_length];
+    #[cfg(not(unix))]
+    read_at(&file, &mut read, prefix.len() as u64).map_err(cannot_read)?;
+    #[cfg(not(unix))]
+    let header = &read[..];
+    let mut input = Reader { bytes: header };
     let untouched = |error: ImageError| LoadError::Untouched(error.to_string());
     // A development build changes its identity with every edit to the runtime, until the base
     // tree is rebuilt; that start is simply slow.
     if input.blob().map_err(untouched)? != host.identity.as_bytes() {
-        return Ok(false);
+        return Err(LoadError::Absent(format!(
+            "the start-up image {} was written by another build of the runtime",
+            path.display()
+        )));
     }
     let expected = input.u64().map_err(untouched)?;
     let damaged = || LoadError::Untouched(format!("{} is damaged", path.display()));
@@ -194,13 +239,13 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     };
     let fill = |offset: u64, length: u64| {
         let file = &file;
-        move |memory: &mut [u8]| -> Result<(), ImageError> {
-            if memory.len() as u64 != length {
+        move |memory: &mut [u8], at: usize| -> Result<(), ImageError> {
+            if at as u64 + memory.len() as u64 > length {
                 return Err(ImageError::Invalid(
                     "its pages differ in size from their memory".to_owned(),
                 ));
             }
-            fill_from(file, memory, offset)
+            fill_from(file, memory, offset + at as u64)
         }
     };
     let roots = heap()
@@ -219,7 +264,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     touch::record(&heap().image_memory(), expected);
     restore_state(state, &roots, &relocation)
         .map_err(|error| LoadError::Partial(error.to_string()))?;
-    Ok(true)
+    Ok(())
 }
 
 /// Where a run of pages starts in the image file: the next 64 KiB boundary, so that the pages
@@ -690,8 +735,9 @@ unsafe fn restore_state(
     Ok(())
 }
 
-/// The bytes of a file of compiled code (`crate::code_image`). On Unix the file is mapped
-/// read-only, which shares the page cache's pages instead of filling a private copy of each.
+/// The bytes of a code image (`crate::code_image`), or of a start image while its header loads.
+/// On Unix the file is mapped read-only, which shares the page cache's pages instead of filling
+/// a private copy of each.
 pub(crate) enum ImageFile {
     #[cfg(unix)]
     Mapped {
@@ -705,34 +751,39 @@ impl ImageFile {
     pub(crate) fn open(path: &Path) -> std::io::Result<ImageFile> {
         #[cfg(unix)]
         {
-            use std::os::fd::AsRawFd;
-            let file = std::fs::File::open(path)?;
-            let length = usize::try_from(file.metadata()?.len())
-                .map_err(|_| std::io::Error::other("the image does not fit in memory"))?;
-            if length == 0 {
-                return Ok(ImageFile::Read(Vec::new()));
-            }
-            // SAFETY: a read-only private mapping of an open file. The base tree is build
-            // output that nothing rewrites in place, so the bytes do not change under the map.
-            let start = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    length,
-                    libc::PROT_READ,
-                    libc::MAP_PRIVATE,
-                    file.as_raw_fd(),
-                    0,
-                )
-            };
-            if start == libc::MAP_FAILED {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(ImageFile::Mapped { start, length })
+            ImageFile::map(&std::fs::File::open(path)?)
         }
         #[cfg(not(unix))]
         {
             std::fs::read(path).map(ImageFile::Read)
         }
+    }
+
+    /// Maps the whole of the open `file` read-only.
+    #[cfg(unix)]
+    pub(crate) fn map(file: &std::fs::File) -> std::io::Result<ImageFile> {
+        use std::os::fd::AsRawFd;
+        let length = usize::try_from(file.metadata()?.len())
+            .map_err(|_| std::io::Error::other("the image does not fit in memory"))?;
+        if length == 0 {
+            return Ok(ImageFile::Read(Vec::new()));
+        }
+        // SAFETY: a read-only private mapping of an open file. The base tree is build
+        // output that nothing rewrites in place, so the bytes do not change under the map.
+        let start = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if start == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(ImageFile::Mapped { start, length })
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {

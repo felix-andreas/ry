@@ -1,9 +1,8 @@
 use {
     crate::{
-        AnnotationTarget, Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile,
-        TypeDefinitions,
+        Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile, TypeDefinitions,
         annotations::{
-            Annotation, Slot, comment_slots, inline_slots, is_type_kind, lower_inline_annotation,
+            Annotation, Slot, comment_slots, inline_slots, lower_inline_annotation,
             statement_inline_site,
         },
         check::{
@@ -24,7 +23,7 @@ use {
             native_symbol,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        parse, prelude_enabled, project_type_definitions, statement_annotations,
+        parse, prelude_enabled, project_type_definitions,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
             namespace_exports, namespace_known, outside_prelude, stubs,
@@ -39,8 +38,10 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
-        SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
-        node_text, paired_comment_definition,
+        SyntaxKind, SyntaxNode, TextRange, TextSize,
+        annotation::{AnnotationTarget, is_type_kind, statement_annotations},
+        ast::is_expression_kind,
+        is_syntactic_name, node_text, paired_comment_definition,
     },
 };
 
@@ -2667,8 +2668,8 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 }
 
 /// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
-/// strict origins for. An origin that is an assignment's value is phrased against the assigned
-/// name.
+/// strict origins and native blockers for. An origin that is an assignment's value is phrased
+/// against the assigned name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -2706,6 +2707,24 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(check) = item_check(db, item) else {
             continue;
         };
+        for blocker in &check.native_blockers {
+            let range = blocker.range + offset;
+            let source = file
+                .text(db)
+                .get(usize::from(range.start())..usize::from(range.end()))
+                .unwrap_or_default();
+            let severity = if blocker.kind.is_error() {
+                Severity::Error
+            } else {
+                Severity::Warning
+            };
+            diagnostics.push(Diagnostic::new(
+                range,
+                severity,
+                blocker.kind.code(),
+                blocker.kind.message(source),
+            ));
+        }
         if check.strict_origins.is_empty() {
             continue;
         }

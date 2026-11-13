@@ -8,6 +8,7 @@ pub mod lints;
 pub mod load_index;
 pub mod metadata;
 pub mod naming;
+pub mod native;
 pub mod session;
 pub mod sorted;
 pub mod stubs;
@@ -31,6 +32,7 @@ use {
     },
     syntax::{
         NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
+        annotation::{AnnotationTarget, formals, statement_annotations},
         ast::{is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
@@ -868,55 +870,6 @@ pub fn package_scheme_exists_in(
     })
 }
 
-/// An annotation applies only to the expression starting on the very next line;
-/// a blank line, a plain comment, or the end of the sequence breaks the association.
-pub enum AnnotationTarget {
-    Attached(SyntaxNode),
-    BlankLineSeparated,
-    Dangling,
-}
-
-/// The single source of the annotation association rule for a statement sequence.
-pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, AnnotationTarget)> {
-    let mut associations = Vec::new();
-    let mut pending: Option<(SyntaxNode, usize)> = None;
-    for child in parent.children_with_tokens() {
-        let kind = child.kind();
-        if kind == SyntaxKind::WHITESPACE {
-            continue;
-        }
-        if kind == SyntaxKind::NEWLINE {
-            if let Some((_, newlines)) = pending.as_mut() {
-                *newlines += 1;
-            }
-            continue;
-        }
-        if let Some((annotation, newlines)) = pending.take() {
-            let target = if child.as_token().is_some() && kind != SyntaxKind::COMMENT {
-                AnnotationTarget::Dangling
-            } else if newlines >= 2 {
-                AnnotationTarget::BlankLineSeparated
-            } else if let Some(node) = child.as_node()
-                && (is_expression_kind(kind) || kind == SyntaxKind::ERROR)
-            {
-                AnnotationTarget::Attached(node.clone())
-            } else {
-                AnnotationTarget::Dangling
-            };
-            associations.push((annotation, target));
-        }
-        if let NodeOrToken::Node(node) = child
-            && kind == SyntaxKind::ANNOTATION
-        {
-            pending = Some((node, 0));
-        }
-    }
-    if let Some((annotation, _)) = pending {
-        associations.push((annotation, AnnotationTarget::Dangling));
-    }
-    associations
-}
-
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
@@ -1002,17 +955,23 @@ fn written_root_annotation<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
 ) -> Option<annotations::Annotation<'db>> {
-    let comment = item_annotation_syntax(db, item)
-        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
+    let block = item_annotation_syntax(db, item).map(|syntax| syntax.syntax_node());
+    let comment = block
+        .as_ref()
+        .map(|block| annotations::lower_annotation(db, block));
     let root = item_syntax(db, item)?.syntax_node();
-    let Some(site) = annotations::statement_inline_site(&root) else {
-        return comment;
-    };
-    if !inline_annotations_enabled(db) {
-        return comment;
-    }
-    let inline = annotations::lower_inline_annotation(db, &site);
-    annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+    let site = annotations::statement_inline_site(&root);
+    let inline_enabled = site.is_some() && inline_annotations_enabled(db);
+    let mut annotation = match site.filter(|_| inline_enabled) {
+        Some(site) => {
+            let inline = annotations::lower_inline_annotation(db, &site);
+            annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+        }
+        None => comment,
+    }?;
+    annotation.written_signature =
+        annotations::has_written_signature(&root, block.as_ref(), inline_enabled);
+    Some(annotation)
 }
 
 /// R calls a package file's `.onLoad` and `.onAttach` with two character arguments, and
@@ -1037,7 +996,7 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
     let mut parameters = Vec::new();
     let mut takes_rest = false;
-    for (position, formal) in annotations::formals(&function).iter().enumerate() {
+    for (position, formal) in formals(&function).iter().enumerate() {
         if formal.name == "..." {
             parameters.push("...: Any".to_owned());
             takes_rest = true;
@@ -1147,15 +1106,18 @@ fn expression_annotations<'db>(
         let Some(index) = module.ranges().position(|candidate| candidate == range) else {
             continue;
         };
+        let written_signature =
+            annotations::has_written_signature(&statement, comment.as_ref(), inline_enabled);
         let comment = comment.map(|comment| annotations::lower_annotation(db, &comment));
         let site = annotations::statement_inline_site(&statement).filter(|_| inline_enabled);
         let inline = site
             .as_ref()
             .map(|site| annotations::lower_inline_annotation(db, site));
-        let Some(lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
+        let Some(mut lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
         else {
             continue;
         };
+        lowered.written_signature = written_signature;
         if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
             continue;
         }
@@ -3625,6 +3587,7 @@ mod tests {
             editor: None,
             errors: ThinVec::new(),
             strict_origins: ThinVec::new(),
+            native_blockers: ThinVec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             masked_reads: Default::default(),
             column_misses: Default::default(),

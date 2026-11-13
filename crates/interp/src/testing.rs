@@ -250,8 +250,6 @@ pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
                 worth_recording: |_| false,
                 back_edge: |_, _| None,
                 back_edge_threshold: bytecode::NEVER,
-                baseline: |_| {},
-                baseline_threshold: bytecode::NEVER,
                 call: |_| None,
             }));
             let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
@@ -783,6 +781,10 @@ const IMAGE_BODIES: &[&str] = &[
     // Calling `g` compiles its argument `one()` into promise code, which has no statement record
     // and no argument after the call, so the call site's three constants end that code's table.
     "one <- function() a; g <- function(x) x; g(one())",
+    // A compiled `switch` tests the arm it chose by identity against the arm's own constant, so
+    // the decoded code must give back the scalar its arm test compares with. Each name below
+    // runs a different arm, and the empty alternatives fall through to the next one.
+    "pick <- \"integer\"; x <- switch(pick, integer = , double = 1L, logical = 2L, 3L); pick <- \"logical\"; y <- switch(pick, integer = , double = 1L, logical = 2L, 3L); pick <- \"none\"; z <- switch(pick, integer = , double = 1L, logical = 2L, 3L); x * 100L + y * 10L + z",
 ];
 
 /// A compiled closure survives the code image's encoding: decoding its code against the same
@@ -918,12 +920,11 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
     with_interpreter(|| {
-        let bytes = code_image::image_bytes(build, trained, stamp, &table, &payloads, None)
+        let bytes = code_image::image_bytes(build, trained, stamp, &table, &payloads)
             .unwrap_or_else(|_| panic!("a small image must write"));
         let entries = code_image::parse(&bytes, build, stamp)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
-            .unwrap_or_else(|| panic!("a written image must belong to its build"))
-            .entries;
+            .unwrap_or_else(|unused| panic!("a written image must apply to its build: {unused:?}"));
         assert_eq!(entries.len(), records.len());
         let at = |offset: u64, length: u32| {
             let start = offset as usize;
@@ -943,7 +944,10 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 Some(&stream[..])
             );
         }
-        assert_eq!(code_image::parse(&bytes, "another-build", stamp), Ok(None));
+        assert_eq!(
+            code_image::parse(&bytes, "another-build", stamp).map(|parsed| parsed.err()),
+            Ok(Some(code_image::Unused::Build))
+        );
         for other in [
             code_image::DatabaseStamp {
                 length: stamp.length + 1,
@@ -954,7 +958,10 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 ..stamp
             },
         ] {
-            assert_eq!(code_image::parse(&bytes, build, other), Ok(None));
+            assert_eq!(
+                code_image::parse(&bytes, build, other).map(|parsed| parsed.err()),
+                Ok(Some(code_image::Unused::Database))
+            );
         }
         let mut mutated = bytes.clone();
         for &(position, value) in &mutations {
@@ -964,12 +971,8 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 _ => mutated.truncate(at),
             }
         }
-        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, stamp) {
-            assert!(
-                parsed.native_offset + parsed.native_length <= mutated.len() as u64,
-                "a parsed image must not name a native section outside the file"
-            );
-            for entry in parsed.entries {
+        if let Ok(Ok(entries)) = code_image::parse(&mutated, build, stamp) {
+            for entry in entries {
                 assert!(
                     entry.payload_offset + u64::from(entry.payload_length) <= mutated.len() as u64,
                     "a parsed image must not name a payload outside the file"
@@ -992,6 +995,7 @@ const LOAD_MODES: usize = 6;
 /// compiling, and code the decoder accepts from a mutated but rehashed payload runs without
 /// crashing.
 pub fn check_code_image_load(entropy: &mut impl Entropy) {
+    syntax::testing::enable_invariants();
     let body = if entropy.below(3) == 0 {
         IMAGE_BODIES[entropy.below(IMAGE_BODIES.len())].to_owned()
     } else {
@@ -1103,7 +1107,6 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                 stamp,
                 &[(offset, stream.len() as u32, &stream[..])],
                 &[payload],
-                None,
             )
             .unwrap_or_else(|_| panic!("a small image must write"));
             // Raw damage: the file no longer matches its own hashes or framing.
@@ -1116,7 +1119,7 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     }
                 }
             }
-            std::fs::write(code_image::path(database), &image)
+            std::fs::write(code_image::path(database, build), &image)
                 .unwrap_or_else(|failure| panic!("cannot write the image: {failure}"));
             let previous = std::mem::replace(&mut crate::interp().code_image.build, build);
             let show = std::mem::replace(&mut crate::interp().show_error_messages, false);

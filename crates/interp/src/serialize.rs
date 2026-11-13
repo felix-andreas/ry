@@ -541,6 +541,19 @@ impl Reader<'_> {
                 {
                     closures.push(object);
                 }
+                // A typed closure's stream carries its signature as the first attribute, which
+                // goes back into the registry and is no attribute of the closure in memory.
+                let mut attributes = attributes;
+                if object_kind == SexpType::Closure
+                    && attributes.kind() == SexpType::Pairlist
+                    && attributes.tag().kind() == SexpType::Symbol
+                    && values::symbol_name(attributes.tag()) == crate::annotations::STREAM_ATTRIBUTE
+                {
+                    crate::heap().root(object);
+                    crate::heap().root(attributes);
+                    crate::annotations::restore_signature(object, attributes.car())?;
+                    attributes = attributes.cdr();
+                }
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
                 }
@@ -2395,11 +2408,20 @@ impl Decoder<'_, '_> {
                     )));
                 }
                 let symbol = values::install(&name)?;
-                return base_function_of(symbol).ok_or_else(|| {
-                    error(format!(
+                let mut function = heap
+                    .frame_cell(known.base_env, symbol)
+                    .map_or(nil(), |cell| cell.cdr());
+                // Base is lazy-loaded, and the writer fetched every function it named, so a
+                // session that has not called this one yet holds a promise for it.
+                if function.kind() == SexpType::Promise {
+                    function = crate::eval::force_promise(function)?;
+                }
+                if function.kind() != SexpType::Closure {
+                    return Err(error(format!(
                         "the code image names base function '{name}', which is not a closure in base"
-                    ))
-                });
+                    )));
+                }
+                return Ok(function);
             }
             tag::CODE => return self.code(depth + 1),
             tag::CELLS => return self.cells(depth),

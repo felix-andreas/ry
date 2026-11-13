@@ -1,6 +1,7 @@
 //! Replays the recorded cases under GNU R, and under the engine in `ORACLE_ENGINE` when set.
 //! `RY_BLESS=1` re-records the expectations. The test passes without R installed, and skips
-//! when GNU R is another release than the one `cases/gnu-r.txt` names.
+//! when GNU R is another release than the one `cases/gnu-r.txt` names. On other BLAS or LAPACK
+//! libraries it skips the cases marked `# oracle: library-dependent`.
 //!
 //! When ry's runtime is built, a rotating subset of the cases also runs under each collection
 //! stress (`ry-gctorture` and `ry-gctorture-young`) and must give what ry gives unstressed.
@@ -12,8 +13,8 @@ use {
         BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine, Verdict,
         check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
         gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
-        libraries_ahead_of_reference, parse, parse_known_failures, render, runnable_cases,
-        ry_runtime_available, verdict, write_build,
+        libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, render,
+        runnable_cases, ry_runtime_available, verdict, write_build,
     },
     std::{
         ffi::OsStr,
@@ -54,9 +55,13 @@ fn recorded_outcomes_match_gnu_r() {
     let bless = std::env::var_os("RY_BLESS").is_some();
     let build = gnu_r_build().unwrap_or_else(|error| panic!("{error}"));
     eprintln!("GNU R {build}");
+    let mut other_libraries = false;
     match check_build(&case_directory(), &build).unwrap_or_else(|error| panic!("{error}")) {
         BuildCheck::Same => {}
-        BuildCheck::LibrariesDiffer(message) => eprintln!("warning: {message}"),
+        BuildCheck::LibrariesDiffer(message) => {
+            eprintln!("warning: {message}");
+            other_libraries = true;
+        }
         BuildCheck::ReleaseDiffers(message) if bless => panic!(
             "refusing to bless: {message}; to move the suite to another release, delete \
              cases/{BUILD_FILE} and bless again"
@@ -73,6 +78,15 @@ fn recorded_outcomes_match_gnu_r() {
     let mut failures = Vec::new();
     assert!(!cases().is_empty(), "no oracle cases found");
     for case in cases() {
+        // A bless records them all the same, as `oracle record` does on other libraries.
+        if other_libraries && !bless && library_dependent(&case) {
+            eprintln!(
+                "skipped {}: its digits follow the numerical libraries, and this GNU R's differ \
+                 from the recorded build's",
+                case.display()
+            );
+            continue;
+        }
         let actual = match gnu_r.run(&case) {
             Ok(actual) => actual,
             Err(EngineError::Crashed(error)) => {

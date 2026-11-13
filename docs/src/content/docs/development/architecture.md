@@ -65,7 +65,13 @@ illegal dependency unrepresentable.
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library.
+  `DataFrame` and the standard library. A `for`, `while` or `repeat` loop in the global
+  environment compiles to tier 0 only once it is known to run at least
+  `bytecode::LOOP_COMPILE_ITERATIONS` (16) iterations: a `for` over at least 16 elements compiles
+  before its first iteration, and a `while` or `repeat` compiles after its 16th. Compiling a small
+  loop costs about what 9 interpreted iterations would, so 16 pays it back with margin, and a
+  shorter top-level loop runs in the AST evaluator
+  ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -85,9 +91,12 @@ illegal dependency unrepresentable.
   of the code written in the call, and the conversion's result type comes from the type the
   interpreter saw it give, so the first call of such a function runs interpreted. Code that has
   called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
-  `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and each typed call that runs in the
-  interpreter with the reason the native path declined it, and
-  `RY_TYPED_DUMP=1` prints the Cranelift IR.
+  `interp`. `RY_TYPED_LOG=1` prints each compilation with the time it took
+  (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone), each refused
+  compilation with its time (`typed: refused [Str] after 85 us`), so the lines of a run add up to
+  its whole compile time, and each typed call that runs in the interpreter with the reason the
+  native path declined it. `RY_TYPED_DUMP=1` prints the Cranelift
+  IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
   data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
@@ -312,7 +321,11 @@ run and panics on any difference. The seeded edit simulation in `cli.rs`
 An item's subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
-(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
+(`annotations::merge_annotations`), so the checker never knows which spelling it was given. The
+rules that need no types live in `syntax::annotation`: which `#:` block attaches to a statement,
+how a declared parameter pairs with a formal, and which form wins a slot. The runtime calls the
+same module when it registers a function's signature, so the checker and the runtime cannot
+disagree about what a function declares. Names
 in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id). Literal text is not interned,
 because the interner never frees and an edit inside a string literal would otherwise keep every
 spelling it passed through; it lives in the module's own text buffer, addressed by a `Copy`
@@ -611,13 +624,15 @@ describes for users. `crates/heap/src/image.rs` writes and loads the heap part,
 `crates/interp/src/image.rs` saves the interpreter state outside the heap and decides when an
 image applies, and `crates/interp/src/session.rs` either loads the image or starts the slow way.
 
-- **Build output, read-only.** `ry-rcmd build-base` writes the image as its last step, into the
-  base tree at `library/base/R/ry-start.image`, by running `ry-rcmd write-start-image` with an
-  emptied environment. A release embeds the tree, image included. A session never writes an
-  image, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
-  (`just start-image`) writes it again over a built tree, and so does assembling an R home
-  (`ry-rcmd assemble`) when the given `libR` cannot load the base tree's image: the home links
-  that image, so a stale one would make every start in the home slow. `libR` exports
+- **Build output, keyed by build.** `ry-rcmd build-base` writes the image as its last step, into
+  the base tree at `library/base/R/ry-start.<build>.image`, by running `ry-rcmd write-start-image`
+  with an emptied environment. `<build>` is the runtime's identity (`RY_RUNTIME_ID`), and
+  `crates/rcmd/src/images.rs` owns the naming. A release embeds the tree with its own build's
+  images only. A session never writes an image, and nothing keys it on the run-time environment.
+  `ry-rcmd start-image BASE --libr FILE` (`just start-image`) writes a build's images over a built
+  tree, and so does assembling or reusing an R home (`ry-rcmd assemble`) when the tree holds no
+  current image of the given `libR`'s build: the home links that image, so a missing one would
+  make every start in the home slow. `libR` exports
   `ry_start_image_current`, which applies the loader's own format and identity checks. A current
   image is only read, so a home assembles over a read-only base tree. A stale one is rewritten
   under a lock file in the base tree (`.start-image.lock`), so homes assembled at once take
@@ -625,14 +640,33 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 - **Base code images.** Right after the start image, the same step starts a session from it,
   fetches every record of every lazy-load database of the base-priority packages by its key
   (start-up has already forced some bindings, so forcing bindings would miss their records), and
-  writes the images (`R/<package>.ryc`, `R/sysdata.ryc`) with the uncompressed records alone, so those fetches read them in place
-  instead of inflating them. They hold no compiled or machine code: for untrained base code,
-  decoding it and mapping a native section cost more than compiling the closures a session
-  calls. They are written for the same build as the start image.
-- **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
-  runtime's sources), and an image of another build is skipped silently, so a development
-  checkout starts the slow way after a runtime edit until `just start-image` runs or a home is
-  assembled over the tree.
+  writes the images (`R/<package>.<build>.ryc`, `R/sysdata.<build>.ryc`) with the uncompressed
+  records alone, so those fetches read them in place instead of inflating them. They hold no
+  compiled code: for untrained base code, decoding it costs more than compiling the closures a
+  session calls. Every other package in the tree (the
+  recommended packages, such as MASS and Matrix) then gets the image an install writes, untrained,
+  so a build that did not install them still loads them from an image. All of them are written for
+  the same build as the start image.
+- **Several builds per tree.** Builds never overwrite or remove each other's images while they
+  are in use, so two builds compared on one tree both start fast. After writing its images, a
+  build prunes the tree under the lock to the images of `images::KEPT_BUILDS` (4) builds: its own
+  and the three others that wrote theirs most recently, a build's images being removed whole. The
+  order comes from a ledger in the tree (`library/base/R/ry-builds`, one build per line, oldest
+  first), never from file times, and a build the ledger does not name counts as the oldest, in
+  name order. A running session holds a shared lock on its build's start-up image, and the pruner
+  removes a build only while it holds that file's exclusive lock, so a build in use is kept
+  however old it is. The ledger is rewritten through a temporary file and a rename, and the writes
+  and the prune all happen under `.start-image.lock`, so two builds starting at once take turns.
+  Unkeyed images (`ry-start.image`, `<package>.ryc`) belong to runtimes that predate the keying
+  and are left alone. One build's images take about 54 MiB in `target/base-r` (a 16 MiB start-up
+  image and 38 MiB of code images).
+- **One build per image.** The header carries the runtime's identity too (`RY_RUNTIME_ID`, a hash
+  of the runtime's sources), and a loader skips an image whose header names another build, which
+  `RY_IMAGE_LOG=1` reports. After a runtime edit, the new build's first start in a development
+  checkout writes its images beside the old build's, which `RY_IMAGE_LOG=1` reports as
+  `ry: image written:`. Installed packages are not rebuilt: when a session finds a package whose
+  code image only another build wrote, it notes once per library and session which packages of
+  that library to reinstall (`note_foreign` in `crates/interp/src/code_image.rs`).
 - **The environment is read again on every start.** After the load, the start clears the options
   and runs the steps that read the process environment: the C-level options, `.Machine`,
   `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,
@@ -652,7 +686,10 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   large section (`fill_from` in `crates/interp/src/image.rs`; Windows reads them instead): nothing
   is decoded or patched per object, a page start-up never writes stays shared through the page
   cache by every process that loads the image, and a page is copied when it is first written.
-  The objects carry their tenured bits, so no minor or intermediate collection traces them and a
+  The file stores only the pages that hold an object, back to back. An empty page between them
+  (left where compaction emptied a page below an environment or symbol that cannot move) is
+  untouched zeroed memory in the loader, so it costs neither file bytes nor memory until an
+  allocation claims it. The objects carry their tenured bits, so no minor or intermediate collection traces them and a
   major collection's marking leaves their headers alone.
 - **Base R's closures arrive compiled.** Just before writing, the writer compiles afresh every
   closure bound in base's namespace and the six default namespaces

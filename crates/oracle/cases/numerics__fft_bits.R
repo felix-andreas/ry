@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # fft and mvfft run Singleton's mixed-radix algorithm as GNU R does, so every length gives GNU R's
 # bits, not just the same values up to rounding.
 bits <- function(x) {

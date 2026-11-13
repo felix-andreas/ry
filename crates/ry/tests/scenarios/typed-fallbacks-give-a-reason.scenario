@@ -1,7 +1,8 @@
-# Every call of a strict typed function that runs in the interpreter instead of on native code
-# leaves a line under `RY_TYPED_LOG` that names the function and says why, so a slow typed
-# program can be explained from its log. An argument R code wrote stays lazy, as in R, and one
-# the native tier cannot read ahead is the reason; so is code the typed core does not compile.
+# Every call of a typed function that runs in the interpreter instead of on native code leaves a
+# line under `RY_TYPED_LOG` that names the function and says why, so a slow typed program can be
+# explained from its log. An argument R code wrote stays lazy, as in R, and one the native tier
+# cannot read ahead is the reason. Code the typed core does not compile is a `native` error in
+# strict mode, so the log gives that reason only for a file checked without it.
 
 requires ry-runtime
 
@@ -15,11 +16,6 @@ file calls.R
 | y <- 2.0
 | print(double_it(Num.from_r(sqrt(y))))
 | print(double_it(y))
-| shout <- function(s: Str) -> Str {
-|   loud <- casefold(s, upper = TRUE)
-|   Str.from_r(loud)
-| }
-| print(shout("hi"))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry calls.R
@@ -27,7 +23,6 @@ expect exit 0
 expect stdout "2.828427"
 expect stdout "[1] 4"
 expect stderr "typed: `double_it` runs in the interpreter: argument 1 is `Num.from_r(sqrt(y))`, which R code wrote"
-expect stderr "typed: `shout` runs in the interpreter: no code for [Str]: it uses the value of R's `casefold` directly"
 expect stderr lacks "recorded no reason"
 
 # A tag from R converts with its payloads, ry lists included. A bare `[]` does not record what
@@ -53,3 +48,27 @@ expect stdout "42i64"
 expect stdout "0i64"
 expect stderr "typed: compiled for [Tag"
 expect stderr "typed: `size` runs in the interpreter: argument 1 does not convert: it holds an empty list whose item type is unknown"
+
+# A function written in ry types that holds an R value does not compile. Strict mode reports it
+# and refuses to run it; without strict mode it runs in the interpreter, and the log says why.
+file shout.R
+| shout <- function(s: Str) -> Str {
+|   loud <- casefold(s, upper = TRUE)
+|   Str.from_r(loud)
+| }
+| print(shout("hi"))
+
+run ry run --runtime ry shout.R
+expect exit 1
+expect stderr "`casefold` is an R function, and a native function holds only ry values"
+expect stderr "Convert the result where it returns: `Str.from_r(casefold(s, upper = TRUE))`"
+
+file ry.toml
+| [check]
+| typing = true
+| strict = false
+
+run ry run --runtime ry shout.R
+expect exit 0
+expect stdout "HI"
+expect stderr "typed: `shout` runs in the interpreter: no code for [Str]: it uses the value of R's `casefold` directly"

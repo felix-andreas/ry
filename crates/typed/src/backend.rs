@@ -31,7 +31,7 @@ use {
         Value, Variable,
         types::{F64, I32, I64},
     },
-    std::sync::atomic::AtomicBool,
+    std::{cell::Cell, sync::atomic::AtomicBool},
 };
 
 /// A compiled function another one may call: its code's address and its machine signature.
@@ -69,7 +69,8 @@ pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
         | Type::Set(_)
         | Type::Dict { .. }
         | Type::Record(_)
-        | Type::Tag(_) => SmallVec::from_slice(&[I64]),
+        | Type::Tag(_)
+        | Type::Table => SmallVec::from_slice(&[I64]),
     }
 }
 
@@ -89,12 +90,20 @@ fn signature(params: &[Type], result: Type) -> Signature {
     signature
 }
 
+/// A runtime function's address, for a call from compiled code.
+macro_rules! address {
+    ($function:path) => {
+        $function as *const () as usize
+    };
+}
+
 /// Compiles `function`, whose calls of other functions index `callees`.
 pub fn compile(
     function: &Function,
     callees: &[Callee],
     r_calls: &[usize],
 ) -> Result<Code, Refusal> {
+    let frees = frees()?;
     ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
@@ -108,6 +117,8 @@ pub fn compile(
             r_calls,
             own,
             host: CallConv::Host,
+            frees,
+            free: None,
             variables: Vec::new(),
             blocks: Vec::new(),
             signatures: FxHashMap::default(),
@@ -178,6 +189,67 @@ fn trampoline(
     Ok(id)
 }
 
+/// The entries compiled code frees a string's buffer and an object through. A drop frees only
+/// when it takes the last reference, and the free functions follow the host's C convention,
+/// under which a call costs its caller every floating-point register and most others. The
+/// allocator would answer by keeping each value that is live across a drop in memory, on the
+/// paths that never free too, so compiled code calls these entries instead: they preserve every
+/// register and pass their argument on.
+#[derive(Clone, Copy)]
+struct Frees {
+    string: usize,
+    object: usize,
+}
+
+thread_local! {
+    /// Compiled on first use and kept per thread, as the code modules are.
+    static FREES: Cell<Option<Frees>> = const { Cell::new(None) };
+}
+
+fn frees() -> Result<Frees, Refusal> {
+    if let Some(frees) = FREES.get() {
+        return Ok(frees);
+    }
+    let frees = ssa::with_module(
+        Allocator::Backtracking,
+        |module| -> Result<Frees, Refusal> {
+            let string = preserving(module, address!(values::ry_str_free))?;
+            let object = preserving(module, address!(values::ry_list_free))?;
+            module.finalize()?;
+            Ok(Frees {
+                string: module.address(string),
+                object: module.address(object),
+            })
+        },
+    )?;
+    FREES.set(Some(frees));
+    Ok(frees)
+}
+
+/// A function in the register-preserving convention that passes its one word to the host
+/// function at `address`.
+fn preserving(module: &mut ssa::Module, address: usize) -> Result<FuncId, Refusal> {
+    let mut outer = Signature::new(CallConv::Preserving);
+    outer.params.push(AbiParam::new(I64));
+    let id = module.declare(&outer)?;
+    let mut builder = Builder::new(outer);
+    let mut inner = Signature::new(CallConv::Host);
+    inner.params.push(AbiParam::new(I64));
+    let inner = builder.import_signature(inner);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let &[pointer] = builder.block_params(entry) else {
+        return Err(Refusal::new("a free entry without its parameter"));
+    };
+    let callee = builder.ins().iconst(I64, address as i64);
+    builder.ins().call_indirect(inner, callee, &[pointer]);
+    builder.ins().return_(&[]);
+    builder.seal_all_blocks();
+    module.define(id, &builder.finalize())?;
+    Ok(id)
+}
+
 type SignatureKey = (SmallVec<[Machine; 8]>, SmallVec<[Machine; 3]>);
 
 struct Emitter<'a> {
@@ -188,17 +260,13 @@ struct Emitter<'a> {
     r_calls: &'a [usize],
     own: FuncRef,
     host: CallConv,
+    frees: Frees,
+    /// The signature of a [`Frees`] entry, imported on the function's first drop.
+    free: Option<SigRef>,
     variables: Vec<SmallVec<[Variable; 2]>>,
     blocks: Vec<Block>,
     signatures: FxHashMap<SignatureKey, SigRef>,
     budget: Option<Variable>,
-}
-
-/// A runtime function's address, for a call from compiled code.
-macro_rules! address {
-    ($function:path) => {
-        $function as *const () as usize
-    };
 }
 
 impl Emitter<'_> {
@@ -256,6 +324,60 @@ impl Emitter<'_> {
     }
 
     fn emit_block(&mut self, block: &IrBlock) -> Result<(), Refusal> {
+        // A block that ends by comparing two doubles and branching on the answer branches on
+        // the machine comparison itself. Building the logical first, with its `NA` for an
+        // unordered pair, and then testing it costs three times the instructions, and this is
+        // the shape of every `if` and `while` on doubles.
+        if let (
+            [
+                plain @ ..,
+                Inst {
+                    dest: Some(compared),
+                    op: Op::Compare(op, Item::Dbl, a, b),
+                    ..
+                },
+                truth @ Inst {
+                    dest: Some(tested),
+                    op: Op::Truth(source),
+                    ..
+                },
+            ],
+            Terminator::Branch {
+                condition,
+                then,
+                otherwise,
+            },
+        ) = (block.insts.as_slice(), &block.terminator)
+            && source == compared
+            && condition == tested
+        {
+            for inst in plain {
+                self.emit_inst(inst)?;
+            }
+            let (x, y) = (self.one(*a)?, self.one(*b)?);
+            let holds = self.builder.ins().fcmp(float_condition(*op), x, y);
+            let unordered = self.builder.ins().fcmp(FloatCC::Unordered, x, y);
+            // Both locals keep a value for a later reader. An unordered pair gives up below,
+            // so the logical is never the `NA` it would otherwise be.
+            let logical = self.logical(holds);
+            self.set(*compared, &[logical])?;
+            self.set(*tested, &[logical])?;
+            let (then, otherwise) = (self.block(*then)?, self.block(*otherwise)?);
+            if *op == Compare::Ne {
+                // `!=` holds for an unordered pair, so that case is ruled out first.
+                self.fail_if(unordered, &truth.fail_drops)?;
+                self.builder.ins().brif(holds, then, &[], otherwise, &[]);
+            } else {
+                // Every other comparison is false for an unordered pair, so only the path
+                // where it does not hold needs the second test.
+                let ordered = self.builder.create_block();
+                self.builder.ins().brif(holds, then, &[], ordered, &[]);
+                self.builder.switch_to_block(ordered);
+                self.fail_if(unordered, &truth.fail_drops)?;
+                self.builder.ins().jump(otherwise, &[]);
+            }
+            return Ok(());
+        }
         for inst in &block.insts {
             self.emit_inst(inst)?;
         }
@@ -511,11 +633,11 @@ impl Emitter<'_> {
         match ty {
             Type::Str => {
                 let heap = self.heap_string(values[0], values[1]);
-                self.count(heap, values[0], Some(address!(values::ry_str_free)));
+                self.count(heap, values[0], Some(self.frees.string));
             }
             ty if ty.is_object() => {
                 let live = self.builder.ins().icmp_imm_s(IntCC::NotEqual, values[0], 0);
-                self.count(live, values[0], Some(address!(values::ry_list_free)));
+                self.count(live, values[0], Some(self.frees.object));
             }
             _ => {}
         }
@@ -564,7 +686,20 @@ impl Emitter<'_> {
                 self.builder.ins().jump(done, &[]);
                 self.builder.switch_to_block(release);
                 self.builder.set_cold_block(release);
-                self.call(free, &[I64], &[], &[pointer]);
+                let signature = match self.free {
+                    Some(signature) => signature,
+                    None => {
+                        let mut signature = Signature::new(CallConv::Preserving);
+                        signature.params.push(AbiParam::new(I64));
+                        let imported = self.builder.import_signature(signature);
+                        self.free = Some(imported);
+                        imported
+                    }
+                };
+                let callee = self.iconst(free as i64);
+                self.builder
+                    .ins()
+                    .call_indirect(signature, callee, &[pointer]);
                 self.builder.ins().jump(done, &[]);
             }
         }
@@ -838,6 +973,17 @@ impl Emitter<'_> {
                 let pointer = self.one(*a)?;
                 let index = self.one(*index)?;
                 let address = self.item_address(pointer, index, item, inst)?;
+                let values = self.load_item(address, item);
+                self.dup(Type::of_item(item), &values);
+                values
+            }
+            Op::ItemAt(a, position) => {
+                let item = ty(*a)
+                    .items()
+                    .ok_or(Refusal::new("an item of a non-vector"))?;
+                let pointer = self.one(*a)?;
+                let position = self.one(*position)?;
+                let address = self.item_address_unchecked(pointer, position, item);
                 let values = self.load_item(address, item);
                 self.dup(Type::of_item(item), &values);
                 values
@@ -1520,29 +1666,53 @@ impl Emitter<'_> {
                     &[dict, k0, k1],
                 ))
             }
-            Op::DictGet(dict, key) => {
+            Op::DictFind(dict, key) => {
+                let dict = self.one(*dict)?;
+                let (k0, k1) = self.item_words(*key)?;
+                SmallVec::from_slice(&self.call(
+                    address!(values::ry_dict_find),
+                    &[I64; 3],
+                    &[I64],
+                    &[dict, k0, k1],
+                ))
+            }
+            Op::DictAt(dict, position) => {
                 let Type::Dict { value, .. } = ty(*dict) else {
                     return Err(Refusal::new(
                         "a lookup in something other than a dictionary",
                     ));
                 };
                 let pointer = self.one(*dict)?;
+                let position = self.one(*position)?;
+                let column = self.builder.ins().load(
+                    I64,
+                    MemFlagsData::trusted(),
+                    pointer,
+                    values::DICT_VALUES,
+                );
+                let scaled = self.builder.ins().imul_imm_s(position, item_size(value));
+                let address = self.builder.ins().iadd(column, scaled);
+                let values = self.load_item(address, value);
+                self.dup(Type::of_item(value), &values);
+                values
+            }
+            Op::DictPut(dict, key, position, value) => {
+                let pointer = self.one(*dict)?;
+                let owned = self.owned(inst, 0);
                 let (k0, k1) = self.item_words(*key)?;
-                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    16,
-                    3,
-                ));
-                let out = self.builder.ins().stack_addr(I64, slot, 0);
-                let found = self.call(
-                    address!(values::ry_dict_get),
-                    &[I64; 4],
-                    &[I32],
-                    &[pointer, k0, k1, out],
-                )[0];
-                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
-                self.fail_if(missing, &inst.fail_drops)?;
-                self.load_item(out, value)
+                let position = self.one(*position)?;
+                let values = self.get(*value)?;
+                if !inst.moves(3) {
+                    self.dup(ty(*value), &values);
+                }
+                let (v0, v1) = self.item_words(*value)?;
+                let dict = self.call_words(
+                    address!(values::ry_dict_put),
+                    I64,
+                    &[pointer, owned, position, k0, k1, v0, v1],
+                );
+                self.fail_if_null(dict, inst)?;
+                SmallVec::from_slice(&[dict])
             }
             Op::DictInsert(dict, key, value) => {
                 let pointer = self.one(*dict)?;

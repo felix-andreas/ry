@@ -1,0 +1,27 @@
+[stdout]
+|   finalize 1 
+| after gc 1 
+|   finalize 2 
+| after gc 2 
+|   finalize 3 
+| after gc 3 
+|   finalize 4 
+| after gc 4 
+|   finalize 5 
+| after gc 5 
+|   finalize 6 
+| after gc 6 
+|   finalize run 1 
+| after run gc 1 
+|   finalize run 2 
+| after run gc 2 
+|   finalize run 3 
+| after run gc 3 
+|   finalize run 4 
+| after run gc 4 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

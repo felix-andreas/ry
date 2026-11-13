@@ -17,8 +17,14 @@ use {
     rustc_hash::FxHashSet,
     std::mem::take,
     syntax::{
-        NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation_kind,
-        node_text,
+        NodeRef, SyntaxKind, SyntaxNode, TextRange,
+        annotation::{
+            BlockRefusal, Declaration, Paired, assigned_function, block_refusal,
+            compact_declaration, directive_name, expanded_declaration, formals, has_token,
+            is_type_kind, misplaced_directives, name_text, pair_formals, signature_from,
+            written_function_type,
+        },
+        ast, is_inline_annotation_kind, node_text,
     },
     thin_vec::ThinVec,
 };
@@ -42,6 +48,12 @@ pub struct Annotation<'db> {
     /// Parameters typed only by an inline signature. It sits on the formals and so never
     /// restates which parameters are optional; the formals alone decide it.
     pub inline_parameters: Vec<String>,
+    /// Whether a type is written for every formal of the annotated function literal, or for
+    /// its result when it has no formals, in a place the runtime reads: on the literal, on the
+    /// name it is assigned to, or as a function type in the `#:` block. The runtime compiles no
+    /// function whose parameter types reach it another way, such as through a type alias. Set
+    /// where the annotation meets its statement, from [`has_written_signature`].
+    pub written_signature: bool,
     /// Shape violations. A block with any carries no typing payload, so it never cascades.
     pub errors: Vec<(String, TextRange)>,
     /// Violations reported only when type checking is on; like `errors`, they strip the payload.
@@ -88,8 +100,11 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
     let mut params: Vec<(String, Ty<'db>, bool)> = Vec::new();
     let mut rest: Option<Ty<'db>> = None;
     let mut ret: Option<Ty<'db>> = None;
-    let mut saw_param = false;
-    let mut saw_return = false;
+    lowering.errors.extend(
+        misplaced_directives(node)
+            .into_iter()
+            .map(|(message, range)| (message.to_owned(), range)),
+    );
 
     for child in node.children() {
         match child.kind() {
@@ -105,22 +120,9 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         }
                     }
                     "forall" => {
-                        if saw_param || saw_return {
-                            lowering.errors.push((
-                                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
                         lowering.lower_binders(&child, &mut forall, "expanded function annotation");
                     }
                     "param" => {
-                        if saw_return {
-                            lowering.errors.push((
-                                "`@param` directives must appear before `@return` or `@returns` in the same `#:` block.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
-                        saw_param = true;
                         let optional = has_token(&child, SyntaxKind::L_BRACKET);
                         let ty = lowering
                             .lower_child_type(&child)
@@ -132,13 +134,6 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         }
                     }
                     "return" | "returns" => {
-                        if saw_return {
-                            lowering.errors.push((
-                                "cannot use more than one `@return` or `@returns` directive in the same `#:` block.".to_owned(),
-                                child.text_range(),
-                            ));
-                        }
-                        saw_return = true;
                         ret = lowering.lower_child_type(&child);
                     }
                     "strict" => annotation.strict = Some(!has_word(&child, "off")),
@@ -318,9 +313,10 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
             });
         }
     }
-    let ret = site
+    let written_return = site
         .children()
-        .find(|child| child.kind() == SyntaxKind::RETURN_TYPE)
+        .find(|child| child.kind() == SyntaxKind::RETURN_TYPE);
+    let ret = written_return
         .and_then(|ret| lowering.lower_child_type(&ret))
         .unwrap_or_else(|| unknown(db));
     annotation.inline_parameters = named
@@ -387,41 +383,6 @@ fn inline_range(site: &SyntaxNode) -> TextRange {
     covered.unwrap_or_else(|| site.text_range())
 }
 
-/// One formal of a `function(...)` literal, as the parser wrote it.
-pub struct Formal {
-    pub name: String,
-    pub has_default: bool,
-    pub ascription: Option<SyntaxNode>,
-}
-
-pub fn formals(function: &SyntaxNode) -> Vec<Formal> {
-    let Some(list) = function
-        .children()
-        .find(|child| child.kind() == SyntaxKind::PARAMETER_LIST)
-    else {
-        return Vec::new();
-    };
-    list.children()
-        .filter(|child| child.kind() == SyntaxKind::PARAMETER)
-        .filter_map(|parameter| {
-            let token = parameter.first_token()?;
-            let text = token.text();
-            let name = text
-                .strip_prefix('`')
-                .and_then(|text| text.strip_suffix('`'))
-                .unwrap_or(text)
-                .to_owned();
-            Some(Formal {
-                name,
-                has_default: has_token(&parameter, SyntaxKind::EQ),
-                ascription: parameter
-                    .children()
-                    .find(|part| part.kind() == SyntaxKind::TYPE_ASCRIPTION),
-            })
-        })
-        .collect()
-}
-
 /// What a statement's two annotations mean together. A coercion form (`@trust`,
 /// `@if-unknown`, `@new`) says how the value gets its type, so it governs wherever it
 /// is written, and the inline one wins when both are coercions;
@@ -474,25 +435,36 @@ pub fn merge_annotations<'db>(
         return Some(inline);
     };
     let formals = formals(signature);
+    let comment_names: Vec<&str> = comment_function
+        .named
+        .iter()
+        .map(|parameter| parameter.name.text(db))
+        .collect();
+    let paired = pair_formals(
+        formals.iter().map(|formal| formal.name.as_str()),
+        &comment_names,
+        comment_function.positional.len(),
+    );
     let mut used = vec![false; comment_function.named.len()];
-    let mut positional = comment_function.positional.iter();
+    let mut surplus = 0;
     let mut named = Vec::new();
-    for formal in formals.iter().filter(|formal| formal.name != "...") {
-        let from_comment = match comment_function
-            .named
-            .iter()
-            .position(|parameter| parameter.name.text(db) == formal.name)
-        {
-            Some(index) => {
+    for (formal, paired) in formals.iter().zip(paired) {
+        let from_comment = match paired {
+            Paired::Rest => continue,
+            Paired::Named(index) => {
                 used[index] = true;
                 Some(comment_function.named[index].clone())
             }
-            None => positional.next().map(|&ty| Parameter {
-                name: Name::new(db, formal.name.clone()),
-                ty,
-                optional: formal.has_default,
-                default: None,
-            }),
+            Paired::Positional(index) => {
+                surplus = index + 1;
+                Some(Parameter {
+                    name: Name::new(db, formal.name.clone()),
+                    ty: comment_function.positional[index],
+                    optional: formal.has_default,
+                    default: None,
+                })
+            }
+            Paired::Undeclared => None,
         };
         let from_inline = inline_function
             .named
@@ -517,7 +489,7 @@ pub fn merge_annotations<'db>(
             .filter(|(_, used)| !**used)
             .map(|(parameter, _)| parameter.clone()),
     );
-    let surplus: Vec<Ty<'db>> = positional.copied().collect();
+    let surplus: Vec<Ty<'db>> = comment_function.positional[surplus..].to_vec();
     let variadic = match (&inline_function.variadic, &comment_function.variadic) {
         (Some(rest), _) => Some(RestParameter {
             element: rest.element,
@@ -653,103 +625,63 @@ pub fn comment_slots<'db>(
             .into_iter()
             .collect();
     };
-    // Each written parameter type, in source order, with its name (`None` when positional).
-    let mut written: Vec<(Option<String>, bool, Option<TextRange>)> = Vec::new();
-    let mut written_return = None;
-    match value_node.filter(|value| value.kind() == SyntaxKind::TYPE_FUNCTION) {
-        Some(compact) => {
-            for parameter in compact
-                .children()
-                .filter(|child| child.kind() == SyntaxKind::TYPE_PARAMETER_LIST)
-                .flat_map(|list| list.children())
-                .filter(|child| child.kind() == SyntaxKind::TYPE_PARAMETER)
-            {
-                let range = parameter
-                    .children()
-                    .find(|child| is_type_kind(child.kind()))
-                    .map(|ty| ty.text_range());
-                written.push((
-                    name_text(&parameter),
-                    has_token(&parameter, SyntaxKind::DOTS),
-                    range,
-                ));
-            }
-            if has_token(&compact, SyntaxKind::MINUS_GREATER) {
-                written_return = compact
-                    .children()
-                    .filter(|child| is_type_kind(child.kind()))
-                    .last()
-                    .map(|ty| ty.text_range());
-            }
-        }
-        None => {
-            for directive in node
-                .children()
-                .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
-            {
-                let range = directive
-                    .children()
-                    .find(|child| is_type_kind(child.kind()))
-                    .map(|ty| ty.text_range());
-                match directive_name(&directive).as_str() {
-                    "param" => {
-                        let name = name_text(&directive);
-                        let dots = name.as_deref() == Some("...");
-                        written.push((name.filter(|_| !dots), dots, range));
-                    }
-                    "return" | "returns" => written_return = range,
-                    _ => {}
-                }
-            }
-        }
-    }
-    let formal_names: Vec<String> = formals(function)
-        .into_iter()
-        .map(|formal| formal.name)
-        .filter(|name| name != "...")
+    let declaration = match value_node.as_ref().and_then(written_function_type) {
+        Some(compact) => compact_declaration(&compact),
+        None => expanded_declaration(node),
+    };
+    let Declaration { parameters, ret } = declaration;
+    let formals = formals(function);
+    let declared_names: Vec<&str> = declared_function
+        .named
+        .iter()
+        .map(|parameter| parameter.name.text(db))
         .collect();
+    let paired = pair_formals(
+        formals.iter().map(|formal| formal.name.as_str()),
+        &declared_names,
+        declared_function.positional.len(),
+    );
     let mut slots = Vec::new();
+    // The lowered function holds the written parameters in the same order, the named ones
+    // apart from those written without a name.
     let mut named = declared_function.named.iter();
-    let mut positional = declared_function.positional.iter();
-    let mut positional_names = formal_names.iter().filter(|name| {
-        !declared_function
-            .named
-            .iter()
-            .any(|parameter| parameter.name.text(db) == name.as_str())
-    });
-    for (name, dots, range) in written {
-        let Some(range) = range else {
-            continue;
+    let mut positional = 0;
+    for parameter in parameters {
+        let slot = if parameter.rest {
+            declared_function
+                .variadic
+                .as_ref()
+                .map(|rest| (Slot::Rest, rest.element))
+        } else if parameter.name.is_some() {
+            named.next().map(|declared| {
+                (
+                    Slot::Parameter(declared.name.text(db).to_owned()),
+                    declared.ty,
+                )
+            })
+        } else {
+            let index = positional;
+            positional += 1;
+            formals
+                .iter()
+                .zip(&paired)
+                .find(|(_, paired)| **paired == Paired::Positional(index))
+                .zip(declared_function.positional.get(index))
+                .map(|((formal, _), ty)| (Slot::Parameter(formal.name.clone()), *ty))
         };
-        if dots {
-            if let Some(rest) = &declared_function.variadic {
-                slots.push(SlotType {
-                    slot: Slot::Rest,
-                    ty: rest.element,
-                    range,
-                });
-            }
-        } else if name.is_some() {
-            if let Some(parameter) = named.next() {
-                slots.push(SlotType {
-                    slot: Slot::Parameter(parameter.name.text(db).to_owned()),
-                    ty: parameter.ty,
-                    range,
-                });
-            }
-        } else if let (Some(&ty), Some(formal)) = (positional.next(), positional_names.next()) {
+        if let (Some((slot, ty)), Some(written)) = (slot, parameter.ty) {
             slots.push(SlotType {
-                slot: Slot::Parameter(formal.clone()),
+                slot,
                 ty,
-                range,
+                range: written.text_range(),
             });
         }
     }
-    if let Some(range) = written_return {
+    if let Some(written) = ret {
         slots.push(SlotType {
             slot: Slot::Return,
             ty: declared_function.ret,
-            range,
+            range: written.text_range(),
         });
     }
     slots
@@ -838,6 +770,18 @@ pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db
     slots
 }
 
+/// Whether the function literal that `statement` is or assigns has a signature the runtime
+/// reads (see [`Annotation::written_signature`]). `block` is the `#:` block attached to the
+/// statement.
+pub fn has_written_signature(
+    statement: &SyntaxNode,
+    block: Option<&SyntaxNode>,
+    inline: bool,
+) -> bool {
+    assigned_function(statement)
+        .is_some_and(|function| signature_from(&function, block, inline).is_complete())
+}
+
 /// The inline site a statement carries: its own `: TYPE`, or else the signature on the
 /// function literal it assigns or is.
 pub fn statement_inline_site(statement: &SyntaxNode) -> Option<SyntaxNode> {
@@ -846,135 +790,6 @@ pub fn statement_inline_site(statement: &SyntaxNode) -> Option<SyntaxNode> {
     }
     let function = assigned_function(statement)?;
     is_inline_site(&function).then_some(function)
-}
-
-/// The function literal a statement assigns (either direction) or is.
-pub fn assigned_function(statement: &SyntaxNode) -> Option<SyntaxNode> {
-    match statement.kind() {
-        SyntaxKind::FUNCTION_DEF => Some(statement.clone()),
-        SyntaxKind::BINARY_EXPR => {
-            let binary = ast::BinaryExpr::cast(statement.clone())?;
-            let value = match binary.operator()?.kind() {
-                SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ => binary.rhs(),
-                SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => binary.lhs(),
-                _ => None,
-            }?;
-            (value.kind() == SyntaxKind::FUNCTION_DEF).then_some(value)
-        }
-        _ => None,
-    }
-}
-
-/// A `#:` block must commit to exactly one form.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BlockForm {
-    Compact,
-    Expanded,
-    Definition,
-}
-
-pub enum BlockRefusal {
-    FormMixing(&'static str),
-    /// Silent: the parser already reported what was wrong.
-    Unparsed,
-}
-
-/// A line's form is that of its first item, and only whole lines are compared. A line with a
-/// second item failed to parse (recovery re-parents an unreadable type's pieces to the block), so
-/// it is `Unparsed`, not form mixing.
-pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
-    // A refused region has no trustworthy payload: a refused binder, for instance, leaves type
-    // parameters unbound, which would be blamed a second time as unknown types.
-    if node.kind() == SyntaxKind::ERROR {
-        return Some(BlockRefusal::Unparsed);
-    }
-    // Markers come from all descendant tokens, not just direct children: a line continuing a
-    // still-open node puts its marker inside that node.
-    let mut markers: Vec<TextSize> = Vec::new();
-    for element in node.node_ref().descendants().skip(1) {
-        if element.kind() == SyntaxKind::ERROR {
-            return Some(BlockRefusal::Unparsed);
-        }
-    }
-    for token in node.node_ref().tokens() {
-        if token.kind() == SyntaxKind::ANNOTATION_MARKER {
-            markers.push(token.range().start());
-        }
-    }
-    let line_of = |start: TextSize| markers.iter().filter(|&&at| at < start).count();
-
-    let mut previous: Option<BlockForm> = None;
-    let mut current: Option<(usize, BlockForm)> = None;
-    // A `<T, U>` binder list prefixes the compact type after it, so the pair is one item.
-    let mut awaiting_bound_type = false;
-    for child in node.children() {
-        let line = line_of(child.text_range().start());
-        if current.is_some_and(|(at, _)| at != line) {
-            current = None;
-            awaiting_bound_type = false;
-        }
-        if awaiting_bound_type && is_type_kind(child.kind()) {
-            awaiting_bound_type = false;
-            continue;
-        }
-        let form = match child.kind() {
-            SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
-                // A flag on the function, not a type, so it fits beside any form.
-                "pure" => continue,
-                "type" | "alias" => BlockForm::Definition,
-                "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
-                _ => BlockForm::Compact,
-            },
-            SyntaxKind::TYPE_BINDER_LIST => {
-                awaiting_bound_type = true;
-                BlockForm::Compact
-            }
-            kind if is_type_kind(kind) => BlockForm::Compact,
-            _ => continue,
-        };
-        if current.is_some() {
-            return Some(BlockRefusal::Unparsed);
-        }
-        current = Some((line, form));
-        let mixing = match (previous, form) {
-            (None, _)
-            | (Some(BlockForm::Definition), BlockForm::Definition)
-            | (Some(BlockForm::Expanded), BlockForm::Expanded) => None,
-            (Some(BlockForm::Compact), BlockForm::Compact) => Some(
-                "only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.",
-            ),
-            (Some(BlockForm::Definition), _) | (_, BlockForm::Definition) => Some(
-                "`@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.",
-            ),
-            (Some(BlockForm::Compact), BlockForm::Expanded)
-            | (Some(BlockForm::Expanded), BlockForm::Compact) => Some(
-                "a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.",
-            ),
-        };
-        if let Some(message) = mixing {
-            return Some(BlockRefusal::FormMixing(message));
-        }
-        previous = Some(form);
-    }
-    None
-}
-
-pub fn is_type_kind(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::TYPE_REF
-            | SyntaxKind::TYPE_APPLY
-            | SyntaxKind::TYPE_VECTOR
-            | SyntaxKind::TYPE_UNION
-            | SyntaxKind::TYPE_FUNCTION
-            | SyntaxKind::TYPE_RECORD
-            | SyntaxKind::TYPE_TUPLE
-            | SyntaxKind::TYPE_LIST
-            | SyntaxKind::TYPE_PAREN
-            | SyntaxKind::TYPE_BINDER_LIST
-            | SyntaxKind::TYPE_TAG
-            | SyntaxKind::TYPE_OTHER_TAGS
-    )
 }
 
 /// `Record{...}` and `Tuple{...}` share the brace grammar of `list{...}` too.
@@ -998,51 +813,12 @@ fn frame_kind(node: &SyntaxNode) -> Option<FrameKind> {
     FrameKind::from_head(name_text(node).as_deref()?)
 }
 
-/// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
 /// Whether a `#:` block carries `@pure`. Read apart from the lowered annotation, so a block
 /// refused for its type still declares purity and the fact stays a per-item `bool`.
 pub fn declares_pure(annotation: &SyntaxNode) -> bool {
     annotation.children().any(|child| {
         child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE && directive_name(&child) == "pure"
     })
-}
-
-fn directive_name(node: &SyntaxNode) -> String {
-    let mut name = String::new();
-    let mut cursor: Option<TextSize> = None;
-    for element in node.children_with_tokens() {
-        let Some(token) = element.into_token() else {
-            break;
-        };
-        match token.kind() {
-            SyntaxKind::AT => {
-                cursor = Some(token.text_range().end());
-                continue;
-            }
-            SyntaxKind::IDENT | SyntaxKind::MINUS => {}
-            kind if kind.is_keyword() => {}
-            _ => break,
-        }
-        if cursor != Some(token.text_range().start()) {
-            break;
-        }
-        name.push_str(token.text());
-        cursor = Some(token.text_range().end());
-    }
-    name
-}
-
-fn name_text(node: &SyntaxNode) -> Option<String> {
-    node.children()
-        .find(|c| c.kind() == SyntaxKind::NAME)
-        .and_then(ast::Name::cast)
-        .and_then(|name| name.text())
-}
-
-fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.node_ref()
-        .child_tokens()
-        .any(|token| token.kind() == kind)
 }
 
 fn has_word(node: &SyntaxNode, word: &str) -> bool {

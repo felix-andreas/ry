@@ -236,6 +236,40 @@ unsafe fn object_of<'a>(value: Sexp) -> Option<&'a Object> {
     tagged.then(|| &*value.external_address().cast::<Object>())
 }
 
+/// Whether `value` is one of the API's own values: a `DataFrame`, a `LazyFrame`, a `GroupBy` or an
+/// expression. Typed code holds one without looking inside it.
+pub unsafe fn is_table_value(value: Sexp) -> bool {
+    is_frame(value) || object_of(value).is_some()
+}
+
+/// Whether the API function `name` gives one of the API's own values. Every function of the
+/// `Expr`, `DataFrame`, `LazyFrame`, `GroupBy` and `LazyGroupBy` modules does, except the ones that
+/// read a table out into R values, write it somewhere or change it in place. A function that gives
+/// a table value changes nothing a second run of it would see.
+pub fn gives_table_value(name: &str) -> bool {
+    const R_VALUES: [&str; 9] = [
+        "DataFrame.height",
+        "DataFrame.width",
+        "DataFrame.columns",
+        "DataFrame.schema",
+        "DataFrame.key",
+        "DataFrame.set_key",
+        "DataFrame.write_csv",
+        "DataFrame.write_parquet",
+        "LazyFrame.explain",
+    ];
+    if matches!(name, "DataFrame" | "as.DataFrame") {
+        return true;
+    }
+    let Some((module, _)) = name.split_once('.') else {
+        return false;
+    };
+    matches!(
+        module,
+        "Expr" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+    ) && !R_VALUES.contains(&name)
+}
+
 /// What an R value is to the API, for error messages.
 unsafe fn describe(value: Sexp) -> String {
     if is_frame(value) {

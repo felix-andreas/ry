@@ -2,10 +2,10 @@
 //!
 //! A closure body compiles to bytecode on its second call, or takes its code from its package's
 //! code image then; the closures of the namespaces the start-up image holds arrive compiled. The
-//! code replaces the body as a
-//! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
-//! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
-//! goes through [`closure_body`], which returns the expression.
+//! code replaces the body as a `BCODESXP`, as GNU R stores compiled closures, and everything that
+//! reads a body as source (`body()`, `deparse`, `identical`, serialization) goes through
+//! [`closure_body`], which returns the expression. Closures over one body expression share its
+//! code (see [`Bodies`]), which lives as long as the expression does.
 //!
 //! The machine has registers instead of an operand stack: each instruction names the registers
 //! it reads and writes, and the register file is a stack the collector traces. Every construct
@@ -25,8 +25,7 @@
 //!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
 //!   slot hints (an integer vector, one per lookup site), the ninth the stored half of the
 //!   effect-free fact (see [`crate::effects`]), the tenth the last argument-match plan of a
-//!   closure body (see `eval::match_args_cached`), and the eleventh the baseline tier's machine
-//!   code (an external pointer whose address is a [`BaselineCode`]), `NULL` until it exists.
+//!   closure body (see `eval::match_args_cached`), and the eleventh the slot table (see [`SLOTS`]).
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -64,7 +63,10 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
-    std::ops::Range,
+    std::{
+        hash::{Hash, Hasher},
+        ops::Range,
+    },
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -102,18 +104,8 @@ pub struct State {
     /// Allocated once at [`REGISTER_FILE_CAPACITY`] and never grown past it, so a register
     /// window's address is stable for as long as the window exists.
     pub(crate) registers: Vec<Sexp>,
-    /// Each expression body a closure has run: its calls until it compiles, then its code.
-    /// The closures one `function` expression makes each time the AST evaluator runs it share
-    /// that body, and finding the code here gives each the same code object, profile and
-    /// tier-1 compilation instead of compiling the body again.
-    ///
-    /// The key is the body's address because a body is any language object (a constant of the
-    /// enclosing code, the value of `body<-` or `as.function`), which has no spare field for a
-    /// dense index, and an attribute would show in `attributes(body(f))`. Compiled code is found
-    /// through the closure's own body slot, so only an uncompiled body reaches this map. The
-    /// collector drops the entry of every body that died before it frees anything
-    /// ([`State::clear_dead`]), so a new body at a dead one's address never finds its entry.
-    bodies: FxHashMap<Sexp, Body>,
+    /// The tier of every closure body that has run, shared by all closures over the body.
+    bodies: Bodies,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
 }
@@ -122,7 +114,7 @@ impl Default for State {
     fn default() -> State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
-            bodies: FxHashMap::default(),
+            bodies: Bodies::default(),
             tier: None,
             call_plans: CallPlans::default(),
         }
@@ -134,43 +126,203 @@ impl State {
         for &register in &self.registers {
             marker.mark(register);
         }
-        for body in self.bodies.values() {
-            if let Body::Code {
-                pair,
-                formals,
-                srcref,
-            } = *body
-            {
-                marker.mark(pair);
-                marker.mark(formals);
-                marker.mark(srcref);
-            }
-        }
         self.call_plans.trace(marker);
     }
 
     pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         self.call_plans.clear_dead(liveness);
-        // The weak pair's key is already cleared when its body died, so the entry's own key is
-        // what says whether the body survives.
-        self.bodies
-            .retain(|&body, _| unsafe { liveness.is_live(body) });
+        self.bodies.clear_dead(liveness);
     }
 }
 
-#[derive(Clone, Copy)]
-enum Body {
-    Calls(u32),
-    /// `pair` is a weak reference from the body to its code, which keeps the code while the
-    /// body lives although no closure runs it, as between two runs of a test block, and does
-    /// not keep the body alive through the code's reference to its source. Compiling reads the
-    /// formals and the srcref, so a closure over the same body with other formals (from
-    /// `as.function`, say) compiles its own code.
-    Code {
-        pair: Sexp,
-        formals: Sexp,
-        srcref: Sexp,
-    },
+/// The tier of each closure body, keyed by the body expression, which every closure made from
+/// one `function` expression shares, and so does every copy `environment<-` makes, as R6 does
+/// for each object's methods. Code compiled for one closure serves every other closure over the
+/// body whose formals and srcref are the same objects, since compiling reads nothing else of the
+/// closure: the enclosure only resolves names that the code guards at run time. A body counts
+/// its calls across all its closures until it compiles, and then holds its code while any
+/// closure runs it, so a closure made meanwhile runs the code from its first call instead of
+/// compiling again.
+///
+/// GNU R shares compiled bodies the same way, through a cache keyed by a hash of the body's
+/// structure. As there, a body changed in place since it compiled (through the C API) does not
+/// give its old code to a new closure, while closures that already run the code keep it.
+#[derive(Default)]
+struct Bodies {
+    /// Below [`COMPILED`], the calls the body has seen; with that bit set, the index of its
+    /// compiled entry in the columns below.
+    states: FxHashMap<Sexp, u32>,
+    /// The compiled entries, as columns indexed by entry. `keys` holds the body, or `NULL` for
+    /// a free entry. None of the columns is traced: an entry holds its objects weakly and goes
+    /// once any of them dies, so the code lives exactly as long as a closure that runs it.
+    keys: Vec<Sexp>,
+    codes: Vec<Sexp>,
+    formals: Vec<Sexp>,
+    srcrefs: Vec<Sexp>,
+    /// The [`shape`] of the body, formals and srcref when the code compiled.
+    shapes: Vec<u64>,
+    free: Vec<u32>,
+}
+
+/// The bit of a [`Bodies`] state that marks an entry index rather than a call count.
+const COMPILED: u32 = 1 << 31;
+
+/// What a closure over a body that has not compiled in it does at a call.
+enum BodyTier {
+    /// Runs the body's code, compiled for another closure over it.
+    Shared(Sexp),
+    /// Compiles now: the body runs often enough, or compiled for a closure this one cannot
+    /// share code with.
+    Compile,
+    /// Runs on the AST evaluator, after this many earlier calls.
+    Counting(u32),
+}
+
+impl Bodies {
+    /// The tier of `function`, a closure over `body`, installing shared code as its body.
+    unsafe fn tier(&self, function: Sexp, body: Sexp) -> BodyTier {
+        let Some(&state) = self.states.get(&body) else {
+            return BodyTier::Counting(0);
+        };
+        if state & COMPILED == 0 {
+            return BodyTier::Counting(state);
+        }
+        let entry = (state & !COMPILED) as usize;
+        let formals = function.car();
+        let srcref = values::get_attr(function, symbols().srcref);
+        if formals != self.formals[entry]
+            || srcref != self.srcrefs[entry]
+            || shape(body, formals, srcref) != self.shapes[entry]
+        {
+            return BodyTier::Compile;
+        }
+        let code = self.codes[entry];
+        crate::heap().set_cdr(function, code);
+        BodyTier::Shared(code)
+    }
+
+    /// Counts a call of `body` on the AST evaluator.
+    fn count(&mut self, body: Sexp, calls: u32) {
+        if self.states.len() > MAX_TRACKED_BODIES {
+            self.states.retain(|_, state| *state & COMPILED != 0);
+        }
+        self.states.insert(body, calls);
+    }
+
+    /// Records `code`, just compiled for `function`, as `body`'s code for closures to share. A
+    /// body that already has an entry keeps it: the code there serves the closures it was
+    /// compiled for, and replacing it would only make two kinds of closure take turns.
+    unsafe fn share(&mut self, function: Sexp, body: Sexp, code: Sexp) {
+        if self
+            .states
+            .get(&body)
+            .is_some_and(|state| state & COMPILED != 0)
+        {
+            return;
+        }
+        let formals = function.car();
+        let srcref = values::get_attr(function, symbols().srcref);
+        let shape = shape(body, formals, srcref);
+        let entry = match self.free.pop() {
+            Some(entry) => {
+                let index = entry as usize;
+                self.keys[index] = body;
+                self.codes[index] = code;
+                self.formals[index] = formals;
+                self.srcrefs[index] = srcref;
+                self.shapes[index] = shape;
+                entry
+            }
+            None => {
+                self.keys.push(body);
+                self.codes.push(code);
+                self.formals.push(formals);
+                self.srcrefs.push(srcref);
+                self.shapes.push(shape);
+                (self.keys.len() - 1) as u32
+            }
+        };
+        self.states.insert(body, entry | COMPILED);
+    }
+
+    /// Frees every entry that holds an object the collection found dead. The body may outlive
+    /// its code, as a quoted `function` expression does, and it then counts its calls afresh.
+    /// A dead body's call count goes too, before anything is freed, so a new body the allocator
+    /// places at its address starts from zero.
+    unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        self.states
+            .retain(|&body, state| *state & COMPILED != 0 || liveness.is_live(body));
+        let live = |object: Sexp| object == nil() || liveness.is_live(object);
+        for entry in 0..self.keys.len() {
+            let body = self.keys[entry];
+            if body == nil() {
+                continue;
+            }
+            if !live(body)
+                || !live(self.codes[entry])
+                || !live(self.formals[entry])
+                || !live(self.srcrefs[entry])
+            {
+                self.states.remove(&body);
+                self.keys[entry] = nil();
+                self.codes[entry] = nil();
+                self.formals[entry] = nil();
+                self.srcrefs[entry] = nil();
+                self.free.push(entry as u32);
+            }
+        }
+    }
+}
+
+/// A hash of what compiled code depends on: the structure of `body` and `formals`, and
+/// `srcref`. Symbols, strings and lists hash by identity, and so does any constant longer than
+/// one element; scalars hash by value, which is what an in-place change of a call reaches.
+// Out of line so a profile shows what the reuse check costs.
+#[inline(never)]
+unsafe fn shape(body: Sexp, formals: Sexp, srcref: Sexp) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    hash_shape(body, &mut hasher);
+    hash_shape(formals, &mut hasher);
+    srcref.hash(&mut hasher);
+    if srcref.kind() == SexpType::Integer {
+        values::ints(srcref).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Walks each call's arguments in a loop and keeps only nested calls on an explicit stack,
+/// because a long left-nested chain such as `a + b + c + ...` nests calls in the car as deep as
+/// it is long.
+unsafe fn hash_shape(expression: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    let mut pending: SmallVec<[Sexp; 16]> = smallvec![expression];
+    while let Some(mut node) = pending.pop() {
+        while matches!(node.kind(), SexpType::Language | SexpType::Pairlist) {
+            (node.kind() as u8).hash(hasher);
+            node.tag().hash(hasher);
+            let head = node.car();
+            if matches!(head.kind(), SexpType::Language | SexpType::Pairlist) {
+                pending.push(head);
+            } else {
+                hash_leaf(head, hasher);
+            }
+            node = node.cdr();
+        }
+        hash_leaf(node, hasher);
+    }
+}
+
+unsafe fn hash_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    match node.kind() {
+        // Reading an ALTREP vector can run R code, so one hashes by identity.
+        _ if node.is_altrep() => node.hash(hasher),
+        SexpType::Integer | SexpType::Logical if length(node) == 1 => {
+            values::ints(node).hash(hasher);
+        }
+        SexpType::Real if length(node) == 1 => {
+            values::reals(node)[0].to_bits().hash(hasher);
+        }
+        _ => node.hash(hasher),
+    }
 }
 
 /// The register file holds this many registers across all active frames. Deep recursion runs
@@ -199,11 +351,6 @@ pub struct Tier {
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
-    /// Called once a body without baseline code reaches [`Tier::baseline_threshold`] entries or
-    /// backward jumps. It stores the body's [`BaselineCode`] in its `BASELINE` constant, or
-    /// leaves the constant `NULL` when the body does not compile.
-    pub baseline: unsafe fn(&Machine<'_>),
-    pub baseline_threshold: i32,
     /// Called before a typed closure gets a frame, with its arguments matched by position or by
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
@@ -424,7 +571,8 @@ pub unsafe fn execute(code: Sexp, env: Sexp) -> R<Sexp> {
     eval::eval(source_of(code), env)
 }
 
-/// Runs a closure's body, compiling it on its second call.
+/// Runs a closure's body, compiling it on its second call, or running the code another closure
+/// over the same body compiled.
 pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
@@ -432,69 +580,24 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return eval::eval(body, env);
     }
-    let state = &mut interp().bytecode;
-    let calls = match state.bodies.entry(body).or_insert(Body::Calls(0)) {
-        Body::Calls(calls) => {
-            *calls += 1;
-            *calls
+    let bodies = &mut interp().bytecode.bodies;
+    match bodies.tier(function, body) {
+        BodyTier::Shared(code) => return run(function, code, env),
+        BodyTier::Compile => {}
+        // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes,
+        // and so does a typed one, whose signature lets the JIT compile it at that call too.
+        BodyTier::Counting(calls)
+            if calls + 1 < COMPILE_AFTER_CALLS
+                && !contains_loop(body, LOOP_SEARCH_DEPTH)
+                && !crate::annotations::is_typed(function) =>
+        {
+            bodies.count(body, calls + 1);
+            return eval::eval(body, env);
         }
-        Body::Code { .. } => COMPILE_AFTER_CALLS,
-    };
-    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
-    // so does a typed one, whose signature lets the JIT compile it at that call too.
-    if calls < COMPILE_AFTER_CALLS
-        && !contains_loop(body, LOOP_SEARCH_DEPTH)
-        && !crate::annotations::is_typed(function)
-    {
-        if state.bodies.len() > MAX_TRACKED_BODIES {
-            state
-                .bodies
-                .retain(|_, body| matches!(body, Body::Code { .. }));
-        }
-        return eval::eval(body, env);
+        BodyTier::Counting(_) => {}
     }
-    let code = install_code(function, body)?;
+    let code = compile_for(function, body)?;
     run(function, code, env)
-}
-
-/// Gives `function`, whose body `body` is an expression, its compiled code: the code its
-/// package's image holds, else a fresh compile.
-unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
-    let heap = crate::heap();
-    let formals = function.car();
-    let srcref = values::get_attr(function, symbols().srcref);
-    if let Some(&Body::Code {
-        pair,
-        formals: compiled_formals,
-        srcref: compiled_srcref,
-    }) = interp().bytecode.bodies.get(&body)
-        && compiled_formals == formals
-        && compiled_srcref == srcref
-    {
-        let code = pair.weak_value();
-        heap.set_cdr(function, code);
-        return Ok(code);
-    }
-    // A package's code image replaces compiling, at the same call, rather than running code from
-    // the first call: decoding costs about as much as compiling, and many closures run only once.
-    let code = match crate::code_image::take_pending(function, body)? {
-        Some(code) => code,
-        None => {
-            let code = compile(body, function)?;
-            heap.set_cdr(function, code);
-            code
-        }
-    };
-    let pair = heap.alloc_weak_ref(body, code, values::nil(), 0, false)?;
-    interp().bytecode.bodies.insert(
-        body,
-        Body::Code {
-            pair,
-            formals,
-            srcref,
-        },
-    );
-    Ok(code)
 }
 
 /// Why a closure body runs on the AST evaluator rather than as compiled code. It is a property
@@ -507,6 +610,75 @@ pub enum Uncompilable {
     NotACall,
 }
 
+/// Iterations after which a loop the tree walker runs compiles: a `for` loop over at least this
+/// many elements compiles before its first iteration, and a `while` or `repeat` loop compiles
+/// once it has run this many.
+pub const LOOP_COMPILE_ITERATIONS: usize = 16;
+
+/// Runs `call`, a `for`, `while` or `repeat` loop the tree walker was about to evaluate in `env`,
+/// as compiled code, or returns `None` when the loop stays with the tree walker. GNU R compiles
+/// such loops in the global environment only, which is where they are not inside a function
+/// whose frame semantics (`on.exit`, `missing`, `sys.function`) the compiled loop would have
+/// to reproduce. `sequence` is a `for` loop's evaluated sequence, which the compiled loop steps
+/// through instead of evaluating the expression again.
+///
+/// The code compiles for this one evaluation and is dropped after it, as in GNU R, which also
+/// retries a loop it could not compile at each evaluation. It runs on `env`'s bindings, so code
+/// called from the loop sees every assignment at once, and in an activation with no call frame,
+/// so `parent.frame()`, `sys.call()` and the calls conditions report are those of the tree
+/// walker.
+pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    // A `return` would end the compiled activation as if it were a function, where the tree
+    // walker raises "no function to return from".
+    if env != heap.known().global_env || interp().debugger.is_some() || calls_return(call) {
+        return Ok(None);
+    }
+    let body = match sequence {
+        Some(sequence) => {
+            let arguments = call.cdr();
+            let rest = values::cons(sequence, arguments.cdr().cdr())?;
+            values::lcons(call.car(), values::cons(arguments.car(), rest)?)?
+        }
+        None => call,
+    };
+    let function = values::triple(SexpType::Closure, nil(), body, env)?;
+    let code = compile_with_locals(body, function, None)?;
+    heap.set_cdr(function, code);
+    let profile = values::ints_mut(code.cdr().element(PROFILE));
+    profile[profile::TIER_STATE] = profile::TIER_OFF;
+    profile[profile::NEXT] = i32::MAX;
+    // A closure's frame restores the source reference on leaving, and this activation has none.
+    let srcref = interp().srcref;
+    let result = run(function, code, env);
+    interp().srcref = srcref;
+    result?;
+    interp().visible = false;
+    Ok(Some(nil()))
+}
+
+/// Whether `expression` calls `return` outside the functions it defines.
+unsafe fn calls_return(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head == symbols().function {
+        return false;
+    }
+    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "return" {
+        return true;
+    }
+    let mut cell = expression;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        if calls_return(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
 /// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
 /// arguments calls this, so that such a call runs in a slot frame rather than in the environment
 /// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
@@ -517,15 +689,32 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return Ok(body);
     }
-    let calls = match interp().bytecode.bodies.get(&body) {
-        Some(Body::Calls(calls)) => *calls,
-        Some(Body::Code { .. }) => COMPILE_AFTER_CALLS,
-        None => 0,
-    };
-    if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
-        return Ok(body);
+    match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => return Ok(code),
+        BodyTier::Compile => {}
+        BodyTier::Counting(calls) => {
+            if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+                return Ok(body);
+            }
+        }
     }
-    let code = install_code(function, body)?;
+    compile_for(function, body)
+}
+
+/// Compiles `body` as `function`'s, or takes its code from the package's code image, installs
+/// the code as the closure's body and records it for other closures over the body.
+unsafe fn compile_for(function: Sexp, body: Sexp) -> R<Sexp> {
+    // A package's code image replaces compiling, at the same call, rather than running code from
+    // the first call: decoding costs about as much as compiling, and many closures run only once.
+    let code = match crate::code_image::take_pending(function, body)? {
+        Some(code) => code,
+        None => {
+            let code = compile(body, function)?;
+            crate::heap().set_cdr(function, code);
+            code
+        }
+    };
+    interp().bytecode.bodies.share(function, body, code);
     Ok(code)
 }
 
@@ -585,16 +774,26 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Result<Sexp, Uncompilable>> {
     if !worth_compiling(body) {
         return Ok(Err(Uncompilable::NotACall));
     }
-    install_code(function, body).map(Ok)
+    if let BodyTier::Shared(code) = interp().bytecode.bodies.tier(function, body) {
+        return Ok(Ok(code));
+    }
+    compile_for(function, body).map(Ok)
 }
 
-/// The body a copy of the closure `function` gets: its compiled code, compiled now if it has
-/// none yet, so that the original and all its copies share one code object, one profile and
-/// one tier-1 compilation however many copies run it. R6 copies every method into each object
-/// it creates, and a replacement call such as `environment(f) <- env` duplicates `f` first. A
-/// body that stays an expression is copied as one.
+/// The body a copy of the closure `function` gets: the code `function` runs, or the code
+/// closures over its body share, so that the original and its copies run one code object, with
+/// one profile and one tier-1 compilation. R6 copies every method into each object it creates,
+/// and a replacement call such as `environment(f) <- env` duplicates `f` first. A body that has
+/// not compiled is copied as the expression, and the copies count their calls together.
 pub unsafe fn body_to_copy(function: Sexp) -> R<Sexp> {
-    Ok(compiled_body(function)?.unwrap_or(function.cdr()))
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode || !worth_compiling(body) {
+        return Ok(body);
+    }
+    match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => Ok(code),
+        BodyTier::Compile | BodyTier::Counting(_) => Ok(body),
+    }
 }
 
 /// Compiles every closure bound in a loaded namespace afresh, for the start-up image, and returns
@@ -722,12 +921,11 @@ pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
 pub const SUMMARY: usize = 8;
 pub const MATCHES: usize = 9;
-pub const BASELINE: usize = 10;
 /// `NULL`, or for a closure body whose call frames keep their variables in slots, a list of the
 /// slot table (per inline cache, the slot of the symbol a `GetVar`, `SetVar` or `GetFun` with
 /// that cache reads, or -1) and the slots' symbols, the formals first in order.
-pub const SLOTS: usize = 11;
-pub const FIRST_CONSTANT: usize = 12;
+pub const SLOTS: usize = 10;
+pub const FIRST_CONSTANT: usize = 11;
 
 /// The most formals a slot frame takes: [`crate::Frame::missing`] has a bit per formal.
 pub const MAX_SLOT_FORMALS: usize = 64;
@@ -738,8 +936,13 @@ pub mod profile {
     pub const ENTRIES: usize = 0;
     /// Backward jumps taken since the counter was last reset.
     pub const BACK_EDGES: usize = 1;
-    /// The optimizing tier's state for this code, which only that tier interprets.
+    /// The optimizing tier's state for this code, which only that tier interprets, apart from
+    /// [`TIER_OFF`].
     pub const TIER_STATE: usize = 2;
+    /// The [`TIER_STATE`] of a loop compiled for the tree walker ([`super::run_loop`]), which no
+    /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
+    /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
+    pub const TIER_OFF: i32 = i32::MIN;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
@@ -757,7 +960,7 @@ pub mod profile {
     pub const RECORDING: usize = 3;
     /// The entry count at which the next entry of this code asks [`super::entry_event`] what to
     /// do, or `i32::MIN` to ask at the very next entry. Every tier decision at entry (recording,
-    /// the first-call compile, the entry-threshold compile, baseline code, running optimized
+    /// the first-call compile, the entry-threshold compile, running optimized
     /// code) happens at a known count, so one comparison per call stands in for testing each
     /// of them, which cost about 30 instructions per call of every body. Whatever changes a
     /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
@@ -1048,8 +1251,10 @@ pub enum Op {
     /// source references; `statement` is 1 when a statement starts there, which an attached
     /// debugger may stop on, and 0 when a block's end restores the outer srcref.
     SetSrcref,
-    /// `function expected target`: jumps unless the function is the primitive `expected`.
-    BranchUnlessPrimitive,
+    /// `src expected target`: jumps unless the value in `src` is the constant `expected` itself,
+    /// compared by identity. A call of a base function tests that the name still finds the
+    /// primitive `expected`, and a compiled `switch` tests the arm [`Op::SwitchArm`] chose.
+    BranchUnlessSame,
     /// `src target`: jumps when the value in `src` is an object (it has a class).
     BranchIfObject,
     /// `dst function call subject`: calls a dispatch-or-eval special such as `[` whose first
@@ -1105,7 +1310,8 @@ pub enum Op {
     MatchCondition,
     /// `dst src table`: the arm of a compiled `switch` that the selector in `src` chooses, as
     /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
-    /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
+    /// [`switch_table`]). The arms follow as a chain of [`Op::BranchUnlessSame`] tests, which
+    /// compare that scalar by identity, so choosing an arm costs one pointer compare per arm.
     SwitchArm,
     /// `dst variable row column value call`: `variable[row, column] <- value` or
     /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
@@ -1138,7 +1344,7 @@ pub enum Op {
     /// `dst program target`: an [`Op::Fused`] site that gave up, which does nothing. The
     /// compiler emits it when the ordinary code did not take the expected shape, and a fused
     /// site rewrites its own opcode to it after [`fusion::GIVE_UP`] declines in a row, so a site
-    /// that never fuses costs one dispatch in tier 0 and no code at all in baseline code.
+    /// that never fuses costs one dispatch in tier 0.
     Unfused,
     /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
     /// `symbol`, or in the global environment.
@@ -1191,7 +1397,7 @@ pub const OPS: [Op; 52] = [
     Op::Closure,
     Op::SubAssign,
     Op::SetSrcref,
-    Op::BranchUnlessPrimitive,
+    Op::BranchUnlessSame,
     Op::BranchIfObject,
     Op::DispatchSubject,
     Op::EndStatement,
@@ -1275,6 +1481,9 @@ pub mod feedback {
     pub const BRANCH_TAKEN: u16 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    /// A `GetVar` read an active binding, so every read there must call the binding again.
+    /// Compiled code records it, and the bit says nothing about the value's type.
+    pub const ACTIVE_BINDING: u16 = 1 << 13;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -1487,13 +1696,27 @@ mod fusion {
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
 /// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
 unsafe fn compile(body: Sexp, function: Sexp) -> R<Sexp> {
+    compile_with_locals(body, function, local_symbols(body, function.car()))
+}
+
+/// [`compile`] with the symbols the frame can bind given, or `None` for code that reads and
+/// writes an environment's bindings, such as a loop in the global environment.
+unsafe fn compile_with_locals(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+) -> R<Sexp> {
     let threshold = crate::heap().swap_report_threshold(usize::MAX);
-    let compiled = compile_unreported(body, function);
+    let compiled = compile_unreported(body, function, locals);
     crate::heap().swap_report_threshold(threshold);
     compiled
 }
 
-unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
+unsafe fn compile_unreported(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+) -> R<Sexp> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -1501,7 +1724,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
         formal = formal.cdr();
     }
     let mut compiler = Compiler {
-        local_symbols: local_symbols(body, function.car()),
+        local_symbols: locals,
         formals: formal_symbols,
         code: Vec::new(),
         constants: Vec::new(),
@@ -1755,7 +1978,10 @@ const SWITCH_NAME_ARMS: usize = 1;
 /// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
 /// alternative, which is an error).
 const SWITCH_POSITION_ARMS: usize = 2;
-/// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
+/// Where it keeps, for arms 0, 1, 2, ..., the constant pool index of the integer scalar
+/// [`Op::SwitchArm`] returns for that arm. The arm tests compare those scalars by identity, and a
+/// code image keeps each pool entry as one object but does not keep an object shared between two
+/// constants, so the table names the scalars by pool index rather than holding them.
 const SWITCH_NUMBERS: usize = 3;
 /// Where it keeps the `switch` call, which its errors name.
 const SWITCH_CALL: usize = 4;
@@ -1801,27 +2027,26 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
     }
     let name_arms = values::integer_vector(&name_arms)?;
     let position_arms = values::integer_vector(&position_arms)?;
-    let mut numbers = Vec::with_capacity(arms.len() + 1);
-    for number in 0..=arms.len() {
-        numbers.push(values::scalar_integer(number as i32)?);
-    }
-    let numbers = values::list_vector(&numbers)?;
+    let numbers = values::integer_vector(&vec![0; arms.len() + 1])?;
     let table = values::list_vector(&[name_vector, name_arms, position_arms, numbers, call])?;
     Ok((table, arms))
 }
 
 /// The arm number a `switch` runs for `selector`, from the table [`switch_table`] built, with
 /// the special's errors.
-unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
-    let numbers = table.element(SWITCH_NUMBERS);
+unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(text) => {
             let names = table.element(SWITCH_NAMES);
-            let matched = (0..length(names)).find(|&index| {
-                let name = names.element(index);
-                name == text || name.bytes() == text.bytes()
-            });
+            let count = length(names);
+            // Names and selectors are interned, so identity finds the name in the common case,
+            // and only a missing selector or one in another encoding needs its text compared.
+            let matched = (0..count)
+                .find(|&index| names.element(index) == text)
+                .or_else(|| {
+                    (0..count).find(|&index| eval::switch_name_matches(names.element(index), text))
+                });
             match matched {
                 Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
                 None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
@@ -1838,7 +2063,7 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
             _ => 0,
         },
     };
-    Ok(numbers.element(arm as usize))
+    Ok(arm as usize)
 }
 
 /// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
@@ -2324,7 +2549,6 @@ impl Compiler {
         values::ints_mut(profile)[profile::NEXT] = i32::MIN;
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
-        heap.set_element(constants, BASELINE, nil());
         heap.set_element(constants, SUMMARY, compiler.summary);
         heap.set_element(constants, SLOTS, compiler.slot_table()?);
         let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
@@ -4162,13 +4386,24 @@ impl Compiler {
             "switch" => {
                 self.expression(args[0].1, dst)?;
                 let (table, arms) = switch_table(call, &args[1..])?;
-                let numbers = table.element(SWITCH_NUMBERS);
+                let mut numbers = Vec::with_capacity(arms.len() + 1);
+                for arm in 0..=arms.len() {
+                    numbers.push(self.constant(values::scalar_integer(arm as i32)?));
+                }
+                for (slot, &number) in table
+                    .element(SWITCH_NUMBERS)
+                    .slice_mut::<i32>()
+                    .iter_mut()
+                    .zip(&numbers)
+                {
+                    *slot = number as i32;
+                }
                 let table = self.constant(table);
                 self.emit(Op::SwitchArm, &[dst, dst, table]);
                 let mut done = Vec::with_capacity(arms.len());
                 for (index, body) in arms.iter().enumerate() {
-                    let number = self.constant(numbers.element(index + 1));
-                    let skip = self.emit_patchable(Op::MatchLiteral, &[dst, number, 0]);
+                    let number = numbers[index + 1];
+                    let skip = self.emit_patchable(Op::BranchUnlessSame, &[dst, number, 0]);
                     self.expression(*body, dst)?;
                     done.push(self.emit_patchable(Op::Jump, &[0]));
                     self.patch(skip);
@@ -4468,7 +4703,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let base = self.next_register;
         for _ in args {
             self.allocate();
@@ -4731,7 +4966,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let object = self.allocate();
         self.expression(subject, object)?;
         self.emit(
@@ -4890,7 +5125,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Replace => 8,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
-        Op::BranchUnlessPrimitive => 3,
+        Op::BranchUnlessSame => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
@@ -5118,7 +5353,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
-        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::BranchUnlessSame => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
         Op::Internal => &[Register, Call, Constant, Base, Count],
@@ -5290,7 +5525,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (0..length(names))
                             .all(|name| names.element(name).kind() == SexpType::Symbol)
                 }
-                Switch => valid_switch_table(constant(value)?),
+                Switch => valid_switch_table(constant(value)?, &constant),
                 Cache => value < caches,
                 Target => is_start(value),
                 Loop => value < loops,
@@ -5395,7 +5630,10 @@ unsafe fn valid_fusion_program(
 }
 
 /// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
-unsafe fn valid_switch_table(table: Sexp) -> bool {
+unsafe fn valid_switch_table<'a>(
+    table: Sexp,
+    constant: impl Fn(usize) -> Result<Sexp, &'a str>,
+) -> bool {
     if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
         return false;
     }
@@ -5408,7 +5646,7 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
         || length(name_arms) != length(names)
         || position_arms.kind() != SexpType::Integer
         || length(position_arms) == 0
-        || numbers.kind() != SexpType::List
+        || numbers.kind() != SexpType::Integer
         || table.element(SWITCH_CALL).kind() != SexpType::Language
     {
         return false;
@@ -5416,7 +5654,12 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms)
+    values::ints(numbers).iter().all(|&index| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| constant(index).ok())
+            .is_some_and(|number| number.kind() == SexpType::Integer && length(number) == 1)
+    }) && values::ints(name_arms)
         .iter()
         .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
@@ -5707,39 +5950,28 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     } else {
         None
     };
-    if entered.is_none()
-        && entries == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && constants.element(BASELINE) == nil()
-    {
-        (tier.baseline)(machine);
-    }
     // The tier may have compiled, refused, or moved the counters, so the schedule is derived
     // from what they hold now.
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES];
     let state = profile[profile::TIER_STATE];
-    profile[profile::NEXT] = if constants.element(TIER1) != nil()
-        || (state >= 0 && entries >= tier.entry_threshold)
-    {
-        i32::MIN
-    } else {
-        let start = recording_start(tier.entry_threshold);
-        let baseline = (tier.baseline_threshold != NEVER && constants.element(BASELINE) == nil())
-            .then_some(tier.baseline_threshold);
-        [
-            (state >= 0).then_some(1),
-            (2 < start).then_some(2),
-            (state >= 0).then_some(start),
-            (state >= 0).then_some(tier.entry_threshold),
-            baseline,
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|&count| count > entries)
-        .min()
-        .unwrap_or(NEVER)
-    };
+    profile[profile::NEXT] =
+        if constants.element(TIER1) != nil() || (state >= 0 && entries >= tier.entry_threshold) {
+            i32::MIN
+        } else {
+            let start = recording_start(tier.entry_threshold);
+            [
+                (state >= 0).then_some(1),
+                (2 < start).then_some(2),
+                (state >= 0).then_some(start),
+                (state >= 0).then_some(tier.entry_threshold),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|&count| count > entries)
+            .min()
+            .unwrap_or(NEVER)
+        };
     entered
 }
 
@@ -5900,6 +6132,13 @@ pub unsafe fn lookup_hints(code: Sexp) -> *mut u32 {
 /// Records `value`'s kind as type feedback for the instruction at `pc`.
 pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
     record_feedback(code.cdr(), pc, value);
+}
+
+/// Marks the `GetVar` at `pc` as one that called an active binding.
+pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
+    if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
+        *bits |= i32::from(feedback::ACTIVE_BINDING);
+    }
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
@@ -6113,10 +6352,6 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     };
     if !SINGLE {
         release(&state);
-        if let Some(baseline) = baseline_code(state.constants) {
-            run_baseline(&mut state, baseline, pc);
-            return (state.exit, STOP);
-        }
     }
     (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
     (state.exit, state.stepped)
@@ -6203,102 +6438,12 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
     }
 }
 
-/// The machine code the baseline tier compiled for these constants' code, if any.
-#[inline(always)]
-unsafe fn baseline_code(constants: Sexp) -> Option<BaselineCode> {
-    let holder = pool_entry(constants, BASELINE);
-    if holder.kind() != SexpType::ExternalPtr {
-        return None;
-    }
-    let address = holder.external_address();
-    // SAFETY: the baseline tier stores only addresses of functions with this signature.
-    (!address.is_null())
-        .then(|| std::mem::transmute::<*mut std::ffi::c_void, BaselineCode>(address))
-}
-
-/// Runs baseline machine code for the activation from `pc` until the activation returns. A
-/// panic inside an instruction is parked while the machine code returns (unwinding through it
-/// is undefined) and resumed here.
-#[inline(never)]
-unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, pc: usize) {
-    baseline((state as *mut Activation<'_, '_>).cast(), pc);
-    if let Some(payload) = PARKED_PANIC.take() {
-        std::panic::resume_unwind(payload);
-    }
-}
-
-thread_local! {
-    /// A panic raised inside a baseline step, carried past the machine code that called it.
-    static PARKED_PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// The baseline tier's machine code for one body: called with the activation and the pc to
-/// start at, it runs instructions until one answers [`STOP`], leaving the result where the
-/// interpreter's handler chain leaves it.
-pub type BaselineCode = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
-
-/// One instruction run for baseline machine code: it takes the activation and the
-/// instruction's pc and answers where to continue, encoded by [`baseline_answer`].
-pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> usize;
-
-/// What a [`BaselineStep`] answers when the activation is done.
-pub const BASELINE_STOP: usize = STOP;
-
-/// Encodes the pc a step continues at for baseline code: 0 for the next instruction, the pc
-/// plus one for any other, and [`STOP`] as itself. Almost every instruction falls through, and
-/// a zero answer lets the code after each call be one test and one branch instead of a compare
-/// against the next pc, which keeps the per-instruction code short.
-#[inline(always)]
-pub fn baseline_answer(pc: usize, next: usize) -> usize {
-    if pc == next {
-        0
-    } else if pc == STOP {
-        STOP
-    } else {
-        pc + 1
-    }
-}
-
-/// Where baseline machine code finds what it reads directly instead of calling a step.
-pub mod baseline_layout {
-    use super::Activation;
-    /// The activation's register window pointer.
-    pub const REGISTERS: usize = std::mem::offset_of!(Activation<'static, 'static>, registers);
-    /// The activation's `Interp` pointer.
-    pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
-    /// The pointer to the activation's header register, which holds its environment.
-    pub const HEADER: usize = std::mem::offset_of!(Activation<'static, 'static>, header);
-    /// The pointer to the code's slot map, one `i32` frame slot (or -1) per lookup slot; null
-    /// when the code has no slot table.
-    pub const SLOT_MAP: usize = std::mem::offset_of!(Activation<'static, 'static>, slot_map);
-    /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
-    pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
-        + std::mem::offset_of!(super::LookupCache, hints);
-    /// The feedback pointer, null while nothing records type feedback.
-    pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
+/// Where tier-1 code finds the interpreter state it writes directly.
+pub mod interp_layout {
     /// The visibility flag inside `Interp`.
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.
     pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
-}
-
-/// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
-#[inline(always)]
-unsafe fn guarded(
-    state: *mut std::ffi::c_void,
-    at: usize,
-    step: impl FnOnce(&mut Activation<'_, '_>, usize) -> usize,
-) -> usize {
-    let state = &mut *state.cast::<Activation<'_, '_>>();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(&mut *state, at))) {
-        Ok(pc) => pc,
-        Err(payload) => {
-            PARKED_PANIC.set(Some(payload));
-            state.exit = Ok(nil());
-            STOP
-        }
-    }
 }
 
 /// The handler table position of the instruction at `pc`.
@@ -6331,30 +6476,7 @@ const STOP: usize = usize::MAX;
 /// activation's result in [`Activation::exit`], so that few values stay live across the calls
 /// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
-    ($($name:ident, $step:ident: $op:ident, $roots:literal, $body:ident;)*) => {
-        $(
-            unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
-                guarded(state, at, |state, at| {
-                    let instruction =
-                        Instruction { code: state.code, at, registers: state.registers };
-                    let flow = $body(state, instruction);
-                    let next = at + 1 + operand_count(Op::$op);
-                    let pc = advance::<false>(state, at, next, flow);
-                    if $roots && pc != STOP {
-                        release(state);
-                    }
-                    baseline_answer(pc, next)
-                })
-            }
-        )*
-
-        /// The step each op runs as in baseline machine code, indexed like [`OPS`].
-        pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
-            let mut table: [BaselineStep; OPS.len()] = [step_jump; OPS.len()];
-            $(table[Op::$op as usize] = $step;)*
-            table
-        };
-
+    ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
         // Never inlined: a fast handler tail-calls these on its slow path, and inlining one
         // would bring its frame setup back onto the fast path.
         $(
@@ -6438,57 +6560,57 @@ static RUN_HANDLERS: [Handler; HANDLER_COUNT] =
 static STEP_HANDLERS: [Handler; HANDLER_COUNT] = handler_table::<true>();
 
 handlers! {
-    run_constant, step_constant: Constant, false, op_constant;
-    run_get_var, step_get_var: GetVar, true, op_get_var;
-    run_set_var, step_set_var: SetVar, true, op_set_var;
-    run_get_fun, step_get_fun: GetFun, true, op_get_fun;
-    run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
-    run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
-    run_call_builtin_rebinding, step_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
-    run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
-    run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
-    run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
-    run_field, step_field: Field, true, op_field;
-    run_item, step_item: Item, true, op_item;
-    run_match_shape, step_match_shape: MatchShape, false, op_match_shape;
-    run_match_tag, step_match_tag: MatchTag, false, op_match_tag;
-    run_match_literal, step_match_literal: MatchLiteral, true, op_match_literal;
-    run_slot, step_slot: Slot, true, op_slot;
-    run_match_fail, step_match_fail: MatchFail, true, op_match_fail;
-    run_construct, step_construct: Construct, true, op_construct;
-    run_move, step_move: Move, false, op_move;
-    run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
-    run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
-    run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
-    run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
-    run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
-    run_ast, step_ast: Ast, true, op_ast;
-    run_guard, step_guard: Guard, true, op_guard;
-    run_resume, step_resume: Resume, false, op_resume;
-    run_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless;
-    run_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic;
-    run_return, step_return: Return, false, op_return;
-    run_for_init, step_for_init: ForInit, true, op_for_init;
-    run_for_step, step_for_step: ForStep, true, op_for_step;
-    run_for_end, step_for_end: ForEnd, false, op_for_end;
-    run_invisible, step_invisible: Invisible, false, op_invisible;
-    run_visible, step_visible: Visible, false, op_visible;
-    run_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref;
-    run_end_statement, step_end_statement: EndStatement, false, op_end_statement;
-    run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
-    run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
-    run_closure, step_closure: Closure, true, op_closure;
-    run_prologue, step_prologue: Prologue, true, op_prologue;
-    run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
-    run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
-    run_replace, step_replace: Replace, true, op_replace;
-    run_missing, step_missing: Missing, true, op_missing;
-    run_namespace, step_namespace: Namespace, true, op_namespace;
-    run_fused, step_fused: Fused, true, op_fused;
-    run_unfused, step_unfused: Unfused, false, op_unfused;
-    run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
-    run_internal, step_internal: Internal, true, op_internal;
+    run_constant: Constant, false, op_constant;
+    run_get_var: GetVar, true, op_get_var;
+    run_set_var: SetVar, true, op_set_var;
+    run_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
+    run_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field: Field, true, op_field;
+    run_item: Item, true, op_item;
+    run_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot: Slot, true, op_slot;
+    run_match_fail: MatchFail, true, op_match_fail;
+    run_construct: Construct, true, op_construct;
+    run_move: Move, false, op_move;
+    run_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_same: BranchUnlessSame, false, op_branch_unless_same;
+    run_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast: Ast, true, op_ast;
+    run_guard: Guard, true, op_guard;
+    run_resume: Resume, false, op_resume;
+    run_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return: Return, false, op_return;
+    run_for_init: ForInit, true, op_for_init;
+    run_for_step: ForStep, true, op_for_step;
+    run_for_end: ForEnd, false, op_for_end;
+    run_invisible: Invisible, false, op_invisible;
+    run_visible: Visible, false, op_visible;
+    run_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right: LogicRight, true, op_logic_right;
+    run_closure: Closure, true, op_closure;
+    run_prologue: Prologue, true, op_prologue;
+    run_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace: Replace, true, op_replace;
+    run_missing: Missing, true, op_missing;
+    run_namespace: Namespace, true, op_namespace;
+    run_fused: Fused, true, op_fused;
+    run_unfused: Unfused, false, op_unfused;
+    run_super_assign: SuperAssign, true, op_super_assign;
+    run_internal: Internal, true, op_internal;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -6524,46 +6646,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         return;
     }
     release(state);
-    // A body whose baseline code appeared while this activation looped in tier 0 moves over
-    // at the back edge, so its loop does not finish in the slower tier.
-    if target < at
-        && let Some(baseline) = baseline_code(state.constants)
-    {
-        run_baseline(state, baseline, pc);
-        return;
-    }
     become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
-}
-
-/// `Jump` for baseline code, which jumps forward by itself and calls this only for a backward
-/// jump: it polls for an interrupt and counts the back edge for the optimizing tier.
-unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize {
-    guarded(state, at, |state, at| {
-        let target = *state.code.add(at + 1) as usize;
-        let mut pc = target;
-        if target < at {
-            if let Err(unwind) = crate::unwind::poll_interrupt() {
-                pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = &(*state.interp).bytecode.tier
-                && back_edge_due(state, tier)
-            {
-                match back_edge(state, tier, pc) {
-                    BackEdge::Continue(resume) => pc = resume,
-                    BackEdge::Finished(result) => {
-                        state.exit = result;
-                        return STOP;
-                    }
-                    BackEdge::Unwound { pc: resume, unwind } => {
-                        pc = failed::<false>(state, resume, unwind);
-                    }
-                }
-            }
-        }
-        if pc != STOP {
-            release(state);
-        }
-        baseline_answer(pc, at + 1 + operand_count(Op::Jump))
-    })
 }
 
 // Fast paths and specialized forms.
@@ -6614,7 +6697,7 @@ fast_paths! {
     fast_jump: Jump, jump_fast;
     fast_constant: Constant, constant_fast;
     fast_end_statement: EndStatement, end_statement_fast;
-    fast_branch_unless_primitive: BranchUnlessPrimitive, branch_unless_primitive_fast;
+    fast_branch_unless_same: BranchUnlessSame, branch_unless_same_fast;
     fast_branch_if_object: BranchIfObject, branch_if_object_fast;
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
@@ -6841,14 +6924,14 @@ unsafe fn end_statement_fast(state: &mut Activation<'_, '_>, at: usize) -> Optio
 }
 
 #[inline(always)]
-unsafe fn branch_unless_primitive_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn branch_unless_same_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
     if *state.registers.add(*code.add(at + 1) as usize)
         != pool_constant(state, *code.add(at + 2) as usize)
     {
         return Some(*code.add(at + 3) as usize);
     }
-    Some(at + 1 + operand_count(Op::BranchUnlessPrimitive))
+    Some(at + 1 + operand_count(Op::BranchUnlessSame))
 }
 
 #[inline(always)]
@@ -9494,8 +9577,10 @@ unsafe fn op_move(_state: &mut Activation<'_, '_>, instruction: Instruction) -> 
 
 #[inline(always)]
 unsafe fn op_switch_arm(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let value = switch_arm(instruction.input(1), state.constant(instruction, 2))?;
-    instruction.output(0, value);
+    let table = state.constant(instruction, 2);
+    let arm = switch_arm(instruction.input(1), table)?;
+    let number = values::ints(table.element(SWITCH_NUMBERS))[arm] as usize;
+    instruction.output(0, pool_constant(state, number));
     Ok(Flow::Next)
 }
 
@@ -9528,7 +9613,7 @@ unsafe fn op_match_condition(state: &mut Activation<'_, '_>, instruction: Instru
 }
 
 #[inline(always)]
-unsafe fn op_branch_unless_primitive(
+unsafe fn op_branch_unless_same(
     state: &mut Activation<'_, '_>,
     instruction: Instruction,
 ) -> R<Flow> {
@@ -10588,16 +10673,14 @@ enum BackEdge {
 }
 
 /// Counts a backward jump and answers whether it reaches a count [`back_edge`] acts on. Every
-/// backward jump of every loop pays this, so it is one increment and three comparisons, inlined
+/// backward jump of every loop pays this, so it is one increment and two comparisons, inlined
 /// into the jump; the rest waits in [`back_edge`] for the counts that need it.
 #[inline(always)]
 unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
     let profile = values::ints_mut(state.constants.element(PROFILE));
     let count = profile[profile::BACK_EDGES].saturating_add(1);
     profile[profile::BACK_EDGES] = count;
-    count >= tier.back_edge_threshold
-        || count == tier.back_edge_threshold / 2
-        || count == tier.baseline_threshold
+    count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2
 }
 
 #[inline(never)]
@@ -10605,19 +10688,16 @@ unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+    if profile[profile::TIER_STATE] == profile::TIER_OFF {
+        profile[profile::BACK_EDGES] = 0;
+        return BackEdge::Continue(pc);
+    }
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
         && machine.code.cdr().element(TIER1) == nil()
     {
         profile[profile::RECORDING] = 1;
         state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
     }
-    if profile[profile::BACK_EDGES] == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && machine.code.cdr().element(BASELINE) == nil()
-    {
-        (tier.baseline)(machine);
-    }
-    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }

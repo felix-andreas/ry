@@ -23,6 +23,7 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
+        native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
         stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
@@ -51,7 +52,11 @@ use {
             atomic::{AtomicUsize, Ordering},
         },
     },
-    syntax::{NumberType, TextRange, TextSize, native_values::accepts_native},
+    syntax::{
+        NumberType, TextRange, TextSize,
+        annotation::{Paired, pair_formals},
+        native_values::accepts_native,
+    },
     thin_vec::ThinVec,
 };
 
@@ -425,6 +430,9 @@ pub enum OperandExpectation {
 pub struct ItemCheck<'db> {
     pub errors: ThinVec<TypeError<'db>>,
     pub strict_origins: ThinVec<StrictOrigin>,
+    /// What keeps the item's native functions off native code, in source order. Recorded only
+    /// where strict origins are, because the finding is a strict-mode one.
+    pub native_blockers: ThinVec<NativeBlocker>,
     pub scheme: Option<TypeScheme<'db>>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
@@ -1069,6 +1077,101 @@ fn check_item_in<'db>(
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
     });
+    let native_blockers = if context.record_strict_origins {
+        // The declaration as written decides whether a function is judged, so a formal the
+        // author left untyped keeps the function out.
+        let mut signatures: FxHashMap<ExprId, FunctionType<'db>> = FxHashMap::default();
+        let mut aliased_signatures: FxHashSet<ExprId> = FxHashSet::default();
+        let declared_function = |annotation: &Annotation<'db>| {
+            if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
+                return None;
+            }
+            let declared = annotation.declared.as_ref()?;
+            // An alias of a function type declares the signature too, without writing it where
+            // the runtime reads it.
+            let mut body = declared.body;
+            let mut through_alias = false;
+            for _ in 0..8 {
+                let TyKind::Named(name, arguments) = body.kind(db) else {
+                    break;
+                };
+                let alias = context
+                    .table
+                    .definitions
+                    .and_then(|definitions| definitions.get(db, *name))
+                    .filter(|definition| definition.alias && arguments.is_empty());
+                let Some(alias) = alias else {
+                    break;
+                };
+                body = alias.body;
+                through_alias = true;
+            }
+            match body.kind(db) {
+                TyKind::Function(function) if !has_r_bound(declared) => Some((
+                    function.clone(),
+                    through_alias && !annotation.written_signature,
+                )),
+                _ => None,
+            }
+        };
+        for id in module.expression_ids() {
+            match *module.kind(id) {
+                ExpressionKind::Function { .. } => {
+                    if let Some((function, aliased)) = context
+                        .expression_annotations
+                        .get(&id)
+                        .and_then(declared_function)
+                    {
+                        signatures.insert(id, function);
+                        if aliased {
+                            aliased_signatures.insert(id);
+                        }
+                    }
+                }
+                ExpressionKind::Assign { value, .. }
+                    if matches!(module.kind(value), ExpressionKind::Function { .. })
+                        && !context.expression_annotations.contains_key(&value) =>
+                {
+                    let item_annotation = if Some(id) == module.root {
+                        annotation
+                    } else {
+                        None
+                    };
+                    if let Some((function, aliased)) = context
+                        .expression_annotations
+                        .get(&id)
+                        .or(item_annotation)
+                        .and_then(declared_function)
+                    {
+                        signatures.insert(value, function);
+                        if aliased {
+                            aliased_signatures.insert(value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if signatures.is_empty() {
+            ThinVec::new()
+        } else {
+            native_blockers(Judged {
+                db,
+                module,
+                naming,
+                definitions: context.table.definitions,
+                globals: context.globals,
+                types: &|id| {
+                    let ty = (*recorded.get(id.index())?)?;
+                    Some(context.table.resolve(db, ty))
+                },
+                signatures: &signatures,
+                aliased: &aliased_signatures,
+            })
+        }
+    } else {
+        ThinVec::new()
+    };
     let editor_facts = db.editor_facts();
     let mut editor = None;
     if editor_facts {
@@ -1173,6 +1276,7 @@ fn check_item_in<'db>(
         typed_empties,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
+        native_blockers,
         scheme,
         editor,
         masked_reads: context.masked_reads.into_iter().collect(),
@@ -7877,6 +7981,20 @@ impl<'db> Checker<'db, '_> {
         use BinaryOperator::*;
         let left = self.structural(left);
         let right = self.structural(right);
+        // A DataFrame expression beside another one, or beside a ry value that shares R's
+        // representation, builds a bigger expression, as `Ops.Expr` does at run time. `I64` is
+        // left to the ordinary rule, which rejects it: an R operator cannot read one.
+        for (expression, other) in [(left, right), (right, left)] {
+            if is_expr_type(self.db, expression)
+                && (is_expr_type(self.db, other)
+                    || matches!(
+                        other.kind(self.db),
+                        TyKind::Native(NativeScalar::F64 | NativeScalar::Bool | NativeScalar::Str)
+                    ))
+            {
+                return Some(expression);
+            }
+        }
         let (known, known_side, other, other_ty) =
             match (self.ry_number_class(left), self.ry_number_class(right)) {
                 (Some(class), _) => (class, left, rhs, right),
@@ -8638,7 +8756,8 @@ impl<'db> Checker<'db, '_> {
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
         ];
-        let class_of = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+        // Resolved fully, so an alias of a class dispatches as the class it names.
+        let class_of = |ty: Ty<'db>| match self.table.resolve(self.db, ty).kind(self.db) {
             TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
             _ => None,
         };
@@ -9483,6 +9602,18 @@ impl<'db> Checker<'db, '_> {
         let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
         // Pairs formals with declared types as R's matcher pairs arguments; any declared
         // entry the walk never consumes is a disagreement.
+        let declared_names: Vec<&str> = declared
+            .named
+            .iter()
+            .map(|field| field.name.text(self.db))
+            .collect();
+        let paired = pair_formals(
+            module[parameters]
+                .iter()
+                .map(|parameter| parameter.name.as_str()),
+            &declared_names,
+            declared.positional.len(),
+        );
         let mut positional_index = 0usize;
         let mut used_named: Vec<bool> = vec![false; declared.named.len()];
         let mut formal_types: Vec<(Ty<'db>, bool)> = Vec::with_capacity(parameters.len());
@@ -9501,8 +9632,8 @@ impl<'db> Checker<'db, '_> {
             reduces: None,
             from_calls: false,
         };
-        for parameter in &module[parameters] {
-            if parameter.name == "..." {
+        for (parameter, paired) in module[parameters].iter().zip(paired) {
+            if paired == Paired::Rest {
                 signature.variadic = Some(RestParameter {
                     element: declared
                         .variadic
@@ -9516,23 +9647,23 @@ impl<'db> Checker<'db, '_> {
             // A disagreeing declaration is reported below, and the definition wins: a declared
             // `[name]` over a forced formal stays required, a declared required parameter over
             // a defaulted or `missing()`-tested formal stays optional.
-            let (declared_ty, optional) = if let Some(index) = declared
-                .named
-                .iter()
-                .position(|field| field.name.text(self.db) == parameter.name)
-            {
-                used_named[index] = true;
-                let field = &declared.named[index];
-                let optional =
-                    is_declared_optional(parameter) || field.optional && is_optional(parameter);
-                (Some(field.ty), optional)
-            } else if positional_index < declared.positional.len() {
-                let ty = declared.positional[positional_index];
-                positional_index += 1;
-                (Some(ty), is_declared_optional(parameter))
-            } else {
+            let (declared_ty, optional) = match paired {
+                Paired::Named(index) => {
+                    used_named[index] = true;
+                    let field = &declared.named[index];
+                    let optional =
+                        is_declared_optional(parameter) || field.optional && is_optional(parameter);
+                    (Some(field.ty), optional)
+                }
+                Paired::Positional(index) => {
+                    positional_index = index + 1;
+                    (
+                        Some(declared.positional[index]),
+                        is_declared_optional(parameter),
+                    )
+                }
                 // Partial annotation: an unannotated formal infers from its uses as if unannotated.
-                (None, is_optional(parameter))
+                Paired::Rest | Paired::Undeclared => (None, is_optional(parameter)),
             };
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
@@ -11972,8 +12103,15 @@ impl<'db> Checker<'db, '_> {
             return operand.ty;
         }
         match self.recorded.get(&value) {
-            Some(&ty) if !is_expr_type(self.db, ty) => self.table.resolve(self.db, ty),
-            _ => operand.ty,
+            Some(&ty) => {
+                let ty = self.table.resolve(self.db, ty);
+                if is_expr_type(self.db, ty) {
+                    operand.ty
+                } else {
+                    ty
+                }
+            }
+            None => operand.ty,
         }
     }
 
@@ -11988,7 +12126,8 @@ impl<'db> Checker<'db, '_> {
         if let Some(column) = self.frame_expression(value, columns, frame) {
             return Some(column);
         }
-        let ty = *self.recorded.get(&value)?;
+        // Resolved first, so an alias of `Expr` reads as the expression it names.
+        let ty = self.table.resolve(self.db, *self.recorded.get(&value)?);
         if is_expr_type(self.db, ty) {
             return None;
         }

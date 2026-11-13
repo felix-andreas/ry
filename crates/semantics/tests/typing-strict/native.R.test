@@ -1,0 +1,1385 @@
+#==== native
+#---- r_call_whose_value_is_used
+#~~~~ script.R
+# blocked: label_width
+# The value of an R call reaches ry code without a conversion.
+label_width <- function(label: Str) -> F64 {
+  width <- nchar(label)
+  Num.to_f64(Num.from_r(width)) * 2
+}
+cat(label_width("native"), "\n")
+#++++
+== script.R
+label_width: fn(label: Str) -> F64
+NULL
+142..154 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+
+#---- r_call_in_the_arguments_of_an_r_call
+#~~~~ script.R
+# blocked: announce
+# An R call in the arguments of another R call.
+announce <- function(amount: F64) -> F64 {
+  cat(format(amount, nsmall = 2), "\n")
+  amount
+}
+cat(announce(1.5), "\n")
+#++++
+== script.R
+announce: fn(amount: F64) -> F64
+NULL
+117..143 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+
+#---- global_that_holds_an_r_value
+#~~~~ script.R
+# blocked: discounted
+# A global that holds an R value, read inside a native function.
+rates <- c(0.01, 0.02, 0.03)
+discounted <- function(amount: F64) -> F64 {
+  amount * (1 - Num.from_r(rates[[2]]))
+}
+cat(discounted(100), "\n")
+#++++
+== script.R
+rates: double[]
+discounted: fn(amount: F64) -> F64
+NULL
+188..193 error[native] `rates` comes from outside the function and holds an R value, and a native function holds only ry values. Convert it once where it is made, as in `List.from_r(...)`, and pass the ry value in as a parameter
+
+#---- boundary_function_called_for_its_value
+#~~~~ script.R
+# blocked: total_length
+# boundary: text_length
+# A project function with an R type in its signature counts as an R function.
+text_length <- function(text: character) -> F64 Num.to_f64(Num.from_r(nchar(text)))
+total_length <- function(first: Str, second: Str) -> F64 text_length(first) + text_length(second)
+cat(total_length("ab", "cde"), "\n")
+#++++
+== script.R
+text_length: fn(text: character) -> F64
+total_length: fn(first: Str, second: Str) -> F64
+NULL
+267..285 error[native] `text_length` has an R type in its signature, so here it counts as an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(text_length(first))`
+288..307 error[native] `text_length` has an R type in its signature, so here it counts as an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(text_length(second))`
+
+#---- unannotated_function_called_for_its_value
+#~~~~ script.R
+# blocked: doubled
+# A project function without annotations counts as an R function.
+answer <- function() 42
+doubled <- function(x: F64) -> F64 {
+  base <- answer()
+  x * Num.from_r(base)
+}
+cat(doubled(2), "\n")
+#++++
+== script.R
+answer: fn() -> double
+doubled: fn(x: F64) -> F64
+NULL
+156..164 error[native] `answer` has no type annotations, so here it counts as an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(answer())`
+
+#---- column_read_outside_a_conversion
+#~~~~ script.R
+# blocked: revenue
+# A column read gives an R vector.
+revenue <- function(sales: DataFrame{units: integer[], price: double[]}) -> F64 {
+  price <- sales$price
+  List.sum(List.from_r(price))
+}
+sales <- DataFrame(units = c(1L, 2L), price = c(2.5, 4))
+cat(revenue(sales), "\n")
+#++++
+== script.R
+revenue: fn(sales: DataFrame{units: integer[], price: double[]}) -> F64
+sales: DataFrame{units: integer[], price: double[]}
+NULL
+147..158 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(sales$price)`
+
+#---- to_r_outside_an_r_call
+#~~~~ script.R
+# blocked: shown
+# `List.to_r` outside the arguments of an R call.
+shown <- function(values: List<F64>) -> F64 {
+  raw <- List.to_r(values)
+  print(raw)
+  List.sum(values)
+}
+main <- function(scale: F64) -> F64 shown([scale, 2, 3])
+cat(main(1), "\n")
+#++++
+== script.R
+shown: fn(values: List<F64>) -> F64
+main: fn(scale: F64) -> F64
+NULL
+122..139 error[native] `List.to_r` gives an R value, which a native function holds only as the argument of an R call. Write it directly inside the call, as in `cat(List.to_r(x))`
+
+#---- function_with_dots
+#~~~~ script.R
+# blocked: first_of
+first_of <- function(first: F64, ...: F64) -> F64 first * 2
+main <- function(x: F64) -> F64 first_of(x, 3)
+cat(main(2), "\n")
+#++++
+== script.R
+first_of: fn(first: F64, ...: F64) -> F64
+main: fn(x: F64) -> F64
+NULL
+53..56 warning[interpreted] this function runs in the interpreter, because a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
+
+#---- function_taken_as_a_parameter
+#~~~~ script.R
+# blocked: apply_twice, main
+apply_twice <- function(step: fn(F64) -> F64, x: F64) -> F64 step(step(x))
+bump <- function(x: F64) -> F64 x + 1
+main <- function(x: F64) -> F64 apply_twice(bump, x)
+cat(main(1), "\n")
+#++++
+== script.R
+apply_twice: fn(step: fn(F64) -> F64, x: F64) -> F64
+bump: fn(x: F64) -> F64
+main: fn(x: F64) -> F64
+NULL
+53..57 warning[interpreted] this function runs in the interpreter, because `step` takes a function, and a function passed as a value is not compiled natively yet. Define the function inside this one, or give a parameter an R type so this function is a boundary function that the interpreter runs
+186..190 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+
+#---- invisible_result
+#~~~~ script.R
+# blocked: remember, show_all
+remember <- function(x: F64) -> F64 {
+  doubled <- x * 2
+}
+show_all <- function(n: I64) -> NULL {
+  for (i in List.range(1, n)) {
+    cat("row", Num.to_r(i), "\n")
+    NULL
+  }
+}
+show_all(2)
+cat(remember(2), "\n")
+#++++
+== script.R
+remember: fn(x: F64) -> F64
+show_all: fn(n: I64) -> NULL
+NULL
+NULL
+70..86 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+130..206 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+
+#---- super_assignment
+#~~~~ script.R
+# blocked: count_up
+count_up <- function(n: I64) -> I64 {
+  total: I64 <- 0
+  bump <- function(k: I64) -> I64 {
+    total <<- total + k
+    k
+  }
+  for (i in List.range(1, n)) bump(i)
+  total
+}
+cat(Num.to_r(count_up(4)), "\n")
+#++++
+== script.R
+count_up: fn(n: I64) -> I64
+NULL
+116..135 warning[interpreted] this function runs in the interpreter, because `<<-` is not compiled natively yet: a native function changes only its own variables. Return the new value and assign it in the caller
+
+#---- assignment_to_a_record_field
+#~~~~ script.R
+# blocked: renamed
+alias User = Record{name: Str, age: I64}
+renamed <- function(user: User, name: Str) -> Str {
+  user$name <- name
+  user$name
+}
+main <- function(name: Str) -> Str renamed((name = "ada", age = 36), name)
+cat(main("grace"), "\n")
+#++++
+== script.R
+renamed: fn(user: User, name: Str) -> Str
+main: fn(name: Str) -> Str
+NULL
+114..131 warning[interpreted] this function runs in the interpreter, because an assignment of this form is not compiled natively yet. Native code assigns to a variable, or to one item of a list this function made, as in `xs[[i]] <- value`. Build a new record with `(..record, field = value)`
+
+#---- local_function_defined_in_a_branch
+#~~~~ script.R
+# blocked: pick
+pick <- function(x: F64, up: Bool) -> F64 {
+  if (up) {
+    step <- function(v: F64) -> F64 v + 1
+    return(step(x))
+  }
+  x - 1
+}
+cat(pick(1, TRUE), "\n")
+#++++
+== script.R
+pick: fn(x: F64, up: Bool) -> F64
+NULL
+76..113 warning[interpreted] this function runs in the interpreter, because `step` is a function defined inside a branch or a loop, which is not compiled natively yet. Define it once at the top of the function
+
+#---- return_in_a_local_function
+#~~~~ script.R
+# blocked: clamp_all
+clamp_all <- function(low: F64, high: F64) -> F64 {
+  clamp <- function(v: F64) -> F64 {
+    if (v > 1) return(1)
+    v
+  }
+  List.sum(List.map([low, high], clamp))
+}
+cat(clamp_all(0.5, 3), "\n")
+#++++
+== script.R
+clamp_all: fn(low: F64, high: F64) -> F64
+NULL
+125..134 warning[interpreted] this function runs in the interpreter, because `return` inside a local function is not compiled natively yet: native code runs a local function in place. End the function with the value instead
+
+#---- function_used_as_a_value
+#~~~~ script.R
+# blocked: adder, add_three
+adder <- function(by: F64) -> fn(F64) -> F64 {
+  function(x: F64) -> F64 x + by
+}
+add_three <- function(x: F64) -> F64 {
+  step <- adder(3)
+  step(x)
+}
+cat(add_three(1), "\n")
+#++++
+== script.R
+adder: fn(by: F64) -> fn(F64) -> F64
+add_three: fn(x: F64) -> F64
+NULL
+77..107 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+170..174 warning[interpreted] this function runs in the interpreter, because `step` is a variable that holds a function, and calling one is not compiled natively yet. Define the function with `step <- function(...)` in this function, or call a top-level function
+
+#---- typed_call_with_named_arguments
+#~~~~ script.R
+# blocked: area_of
+area <- function(width: F64, height: F64) -> F64 width * height
+area_of <- function(side: F64) -> F64 area(width = side, height = 2 * side)
+cat(area_of(3), "\n")
+#++++
+== script.R
+area: fn(width: F64, height: F64) -> F64
+area_of: fn(side: F64) -> F64
+NULL
+121..158 warning[interpreted] this function runs in the interpreter, because a call of `area` with named arguments is not compiled natively yet. Pass the arguments by position
+
+#---- typed_call_that_leaves_a_default_out
+#~~~~ script.R
+# blocked: with_default
+scaled <- function(x: F64, factor: F64 = 2) -> F64 x * factor
+with_default <- function(x: F64) -> F64 scaled(x)
+cat(with_default(3), "\n")
+#++++
+== script.R
+scaled: fn(x: F64, [factor]: F64) -> F64
+with_default: fn(x: F64) -> F64
+NULL
+126..135 warning[interpreted] this function runs in the interpreter, because this call of `scaled` does not pass every parameter, which is not compiled natively yet. Pass each argument by position
+
+#---- standard_library_function_without_native_code
+#~~~~ script.R
+# blocked: reversed_first
+reversed_first <- function(first: F64) -> F64 {
+  flipped <- List.reverse([first, 2, 3])
+  flipped[[1]]
+}
+cat(reversed_first(1), "\n")
+#++++
+== script.R
+reversed_first: fn(first: F64) -> F64
+NULL
+87..99 warning[interpreted] this function runs in the interpreter, because `List.reverse` is not compiled natively yet. Write the step with a loop or another standard library function
+
+#---- standard_library_function_passed_by_name
+#~~~~ script.R
+# blocked: as_floats
+as_floats <- function(n: I64) -> F64 List.sum(List.map(List.range(1, n), Num.to_f64))
+cat(as_floats(4), "\n")
+#++++
+== script.R
+as_floats: fn(n: I64) -> F64
+NULL
+94..104 warning[interpreted] this function runs in the interpreter, because a function passed by name is not compiled natively yet unless it is a typed function of the project or a local function. Wrap it in a function literal, as in `function(x: I64) -> F64 Num.to_f64(x)`
+
+#---- dict_of_bool
+#~~~~ script.R
+# blocked: distinct
+distinct <- function(first: Str, second: Str) -> I64 {
+  seen: Dict<Str, Bool> <- Dict.empty()
+  for (name in [first, second, first]) seen <- Dict.insert(seen, name, TRUE)
+  Dict.len(seen)
+}
+cat(Num.to_r(distinct("a", "b")), "\n")
+#++++
+== script.R
+distinct: fn(first: Str, second: Str) -> I64
+NULL
+102..114 warning[interpreted] this function runs in the interpreter, because a `Dict` whose keys or values are not `I64`, `F64` or `Str` is not compiled natively yet. Keep the values in a `List` and store their positions in the dictionary
+
+#---- match_guard
+#~~~~ script.R
+# blocked: grade
+alias Reading = :Value(amount: F64) | :Missing
+grade <- function(reading: Reading) -> Str {
+  match (reading) {
+    :Value(amount = a) if (a > 10) => "high"
+    :Value(amount = _) => "low"
+    :Missing => "none"
+  }
+}
+graded <- function(amount: F64) -> Str grade(:Value(amount = amount))
+cat(graded(12), "\n")
+#++++
+== script.R
+grade: fn(reading: Reading) -> Str
+graded: fn(amount: F64) -> Str
+NULL
+156..162 warning[interpreted] this function runs in the interpreter, because a `match` arm with an `if` guard is not compiled natively yet. Test the condition inside the arm's body
+
+#---- nested_match_pattern
+#~~~~ script.R
+# blocked: describe
+alias Reading = :Value(amount: F64) | :Missing
+alias Slot = :Full(reading: Reading) | :Empty
+describe <- function(slot: Slot) -> Str {
+  match (slot) {
+    :Full(reading = :Value(amount = _)) => "value"
+    :Full(reading = :Missing) => "missing"
+    :Empty => "empty"
+  }
+}
+main <- function(amount: F64) -> Str describe(:Full(reading = :Value(amount = amount)))
+cat(main(2), "\n")
+#++++
+== script.R
+describe: fn(slot: Slot) -> Str
+main: fn(amount: F64) -> Str
+NULL
+176..211 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
+227..252 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
+
+#---- match_on_a_list
+#~~~~ script.R
+# blocked: first_or_zero
+first_or_zero <- function(first: F64) -> F64 {
+  match ([first, 5]) {
+    [] => 0
+    [head, ..] => head
+  }
+}
+cat(first_or_zero(4), "\n")
+#++++
+== script.R
+first_or_zero: fn(first: F64) -> F64
+NULL
+80..92 warning[interpreted] this function runs in the interpreter, because a `match` on a value that is not a tag, a record or a tuple is not compiled natively yet. Compare the value with `if` and `==`
+
+#---- name_set_only_in_a_loop
+#~~~~ script.R
+# blocked: last_seen
+last_seen <- function(n: I64) -> F64 {
+  for (i in List.range(1, n)) last <- Num.to_f64(i)
+  last
+}
+cat(last_seen(3), "\n")
+#++++
+== script.R
+last_seen: fn(n: I64) -> F64
+NULL
+114..118 warning[maybe-undefined] `last` is only assigned on some paths here, so this read can find nothing.
+114..118 warning[interpreted] this function runs in the interpreter, because `last` is first set inside a branch or a loop and read after it, which is not compiled natively yet. Give `last` a value before the branch
+
+#---- variable_that_changes_type
+#~~~~ script.R
+# blocked: widened
+widened <- function(n: I64) -> F64 {
+  value <- n
+  value <- Num.to_f64(value)
+  value
+}
+cat(widened(2), "\n")
+#++++
+== script.R
+widened: fn(n: I64) -> F64
+NULL
+71..97 warning[interpreted] this function runs in the interpreter, because `value` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+
+#---- tag_variable_assigned_again
+#~~~~ script.R
+# blocked: cycled
+alias Light = :Red | :Amber | :Green
+next_light <- function(light: Light) -> Light {
+  match (light) {
+    :Red => :Green
+    :Amber => :Red
+    :Green => :Amber
+  }
+}
+cycled <- function(n: I64) -> F64 {
+  light <- next_light(:Green)
+  for (i in List.range(1, n)) light <- next_light(light)
+  match (light) {
+    :Red => 1f64
+    :Amber => 2f64
+    :Green => 3f64
+  }
+}
+cat(cycled(3), "\n")
+#++++
+== script.R
+next_light: fn(light: Light) -> Light
+cycled: fn(n: I64) -> F64
+NULL
+282..308 warning[interpreted] this function runs in the interpreter, because `light` holds a tag and is assigned again, which is not compiled natively yet: native code fixes the tags a variable can hold where it is first set. Use a new name for each value, or compute the final value in one expression
+
+#---- global_that_holds_a_ry_value
+#~~~~ script.R
+# blocked: taxed
+rate: F64 <- 0.2
+taxed <- function(amount: F64) -> F64 amount * (1 + rate)
+cat(taxed(100), "\n")
+#++++
+== script.R
+rate: F64
+taxed: fn(amount: F64) -> F64
+NULL
+86..90 warning[interpreted] this function runs in the interpreter, because reading the global `rate` is not compiled natively yet. Pass the value in as a parameter
+
+#---- variable_of_an_enclosing_boundary_function
+#~~~~ script.R
+# blocked: scaled_total
+# boundary: scaled_total
+# The native local function `scale` reads a variable of the boundary function around it. The
+# header names the top-level function a finding lies in.
+scaled_total <- function(values: double[]) -> double {
+  factor <- 2f64
+  total <- List.sum(List.from_r(values))
+  scale <- function(x: F64) -> F64 x * factor
+  scale(total)
+}
+cat(scaled_total(c(1, 2)), "\n")
+#++++
+== script.R
+scaled_total: fn(values: double[]) -> double
+NULL
+351..357 warning[interpreted] this function runs in the interpreter, because reading `factor` from the enclosing function is not compiled natively yet: that function is not native. Pass the value in as a parameter
+
+#---- colon_range
+#~~~~ script.R
+# blocked: counted
+counted <- function(n: I64) -> F64 {
+  total <- 0
+  for (i in 1:3) total <- total + Num.to_f64(n)
+  total
+}
+cat(counted(2), "\n")
+#++++
+== script.R
+counted: fn(n: I64) -> F64
+NULL
+81..84 error[native] `:` builds an R vector, and a native function holds only ry values. Write `List.range(from, to)`
+
+#---- try_expression
+#~~~~ script.R
+# blocked: add_strings
+# `try` returns an error from the enclosing function. `add_matched` is the same function written
+# with `match`, which compiles.
+add_strings <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
+  x <- try Str.to_i64(a)
+  y <- try Str.to_i64(b)
+  :Ok(x + y)
+}
+add_matched <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
+  match (Str.to_i64(a)) {
+    :Err(error) => :Err(error),
+    :Ok(x) => match (Str.to_i64(b)) {
+      :Err(error) => :Err(error),
+      :Ok(y) => :Ok(x + y)
+    }
+  }
+}
+total <- function(a: Str, b: Str) -> I64 {
+  tried <- Result.with_default(add_strings(a, b), 0)
+  matched <- Result.with_default(add_matched(a, b), 0)
+  tried + matched
+}
+print(total("4", "5"))
+print(total("4", "five"))
+#++++
+== script.R
+add_strings: fn(a: Str, b: Str) -> Result<I64, :InvalidNumStr>
+add_matched: fn(a: Str, b: Str) -> Result<I64, :InvalidNumStr>
+total: fn(a: Str, b: Str) -> I64
+I64
+I64
+232..249 warning[interpreted] this function runs in the interpreter, because `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
+257..274 warning[interpreted] this function runs in the interpreter, because `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
+
+#---- boundary_function_is_not_judged
+#~~~~ script.R
+# boundary: load_scores, report
+# A function with an R type in its signature is where R values meet ry values. The interpreter
+# runs it, and the native function it calls takes ry values only.
+average <- function(scores: List<F64>) -> F64 List.sum(scores) / Num.to_f64(List.len(scores))
+load_scores <- function(count: integer) -> List<F64> {
+  raw <- sqrt(seq_len(count))
+  List.from_r(raw[raw > 1.5])
+}
+report <- function(count: integer) -> character {
+  scores <- load_scores(count)
+  sprintf("%.3f", average(scores))
+}
+cat(report(10L), "\n")
+#++++
+== script.R
+average: fn(scores: List<F64>) -> F64
+load_scores: fn(count: integer) -> List<F64>
+report: fn(count: integer) -> character
+NULL
+
+#---- clean_scalars
+#~~~~ script.R
+# Numbers, conditions, loops, early returns and recursion.
+collatz <- function(start: I64) -> I64 {
+  steps: I64 <- 0
+  n <- start
+  while (n != 1) {
+    if (n %% 2 == 0) n <- n %/% 2 else n <- 3 * n + 1
+    steps <- steps + 1
+  }
+  steps
+}
+gcd <- function(a: I64, b: I64) -> I64 {
+  if (b == 0) return(a)
+  gcd(b, a %% b)
+}
+mean_of_squares <- function(n: I64) -> F64 {
+  total <- 0
+  for (i in List.range(1, n)) {
+    x <- Num.to_f64(i)
+    total <- total + x * x
+  }
+  total / Num.to_f64(n)
+}
+classify <- function(x: F64, strict: Bool) -> Str {
+  if (Num.is_nan(x)) return("nan")
+  label: Str <- if (x < 0) "negative" else if (x == 0) "zero" else "positive"
+  if (strict && Num.abs(x) > 100) "large" else label
+}
+cat(Num.to_r(collatz(27)), Num.to_r(gcd(1071, 462)), mean_of_squares(10), classify(-3, TRUE), classify(250, TRUE), "\n")
+#++++
+== script.R
+collatz: fn(start: I64) -> I64
+gcd: fn(a: I64, b: I64) -> I64
+mean_of_squares: fn(n: I64) -> F64
+classify: fn(x: F64, strict: Bool) -> Str
+NULL
+
+#---- clean_lists_and_closures
+#~~~~ script.R
+# Lists, local functions that capture, and function literals passed to the standard library.
+square <- function(x: F64) -> F64 x * x
+scaled_sum <- function(n: I64, factor: F64) -> F64 {
+  scale <- function(x: F64) -> F64 x * factor
+  values <- List.map(List.range(1, n), function(i: I64) -> F64 scale(Num.to_f64(i)))
+  squares <- List.map(values, square)
+  kept <- List.count_if(squares, function(value) value > 10)
+  running <- List.walk(squares, 0, function(total, value) total + value)
+  sorted <- List.sort_desc(values)
+  doubled <- values * 2 + 1
+  grown <- List.with_capacity(n)
+  for (value in sorted) grown <- List.append(grown, value)
+  grown[[1]] <- grown[[1]] + List.sum(doubled)
+  running + Num.to_f64(kept) + grown[[1]] + Num.to_f64(List.len(List.concat(values, sorted)))
+}
+cat(scaled_sum(6, 1.5), "\n")
+#++++
+== script.R
+square: fn(x: F64) -> F64
+scaled_sum: fn(n: I64, factor: F64) -> F64
+NULL
+
+#---- clean_dicts_and_strings
+#~~~~ script.R
+# Dictionaries, sets, strings, format strings and results.
+word_counts <- function(text: Str) -> Dict<Str, I64> {
+  counts: Dict<Str, I64> <- Dict.empty()
+  for (word in Str.split_on(text, " ")) {
+    counts <- Dict.insert(counts, word, Result.with_default(Dict.get(counts, word), 0) + 1)
+  }
+  counts
+}
+describe <- function(text: Str) -> Str {
+  counts <- word_counts(Str.with_ascii_lowercased(text))
+  distinct <- Set.len(Set.from_list(Str.split_on(text, " ")))
+  the <- Result.with_default(Dict.get(counts, "the"), 0)
+  parsed <- match (Str.to_i64("42")) {
+    :Ok(number) => number
+    :Err(_) => 0
+  }
+  f"{Dict.len(counts)} words, {distinct} spellings, {the} the, {parsed}"
+}
+cat(describe("The cat and the hat and THE bat"), "\n")
+#++++
+== script.R
+word_counts: fn(text: Str) -> Dict<Str, I64>
+describe: fn(text: Str) -> Str
+NULL
+
+#---- clean_records_and_tags
+#~~~~ script.R
+# Records, tuples, tags, nominal types and `match`.
+alias Point = Record{x: F64, y: F64}
+type Shape = :Circle(center: Point, radius: F64) | :Rect(corner: Point, width: F64, height: F64) | :Dot
+alias Light = :Red | :Amber | :Green
+
+area <- function(shape: Shape) -> F64 {
+  match (shape) {
+    :Circle(center = _, radius = r) => Num.pi * r * r
+    :Rect(corner = _, width = w, height = h) => w * h
+    :Dot => 0
+  }
+}
+moved <- function(point: Point, dx: F64) -> Point (..point, x = point$x + dx)
+next_light <- function(light: Light) -> Light {
+  match (light) {
+    :Red => :Green
+    :Amber => :Red
+    :Green => :Amber
+  }
+}
+bounds <- function(values: List<F64>) -> Tuple{F64, F64} {
+  low <- values[[1]]
+  high <- values[[1]]
+  for (value in values) {
+    low <- Num.min(low, value)
+    high <- Num.max(high, value)
+  }
+  (low, high)
+}
+total_area <- function(n: I64) -> F64 {
+  origin: Point <- (x = 0, y = 0)
+  total <- 0
+  light <- next_light(next_light(:Green))
+  for (i in List.range(1, n)) {
+    side <- Num.to_f64(i)
+    shape <- if (i %% 3 == 0) @Shape(:Dot) else if (i %% 3 == 1) @Shape(:Circle(center = origin, radius = side)) else @Shape(:Rect(corner = moved(origin, side), width = side, height = 2f64))
+    total <- total + area(shape)
+  }
+  range <- bounds([total, 1, 2 * total])
+  weight: F64 <- match (light) {
+    :Red => 1f64
+    :Amber => 2f64
+    :Green => 3f64
+  }
+  range[[2]] - range[[1]] + weight
+}
+cat(total_area(9), "\n")
+#++++
+== script.R
+area: fn(shape: Shape) -> F64
+moved: fn(point: Point, dx: F64) -> Point
+next_light: fn(light: Light) -> Light
+bounds: fn(values: List<F64>) -> Tuple{F64, F64}
+total_area: fn(n: I64) -> F64
+NULL
+
+#---- clean_r_calls_as_statements_and_in_conversions
+#~~~~ script.R
+# R functions called where a native function may call them: as a statement, or inside a conversion.
+# The first call runs in the interpreter, which loads `stats::rnorm`, so the second one is the
+# call that has to run natively.
+simulate <- function(draws: I64, label: Str) -> F64 {
+  set.seed(Num.to_r(draws))
+  noise <- List.from_r(stats::rnorm(Num.to_r(draws)))
+  low_bits <- Num.from_r(bitwAnd(Num.to_r(draws), 3L))
+  doubled <- Str.from_r(strrep(label, 2L))
+  exists <- Bool.from_r(file.exists(label))
+  if (exists) stop(sprintf("a file is named %s", toupper(label)))
+  cat(doubled, "\n")
+  message("drew ", List.to_r(noise))
+  List.sum(noise) * 0 + Num.to_f64(low_bits)
+}
+cat(simulate(4, "native"), "\n")
+cat(simulate(5, "native"), "\n")
+#++++
+== script.R
+simulate: fn(draws: I64, label: Str) -> F64
+NULL
+NULL
+
+#---- r_call_as_the_last_statement_of_a_loop_or_branch
+#~~~~ script.R
+# An R call whose value is unused, as the last statement of a loop body or of a branch. The
+# checker accepts each, and the typed core does not compile them yet.
+loop_tail <- function(n: I64) -> F64 {
+  total <- 0f64
+  for (i in List.range(1, n)) {
+    total <- total + Num.to_f64(i)
+    cat("step", total, "\n")
+  }
+  total
+}
+loop_statement <- function(n: I64) -> F64 {
+  for (i in List.range(1, n)) cat("row", Num.to_r(i), "\n")
+  1
+}
+while_tail <- function(n: I64) -> F64 {
+  left <- n
+  while (left > 0) {
+    left <- left - 1
+    cat("left", Num.to_r(left), "\n")
+  }
+  Num.to_f64(left)
+}
+branch_statement <- function(n: I64) -> F64 {
+  if (n > 2) cat("large\n")
+  1
+}
+both_branches <- function(n: I64) -> F64 {
+  if (n > 2) {
+    cat("large\n")
+  } else {
+    cat("small\n")
+  }
+  1
+}
+match_arms <- function(text: Str) -> F64 {
+  match (Str.to_i64(text)) {
+    :Ok(number) => cat("number", Num.to_r(number), "\n")
+    :Err(_) => cat("not a number\n")
+  }
+  1
+}
+cat(loop_tail(2), loop_statement(2), while_tail(2), branch_statement(3), both_branches(3), match_arms("12"), "\n")
+#++++
+== script.R
+loop_tail: fn(n: I64) -> F64
+loop_statement: fn(n: I64) -> F64
+while_tail: fn(n: I64) -> F64
+branch_statement: fn(n: I64) -> F64
+both_branches: fn(n: I64) -> F64
+match_arms: fn(text: Str) -> F64
+NULL
+
+#---- conversion_of_a_base_function
+#~~~~ script.R
+# A conversion of what a base R function returns, where the typed core computes the function
+# itself. The checker accepts each, and the typed core does not compile them yet.
+label_width <- function(label: Str) -> I64 Num.from_r(nchar(label))
+shouted <- function(label: Str) -> Str Str.from_r(toupper(label))
+root <- function(x: F64) -> F64 Num.from_r(sqrt(x))
+cat(Num.to_r(label_width("native")), shouted("native"), root(16), "\n")
+#++++
+== script.R
+label_width: fn(label: Str) -> I64
+shouted: fn(label: Str) -> Str
+root: fn(x: F64) -> F64
+NULL
+
+#---- table_pipeline_is_native
+#~~~~ script.R
+pipeline <- function(sales: DataFrame{region: character[], units: integer[], price: double[]}) -> F64 {
+  totals <- sales |>
+    DataFrame.filter(Expr.col("units") > 3L) |>
+    DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
+    DataFrame.group_by("region") |>
+    GroupBy.agg(total = Expr.sum(Expr.col("revenue"))) |>
+    DataFrame.sort("region")
+  revenue <- List.from_r(totals$total)
+  rows <- Num.from_r(DataFrame.height(totals))
+  List.sum(revenue) / Num.to_f64(rows)
+}
+#++++
+== script.R
+pipeline: fn(sales: DataFrame{region: character[], units: integer[], price: double[]}) -> F64
+0..8 warning[unused] `pipeline` is assigned but never used.
+
+#---- table_value_is_bound_passed_and_returned
+#~~~~ script.R
+alias Sales = DataFrame{region: character[], units: integer[]}
+large <- function(sales: Sales, least: F64) -> Sales {
+  kept <- DataFrame.filter(sales, Expr.col("units") > least & !(Expr.col("region") == "north"))
+  kept
+}
+largest <- function(sales: Sales) -> Sales large(sales, 3) |> DataFrame.sort("units")
+#++++
+== script.R
+large: fn(sales: Sales, least: F64) -> Sales
+largest: fn(sales: Sales) -> Sales
+223..230 warning[unused] `largest` is assigned but never used.
+
+#---- i64_crosses_into_a_table_expression_through_to_r
+#~~~~ script.R
+at_least <- function(sales: DataFrame{units: integer[]}, least: I64) -> DataFrame{units: integer[]} {
+  DataFrame.filter(sales, Expr.col("units") >= Num.to_r(least) & -Expr.col("units") < Num.to_r(0 - least))
+}
+#++++
+== script.R
+at_least: fn(sales: DataFrame{units: integer[]}, least: I64) -> DataFrame{units: integer[]}
+0..8 warning[unused] `at_least` is assigned but never used.
+
+#---- table_call_that_gives_an_r_value
+#~~~~ script.R
+rows <- function(sales: DataFrame{units: integer[]}) -> I64 {
+  height <- DataFrame.height(sales)
+  DataFrame.write_csv(sales, "sales.csv")
+  Num.from_r(height)
+}
+#++++
+== script.R
+rows: fn(sales: DataFrame{units: integer[]}) -> I64
+0..4 warning[unused] `rows` is assigned but never used.
+74..97 error[native] `DataFrame.height` gives an R value, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(DataFrame.height(sales))`
+
+#---- r_call_in_the_arguments_of_a_table_call
+#~~~~ script.R
+recent <- function(sales: DataFrame{day: double[]}) -> DataFrame{day: double[]} {
+  DataFrame.filter(sales, Expr.col("day") > max(1, 2))
+}
+#++++
+== script.R
+recent: fn(sales: DataFrame{day: double[]}) -> DataFrame{day: double[]}
+0..6 warning[unused] `recent` is assigned but never used.
+126..135 error[native] `max` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(max(1, 2))`
+
+#---- comment_annotations_are_judged
+#~~~~ script.R
+#: fn(label: Str) -> F64
+label_width <- function(label) {
+  width <- nchar(label)
+  Num.to_f64(Num.from_r(width))
+}
+#++++
+== script.R
+label_width: fn(label: Str) -> F64
+25..36 warning[unused] `label_width` is assigned but never used.
+69..81 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+
+#---- unannotated_function_is_not_judged
+#~~~~ script.R
+label_width <- function(label) {
+  width <- nchar(label)
+  width * 2
+}
+#++++
+== script.R
+label_width: <T> fn(label: T) -> double
+0..11 warning[unused] `label_width` is assigned but never used.
+24..29 error[strict] strict mode: parameter `label` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `label: TYPE`
+
+#---- unannotated_lambda_is_judged_inside_a_native_function
+#~~~~ script.R
+total <- function(values: List<F64>) -> F64 {
+  List.sum(List.map(values, function(value) {
+    stamp <- Sys.time()
+    value
+  }))
+}
+stamps <- lapply(c(1, 2), function(value) {
+  stamp <- Sys.time()
+  stamp
+})
+#++++
+== script.R
+total: fn(values: List<F64>) -> F64
+stamps: list[POSIXct]
+0..5 warning[unused] `total` is assigned but never used.
+96..101 warning[unused] `stamp` is assigned but never used.
+134..140 warning[unused] `stamps` is assigned but never used.
+105..115 error[native] `Sys.time` is an R function, and a native function holds only ry values, so its result cannot be used here. If only its effect matters, call it in a statement of its own. Otherwise move the call into a function with an R type in its signature, which is where R values and ry values meet
+
+#---- native_lambda_at_the_top_level_is_judged
+#~~~~ script.R
+handlers <- list(
+  stamped = function(value: F64) -> F64 {
+    stamp <- Sys.time()
+    value
+  },
+  plain = function(value) {
+    stamp <- Sys.time()
+    value
+  }
+)
+#++++
+== script.R
+handlers: list{stamped: fn(value: F64) -> F64, plain: fn(value: Unknown) -> Unknown}
+0..8 warning[unused] `handlers` is assigned but never used.
+64..69 warning[unused] `stamp` is assigned but never used.
+131..136 warning[unused] `stamp` is assigned but never used.
+73..83 error[native] `Sys.time` is an R function, and a native function holds only ry values, so its result cannot be used here. If only its effect matters, call it in a statement of its own. Otherwise move the call into a function with an R type in its signature, which is where R values and ry values meet
+
+#---- caller_of_a_blocked_function_is_not_reported
+#~~~~ script.R
+label_width <- function(label: Str) -> I64 {
+  width <- nchar(label)
+  Num.from_r(width)
+}
+twice <- function(label: Str) -> I64 label_width(label) * 2
+#++++
+== script.R
+label_width: fn(label: Str) -> I64
+twice: fn(label: Str) -> I64
+91..96 warning[unused] `twice` is assigned but never used.
+56..68 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+
+#---- conversion_follows_the_result_type
+#~~~~ script.R
+describe <- function(label: Str, amount: F64) -> NULL {
+  width <- nchar(label)
+  upper <- toupper(label)
+  missing <- is.na(amount)
+  parts <- strsplit(label, "")
+  repeated <- rep(amount, 3L)
+  NULL
+}
+#++++
+== script.R
+describe: fn(label: Str, amount: F64) -> NULL
+0..8 warning[unused] `describe` is assigned but never used.
+58..63 warning[unused] `width` is assigned but never used.
+82..87 warning[unused] `upper` is assigned but never used.
+108..115 warning[unused] `missing` is assigned but never used.
+135..140 warning[unused] `parts` is assigned but never used.
+166..174 warning[unused] `repeated` is assigned but never used.
+67..79 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+91..105 error[native] `toupper` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Str.from_r(toupper(label))`
+119..132 error[native] `is.na` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Bool.from_r(is.na(amount))`
+144..163 error[native] `strsplit` is an R function, and a native function holds only ry values, so its result cannot be used here. If only its effect matters, call it in a statement of its own. Otherwise move the call into a function with an R type in its signature, which is where R values and ry values meet
+178..193 error[native] `rep` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `List.from_r(rep(amount, 3L))`
+
+#---- arguments_of_an_r_call
+#~~~~ script.R
+show <- function(count: I64, amounts: List<F64>, ids: List<I64>, label: Str, done: Bool) -> NULL {
+  cat(label, Num.to_r(count), done, 2.5, "\n")
+  print(amounts)
+  print(List.to_r(ids))
+  NULL
+}
+#++++
+== script.R
+show: fn(count: I64, amounts: List<F64>, ids: List<I64>, label: Str, done: Bool) -> NULL
+0..4 warning[unused] `show` is assigned but never used.
+
+#---- stop_takes_r_calls
+#~~~~ script.R
+checked <- function(amount: F64) -> F64 {
+  if (amount < 0) stop(sprintf("a negative amount: %s", format(amount)))
+  amount
+}
+#++++
+== script.R
+checked: fn(amount: F64) -> F64
+0..7 warning[unused] `checked` is assigned but never used.
+
+#---- parameter_of_an_enclosing_boundary_function
+#~~~~ script.R
+scaled <- function(values: double[], factor: double) -> F64 {
+  scale <- function(amount: F64) -> F64 amount * Num.from_r(factor)
+  scale(List.sum(List.from_r(values)))
+}
+#++++
+== script.R
+scaled: fn(values: double[], factor: double) -> F64
+0..6 warning[unused] `scaled` is assigned but never used.
+122..128 error[native] `factor` comes from the enclosing function and holds an R value, and a native function holds only ry values. Convert it once where it is made, as in `Num.from_r(...)`, and pass the ry value in as a parameter
+
+#---- r_literals
+#~~~~ script.R
+missing_amount <- function(amount: F64) -> F64 {
+  fallback <- NA_real_
+  amount
+}
+#++++
+== script.R
+missing_amount: fn(amount: F64) -> F64
+0..14 warning[unused] `missing_amount` is assigned but never used.
+51..59 warning[unused] `fallback` is assigned but never used.
+63..71 error[native] this literal is an R value with no ry type, and a native function holds only ry values. Use a `Result` or a tag for a missing value
+
+#---- each_function_is_reported_where_the_value_first_appears
+#~~~~ script.R
+label_width <- function(label: Str) -> F64 {
+  width <- nchar(label)
+  doubled <- width * 2L
+  wider <- doubled + 1L
+  Num.to_f64(Num.from_r(wider))
+}
+#++++
+== script.R
+label_width: fn(label: Str) -> F64
+0..11 warning[unused] `label_width` is assigned but never used.
+56..68 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+
+#---- operator_on_a_table_expression_of_another_form
+#~~~~ script.R
+units <- function() -> Expr Expr.col("units")
+picked <- function(sales: DataFrame{units: integer[], price: double[]}, wide: Bool) -> DataFrame {
+  DataFrame.filter(sales, (if (wide) Expr.col("units") else Expr.col("price")) > 3L)
+}
+helped <- function(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame {
+  DataFrame.filter(sales, units() > 3L)
+}
+#++++
+== script.R
+units: fn() -> Expr
+picked: fn(sales: DataFrame{units: integer[], price: double[]}, wide: Bool) -> DataFrame
+helped: fn(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame
+46..52 warning[unused] `picked` is assigned but never used.
+232..238 warning[unused] `helped` is assigned but never used.
+171..223 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable
+
+#---- signature_written_on_the_name
+#~~~~ script.R
+double_it: fn(n: I64) -> I64 <- function(n) n * 2
+inline <- function(n: I64) -> I64 n * 2
+#: I64
+mixed <- function(n: I64) n * 2
+#++++
+== script.R
+double_it: fn(n: I64) -> I64
+inline: fn(n: I64) -> I64
+mixed: fn(n: I64) -> I64
+0..9 warning[unused] `double_it` is assigned but never used.
+50..56 warning[unused] `inline` is assigned but never used.
+97..102 warning[unused] `mixed` is assigned but never used.
+
+#---- signature_written_in_a_comment
+#~~~~ script.R
+#: fn(n: I64) -> I64
+compact <- function(n) n * 2
+#: @param n {I64}
+#: @return {I64}
+expanded <- function(n) n * 2
+#: (fn(I64) -> I64)
+positional <- function(n) n * 2
+#: fn(n: I64, m: I64) -> I64
+mixed <- function(n, m: I64) n * m
+#++++
+== script.R
+compact: fn(n: I64) -> I64
+expanded: fn(n: I64) -> I64
+positional: fn(n: I64) -> I64
+mixed: fn(n: I64, m: I64) -> I64
+21..28 warning[unused] `compact` is assigned but never used.
+85..93 warning[unused] `expanded` is assigned but never used.
+135..145 warning[unused] `positional` is assigned but never used.
+196..201 warning[unused] `mixed` is assigned but never used.
+
+#---- signature_from_a_type_alias
+#~~~~ script.R
+#: @alias Pick {fn(n: I64, m: I64) -> I64}
+
+#: Pick
+in_a_comment <- function(n, m) n
+on_the_name: Pick <- function(n, m) m
+#++++
+== script.R
+in_a_comment: Pick
+on_the_name: Pick
+52..64 warning[unused] `in_a_comment` is assigned but never used.
+85..96 warning[unused] `on_the_name` is assigned but never used.
+77..81 warning[interpreted] this function runs in the interpreter, because a function whose signature is a type alias is not compiled natively yet: the runtime reads the types where they are written, and an alias only names them. Write the function type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the parameters
+115..119 warning[interpreted] this function runs in the interpreter, because a function whose signature is a type alias is not compiled natively yet: the runtime reads the types where they are written, and an alias only names them. Write the function type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the parameters
+
+#---- signature_alias_is_blamed_only_when_an_alias_is_the_cause
+#~~~~ script.R
+#: @alias Pick {fn(n: I64, m: I64) -> I64}
+
+untyped_rest <- function(xs: List<F64>, ...) -> F64 List.sum(xs)
+#: fn(a: I64, b: I64) -> I64
+other_names <- function(x, y) x
+alias_with_types: Pick <- function(n: I64, m: I64) -> I64 n
+#: @trust fn(n: I64) -> I64
+trusted <- function(n: I64) n
+#++++
+== script.R
+untyped_rest: fn(xs: List<F64>, ...: Any) -> F64
+other_names: fn(x: I64, [y]: Unknown) -> I64
+alias_with_types: Pick
+trusted: fn(n: I64) -> I64
+44..56 warning[unused] `untyped_rest` is assigned but never used.
+60..108 error[type-mismatch] expected `fn(xs: List<F64>) -> F64`, found `fn(xs: List<F64>, ...: Any) -> F64`
+138..149 warning[unused] `other_names` is assigned but never used.
+153..169 error[type-mismatch] this annotation names a parameter `a`, but the function does not define one. An annotation parameter name must match the function's parameter name
+153..169 error[type-mismatch] this annotation names a parameter `b`, but the function does not define one. An annotation parameter name must match the function's parameter name
+170..186 warning[unused] `alias_with_types` is assigned but never used.
+258..265 warning[unused] `trusted` is assigned but never used.
+84..87 warning[interpreted] this function runs in the interpreter, because a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
+162..163 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+165..166 error[strict] strict mode: parameter `y` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `y: TYPE`
+
+#---- signature_in_a_comment_reports_what_blocks_it
+#~~~~ script.R
+#: fn(xs: List<F64>, ...: F64) -> F64
+total <- function(xs, ...) List.sum(xs)
+#++++
+== script.R
+total: fn(xs: List<F64>, ...: F64) -> F64
+38..43 warning[unused] `total` is assigned but never used.
+60..63 warning[interpreted] this function runs in the interpreter, because a function with `...` is not compiled natively yet. Name each parameter, or take the values as one `List`
+
+#---- type_parameter_bounded_by_an_r_type_makes_a_boundary_function
+#~~~~ script.R
+#: <T: numeric> fn(width: T, [height]: T) -> T
+area <- function(width, height = 1) width * height
+#++++
+== script.R
+area: <T: numeric> fn(width: T, [height]: T) -> T
+47..51 warning[unused] `area` is assigned but never used.
+
+#---- variable_that_changes_kind
+#~~~~ script.R
+from_record <- function(n: I64) -> I64 {
+  point <- (x = n, y = n)
+  point <- n
+  point
+}
+from_null <- function(n: I64) -> I64 {
+  held <- NULL
+  held <- n
+  held
+}
+nested <- function(xs: List<I64>) -> I64 {
+  ys <- xs
+  ys <- [xs, xs]
+  List.len(ys)
+}
+#++++
+== script.R
+from_record: fn(n: I64) -> I64
+from_null: fn(n: I64) -> I64
+nested: fn(xs: List<I64>) -> I64
+0..11 warning[unused] `from_record` is assigned but never used.
+43..48 warning[unused] `point` is assigned but never used.
+90..99 warning[unused] `from_null` is assigned but never used.
+131..135 warning[unused] `held` is assigned but never used.
+165..171 warning[unused] `nested` is assigned but never used.
+210..212 warning[unused] `ys` is assigned but never used.
+69..79 warning[interpreted] this function runs in the interpreter, because `point` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+146..155 warning[interpreted] this function runs in the interpreter, because `held` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+221..235 warning[interpreted] this function runs in the interpreter, because `ys` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+
+#---- parameter_and_loop_variable_that_change_type
+#~~~~ script.R
+parameter <- function(n: I64) -> F64 {
+  n <- Num.to_f64(n) / 2
+  n
+}
+loop_variable <- function(xs: List<I64>) -> F64 {
+  total <- 0.5
+  for (x in xs) {
+    x <- Num.to_f64(x) / 2
+    total <- total + x
+  }
+  total
+}
+same_type <- function(n: I64) -> I64 {
+  n <- n + 1
+  n
+}
+#++++
+== script.R
+parameter: fn(n: I64) -> F64
+loop_variable: fn(xs: List<I64>) -> F64
+same_type: fn(n: I64) -> I64
+0..9 warning[unused] `parameter` is assigned but never used.
+70..83 warning[unused] `loop_variable` is assigned but never used.
+217..226 warning[unused] `same_type` is assigned but never used.
+41..63 warning[interpreted] this function runs in the interpreter, because `n` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+157..179 warning[interpreted] this function runs in the interpreter, because `x` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+
+#---- branches_that_disagree_on_a_type
+#~~~~ script.R
+branches <- function(n: I64) -> I64 {
+  if (n > 5) {
+    x <- 1.5
+  } else {
+    x <- "small"
+  }
+  y <- x
+  n
+}
+agreeing <- function(n: I64) -> I64 {
+  if (n > 5) {
+    x <- n
+  } else {
+    x <- n + 1
+  }
+  n + x
+}
+#++++
+== script.R
+branches: fn(n: I64) -> I64
+agreeing: fn(n: I64) -> I64
+0..8 warning[unused] `branches` is assigned but never used.
+100..101 warning[unused] `y` is assigned but never used.
+113..121 warning[unused] `agreeing` is assigned but never used.
+105..106 warning[interpreted] this function runs in the interpreter, because `x` is first set inside a branch or a loop and read after it, which is not compiled natively yet. Give `x` a value before the branch
+
+#---- value_of_an_if_without_else
+#~~~~ script.R
+half <- function(n: I64) -> I64 {
+  x <- if (n > 5) n
+  n
+}
+statement <- function(n: I64) -> I64 {
+  total <- n
+  if (n > 5) total <- total + 1
+  total
+}
+#++++
+== script.R
+half: fn(n: I64) -> I64
+statement: fn(n: I64) -> I64
+0..4 warning[unused] `half` is assigned but never used.
+36..37 warning[unused] `x` is assigned but never used.
+60..69 warning[unused] `statement` is assigned but never used.
+41..53 warning[interpreted] this function runs in the interpreter, because the value of an `if` without `else` is not compiled natively yet: it is `NULL` when the condition is false, so it has two types. Add an `else` branch that gives a value of the same type
+
+#---- ry_value_passed_to_r
+#~~~~ script.R
+show <- function(n: I64, xs: List<I64>) -> I64 {
+  counts <- Dict.insert(Dict.empty(), "a", n)
+  seen <- Set.from_list(xs)
+  print(counts)
+  print(seen)
+  print(xs)
+  print(n)
+  print(Num.to_r(n))
+  print(List.to_r(xs))
+  n
+}
+#++++
+== script.R
+show: fn(n: I64, xs: List<I64>) -> I64
+0..4 warning[unused] `show` is assigned but never used.
+131..137 warning[interpreted] this function runs in the interpreter, because a `Dict` passed to R's `print` is not compiled natively yet. Pass `Dict.keys(...)` and `Dict.values(...)` instead
+147..151 warning[interpreted] this function runs in the interpreter, because a `Set` passed to R's `print` is not compiled natively yet. Pass `Set.to_list(...)` instead
+161..163 warning[interpreted] this function runs in the interpreter, because a `List<I64>` passed to R's `print` as it is is not compiled natively yet: R has no 64-bit integer, so the call says how the numbers cross. Write `List.to_r(...)` around the argument
+173..174 warning[interpreted] this function runs in the interpreter, because an `I64` passed to R's `print` as it is is not compiled natively yet: R has no 64-bit integer, so the call says how the number crosses. Write `Num.to_r(...)` around the argument
+
+#---- conversion_of_an_r_call_in_the_arguments_of_an_r_call
+#~~~~ script.R
+announce <- function(amount: F64) -> F64 {
+  cat("value", Str.from_r(format(amount, nsmall = 2)), "\n")
+  amount
+}
+table <- function(xs: List<F64>) -> F64 {
+  made <- DataFrame(a = List.from_r(c(1, 2)), b = List.to_r(xs))
+  List.sum(List.from_r(made$a))
+}
+ahead <- function(amount: F64) -> F64 {
+  text <- Str.from_r(format(amount, nsmall = 2))
+  cat("value", text, "\n")
+  amount
+}
+#++++
+== script.R
+announce: fn(amount: F64) -> F64
+table: fn(xs: List<F64>) -> F64
+ahead: fn(amount: F64) -> F64
+0..8 warning[unused] `announce` is assigned but never used.
+115..120 warning[unused] `table` is assigned but never used.
+256..261 warning[unused] `ahead` is assigned but never used.
+58..96 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+181..201 error[native] this calls R's `c` inside the arguments of R's `DataFrame`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- List.from_r(c(...))`, and pass the variable
+
+#---- table_forms_the_typed_core_does_not_compile
+#~~~~ script.R
+by_position <- function(sales: DataFrame{units: integer[], price: double[]}) -> F64 {
+  List.sum(List.from_r(sales[[2]]))
+}
+prefixed <- function(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame {
+  DataFrame.filter(sales, ry::Expr.col("units") > 2L)
+}
+boxed <- function(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame {
+  held <- (rule = Expr.col("units") > 2L, count = 1)
+  DataFrame.filter(sales, held$rule)
+}
+#++++
+== script.R
+by_position: fn(sales: DataFrame{units: integer[], price: double[]}) -> F64
+prefixed: fn(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame
+boxed: fn(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame
+0..11 warning[unused] `by_position` is assigned but never used.
+124..132 warning[unused] `prefixed` is assigned but never used.
+269..274 warning[unused] `boxed` is assigned but never used.
+109..119 warning[interpreted] this function runs in the interpreter, because a column read by its position is not compiled natively yet. Read the column by its name, as in `table[["price"]]`
+239..251 warning[interpreted] this function runs in the interpreter, because a standard library function called with a `ry::` prefix is not compiled natively yet. Write the name without the prefix
+373..395 warning[interpreted] this function runs in the interpreter, because a table value inside a record, a tuple, a tag or a list is not compiled natively yet. Keep the table value in a variable of its own
+
+#---- standard_library_call_with_a_named_argument
+#~~~~ script.R
+words <- function(text: Str) -> I64 {
+  List.len(Str.split_on(text, sep = " "))
+}
+#++++
+== script.R
+words: fn(text: Str) -> I64
+0..5 warning[unused] `words` is assigned but never used.
+49..78 warning[interpreted] this function runs in the interpreter, because a call of `Str.split_on` with named arguments is not compiled natively yet. Pass the arguments by position
+
+#---- part_of_a_list_with_single_brackets
+#~~~~ script.R
+second <- function(xs: List<I64>) -> I64 {
+  part <- xs[2]
+  List.len(part)
+}
+item <- function(xs: List<I64>) -> I64 xs[[2]]
+#++++
+== script.R
+second: fn(xs: List<I64>) -> I64
+item: fn(xs: List<I64>) -> I64
+0..6 warning[unused] `second` is assigned but never used.
+78..82 warning[unused] `item` is assigned but never used.
+53..58 warning[interpreted] this function runs in the interpreter, because a part of a list taken by position with single brackets is not compiled natively yet. Read one item with `xs[[i]]`, or take a part with `List.sublist`
+
+#---- match_on_a_tuple
+#~~~~ script.R
+first <- function(pair: Tuple{I64, Str}) -> I64 {
+  match (pair) {
+    (a, _) => a
+  }
+}
+#++++
+== script.R
+first: fn(pair: Tuple{I64, Str}) -> I64
+0..5 warning[unused] `first` is assigned but never used.
+
+#---- local_function_that_reads_a_later_name
+#~~~~ script.R
+shifted <- function(n: I64) -> I64 {
+  add <- function(a: I64) -> I64 a + step
+  step <- 2
+  add(n)
+}
+#++++
+== script.R
+shifted: fn(n: I64) -> I64
+0..7 warning[unused] `shifted` is assigned but never used.
+
+#---- operator_on_an_aliased_table_expression
+#~~~~ script.R
+alias Rule = Expr
+alias Sales = DataFrame{units: integer[], price: double[]}
+units <- function(name: Str) -> Rule Expr.col(name)
+direct <- function(sales: Sales) -> DataFrame {
+  DataFrame.filter(sales, units("units") > 2L)
+}
+through_a_variable <- function(sales: Sales) -> DataFrame {
+  rule <- units("units")
+  DataFrame.filter(sales, rule > 2L)
+}
+#++++
+== script.R
+units: fn(name: Str) -> Rule
+direct: fn(sales: Sales) -> DataFrame
+through_a_variable: fn(sales: Sales) -> DataFrame
+129..135 warning[unused] `direct` is assigned but never used.
+226..244 warning[unused] `through_a_variable` is assigned but never used.
+203..217 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable
