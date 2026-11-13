@@ -2,11 +2,12 @@
 """Measure incremental re-check latency through the language server.
 
 Opens one file of a generated code base in `ry server`, waits for its first diagnostics,
-then repeats two edits and times each from the `didChange` notification to the diagnostics
+then repeats three edits and times each from the `didChange` notification to the diagnostics
 the server publishes for that file:
 
-  body       one literal changes inside a function body (no signature changes)
-  signature  a defaulted parameter is appended to a function's formals
+  body        one literal changes inside a function body (no signature changes)
+  signature   a defaulted parameter is appended to a function's formals
+  definition  a new top-level function is inserted at the top of the file
 
 Each edit is followed by the revert, so the code base ends where it started. `first` is the
 first publish after the edit (the fast wave plus whatever the server had ready) and `settled`
@@ -124,7 +125,7 @@ def pick_edits(text):
     body = signature = None
     for index, line in enumerate(lines):
         if signature is None:
-            match = re.match(r"^(\w+) <- function\(([^)]*)\) \{$", line)
+            match = re.match(r"^(\w+) <- function\(([^)]*)\)\s+\{$", line)
             if match and match.group(2):
                 signature = (index, line.rindex(")"))
         if body is None and signature is not None and index > signature[0]:
@@ -136,7 +137,7 @@ def pick_edits(text):
     return body, signature
 
 
-def edit(client, uri, version, line, start, end, replacement):
+def edit(client, uri, version, line, start, end, replacement, end_line=None):
     client.notify(
         "textDocument/didChange",
         {
@@ -145,7 +146,7 @@ def edit(client, uri, version, line, start, end, replacement):
                 {
                     "range": {
                         "start": {"line": line, "character": start},
-                        "end": {"line": line, "character": end},
+                        "end": {"line": line if end_line is None else end_line, "character": end},
                     },
                     "text": replacement,
                 }
@@ -263,25 +264,32 @@ def main():
     cold = (initial[0] - opened, initial[-1] - opened)
 
     version = 1
-    results = {"body": ([], []), "signature": ([], [])}
+    results = {"body": ([], []), "signature": ([], []), "definition": ([], [])}
     body_line, body_column, digit = body
     sig_line, sig_column = signature
     changed = str((int(digit) + 1) % 10)
     extra = ", bench_extra = 1L"
+    # A new top-level name at the head of the file: it moves every item below it and adds a
+    # name to the project's name maps.
+    definition = "bench_new_definition <- function() 1L\n"
     for _ in range(args.runs):
-        for kind in ("body", "signature"):
+        for kind in ("body", "signature", "definition"):
             for forward in (True, False):
                 version += 1
+                end_line = None
                 if kind == "body":
                     new, old = (changed, digit) if forward else (digit, changed)
                     start, end, replacement = body_column, body_column + len(old), new
                     line = body_line
+                elif kind == "definition":
+                    line, start, end, replacement = 0, 0, 0, definition if forward else ""
+                    end_line = 0 if forward else 1
                 elif forward:
                     line, start, end, replacement = sig_line, sig_column, sig_column, extra
                 else:
                     line, start, end, replacement = sig_line, sig_column, sig_column + len(extra), ""
                 sent = time.perf_counter()
-                edit(client, uri, version, line, start, end, replacement)
+                edit(client, uri, version, line, start, end, replacement, end_line)
                 times = client.drain(uri, args.quiet, 30)
                 if forward and times:
                     results[kind][0].append(times[0] - sent)

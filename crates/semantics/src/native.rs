@@ -15,6 +15,7 @@ use {
     crate::{
         Db, TypeDefinitions,
         check::GlobalEnv,
+        dense::{Bitset, Column},
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
             PatId, PatternKind, Symbol, UnaryOperator,
@@ -26,7 +27,7 @@ use {
             TypeScheme, array_element, dict_entries,
         },
     },
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashSet,
     syntax::{
         TextRange, TextSize,
         annotation::{Paired, pair_formals},
@@ -564,10 +565,10 @@ pub struct Judged<'a, 'db> {
     /// Each expression's resolved type, where the check recorded one.
     pub types: &'a dyn Fn(ExprId) -> Option<Ty<'db>>,
     /// The declared signature of each function literal that has one.
-    pub signatures: &'a FxHashMap<ExprId, FunctionType<'db>>,
+    pub signatures: &'a Column<'a, ExprId, FunctionType<'db>>,
     /// The function literals whose signature only a type alias gives, so that no type is
     /// written where the runtime reads one (see `Annotation::written_signature`).
-    pub aliased: &'a FxHashSet<ExprId>,
+    pub aliased: &'a Bitset<'a, ExprId>,
 }
 
 /// Every blocker in the native functions of one item, in source order.
@@ -833,7 +834,7 @@ impl<'a, 'db> Judge<'a, 'db> {
     fn find(&mut self, id: ExprId) {
         let module = self.judged.module;
         if let ExpressionKind::Function { parameters, .. } = *module.kind(id)
-            && let Some(signature) = self.judged.signatures.get(&id)
+            && let Some(signature) = self.judged.signatures.get(id)
         {
             let formals = module[parameters]
                 .iter()
@@ -863,7 +864,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.r_arguments = None;
         self.invisible = None;
         self.collect_locals(function);
-        if self.judged.aliased.contains(&function) {
+        if self.judged.aliased.contains(function) {
             let parameters = &module[parameters];
             let range = match (parameters.first(), parameters.last()) {
                 (Some(first), Some(last)) => first.range.cover(last.range),
