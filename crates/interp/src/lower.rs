@@ -2041,18 +2041,23 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
             let decimal = body.contains('.');
             if value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
                 let hex = body.starts_with("0x") || body.starts_with("0X");
-                if decimal && (hex || !body.contains(['e', 'E'])) {
+                if decimal
+                    && (hex || !body.contains(['e', 'E']))
+                    && !crate::ahead::holds_back_warning()
+                {
                     crate::conditions::warning(format!(
                         "integer literal {text} contains unnecessary decimal point"
                     ))?;
                 }
                 values::scalar_integer(value as i32)
             } else {
-                crate::conditions::warning(if decimal {
-                    format!("integer literal {text} contains decimal; using numeric value")
-                } else {
-                    format!("non-integer value {text} qualified with L; using numeric value")
-                })?;
+                if !crate::ahead::holds_back_warning() {
+                    crate::conditions::warning(if decimal {
+                        format!("integer literal {text} contains decimal; using numeric value")
+                    } else {
+                        format!("non-integer value {text} qualified with L; using numeric value")
+                    })?;
+                }
                 values::scalar_real(value)
             }
         }

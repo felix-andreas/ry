@@ -50,6 +50,17 @@ impl Items {
         }
     }
 
+    /// The ry type of one item, as a diagnostic names it.
+    fn item_type(self) -> &'static str {
+        match self {
+            Items::Logical => "Bool",
+            Items::Integer | Items::I64 => "I64",
+            Items::Double => "F64",
+            Items::Character => "Str",
+            Items::RyValues => "list",
+        }
+    }
+
     fn storage(self) -> SexpType {
         match self {
             Items::Logical => SexpType::Logical,
@@ -213,10 +224,10 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// `"list"`, the storage of records, tuples, tags and nested lists. A dictionary passes through
 /// unchanged: its `"Dict<K, V>"` name is for typed code, which lays the dictionary out by it.
 ///
-/// Around a `List.from_r(x)` the name is also a claim about what R code gives, which the checker
-/// cannot enforce: R code can rebind the function behind `x` after the check. Compiled code is
-/// laid out for the checker's type before the conversion runs, so a list of other items is an
-/// error there, and it is the same error here.
+/// Around a `List.from_r(x)` the name is the type the checker gave the conversion, and the
+/// conversion gives a list of that type or fails ([`checked_conversion`]). The test is the
+/// call's text, because the preflight writes the wrapper around the standard library's
+/// `List.from_r` only.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     if !list.is_array() {
@@ -230,25 +241,82 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
         return Ok(list);
     }
     let name = values::as_string_scalar(call.arg(1))?;
-    let storage = match name.as_deref() {
+    let expected = match name.as_deref() {
         Some("I64") => Items::I64,
         Some("F64") => Items::Double,
         Some("Str") => Items::Character,
         Some("list") => Items::RyValues,
         _ => return Err(call.error("the item type must be \"I64\", \"F64\", \"Str\" or \"list\"")),
+    };
+    if converts && expected != Items::RyValues {
+        return checked_conversion(converted, list, expected);
     }
-    .storage();
+    if length(list) != 0 {
+        return Ok(list);
+    }
+    empty_in(list, expected.storage())
+}
+
+/// The list the `List.from_r` call `conversion` gave, as a list of `expected` items, the type
+/// the checker gave the conversion.
+///
+/// The checker types the conversion from R's vector types, and a vector R code types as
+/// `double` holds integers whenever R computed it from integers (`abs(-3:3)`, `sample(5)`), as
+/// a vector typed `integer` or `double` may hold logicals. R converts such a vector wherever
+/// it needs the wider type, so the conversion does the same: `Bool` items become `I64` or
+/// `F64`, and `I64` items become `F64`. An empty list has no items to tell its type by and
+/// becomes an empty list of `expected`. Any other difference means R code gave a value its
+/// types do not describe, which nothing can convert, so it is an error. The interpreter and
+/// compiled typed code both convert through this function, so they agree on every vector.
+pub unsafe fn checked_conversion(conversion: Sexp, list: Sexp, expected: Items) -> R<Sexp> {
+    let found = items(list);
+    if found == expected {
+        return Ok(list);
+    }
+    if length(list) == 0 {
+        return empty_in(list, expected.storage());
+    }
+    match (found, expected) {
+        (Items::Logical | Items::Integer, Items::I64) => {
+            let widened: Vec<i64> = values::ints(list).iter().map(|&item| i64::from(item)).collect();
+            numbers::list(&widened)
+        }
+        (Items::Logical | Items::Integer, Items::Double) => {
+            let widened: Vec<f64> = values::ints(list).iter().map(|&item| f64::from(item)).collect();
+            doubles(&widened)
+        }
+        (Items::I64, Items::Double) => {
+            let widened: Vec<f64> = list.slice::<i64>().iter().map(|&item| item as f64).collect();
+            doubles(&widened)
+        }
+        _ => Err(crate::unwind::error(format!(
+            "`{}` gave a `List<{}>` where the type checker expects a `List<{}>`, the type of the \
+             R code it read: convert the vector to that type in R first{}",
+            crate::deparse::deparse_first_line(conversion),
+            found.item_type(),
+            expected.item_type(),
+            match expected {
+                Items::I64 => ", for example with `as.integer()`",
+                Items::Double => ", for example with `as.numeric()`",
+                Items::Character => ", for example with `as.character()`",
+                _ => "",
+            }
+        ))),
+    }
+}
+
+unsafe fn doubles(items: &[f64]) -> R<Sexp> {
+    let object = values::alloc_uninit(SexpType::Real, items.len())?;
+    object.slice_mut::<f64>().copy_from_slice(items);
+    Ok(finish(object))
+}
+
+/// An empty list in `storage` with the room `list`, which is empty, set aside with
+/// `List.with_capacity`.
+unsafe fn empty_in(list: Sexp, storage: SexpType) -> R<Sexp> {
     if list.kind() == storage {
         return Ok(list);
     }
-    if length(list) != 0 {
-        return Err(crate::unwind::error(conversion_mismatch(
-            converted,
-            list,
-            name.as_deref().unwrap_or_default(),
-        )));
-    }
-    // `List.with_capacity` set room aside, which the list in its storage keeps.
     if crate::heap().is_resizable(list) {
         return Ok(finish(crate::standard_library::resizable(
             storage,
@@ -257,23 +325,6 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
         )?));
     }
     Ok(finish(alloc(storage, 0)?))
-}
-
-/// What a `List.from_r` says when it gives a list of other items than the checker typed it with.
-/// `expected` is the checker's item type as `.ry_items` names it.
-pub unsafe fn conversion_mismatch(conversion: Sexp, list: Sexp, expected: &str) -> String {
-    let found = match items(list) {
-        Items::Logical => "Bool",
-        Items::Integer | Items::I64 => "I64",
-        Items::Double => "F64",
-        Items::Character => "Str",
-        Items::RyValues => "list",
-    };
-    format!(
-        "`{}` gave a `List<{found}>`, and the type checker typed it as a `List<{expected}>` from \
-         the R code it read: convert the vector in R, so that the conversion always gives that type",
-        crate::deparse::deparse_first_line(conversion)
-    )
 }
 
 /// An Array of `items`, each a single non-NA value or a ry value, all of one kind; or why they

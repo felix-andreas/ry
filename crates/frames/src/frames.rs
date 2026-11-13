@@ -19,9 +19,8 @@ pub mod frame;
 pub mod viewer;
 
 use interp::{
-    define_builtins, define_own_builtins,
     extensions::{Tables, Viewer},
-    interp,
+    define_builtins, define_own_builtins, interp,
 };
 
 /// Registers the tables' builtins with the interpreter, which must be installed, and hands it

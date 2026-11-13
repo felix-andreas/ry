@@ -50,8 +50,13 @@ use {
         strings::Encoding,
     },
     interp::{
-        annotations::decline, builtins::Arg, bytecode::TypedCall, records::NativeValues,
-        unwind::Unwind, values as rvalues,
+        annotations::decline,
+        arrays::{Items, checked_conversion},
+        builtins::Arg,
+        bytecode::TypedCall,
+        records::NativeValues,
+        unwind::Unwind,
+        values as rvalues,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
@@ -133,7 +138,8 @@ struct Running {
     sys_parent: Sexp,
 }
 
-/// How many closures a session compiles at most, since each keeps its closure alive.
+/// How many closures a session compiles at most, since each keeps its closure alive. The
+/// functions compiled before a script starts are not counted ([`ahead::compiled_ahead`]).
 const MAX_COMPILED: usize = 4096;
 
 /// How many refusals the table keeps before it forgets them. A refusal is keyed by a closure
@@ -312,8 +318,9 @@ unsafe fn compiled_or_refusal(
         }
         None => {}
     }
-    if COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
-        >= MAX_COMPILED
+    if !ahead::compiling_ahead()
+        && COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
+            >= MAX_COMPILED + ahead::compiled_ahead()
     {
         decline(|| format!("the session compiled its limit of {MAX_COMPILED} typed functions"));
         return Err(Refusal::new(
@@ -1453,29 +1460,29 @@ unsafe fn write_converted(
     value: Sexp,
     out: *mut u64,
 ) -> Result<(), Unwind> {
+    let value = match conversion.checked {
+        Some(item) if value.is_array() => {
+            let expected = match item {
+                Item::I64 => Items::I64,
+                Item::Dbl => Items::Double,
+                _ => Items::Character,
+            };
+            let list = checked_conversion(conversion.call, value, expected)?;
+            interp::heap().root(list);
+            list
+        }
+        _ => value,
+    };
     let expected = storage(ty).map(|(kind, _)| kind);
     if expected != Some(value.kind())
         || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
     {
-        let message = match conversion.checked {
-            Some(item) if value.is_array() => interp::arrays::conversion_mismatch(
-                conversion.call,
-                value,
-                match item {
-                    Item::I64 => "I64",
-                    Item::Dbl => "F64",
-                    Item::Str => "Str",
-                    _ => "list",
-                },
-            ),
-            _ => format!(
-                "`{}` gave a value of type `{}`, and the typed function was compiled for the \
-                 type it gave before: convert the value to one type in R first",
-                interp::deparse::deparse_first_line(conversion.call),
-                value.kind().name()
-            ),
-        };
-        return Err(interp::unwind::error(message));
+        return Err(interp::unwind::error(format!(
+            "`{}` gave a value of type `{}`, and the typed function was compiled for the type \
+             it gave before: convert the value to one type in R first",
+            interp::deparse::deparse_first_line(conversion.call),
+            value.kind().name()
+        )));
     }
     match ty {
         Type::Dbl => *out = rvalues::reals(value)[0].to_bits(),

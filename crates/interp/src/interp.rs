@@ -243,19 +243,9 @@ pub fn set_object_systems(allowed: bool) {
 /// what the word must hold, apart from the profiling bits.
 pub fn observer_bits() -> u8 {
     let state = interp();
-    (if state.debugger.is_some() {
-        activity::DEBUGGER
-    } else {
-        0
-    }) | (if moves::tracking() {
-        activity::MOVES
-    } else {
-        0
-    }) | (if state.object_systems {
-        0
-    } else {
-        activity::NO_OBJECT_SYSTEMS
-    })
+    (if state.debugger.is_some() { activity::DEBUGGER } else { 0 })
+        | (if moves::tracking() { activity::MOVES } else { 0 })
+        | (if state.object_systems { 0 } else { activity::NO_OBJECT_SYSTEMS })
 }
 
 // A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a

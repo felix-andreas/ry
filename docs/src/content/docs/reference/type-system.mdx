@@ -1345,9 +1345,23 @@ such as `List.append(xs, 1)`.
 - At run time `List.from_r()` stops with an error on an `NA` or an attribute such as a class, and it
   drops names. Setting an attribute on a list, or assigning `NA` into it from R code, turns it into a
   plain R vector.
-- The item type the checker gives `List.from_r(x)` comes from the R code it read, and R code can
-  bind `x` to something else while the program runs. When the vector R hands over has another item
-  type than the checked one, the conversion stops with an error:
+- At run time `List.from_r(x)` gives a list of the item type the checker gave it, which comes from
+  R's vector types. A vector R types as `double` holds integers when R computed it from integers,
+  as `abs(-3:3)` does, so where the checked type is `List<F64>` an `integer` or `logical` vector
+  converts to `F64` items, and where it is `List<I64>` a `logical` vector converts to `I64` items.
+  An empty vector gives an empty list of the checked type:
+
+  ```r ry run runtime=ry strict
+  whole <- function() abs(-3:3)
+  total <- function(extra: F64) -> F64 {
+    List.sum(List.from_r(whole())) + extra
+  }
+  total(0.5)
+  #> [1] 12.5
+  ```
+
+  A vector of any other type stops the conversion with an error. That happens when R code gives a
+  value its types do not describe, for example after it binds a function to something else:
 
   ```r
   prices <- function() c(1.5, 2.5)
@@ -1355,12 +1369,12 @@ such as `List.append(xs, 1)`.
     listed <- List.from_r(prices())
     Num.to_f64(List.len(listed)) + extra
   }
-  assign("prices", function() 1:2)
+  assign("prices", function() c("1.5", "2.5"))
   count(3)
   ```
 
   ```text ry run runtime=ry
-  Error: `List.from_r(prices())` gave a `List<I64>`, and the type checker typed it as a `List<F64>` from the R code it read: convert the vector in R, so that the conversion always gives that type
+  Error: `List.from_r(prices())` gave a `List<Str>` where the type checker expects a `List<F64>`, the type of the R code it read: convert the vector to that type in R first, for example with `as.numeric()`
   ```
 
 ### List operators

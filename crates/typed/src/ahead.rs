@@ -36,13 +36,12 @@ use {
 
 thread_local! {
     /// The closures of the script's definitions by the name each will be bound to, while
-    /// [`compile`] runs.
+    /// [`compile`] runs. It is empty at any other time.
     static DEFINED_LATER: RefCell<FxHashMap<Sexp, Sexp>> = RefCell::new(FxHashMap::default());
-    /// Whether [`DEFINED_LATER`] holds anything, which every function lookup asks first.
-    static COMPILING_AHEAD: Cell<bool> = const { Cell::new(false) };
-    /// Whether a script's definitions were compiled ahead, so that a compilation after it is
-    /// one the run pays for.
-    static COMPILED_AHEAD: Cell<bool> = const { Cell::new(false) };
+    /// How many functions [`compile`] compiled. A script's definitions are as many as its text
+    /// holds, so they do not count toward the session's limit on compiled closures, which
+    /// bounds the closures a running program makes.
+    static COMPILED_AHEAD: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many rounds [`compile`] compiles its functions again because a later one confirmed a
@@ -56,8 +55,16 @@ const MAX_NAMED_DEPTH: usize = 8;
 /// Compiles the typed closures among the definitions of `program` for the argument types they
 /// declare.
 pub unsafe fn compile(program: &Program<'_>) {
-    let started = Instant::now();
+    let logging = annotations::typed_logging();
+    let started = logging.then(Instant::now);
     let definitions = program.definitions;
+    if definitions.is_empty() {
+        if logging {
+            eprintln!("typed: compiled 0 functions ahead of time in 0 us");
+        }
+        return;
+    }
+    let compiled_before = compiled_functions();
     DEFINED_LATER.with_borrow_mut(|later| {
         later.clear();
         // A name the script defines more than once stands for its first definition, the one
@@ -67,8 +74,6 @@ pub unsafe fn compile(program: &Program<'_>) {
             later.entry(definition.symbol).or_insert(definition.closure);
         }
     });
-    COMPILING_AHEAD.set(true);
-    let logging = annotations::typed_logging();
     let mut roots: Vec<(Sexp, SmallVec<[Type; 4]>)> = Vec::new();
     for definition in definitions {
         if !annotations::is_typed(definition.closure) {
@@ -114,15 +119,14 @@ pub unsafe fn compile(program: &Program<'_>) {
             break;
         }
     }
-    COMPILING_AHEAD.set(false);
     DEFINED_LATER.with_borrow_mut(|later| later.clear());
     // A refusal met here may only say that the script had not run yet, as for a call of a
     // function the script builds at run time, so the first call tries again.
     COMPILED.with_borrow_mut(|table| table.retain(|_, entry| entry.is_ok()));
     AWAITING.with_borrow_mut(|awaiting| awaiting.clear());
-    COMPILED_AHEAD.set(true);
-    if logging {
-        let functions = COMPILED.with_borrow(|table| table.len());
+    let functions = compiled_functions().saturating_sub(compiled_before);
+    COMPILED_AHEAD.set(COMPILED_AHEAD.get() + functions);
+    if let Some(started) = started {
         eprintln!(
             "typed: compiled {functions} function{} ahead of time in {} us",
             if functions == 1 { "" } else { "s" },
@@ -131,29 +135,34 @@ pub unsafe fn compile(program: &Program<'_>) {
     }
 }
 
-/// Whether a script's definitions were compiled before it ran, which makes every later
-/// compilation one that happens during the run.
-pub fn compiled_ahead() -> bool {
+fn compiled_functions() -> usize {
+    COMPILED.with_borrow(|table| table.values().filter(|entry| entry.is_ok()).count())
+}
+
+/// How many compiled functions the session's limit on compiled closures leaves out, because
+/// [`compile`] compiled them from a script's text.
+pub(crate) fn compiled_ahead() -> usize {
     COMPILED_AHEAD.get()
 }
 
 /// Whether [`compile`] is running, so that function lookups go through [`defined_later`].
 #[inline]
 pub(crate) fn compiling_ahead() -> bool {
-    COMPILING_AHEAD.get()
+    DEFINED_LATER.with_borrow(|later| !later.is_empty())
 }
 
 /// The closure a function lookup of `symbol` from `start` will find once the script has run the
 /// first definition of that name, when the lookup starts in the global environment and no
 /// binding there shadows it yet.
 pub(crate) unsafe fn defined_later(symbol: Sexp, start: Sexp) -> Option<Sexp> {
-    if !COMPILING_AHEAD.get() || start != rvalues::global_env() {
+    if start != rvalues::global_env() {
         return None;
     }
-    if interp::heap().frame_cell(start, symbol).is_some() {
-        return None;
-    }
-    DEFINED_LATER.with_borrow(|later| later.get(&symbol).copied())
+    let closure = DEFINED_LATER.with_borrow(|later| later.get(&symbol).copied())?;
+    interp::heap()
+        .frame_cell(start, symbol)
+        .is_none()
+        .then_some(closure)
 }
 
 /// The argument types a typed closure declares, as [`crate::call`] reads them from values of
@@ -223,8 +232,14 @@ fn annotated_type(
         return annotated_item(items, named_types, depth)
             .map(|item| Type::Vector { item, array: true });
     }
+    // A table type may spell out its columns, as in `DataFrame{price: double[]}`, which say
+    // nothing about how the value arrives.
+    let table = annotation
+        .split_once('{')
+        .filter(|_| annotation.ends_with('}'))
+        .map_or(annotation, |(name, _)| name.trim_end());
     if matches!(
-        annotation,
+        table,
         "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy" | "Expr"
     ) {
         return Some(Type::Table);

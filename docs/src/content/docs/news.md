@@ -9,7 +9,7 @@ description: Release announcements and project news
 
 `ry run --aot script.R` compiles the script's typed functions before its first expression runs, so that no function compiles in the middle of the program. Without the flag a typed function compiles at its first call, which costs about a millisecond on that call. The whole run takes the same time either way, because the same compiler does the same work: the flag moves it in front of the program. Untyped R code is not compiled ahead of time. See [the CLI reference](/reference/cli#compiling-ahead-of-time).
 
-A typed function that converts an R vector with `List.from_r` compiles at its first call, and so does one that calls a function of a loaded package such as `stats::rnorm`. Each used to run its first call in the interpreter, to see the vector's item type or to load the function. The item type is the one the type checker gives the conversion, and when R hands over a vector of another type the conversion stops with an error that names both.
+A typed function that converts an R vector with `List.from_r` compiles at its first call, and so does one that calls a function of a loaded package such as `stats::rnorm`. Each used to run its first call in the interpreter, to see the vector's item type or to load the function. The item type is the one the type checker gives the conversion. Where the checker says `List<F64>` and R hands over integers or logicals, as `abs(-3:3)` does, the conversion widens them; a vector of any other type stops the conversion with an error that names both types.
 
 ### A crash leaves a report
 

@@ -48,6 +48,46 @@ expect exit 0
 expect stdout "[1] 385\n[1] 65\n"
 expect stderr "rebound\ntyped: compiled for [I64] -> I64"
 
+# A literal such as `1.5L` warns when its expression is lowered. Lowering the script up front
+# must not signal the warning before the statements ahead of it ran: here `options(warn = 2)`
+# turns it into the error that stops the script, with `--aot` as without.
+
+file literal.R
+| cat("first\n")
+| options(warn = 2)
+| half <- function(x: F64) -> F64 x / 2
+| x <- 1.5L
+| cat("second\n")
+
+run ry run --runtime ry --aot literal.R
+expect exit 1
+expect stdout "first\n"
+expect stdout lacks "second"
+expect stderr "typed: compiled 1 function ahead of time in "
+expect stderr "(converted from warning) integer literal 1.5L contains decimal; using numeric value"
+
+run ry run --runtime ry literal.R
+expect exit 1
+expect stdout lacks "second"
+expect stderr "(converted from warning) integer literal 1.5L contains decimal; using numeric value"
+
+# A table parameter that spells out its columns compiles ahead like a bare `DataFrame`.
+
+file table.R
+| rows <- function(sales: DataFrame{price: double[]}, extra: I64) -> I64 {
+|   prices <- List.from_r(sales$price)
+|   List.len(prices) + extra
+| }
+| sales <- DataFrame(price = c(1.5, 2.5))
+| print(Num.to_f64(rows(sales, 1)))
+
+run ry run --runtime ry --aot table.R
+expect exit 0
+expect stdout "[1] 3\n"
+expect stderr "typed: compiled for [Table, I64] -> I64 in"
+expect stderr "typed: compiled 1 function ahead of time in "
+expect stderr lacks "runs in the interpreter"
+
 # The flag is for a script, and for ry's runtime.
 
 unset RY_TYPED_LOG

@@ -8,8 +8,11 @@
 //! `function` expression the closure made for it. The closure the script binds is therefore the
 //! very object the code was compiled for, and nothing has to find the code again.
 //!
-//! Nothing of the script runs early: lowering and making a closure have no effect a program can
-//! observe, and a lowering error waits for its expression's turn.
+//! Nothing of the script runs early. Making a closure has no effect a program can observe, and
+//! neither has lowering an expression, with one exception: lowering signals a warning for a
+//! literal such as `1.5L`, which a handler or `options(warn = 2)` set earlier in the script
+//! must see when the expression's turn comes. An expression whose lowering warns or fails is
+//! therefore left out here and lowered when the run reaches it, as without `--aot`.
 
 use {
     crate::{
@@ -31,8 +34,13 @@ use {
 pub struct State {
     /// Whether the session compiles a script's definitions before it runs the script.
     pub enabled: bool,
-    /// The script's lowered expressions, in order, as far as lowering went.
-    lowered: Vec<Sexp>,
+    /// The script's expressions as [`prepare`] lowered them, in order, each until the run takes
+    /// it. `None` is one the run lowers itself.
+    lowered: Vec<Option<Sexp>>,
+    /// Whether [`prepare`] is lowering, so that a warning lowering would signal is held back.
+    lowering: bool,
+    /// Whether the expression being lowered asked to signal a warning.
+    warned: bool,
     /// The closures made ahead whose definitions the run has not reached, by what identifies a
     /// definition: its formals, or its body when it has none.
     waiting: FxHashMap<Sexp, Sexp>,
@@ -40,7 +48,7 @@ pub struct State {
 
 impl State {
     pub unsafe fn trace(&self, marker: &mut Marker<'_>) {
-        for &expression in &self.lowered {
+        for &expression in self.lowered.iter().flatten() {
             marker.mark(expression);
         }
         for &closure in self.waiting.values() {
@@ -74,8 +82,7 @@ pub struct Prepared {
 }
 
 /// Lowers the expressions of `script`, makes the closures of its top-level definitions and has
-/// the optimizing tier compile them. Lowering stops at the first expression that fails to lower,
-/// which reports its error when the run reaches it.
+/// the optimizing tier compile them.
 pub unsafe fn prepare(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
     // The session's state keeps what this makes alive, so the handles made on the way go.
     let mark = crate::heap().handle_mark();
@@ -87,15 +94,22 @@ pub unsafe fn prepare(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
 unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
     finish();
     for node in &script.expressions {
-        let Ok(expression) = lower_script_expression(script, node, keep_source) else {
-            break;
-        };
-        interp().ahead.lowered.push(expression);
+        let state = &mut interp().ahead;
+        state.lowering = true;
+        state.warned = false;
+        let lowered = lower_script_expression(script, node, keep_source);
+        let state = &mut interp().ahead;
+        state.lowering = false;
+        // The error is the expression's to report when it runs, so lowering it again finds it.
+        let lowered = lowered.ok().filter(|_| !state.warned);
+        state.lowered.push(lowered);
     }
     let mut definitions = Vec::new();
     for index in 0..interp().ahead.lowered.len() {
-        let expression = interp().ahead.lowered[index];
-        let Some((symbol, value)) = assignment(expression) else {
+        let Some(expression) = interp().ahead.lowered[index] else {
+            continue;
+        };
+        let Some((symbol, value)) = assignment(expression)? else {
             continue;
         };
         if value.kind() != SexpType::Language || value.car() != symbols().function {
@@ -139,15 +153,24 @@ fn discards_closures() -> bool {
 }
 
 /// The lowered expression at `index` of the prepared script, when [`prepare`] lowered it the
-/// way the run would lower it now.
+/// way the run would lower it now. The session holds the expression no longer: the caller runs
+/// it once.
 pub fn lowered(prepared: &Prepared, index: usize, keep_source: bool) -> Option<Sexp> {
-    if prepared.keep_source != keep_source {
-        return None;
-    }
-    interp().ahead.lowered.get(index).copied()
+    let expression = interp().ahead.lowered.get_mut(index)?.take()?;
+    (prepared.keep_source == keep_source).then_some(expression)
 }
 
-/// Forgets the prepared script: the run is over, or carries on from text parsed again.
+/// Whether a warning lowering is about to signal is held back because [`prepare`] is lowering
+/// the expression ahead of its turn. The expression is then lowered again when the run reaches
+/// it, which signals the warning.
+pub fn holds_back_warning() -> bool {
+    let state = &mut interp().ahead;
+    state.warned |= state.lowering;
+    state.lowering
+}
+
+/// Forgets the prepared script, which the session is done with, and the closures made for
+/// definitions that never ran.
 pub fn finish() {
     let state = &mut interp().ahead;
     state.lowered.clear();
@@ -169,28 +192,31 @@ pub unsafe fn take(formals: Sexp, body: Sexp, env: Sexp) -> Option<Sexp> {
 /// The symbol a top-level expression assigns to and the expression of the value, for the plain
 /// assignments `name <- value`, `name = value` and `name <<- value`, which all bind in the
 /// global environment at the top level.
-unsafe fn assignment(expression: Sexp) -> Option<(Sexp, Sexp)> {
+unsafe fn assignment(expression: Sexp) -> R<Option<(Sexp, Sexp)>> {
     if expression.kind() != SexpType::Language {
-        return None;
+        return Ok(None);
     }
     let head = expression.car();
     let symbols = symbols();
     if head != symbols.assign && head != symbols.assign_eq && head != symbols.assign2 {
-        return None;
+        return Ok(None);
     }
     let arguments = expression.cdr();
     if arguments.kind() != SexpType::Pairlist || arguments.cdr().kind() != SexpType::Pairlist {
-        return None;
+        return Ok(None);
     }
     let target = match arguments.car() {
         target if target.kind() == SexpType::Symbol => target,
         // `"name" <- value` assigns to the variable of that name.
         target if target.kind() == SexpType::String && values::length(target) == 1 => {
-            values::install(&values::string_at(target, 0)?).ok()?
+            let Some(name) = values::string_at(target, 0) else {
+                return Ok(None);
+            };
+            values::install(&name)?
         }
-        _ => return None,
+        _ => return Ok(None),
     };
-    Some((target, arguments.cdr().car()))
+    Ok(Some((target, arguments.cdr().car())))
 }
 
 /// What identifies a definition among every closure made from it: the formals, which lowering

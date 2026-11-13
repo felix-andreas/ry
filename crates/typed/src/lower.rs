@@ -6532,8 +6532,8 @@ unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
 
 /// The type a conversion of what an R call returns gives: fixed for `Str.from_r` and
 /// `Bool.from_r`, and for `Num.from_r` and `List.from_r` the type the conversion gave when the
-/// interpreter last ran it. A `List.from_r` the interpreter has not run takes the item type the
-/// checker gave it, which the conversion holds the R value to when the code runs.
+/// interpreter last ran it. A `List.from_r` the checker typed takes that item type, which the
+/// conversion gives or fails with when the code runs (`interp::arrays::checked_conversion`).
 unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
     let name = rvalues::symbol_name(conversion.call.car());
     let observed = || interp::numbers::observed_conversion(conversion.call);
@@ -6554,6 +6554,8 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
             Some(_) => Err(Refusal::new("a `Num.from_r` of an unexpected type")),
             None => Err(awaiting()),
         },
+        // The conversion gives the checker's type or fails, whatever the interpreter saw it give.
+        _ if conversion.checked.is_some() => conversion.checked.map(list).ok_or_else(awaiting),
         _ => match observed() {
             Some(SexpType::Real) => Ok(list(Item::Dbl)),
             Some(SexpType::Logical) => Ok(list(Item::Lgl)),
@@ -6562,7 +6564,7 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
             Some(_) => Err(Refusal::new(
                 "a `List.from_r` of an R list, whose items typed code cannot take from R yet",
             )),
-            None => conversion.checked.map(list).ok_or_else(awaiting),
+            None => Err(awaiting()),
         },
     }
 }
@@ -6593,18 +6595,29 @@ unsafe fn namespaced_function(head: Sexp) -> Option<Result<Speculation, Refusal>
     };
     // A lazy-loaded namespace binds each function to a promise that reads it from the package's
     // database. Reading it changes nothing a program can observe, so the compiler forces it. Any
-    // other promise runs code, which is the interpreter's to do when the code runs.
+    // other promise runs code, which is the interpreter's to do when the code runs. So is a
+    // read that fails: the interpreter forces the promise again and the program gets the error.
     if let Some(cell) = interp::heap().frame_cell(namespace, symbol)
         && cell.cdr().kind() == SexpType::Promise
         && cell.cdr().car() == rvalues::unbound()
-        && !(interp::methods_core::is_lazy_load_promise(cell.cdr()).unwrap_or(false)
-            && interp::eval::force_promise(cell.cdr()).is_ok())
     {
-        AWAITED.set(Some(Awaited::Promise(cell.cdr())));
-        return Some(Err(Refusal(Cow::Owned(format!(
-            "{AWAITING}{}` once, which loads the function",
-            interp::deparse::deparse_first_line(head)
-        )))));
+        let loaded = match interp::methods_core::is_lazy_load_promise(cell.cdr()) {
+            Ok(true) => interp::eval::force_promise(cell.cdr()).is_ok(),
+            Ok(false) => false,
+            Err(_) => {
+                return Some(Err(Refusal::new(
+                    "the session cannot name `lazyLoadDBfetch`, so it cannot tell a lazy-loaded \
+                     function from a promise that runs code",
+                )));
+            }
+        };
+        if !loaded {
+            AWAITED.set(Some(Awaited::Promise(cell.cdr())));
+            return Some(Err(Refusal(Cow::Owned(format!(
+                "{AWAITING}{}` once, which loads the function",
+                interp::deparse::deparse_first_line(head)
+            )))));
+        }
     }
     let speculation = resolve_function(symbol, namespace)?;
     let (exported, _) = interp::envir::namespace_binding(package, symbol, true).ok()?;

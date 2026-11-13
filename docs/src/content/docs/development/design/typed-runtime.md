@@ -532,9 +532,11 @@ code compiled before the script ran valid once it runs:
   guarded by that closure's identity like every other global call, and the assignment that defines
   the function hands out the same closure, so the guard holds.
 - The preflight passes the item type the checker gives a `List.from_r` to the runtime, so the
-  conversion has a type before any call has run. The conversion compares what R gives with that
-  type on every call and stops with an error on a mismatch, in the interpreter and in compiled
-  code alike (`decisions.md`, "`ry run --aot` compiles a script's typed code before it starts").
+  conversion has a type before any call has run. On every call the conversion turns what R gives
+  into a list of that type: it widens `Bool` and `I64` items as R coerces, because a vector R
+  types as `double` may hold integers, and it stops with an error on any other type. The
+  interpreter and compiled code convert through one function (`decisions.md`, "`ry run --aot`
+  compiles a script's typed code before it starts").
 - A function a loaded namespace binds lazily is read from the package database when the code
   compiles.
 

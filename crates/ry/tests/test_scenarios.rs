@@ -314,8 +314,9 @@ const TIERINGS: [Tiering; 5] = [
 /// The scripts are built from the shapes that make compiling ahead differ from compiling at a
 /// first call: a function called before its callee is defined, a name defined twice or bound to
 /// another function between calls, a definition inside a block, parameters typed by an alias, a
-/// conversion of what R returns, a changed `keep.source`, and a script that stops with an error
-/// partway.
+/// conversion of what R returns, one whose vector is of a narrower type than the checker's or
+/// empty, a literal that warns when it is lowered, a changed `keep.source`, and a script that
+/// stops with an error partway.
 #[test]
 fn typed_scripts_agree_however_they_compile() {
     if let Some(reason) =
@@ -404,6 +405,48 @@ fn typed_scripts_agree_however_they_compile() {
     );
 }
 
+/// A session limits how many closures it compiles, because a running program can make closures
+/// without end. A script's own definitions are not such closures: all of them compile before the
+/// script starts, and the function the script then calls is among them.
+#[test]
+fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead() {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
+        eprintln!("many definitions: skipped, {reason}");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut text = String::new();
+    for index in 0..4200 {
+        text.push_str(&format!("f{index} <- function(x: F64) -> F64 x + {index}.5\n"));
+    }
+    text.push_str("hot <- function(x: F64) -> F64 x * 2.5\nprint(hot(1))\nprint(f4199(1))\n");
+    let script = directory.path().join("many.R");
+    fs::write(&script, text).expect("write the script");
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .args(["run", "--runtime", "ry", "--aot"])
+        .arg(&script)
+        .current_dir(directory.path())
+        .env("RY_TYPED_LOG", "1")
+        .env_remove("RY_JIT")
+        .env_remove("RY_AHEAD_MISS")
+        .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+        .output()
+        .expect("run ry");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[1] 2.5\n[1] 4200.5\n", "{stderr}");
+    let (_, after) = stderr
+        .split_once("typed: compiled 4201 functions ahead of time in ")
+        .unwrap_or_else(|| panic!("not every definition compiled ahead:\n{}", last_lines(&stderr)));
+    assert!(!after.contains("typed: "), "the run compiled or refused later:\n{after}");
+}
+
+fn last_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(5)..].join("\n")
+}
+
 /// A script of typed functions and the calls that print what they give, and whether it means
 /// the same with its annotations erased. Every number is printed as an `F64`, which prints the
 /// same whether or not the checker made the literals behind it `I64`.
@@ -412,7 +455,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(12) {
+        let mut lines = match rng.below(14) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -528,6 +571,33 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                 }
                 definitions.push(format!("print(even_{index}({n}))"));
                 definitions
+            }
+            11 => vec![
+                // Lowering the literal signals a warning, which must wait for the statement's
+                // turn and for the handler the statement before it may have set.
+                format!("near_{index} <- function(x: F64) -> F64 x + 0.25"),
+                ["options(warn = 1)", "options(warn = 0)"][rng.below(2)].to_owned(),
+                format!("print(near_{index}({n}.5L))"),
+                "options(warn = 0)".to_owned(),
+            ],
+            12 => {
+                // R code the checker types as `double` gives integers here, or no items at
+                // all, and the conversion gives the checker's `List<F64>` in every tier.
+                let vector = if rng.chance(1, 2) {
+                    format!("abs(-{n}:{n})")
+                } else {
+                    format!("abs(-{n}:{n})[0]")
+                };
+                vec![
+                    format!("whole_{index} <- function() {vector}"),
+                    format!(
+                        "width_{index} <- function(k: I64) -> F64 {{\n  xs <- \
+                         List.from_r(whole_{index}())\n  Num.to_f64(List.sum(xs)) + \
+                         Num.to_f64(k)\n}}"
+                    ),
+                    format!("print(width_{index}({n}))"),
+                    format!("print(width_{index}({n} + 1))"),
+                ]
             }
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),

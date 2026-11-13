@@ -186,7 +186,8 @@ like `R --no-echo`, except that it keeps going after an error.
 
 `ry run --aot script.R` compiles the script's typed functions before the script starts, so no
 function compiles in the middle of the run. Without the flag, each typed function compiles at its
-first call. The output is the same either way.
+first call. The script prints the same either way, and its warnings and errors arrive at the same
+points.
 
 ```r
 total <- function(n: I64) -> I64 {
@@ -217,11 +218,14 @@ started
 
 A function compiles ahead when it is defined at the top level of the script as
 `name <- function(...)` and each parameter's annotation says which values arrive from R: a number,
-`Bool`, `Str`, a `List` of those, a tag union or a table. The typed functions it calls compile with
-it, whatever their parameters. These still compile at their first call:
+`Bool`, `Str`, a `List` of those, a tag union or a table such as `DataFrame` or
+`DataFrame{price: double[]}`. The typed functions it calls compile with it, whatever their
+parameters. These compile at their first call instead:
 
 - a function defined inside a block, another function or a file the script sources, and a function
   of a package;
+- a function defined after the script set `options(keep.source = TRUE)`, or in a statement that
+  holds a literal R warns about, such as `1.5L`;
 - a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no typed
   function compiled ahead calls;
 - a function that calls a name the script binds to something else later. It was compiled for the
