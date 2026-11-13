@@ -9117,7 +9117,10 @@ unsafe fn assign_slot_element(
             | SexpType::List
             | SexpType::Expression
     );
-    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1) {
+    if !replaceable
+        || (kind == ElementKind::Dollar && length(index) != 1)
+        || (target.is_object() && setter_finds_method(target, kind)?)
+    {
         return Ok(false);
     }
     moves::modifying(target)?;
@@ -9598,6 +9601,16 @@ unsafe fn op_call_tail_update(state: &mut Activation<'_, '_>, instruction: Instr
     Ok(Flow::Next)
 }
 
+/// The slot frame whose slots the running byte code reads, which a `NULL` environment stands
+/// for.
+unsafe fn slot_owner() -> R<usize> {
+    let owner = interp().slot_owner;
+    if owner == crate::NO_SLOTS {
+        panic!("byte code handed out a slot frame's environment outside any slot frame");
+    }
+    Ok(owner as usize)
+}
+
 #[inline(always)]
 unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let object = instruction.input(1);
@@ -9606,19 +9619,64 @@ unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     let shape = state.constant(instruction, 4);
     let value = match crate::records::cached_field(object, name, shape)? {
         Some(value) => value,
-        // Only an object dispatches, to a method that may look at the frame.
-        None if object.is_object() => crate::subset::dollar_value(
-            object,
-            name.car(),
-            call,
-            state.env(Reify::Site("`$` field"))?,
-        )?,
+        // Only an object dispatches, to a method that may look at the frame, so a slot frame
+        // gets its environment only when there is a method.
+        None if object.is_object()
+            && (!state.in_slots() || field_finds_method(object, name.car())?) =>
+        {
+            crate::subset::dollar_value(
+                object,
+                name.car(),
+                call,
+                state.env(Reify::Site("`$` field"))?,
+            )?
+        }
         None => crate::subset::dollar(object, name.car(), call)?,
     };
     record_feedback(state.constants, instruction.at, value);
     (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// Whether the element assignment `kind` on `object` from the running slot frame, which has no
+/// environment, finds a `[<-`, `[[<-` or `$<-` method ([`dispatch::slot_frame_finds_method`]).
+/// Without one the default assignment runs on the slot, as `[<-` would after finding none.
+#[inline(never)]
+unsafe fn setter_finds_method(object: Sexp, kind: ElementKind) -> R<bool> {
+    let name = match kind {
+        ElementKind::Single => "[<-",
+        ElementKind::Double => "[[<-",
+        ElementKind::Dollar => "$<-",
+    };
+    let Some(op) = crate::builtins::primitive(name) else {
+        panic!("base has no `{name}` primitive");
+    };
+    let args = [Arg {
+        tag: nil(),
+        value: object,
+    }];
+    dispatch::slot_frame_finds_method(slot_owner()?, eval::builtin_def(op)?, &args)
+}
+
+/// Whether `object$name` from the running slot frame, which has no environment, finds a `$`
+/// method ([`dispatch::slot_frame_finds_method`]).
+#[inline(never)]
+unsafe fn field_finds_method(object: Sexp, name: Sexp) -> R<bool> {
+    let Some(op) = crate::builtins::primitive("$") else {
+        panic!("base has no `$` primitive");
+    };
+    let args = [
+        Arg {
+            tag: nil(),
+            value: object,
+        },
+        Arg {
+            tag: nil(),
+            value: values::scalar_string_charsxp(name)?,
+        },
+    ];
+    dispatch::slot_frame_finds_method(slot_owner()?, eval::builtin_def(op)?, &args)
 }
 
 #[inline(always)]
@@ -9905,10 +9963,41 @@ unsafe fn slot_subject_call(
 #[inline(always)]
 unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let expression = state.constant(instruction, 1);
-    let value = eval::eval(expression, state.env(Reify::Site("uncompiled expression"))?)?;
+    let value = match slot_dot_dot(state, expression)? {
+        Some(value) => value,
+        None => eval::eval(expression, state.env(Reify::Site("uncompiled expression"))?)?,
+    };
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// `..N` read from the slot frame's `...` without giving the frame an environment, when the
+/// element is there and not missing. `None` leaves the read, and the errors a missing or absent
+/// element raises, to the general evaluation.
+unsafe fn slot_dot_dot(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
+    if !state.in_slots() || expression.kind() != SexpType::Symbol {
+        return Ok(None);
+    }
+    let Some(index) = eval::dot_dot_index(expression).filter(|&index| index >= 1) else {
+        return Ok(None);
+    };
+    let Some(slot) = slot_named(state, symbols().dots) else {
+        return Ok(None);
+    };
+    let mut item = *slot;
+    for _ in 1..index {
+        if item.kind() != SexpType::Dots {
+            return Ok(None);
+        }
+        item = item.cdr();
+    }
+    if item.kind() != SexpType::Dots || item.car() == missing_arg() {
+        return Ok(None);
+    }
+    let value = eval::value_of(item.car())?;
+    interp().visible = true;
+    Ok(Some(value))
 }
 
 #[inline(always)]
@@ -11151,16 +11240,17 @@ unsafe fn replace_variable(
         // An object may dispatch to a replacement method, which `complex_assign` calls with the
         // `*tmp*` and value promises it expects.
         SexpType::Builtin => {
-            if target.is_object() {
+            let definition = eval::builtin_def(function)?;
+            if target.is_object() && dispatches(home, definition, target)? {
                 return Ok(false);
             }
-            Some(eval::builtin_def(function)?)
+            Some(definition)
         }
         // A special such as `[<-` evaluates its own arguments, so only its direct entry can take
         // the registers; anything that entry declines goes to `complex_assign`.
         SexpType::Special => {
             let definition = eval::builtin_def(function)?;
-            if target.is_object()
+            if (target.is_object() && dispatches(home, definition, target)?)
                 || definition.direct.is_none()
                 || !replacement_arguments(setter_call, true)
             {
@@ -11257,6 +11347,22 @@ unsafe fn replace_variable(
         Home::Slot(slot) => heap.store_slot(&mut *slot, result),
     }
     Ok(true)
+}
+
+/// Whether the replacement `definition` may dispatch on `target`, which is an object: always
+/// for a variable in an environment, whose frame `complex_assign` hands to the method, and for a
+/// slot only when a method exists ([`dispatch::slot_frame_finds_method`]).
+unsafe fn dispatches(home: Home, definition: &BuiltinDef, target: Sexp) -> R<bool> {
+    match home {
+        Home::Cell(_) => Ok(true),
+        Home::Slot(_) => {
+            let args = [Arg {
+                tag: nil(),
+                value: target,
+            }];
+            dispatch::slot_frame_finds_method(slot_owner()?, definition, &args)
+        }
+    }
 }
 
 /// Whether a replacement call's arguments are untagged but for the trailing `value`, the shape
@@ -11405,13 +11511,19 @@ pub(crate) unsafe fn call_builtin(
 ) -> R<Sexp> {
     if definition.generic != Generic::None {
         // Dispatch hands the frame to a method, so an unreified slot frame (a `NULL` `env`)
-        // gets its environment, but only when an argument is an object to dispatch on.
-        let env = if env == nil() && args.iter().any(|arg| arg.value.is_object()) {
-            eval::slot_owner_env(Reify::Site("builtin dispatch"))?
+        // gets its environment, but only when dispatch finds a method to hand it to.
+        let env = if env != nil() {
+            Some(env)
+        } else if !args.iter().any(|arg| arg.value.is_object()) {
+            Some(env)
+        } else if dispatch::slot_frame_finds_method(slot_owner()?, definition, args)? {
+            Some(eval::slot_owner_env(Reify::Site("builtin dispatch"))?)
         } else {
-            env
+            None
         };
-        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)?
+        if let Some(env) = env
+            && let Some(value) =
+                dispatch::try_builtin_dispatch(definition, call, function, args, env)?
         {
             return Ok(value);
         }

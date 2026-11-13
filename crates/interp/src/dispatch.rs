@@ -1501,6 +1501,89 @@ unsafe fn apply_next_primitive(
 
 // Dispatch from builtins.
 
+/// Whether dispatching the builtin `definition` on `args` from the slot frame at `owner`, which
+/// has no environment, could find a method. The lookup starts in the closure's environment
+/// instead of the frame's, so it makes no environment, and it finds the same method unless the
+/// frame binds one itself: a slot named like a method for one of the arguments' classes
+/// (`<generic>.<class>`, or `<generic>.default`) counts as found, and so does an S4 object.
+pub unsafe fn slot_frame_finds_method(
+    owner: usize,
+    definition: &BuiltinDef,
+    args: &[Arg],
+) -> R<bool> {
+    if args.iter().any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
+        return Ok(true);
+    }
+    if definition.generic == Generic::None {
+        return Ok(false);
+    }
+    let function = interp().frames[owner].function;
+    let names = function
+        .cdr()
+        .cdr()
+        .element(crate::bytecode::SLOTS)
+        .element(1);
+    for slot in 0..length(names) {
+        let name = symbol_name(names.element(slot));
+        let Some((_, suffix)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if suffix == "default" {
+            return Ok(true);
+        }
+        for arg in args.iter().filter(|arg| arg.value.is_object()) {
+            let classes = get_attr(arg.value, symbols().class);
+            if (0..length(classes)).any(|index| char_str(classes.element(index)).ends_with(suffix))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    let env = function.tag();
+    let Some(first) = args.first() else {
+        return Ok(false);
+    };
+    let base = values::base_namespace();
+    Ok(match definition.generic {
+        Generic::None => false,
+        Generic::Internal => {
+            let generic = match definition.symbol {
+                _ if definition.name == "seq.int" => symbols().seq,
+                Some(symbol) => symbol,
+                None => values::install(definition.name)?,
+            };
+            first.value.is_object() && find_s3_method(generic, first.value, env, base)?.is_some()
+        }
+        Generic::Ops | Generic::MatrixOps => {
+            let group = if definition.generic == Generic::Ops {
+                "Ops"
+            } else {
+                "matrixOps"
+            };
+            let mut found = false;
+            for arg in args.iter().take(2).filter(|arg| arg.value.is_object()) {
+                found |= find_group_method(group, definition.name, arg.value, env)?.is_some();
+            }
+            found
+        }
+        Generic::Summary => match args.iter().find(|arg| arg.tag != symbols().na_rm) {
+            Some(arg) if arg.value.is_object() => {
+                find_group_method("Summary", definition.name, arg.value, env)?.is_some()
+            }
+            _ => false,
+        },
+        Generic::Math | Generic::Complex => {
+            let group = if definition.generic == Generic::Math {
+                "Math"
+            } else {
+                "Complex"
+            };
+            first.value.is_object()
+                && find_group_method(group, definition.name, first.value, env)?.is_some()
+        }
+    })
+}
+
 /// Dispatches a builtin call on its arguments' classes, if any is an object with a method.
 /// Returns `None` when the builtin itself should run.
 pub unsafe fn try_builtin_dispatch(

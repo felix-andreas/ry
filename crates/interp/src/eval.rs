@@ -175,12 +175,33 @@ pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
         if env == known.global_env {
             return heap.global_cell(symbol).map(|(cell, _)| cell);
         }
+        if env.has_gp(gp::PENDING_FRAME) && pending_passes(env, symbol) {
+            env = env.enclosure();
+            continue;
+        }
         if let Some(cell) = heap.frame_cell(env, symbol) {
             return Some(cell);
         }
         env = env.enclosure();
     }
     None
+}
+
+/// Whether a lookup of `symbol` passes the pending environment `env` of a live slot frame
+/// without finding a binding, so it can go on to the enclosure without giving the frame its
+/// environment: the frame binds no slot of that name and no method variable such as
+/// `.Generic`. A closure the frame made looks up its free names through here.
+unsafe fn pending_passes(env: Sexp, symbol: Sexp) -> bool {
+    let state = interp();
+    let Some(owner) = state.frames.iter().rposition(|frame| frame.pending == env) else {
+        return false;
+    };
+    let frame = &state.frames[owner];
+    frame.env == nil()
+        && slot_content(frame.function, frame.slots as usize, symbol).is_none()
+        && !crate::method_vars(state, owner)
+            .iter()
+            .any(|&(name, _)| name == symbol)
 }
 
 /// The value of a binding cell, calling an active binding's function.
@@ -271,6 +292,8 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
                 }
             }
             heap.frame_cell(env, symbol)
+        } else if env.has_gp(gp::PENDING_FRAME) && pending_passes(env, symbol) {
+            None
         } else {
             heap.frame_cell(env, symbol)
         };
@@ -2785,12 +2808,23 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
         };
         let head = |call: Sexp| {
             let car = call.car();
-            if car.kind() == SexpType::Symbol { values::symbol_name(car).to_string() } else { format!("<{:?}>", car.kind()) }
+            if car.kind() == SexpType::Symbol {
+                values::symbol_name(car).to_string()
+            } else {
+                format!("<{:?}>", car.kind())
+            }
         };
         let state = interp();
         let frame = &state.frames[index];
-        let top = state.frames.last().map_or(String::new(), |top| head(top.call));
-        eprintln!("REIFY\t{name}\t{}\t{top}\t{}", head(frame.call), state.frames.len() - 1 - index);
+        let top = state
+            .frames
+            .last()
+            .map_or(String::new(), |top| head(top.call));
+        eprintln!(
+            "REIFY\t{name}\t{}\t{top}\t{}",
+            head(frame.call),
+            state.frames.len() - 1 - index
+        );
     }
     if activity::enabled() {
         let name = match cause {
@@ -3433,16 +3467,20 @@ unsafe fn finish_frame(
 /// Whether something other than what dies with the slot frame at `index` holds its pending
 /// environment as the frame returns `result`: the counted references to it must all come from
 /// the frame's dying closures and the unforced default promises in its slots, the environment
-/// must not be the value returned, and `R_PreserveObject` must not hold it. An error
-/// return keeps it, since the unwind may carry it.
+/// must not be the value returned, and `R_PreserveObject` must not hold it. An unwind carries
+/// it only as the value or the target of a jump: an error holds a message and a call, and
+/// whatever a condition object holds it through counts a reference to it.
 unsafe fn pending_env_kept(index: usize, result: &R<Sexp>) -> bool {
-    let Ok(value) = *result else {
-        return true;
-    };
     let state = interp();
     let frame = &state.frames[index];
     let pending = frame.pending;
-    if value == pending || crate::heap().is_preserved(pending) {
+    let carried = match result {
+        Ok(value) => *value == pending,
+        Err(Unwind::Jump(Jump::Return { env, value })) => *env == pending || *value == pending,
+        Err(Unwind::Jump(Jump::Break { env } | Jump::Next { env })) => *env == pending,
+        Err(Unwind::Jump(Jump::TopLevel) | Unwind::Error(_) | Unwind::Interrupt) => false,
+    };
+    if carried || crate::heap().is_preserved(pending) {
         return true;
     }
     let closures = state
