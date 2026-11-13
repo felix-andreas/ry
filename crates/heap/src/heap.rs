@@ -37,7 +37,7 @@ use {
         object::{
             CARD_CLEAN, CARD_ELEMENTS, CARD_UNTENURED, CARD_YOUNG, EnvironmentObject, LARGE_CLASS,
             NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, TripleObject,
-            VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
+            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
@@ -116,9 +116,13 @@ pub struct Heap {
     young_large: Vec<Sexp>,
     /// Whether the collections running are the deeper ones of an escalation.
     escalating: bool,
-    /// The share of the younger old generation the last escalation found dead, which predicts
-    /// what an intermediate collection would free ([`Heap::escalate_if_full`]).
+    /// The share of the younger old generation the last intermediate collection of an
+    /// escalation found dead, which predicts what the next one would free
+    /// ([`Heap::escalate_if_full`]).
     younger_dead_share: f64,
+    /// Escalations since the last intermediate one that went straight to a major collection
+    /// because the prediction said an intermediate one would free too little.
+    predicted_majors: u32,
     /// Bytes of objects outside the oldest generation the last intermediate or major sweep freed.
     untenured_freed: usize,
     /// Bytes of large vectors allocated since the last major collection.
@@ -588,6 +592,23 @@ impl HeapGrowth {
 
 const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 
+/// The addresses of the strings one character vector's trace already marked, keyed by address
+/// bits, each with whether the string was younger than the vector in its low bit, which a
+/// CHARSXP's alignment leaves free ([`Heap::mark_strings`]).
+struct RepeatTable([usize; REPEAT_TABLE_SLOTS]);
+
+impl Default for RepeatTable {
+    fn default() -> Self {
+        RepeatTable([0; REPEAT_TABLE_SLOTS])
+    }
+}
+
+const REPEAT_TABLE_SLOTS: usize = 64;
+
+/// How many escalations in a row go straight to a major collection on the prediction alone
+/// before an intermediate one measures the younger old generation again.
+const RETRY_INTERMEDIATE_AFTER: u32 = 4;
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
     pub minor_collections: u64,
@@ -774,6 +795,7 @@ impl Heap {
             young_large: Vec::new(),
             escalating: false,
             younger_dead_share: 1.0,
+            predicted_majors: 0,
             untenured_freed: 0,
             large_allocated_since_major: 0,
             remembered: Vec::new(),
@@ -1767,6 +1789,47 @@ impl Heap {
         object.mark_not_mutable();
         self.observe_slots(layout, slots);
         Ok(object)
+    }
+
+    /// A lazy record ([`crate::object::LAZY_RECORD`]) of `layout` with `slot_count` slots, from
+    /// one to [`UNBOXED_SLOTS`], standing for the typed-core value at `value`
+    /// until [`Heap::settle_record`] fills it.
+    pub unsafe fn alloc_lazy_record(
+        &mut self,
+        layout: u32,
+        slot_count: usize,
+        value: u64,
+    ) -> HeapResult<Sexp> {
+        assert!(
+            (1..=UNBOXED_SLOTS).contains(&slot_count),
+            "a lazy record needs one to {} slots, not {slot_count}",
+            UNBOXED_SLOTS
+        );
+        let Some(size) = object_size(SexpType::Record, slot_count) else {
+            return Err(HeapError::TooLong);
+        };
+        let object = self.allocate(SexpType::Record, size, &[])?;
+        object.init_lazy_record(layout, slot_count, value);
+        object.mark_not_mutable();
+        Ok(object)
+    }
+
+    /// Fills the lazy record `record` with `slots`, one per slot, after which it is an ordinary
+    /// record of its layout. Its slots held no handles, so nothing is released.
+    pub unsafe fn settle_record(&mut self, record: Sexp, slots: &[Slot]) {
+        assert!(
+            record.is_lazy_record() && slots.len() == record.record_slot_count(),
+            "only a lazy record settles, with one value per slot"
+        );
+        for slot in slots {
+            if let Slot::Handle(handle) = slot {
+                handle.increment_refcount();
+                self.write_barrier(record, *handle);
+            }
+        }
+        let layout = record.record_layout();
+        record.init_record(layout, slots);
+        self.observe_slots(layout, slots);
     }
 
     /// Adds the kinds of `slots`, a new value of layout `layout`, to the layout's slot profile.
@@ -3172,9 +3235,14 @@ impl Heap {
     /// An intermediate collection that cannot free enough only adds its tracing to the major
     /// collection after it, which happens whenever the objects promoted since the last deeper
     /// collection are a structure the program is still building. The share of them the last
-    /// escalation found dead predicts what an intermediate collection would free now, and
-    /// when that is short of what the small objects need, the escalation goes straight to a
-    /// major collection.
+    /// intermediate collection found dead predicts what one would free now, and when that is
+    /// short of what the small objects need, the escalation goes straight to a major
+    /// collection. Only an intermediate collection measures that share: tenured objects that
+    /// died keep their younger children alive through the remembered set until a major
+    /// collection, so a major one finds most of the younger generation dead where an
+    /// intermediate one frees almost nothing. Every few predicted major collections an
+    /// intermediate one runs anyway, so a program that starts making short-lived objects
+    /// again gets cheap collections back.
     unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
         let mut kind = Collection::Intermediate;
         loop {
@@ -3196,10 +3264,14 @@ impl Heap {
                 return;
             }
             let younger = self.space.younger_old_bytes();
-            if kind == Collection::Intermediate && !vectors_full {
+            if kind == Collection::Intermediate
+                && !vectors_full
+                && self.predicted_majors < RETRY_INTERMEDIATE_AFTER
+            {
                 let expected = (younger as f64 * self.younger_dead_share) as usize;
                 if self.old_small_bytes.saturating_sub(expected) + margin > node_limit {
                     kind = Collection::Major;
+                    self.predicted_majors += 1;
                 }
             }
             if kind == Collection::Major {
@@ -3208,13 +3280,14 @@ impl Heap {
             self.escalating = true;
             self.collect_keeping(kind, keep, request);
             self.escalating = false;
-            // Right after an intermediate collection the younger old generation is nearly
-            // empty, and a share of a few objects predicts nothing.
-            if younger > self.policy.min_node_limit / 20 {
-                self.younger_dead_share = (self.untenured_freed as f64 / younger as f64).min(1.0);
-            }
             if kind == Collection::Major {
                 return;
+            }
+            self.predicted_majors = 0;
+            // Right after a deeper collection the younger old generation is nearly empty, and a
+            // share of a few objects predicts nothing.
+            if younger > self.policy.min_node_limit / 20 {
+                self.younger_dead_share = (self.untenured_freed as f64 / younger as f64).min(1.0);
             }
             kind = Collection::Major;
         }
@@ -3964,16 +4037,31 @@ impl Heap {
                     self.weak_pairs.push(object);
                 } else if TENURED && object.is_carded() {
                     // A deeper collection derives each card of a tenured vector from scratch:
-                    // dirty exactly where an element is younger than the vector.
-                    let length = object.length() as usize;
+                    // dirty exactly where an element is younger than the vector. A card past
+                    // the length (the capacity keeps cards too) holds nothing and comes out clean.
+                    // A card of strings without a single repeat says the vector holds distinct
+                    // strings, like a column of identifiers, where the table only adds its cost
+                    // to every mark, so the cards after it are marked plainly.
+                    let mut strings = object.kind() == SexpType::String;
+                    let mut table = RepeatTable::default();
+                    let elements = object.slice::<Sexp>();
                     let cards = object.cards();
                     for card in 0..object.card_count() {
-                        let start = card * CARD_ELEMENTS;
-                        let mut card_younger = false;
-                        for index in start..(start + CARD_ELEMENTS).min(length) {
-                            card_younger |=
-                                self.mark_child::<TENURED>(object.stored_element(index));
-                        }
+                        let start = (card * CARD_ELEMENTS).min(elements.len());
+                        let end = (start + CARD_ELEMENTS).min(elements.len());
+                        let chunk = elements.get(start..end).unwrap_or_default();
+                        let card_younger = if strings {
+                            let (younger, repeated) =
+                                self.mark_strings::<TENURED>(chunk, &mut table);
+                            strings = repeated;
+                            younger
+                        } else {
+                            let mut younger = false;
+                            for &element in chunk {
+                                younger |= self.mark_child::<TENURED>(element);
+                            }
+                            younger
+                        };
                         *cards.add(card) = if card_younger {
                             CARD_UNTENURED
                         } else {
@@ -3982,25 +4070,17 @@ impl Heap {
                         has_younger |= card_younger;
                     }
                 } else if object.kind() == SexpType::String && object.length() <= 16 {
+                    // A short vector has too few repeats to pay for clearing the table.
                     for &element in object.slice::<Sexp>() {
                         has_younger |= self.mark_child::<TENURED>(element);
                     }
                 } else if object.kind() == SexpType::String {
-                    // A character vector usually repeats a few strings, like a column of
-                    // categories, and marking one again only finds it marked. A small table of
-                    // the addresses this vector already marked skips the repeats. Its elements
-                    // are CHARSXPs, which hold no references, so a skipped repeat loses nothing.
-                    // A short vector has too few repeats to pay for clearing the table.
-                    let mut marked = [0usize; 64];
-                    for &element in object.slice::<Sexp>() {
-                        let address = element.as_ptr() as usize;
-                        let slot = (address >> 4) as u8 as usize % marked.len();
-                        if marked[slot] == address {
-                            continue;
-                        }
-                        marked[slot] = address;
-                        has_younger |= self.mark_child::<TENURED>(element);
-                    }
+                    has_younger |= self
+                        .mark_strings::<TENURED>(
+                            object.slice::<Sexp>(),
+                            &mut RepeatTable::default(),
+                        )
+                        .0;
                 } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
                     for &element in object.slice::<Sexp>() {
                         has_younger |= self.mark_child::<TENURED>(element);
@@ -4024,7 +4104,7 @@ impl Heap {
             }
             Shape::Record => {
                 for index in 0..object.record_slot_count() {
-                    if let Some(handle) = object.record_handle(index) {
+                    if let Some(handle) = object.record_child(index) {
                         has_younger |= self.mark_child::<TENURED>(handle);
                     }
                 }
@@ -4033,6 +4113,43 @@ impl Heap {
             Shape::WeakRef | Shape::Primitive => {}
         }
         has_younger
+    }
+
+    /// Marks the strings of a character vector and says whether one of them is younger and
+    /// whether one of them repeated a string the table holds. A character vector usually
+    /// repeats a few strings, like a column of categories, and marking one again only finds it
+    /// marked, so `table` skips the strings this vector already marked. Strings hold no
+    /// references, so a skipped repeat loses nothing but its age, which the table keeps: a
+    /// string cannot age between two of its marks, because the first one aged it.
+    ///
+    /// The table is cheaper than any mark test. A repeat costs a hash of the address and one
+    /// load from a table that stays in L1, about 6 instructions; a mark test must find the
+    /// string's page, size class, word and bit and read the mark and tenured bitmaps, about 25.
+    /// A flat bitmap over a space of strings alone would still need the range check, the shift
+    /// and both bitmap reads, and a mark bit in the string's own header would cost a cache miss
+    /// per element. A string the table misses costs about 11 instructions more than a plain
+    /// mark, which is why a caller stops using it on a vector without repeats.
+    #[inline(always)]
+    unsafe fn mark_strings<const TENURED: bool>(
+        &mut self,
+        strings: &[Sexp],
+        table: &mut RepeatTable,
+    ) -> (bool, bool) {
+        let mut has_younger = false;
+        let mut marked = 0;
+        for &string in strings {
+            let address = string.as_ptr() as usize;
+            let slot = &mut table.0[(address >> 4) as u8 as usize % REPEAT_TABLE_SLOTS];
+            if *slot & !1 == address {
+                has_younger |= *slot & 1 != 0;
+                continue;
+            }
+            let younger = self.mark_child::<TENURED>(string);
+            *slot = address | younger as usize;
+            has_younger |= younger;
+            marked += 1;
+        }
+        (has_younger, marked < strings.len())
     }
 
     /// Marks the elements in the dirty cards of a remembered carded vector that `kind` of
@@ -4259,7 +4376,7 @@ impl Heap {
                     }
                     Shape::Record => children.extend(
                         (0..parent.record_slot_count())
-                            .filter_map(|slot| parent.record_handle(slot)),
+                            .filter_map(|slot| parent.record_child(slot)),
                     ),
                     _ => {}
                 }
@@ -4652,7 +4769,7 @@ unsafe fn has_younger_child(parent: Sexp) -> bool {
             younger(parent, parent.external_tag()) || younger(parent, parent.external_protected())
         }
         Shape::Record => (0..parent.record_slot_count())
-            .filter_map(|slot| parent.record_handle(slot))
+            .filter_map(|slot| parent.record_child(slot))
             .any(|handle| younger(parent, handle)),
         Shape::WeakRef | Shape::Primitive => false,
     }

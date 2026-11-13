@@ -602,16 +602,15 @@ unsafe fn call_handler(request: &Request) -> R<Sexp> {
         // `Sys.sleep()`.
         let state = interp();
         let shown = std::mem::replace(&mut state.show_error_messages, false);
-        let suspended = (state.handlers.take(), state.restarts.take());
-        state.suspended_handlers.push(suspended);
+        let (handlers, restarts) = (state.handlers.take(), state.restarts.take());
+        let saved = crate::conditions::set_aside(handlers.clone(), restarts.clone());
         let srcref = state.srcref;
         let result = eval::eval(expressions.element(0), env);
+        drop(saved);
         let state = interp();
         state.show_error_messages = shown;
-        if let Some((handlers, restarts)) = state.suspended_handlers.pop() {
-            state.handlers = handlers;
-            state.restarts = restarts;
-        }
+        state.handlers = handlers;
+        state.restarts = restarts;
         state.srcref = srcref;
         let result = result?;
         crate::heap().root(result);
