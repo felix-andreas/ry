@@ -425,11 +425,38 @@ unsafe fn do_psort(call: &Call<'_>) -> R<Sexp> {
     let mut positions = Vec::with_capacity(length(partial));
     for &position in values::reals(partial) {
         if !(position >= 1.0 && position <= count as f64) {
-            return Err(error(format!("index {} outside bounds", position as i64)));
+            return Err(error(format!("'partial' index {} outside bounds", position as i64)));
         }
         positions.push(position as usize - 1);
     }
     positions.sort_unstable();
+    // Numbers are selected in place on a copy of the values; NA and NaN compare equal to each
+    // other and after every number, as `rcmp(nalast = TRUE)` orders them.
+    match x.kind() {
+        SexpType::Real => {
+            let mut items = values::reals(x).to_vec();
+            let compare = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
+                (false, false) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+            };
+            partial_sort(&mut items, 0, count as isize - 1, &positions, &compare);
+            let result = values::alloc_uninit(SexpType::Real, count)?;
+            values::reals_mut(result).copy_from_slice(&items);
+            return Ok(result);
+        }
+        SexpType::Integer | SexpType::Logical => {
+            let mut items = values::ints(x).to_vec();
+            // `NA_integer_` is the smallest `i32`, so flipping it above every number orders it last.
+            let compare = |left: i32, right: i32| left.wrapping_sub(1).cmp(&right.wrapping_sub(1));
+            partial_sort(&mut items, 0, count as isize - 1, &positions, &compare);
+            let result = values::alloc_uninit(x.kind(), count)?;
+            values::ints_mut(result).copy_from_slice(&items);
+            return Ok(result);
+        }
+        _ => {}
+    }
     let column = column(x).ok_or_else(|| error("only atomic vectors can be sorted"))?;
     let mut order: Vec<usize> = (0..count).collect();
     let compare = |left: usize, right: usize| column.compare(left, right, true);
@@ -2013,12 +2040,12 @@ fn shell_sort<T: Copy>(items: &mut [T], greater: impl Fn(T, T) -> bool) {
 /// Places the element of rank `target` (a position in `order`) correctly within
 /// `order[low..=high]`, with nothing greater before it and nothing smaller after it. This is
 /// Hoare's selection as Wirth presents it.
-fn select(
-    order: &mut [usize],
+fn select<T: Copy>(
+    order: &mut [T],
     low: isize,
     high: isize,
     target: usize,
-    compare: &impl Fn(usize, usize) -> Ordering,
+    compare: &impl Fn(T, T) -> Ordering,
 ) {
     let target = target as isize;
     let (mut left, mut right) = (low, high);
@@ -2049,12 +2076,12 @@ fn select(
 
 /// Selects every position in `positions` (sorted) within `order[low..=high]`: the position
 /// nearest the middle first, then the ones on each side of it within their halves.
-fn partial_sort(
-    order: &mut [usize],
+fn partial_sort<T: Copy>(
+    order: &mut [T],
     low: isize,
     high: isize,
     positions: &[usize],
-    compare: &impl Fn(usize, usize) -> Ordering,
+    compare: &impl Fn(T, T) -> Ordering,
 ) {
     if positions.is_empty() || high - low < 1 {
         return;

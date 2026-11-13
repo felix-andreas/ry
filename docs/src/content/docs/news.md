@@ -9,6 +9,26 @@ description: Release announcements and project news
 
 A process that ends in SIGSEGV, SIGBUS or SIGABRT, for example a segmentation fault in a package's compiled code, now prints a report on standard error before it dies: the ry version, the signal with the faulting address and its cause, the R call stack with function names, and the native stack. It then dies by the same signal, so exit statuses and core dumps are unchanged. Windows prints no report yet. See [the CLI reference](/reference/cli#crash-reports).
 
+### Faster aperm, t, apply, sweep, partial sorts and scalar array indexing
+
+`aperm()` and `t()` copied one element at a time through a per-element type dispatch, and `aperm()` allocated an index vector for every element. Both now run one blocked, strided copy specialized by element type, so the data is read and written once, in cache-sized tiles, and a permutation that keeps the first dimension is a plain run copy. `aperm()` and `t()` also read an array whose dimnames were set after creation in place, where they used to copy its data first. `a[i, j, k]` with one plain position per dimension of an array without dimnames reads the element directly instead of building index vectors, and `sort(x, partial = ...)` (so `quantile()` and `median()`) selects on a copy of the numbers instead of an index permutation. `apply()` and `sweep()` get faster through `aperm()`.
+
+Measured on one machine against GNU R 4.6.2 (seconds, best of three, release build):
+
+| | ry before | ry after | GNU R |
+|---|---:|---:|---:|
+| `aperm(a, c(2, 1, 3))`, 200x200x50, 20 times | 1.39 | 0.22 | 0.42 |
+| `aperm(a, c(3, 1, 2))`, 200x200x50, 20 times | 1.25 | 0.14 | 0.26 |
+| `aperm()` of an integer array and of one with dimnames, 20 times | 0.98, 1.22 | 0.07, 0.14 | 0.16, 0.54 |
+| `t(m)`, 1000x1000, 200 times | 1.88 | 0.69 | 0.91 |
+| `a[3, 4, 5]`, 200,000 times | 0.060 | 0.017 | 0.006 |
+| `apply(m, 1, sum)` and `sweep(m, 2, colMeans(m))`, 1000x1000 | 0.037, 0.046 | 0.012, 0.016 | 0.025, 0.016 |
+| `apply(a, c(1, 3), sum)`, 200x200x50 | 0.082 | 0.025 | 0.052 |
+| `quantile()` of 2 million doubles, 5 times | 1.14 | 0.34 | 0.35 |
+| `sort(x, partial = 1e6)`, 5 times | 0.41 | 0.19 | 0.18 |
+
+Scalar array indexing at the top level and `rbind()` of data frames (0.075 s before, 0.037 s after for 200 calls, against 0.025 s) are still slower than GNU R, because their remaining time is in the interpreter's per-call overhead.
+
 ### The VS Code extension on Windows
 
 The Marketplace had no Windows package for 0.4.4, so VS Code on Windows installed the universal `ry.vsix`, which bundles no binary, and failed with "spawn ry ENOENT" in the log only. A release now publishes the universal `ry.vsix` only when every platform has its package, and the extension shows an error with a link to the installation page when it finds no `ry` to start.
