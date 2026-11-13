@@ -4,7 +4,7 @@
 use {
     crate::{
         AnalysisSettings, DataFiles, Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase,
-        SourceFile, SpliceCache, binds_only_own_name,
+        SourceFile, TreeStore, binds_only_own_name,
         diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
         item_check, item_naming, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
@@ -243,9 +243,9 @@ const VALIDATED: &str = "validated ";
 #[derive(Clone)]
 pub struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: Arc<SpliceCache>,
+    trees: Arc<TreeStore>,
     executed: Arc<Mutex<Vec<String>>>,
-    one_shot: bool,
+    diagnostics_only: bool,
 }
 
 impl Default for ProbeDatabase {
@@ -263,9 +263,9 @@ impl Default for ProbeDatabase {
                 };
                 log.lock().expect("probe log").push(entry);
             }))),
-            splice_cache: Arc::default(),
+            trees: Arc::default(),
             executed,
-            one_shot: false,
+            diagnostics_only: false,
         }
     }
 }
@@ -275,21 +275,23 @@ impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
 impl Db for ProbeDatabase {
-    fn splice_cache(&self) -> &SpliceCache {
-        &self.splice_cache
+    fn trees(&self) -> &TreeStore {
+        &self.trees
     }
 
-    fn one_shot(&self) -> bool {
-        self.one_shot
+    fn editor_facts(&self) -> bool {
+        !self.diagnostics_only
     }
 }
 
 impl ProbeDatabase {
-    /// A probe for a host that checks once and never edits, like `RootDatabase::one_shot`.
-    pub fn one_shot() -> ProbeDatabase {
+    /// A probe for a host that only reports diagnostics, like
+    /// `RootDatabase::for_command(false)`, with a store so small that any project of three
+    /// files drops trees.
+    pub fn diagnostics_only() -> ProbeDatabase {
         ProbeDatabase {
-            splice_cache: Arc::new(SpliceCache::disabled()),
-            one_shot: true,
+            trees: Arc::new(TreeStore::bounded(2)),
+            diagnostics_only: true,
             ..ProbeDatabase::default()
         }
     }

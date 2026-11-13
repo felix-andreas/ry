@@ -830,7 +830,7 @@ fn classify_non_local_read(
         })
     };
     if crate::package_scheme_exists_in(db, context.library, name, package_binds)
-        || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
+        || test_files.is_some_and(|_| crate::name_layer(db, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
         || crate::session::resolves(

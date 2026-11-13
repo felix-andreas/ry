@@ -5,7 +5,7 @@
 
 use {
     semantics::{
-        Db, DocumentKind, ProjectFiles, SourceFile, SpliceCache, diagnostics::file_diagnostics,
+        Db, DocumentKind, ProjectFiles, SourceFile, TreeStore, diagnostics::file_diagnostics,
         item_tree, stubs::install_shipped_stubs, test_document_kind,
     },
     std::{
@@ -24,7 +24,7 @@ static EXECUTES: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
 #[derive(Clone)]
 struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: Arc<SpliceCache>,
+    trees: Arc<TreeStore>,
 }
 
 impl Default for ProbeDatabase {
@@ -39,7 +39,7 @@ impl Default for ProbeDatabase {
                     }
                 }
             }))),
-            splice_cache: Arc::default(),
+            trees: Arc::default(),
         }
     }
 }
@@ -49,8 +49,8 @@ impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
 impl Db for ProbeDatabase {
-    fn splice_cache(&self) -> &SpliceCache {
-        &self.splice_cache
+    fn trees(&self) -> &TreeStore {
+        &self.trees
     }
 }
 

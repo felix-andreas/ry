@@ -86,6 +86,48 @@ crates", has the shape and the measurements behind this list.
 - **`libr` has 24 test binaries, each linked against the whole runtime**, and no fast linker is
   configured. Both show in `cargo test-release`, not in the edit loop measured above.
 
+## Open: the analysis core after the single lookup path
+
+`decisions.md`, "Decision record: every host resolves names through one path, and trees live in
+the host's store", has the shape and the measurements behind this list.
+
+- **The type store.** `Ty` is a pointer to an immortal hash-consed entry whose kinds hold `Vec`s.
+  The target is a `u32` id into a struct-of-arrays store with a per-item store for types that
+  contain inference variables. Three caches exist only because of the current shape and go with
+  it: the per-thread recent-entry cache in front of the interner's shards (`types.rs`), and
+  `InferenceTable`'s `resolve_cache` and `definition_cache` (`infer.rs`).
+- **Opening a file settles its diagnostics 8 ms later than with the two paths** (24 ms against
+  16 ms on an idle server on the finance bench, and 100 to 130 ms against 41 to 44 ms for the
+  file open at start-up; `tools/bench/tooling/lsp_latency.py`). Keystroke latency is equal.
+  Not profiled. The likely cause is that opening lowers the file's durability, which makes
+  salsa verify every memo's inputs once, and `project_bound_names` reads a memo of every file
+  where the two-path lookup read only the names the file uses. At start-up the same query is
+  computed for the whole project before the first file's check can finish.
+- **Every item of an edited file lowers again before `item_hir` backdates**, because no memo
+  holds the item's syntax. It does not show in request latency after an edit. Lowering only
+  the items whose window of the tree changed needs the splice to report which top-level runs
+  it copied.
+- **Tag completion and two reference searches walk every syntax tree untracked** (`ide.rs`,
+  the callers of `parse` over all project files). The `spelled_names` query is the model: a
+  per-file memo of the names a file spells, so a search opens only the files that can match.
+- **"Is this file strict" has three definitions** (`semantics.rs` twice, `load_index.rs` once)
+  that disagree on the default. One function should answer it.
+- **`StubLibrary` is nine maps keyed by `String`**, and `visible_arithmetic_classes` merges two
+  cloned sets per file. Keys should be `Symbol`s.
+- **The server mirrors a tracked query by hand** (`attached_by_file` in `Worker`,
+  `server.rs`). Read `file_attached_namespaces` instead.
+- **`item_links` sorts its names and edges by `Symbol::index()`**, which is interning order, and
+  parallel workers intern in a different order on every run. Every reader is order-insensitive
+  today. Sort by the name's text, or by first use in the item, before a reader depends on the
+  order.
+- **Two per-body facts in `check.rs` are sized to the whole item**: the `superassign_seeds`
+  column and the `callees` bitset are allocated at the item's binding count for every function
+  body or bracket query that asks. Size them to the body, or collect once per item.
+- **`TreeStore` is one process-wide mutex**, taken by every `parse` and `item_node`, and two
+  workers that miss the same file both parse it. Shard the store by file id and let the second
+  worker wait for the first one's tree. Not measured as a cost on the finance bench at four
+  cores.
+
 ## Open: one switch for every fast path
 
 - `RY_FAST_PATHS=0` is checked inside three prologues only (`fast_paths_enabled` in `crates/interp/src/base_fast_paths.rs`), so every other base and package prologue still runs and a fast-path bug cannot be bisected with it. Install time is the wrong place for the check, because a start-up image already holds installed prologues; check it once where a prologue internal is dispatched. Found while tracing withr's `get_options` prologue, which passed every name in one character vector to `options()` (only the first is read) and so broke `local_options` with an unset first option.
@@ -4081,7 +4123,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Ten typing fixtures pin the overload-set and function-compatibility rules.** Writing them exposed a reference contradiction on a non-call use of an overloaded name: the implementation resolves to the last and most general candidate with recorded rationale, and the reference wrongly said first. The reference is fixed.
 - **Thirteen typing fixtures pin the `[[`, `[` and `$` rules and the guard-narrowing rules.** The per-position IDE differential over them caught one real defect: `$` field completion now offers a non-syntactic name in its backtick-quoted, insertable spelling, through `syntax::is_syntactic_name`.
 - **Eight typing fixtures pin the operator rules and the reserved constants.** Writing them caught a real bug, because the typed `NA_*` constants all lowered through the bare-`NA` catch-all and inferred `logical`. `LiteralKind::Na(NaAtom)` carries the atom at lowering now.
-- **A whole-project walk reads a small tracked projection of naming, not full `ItemNaming`.** `item_interface_reads` and `item_top_level_names` serve the interface group walk, `conditional_slot_items` and `script_definition`'s statement branch, so a body edit that shifts ranges without changing a name backdates and no project-wide walk re-executes per keystroke. Measured by `examples/keystroke_probe.rs`, walks went from 8 of 8 edits to 0 of 8. A new-item edit still re-runs them, as it must.
+- **A whole-project walk reads a small tracked projection of naming, not full `ItemNaming`.** `item_links` and `item_top_level_names` serve the interface group walk, `conditional_slot_items` and `script_definition`'s statement branch, so a body edit that shifts ranges without changing a name backdates and no project-wide walk re-executes per keystroke. Measured by `examples/keystroke_probe.rs`, walks went from 8 of 8 edits to 0 of 8. A new-item edit still re-runs them, as it must.
 - **Two shadow lints ship, both default-off.** `shadows-builtin` covers a top-level binding over a `base` export and `shadows-namespace` covers one over another stub namespace's name. Both read the stub corpus only, because bare resolution is ungated, so there is no NAMESPACE plumbing and no drift between the CLI and the LSP. A dotted S3 name is naturally exempt, because it is not an export.
 - **A top-level slot's read-before-write observes the cross-item binding.** It resolves through `GlobalEnv::scheme(name, deferred = false)`, which is the nearest earlier item in a script and the definition winner or conditional slot in a package, mirroring the unused check's cross-item-read rule. The observed type is materialized as the slot's pre-state, re-established after each loop-pass rollback, so the loop join keeps it and a first-iteration type error survives to the reported stable pass. A self-referential-only name keeps the tolerant `Unknown`.
 - **Generic-application arity errors report at the applied name.** That covers a generic applied with the wrong number of type arguments, a non-generic given arguments, and a bare generic that must be applied, except under `@new`, whose representation check infers the arguments. A mis-applied name floors to `Unknown` in the relations, so the one arity error never cascades.
@@ -4261,14 +4303,15 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
     1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
   - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
-    `test_incremental.rs` pins; a coarser one-shot `item_check` would be the next cut. It is also
-    the next memory cut: salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
+    `test_incremental.rs` pins. Every host runs the same queries (`decisions.md`, "Decision
+    record: every host resolves names through one path, and trees live in the host's store"), so
+    a cut here is a cut for the server too. Salsa edges are about 29 MiB of the heap peak, 8 MiB
+    of it `item_check`.
   - Done: kind-column scans, phase overlap, one-allocation HIR, memchr lexing and a one-pass tree
     finish took finance to 17.6 G instructions and 222-228 MiB in release (`decisions.md`, "The
     one-shot check scans kind columns and overlaps its serial phases"). Left: the parser and
     `TreeBuilder` self cost (about 1.4 G), the lexer's ident scans and per-token work (about
-    0.65 G), and salsa fetch overhead spread across queries. Tried without gain: skipping the
-    `SalsaGlobals::layer` memo in one-shot mode (+64 M).
+    0.65 G), and salsa fetch overhead spread across queries.
   - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
     and type instantiation dominate it.
   - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
