@@ -11,6 +11,10 @@
 //! assigns the new ones at the same place, a read sees the same value on every path, including
 //! around a loop and after a join of branches that built different shapes.
 //!
+//! A tag without a payload is one static box per shape, which nothing allocates, but a variable
+//! that holds one becomes its shape all the same, so a test of it compares a number instead of
+//! loading the shape out of the box.
+//!
 //! Variables that are copied into each other form a group, which is replaced as a whole or not
 //! at all. A group keeps its boxes when any of its variables is assigned by anything but a
 //! construction, a copy or a tag without a payload, or is used by anything but a read of its
@@ -48,7 +52,7 @@ fn unbox_once(function: &mut Function) -> bool {
     let mut groups = Groups {
         parents: (0..locals as u32).collect(),
     };
-    let mut constructs = false;
+    let mut builds = false;
     for inst in function.blocks.iter().flat_map(|block| &block.insts) {
         match (&inst.op, inst.dest) {
             (&Op::Copy(source), Some(dest))
@@ -56,16 +60,19 @@ fn unbox_once(function: &mut Function) -> bool {
             {
                 groups.join(source, dest);
             }
-            (Op::Construct(shape, _), _) => constructs |= has_box(*shape),
+            (Op::Construct(..) | Op::Const(Constant::Object(_)), _) => builds = true,
             _ => {}
         }
     }
-    if !constructs {
+    if !builds {
         return false;
     }
 
-    // A group whose boxes stay, marked at the local that names the group.
+    // A group whose boxes stay, and a group some instruction builds a box or a tag for, each
+    // marked at the local that names the group. A group nothing builds has nothing to replace,
+    // which is every group of a round before this one.
     let mut kept = Bits::new(locals);
+    let mut built = Bits::new(locals);
     let mut fields = Fields {
         slots: Vec::new(),
         heads: vec![NONE; locals],
@@ -77,17 +84,19 @@ fn unbox_once(function: &mut Function) -> bool {
                 if !holds_box(function, local) {
                     continue;
                 }
-                let replaceable = inst.dest == Some(local)
-                    && match inst.op {
-                        Op::Construct(..) => true,
-                        Op::Copy(source) => holds_box(function, source),
-                        Op::Const(Constant::Object(pointer)) => {
-                            shapes::constant_shape(pointer).is_some()
-                        }
-                        _ => false,
-                    };
-                if !replaceable {
-                    kept.insert(groups.find(local) as usize);
+                let group = groups.find(local) as usize;
+                let builds = match inst.op {
+                    Op::Construct(..) => true,
+                    Op::Const(Constant::Object(pointer)) => {
+                        shapes::constant_shape(pointer).is_some()
+                    }
+                    _ => false,
+                };
+                let copies = matches!(inst.op, Op::Copy(source) if holds_box(function, source));
+                if inst.dest != Some(local) || !(builds || copies) {
+                    kept.insert(group);
+                } else if builds {
+                    built.insert(group);
                 }
             }
             for operand in inst.op.operands() {
@@ -123,7 +132,6 @@ fn unbox_once(function: &mut Function) -> bool {
 
     // Each field's variable has the type of the values the constructions store in it, or the
     // type the box stores when they differ.
-    let mut boxed = Bits::new(locals);
     for inst in function.blocks.iter().flat_map(|block| &block.insts) {
         let (Op::Construct(shape, values), Some(dest)) = (&inst.op, inst.dest) else {
             continue;
@@ -132,9 +140,6 @@ fn unbox_once(function: &mut Function) -> bool {
             continue;
         }
         let group = groups.find(dest);
-        if has_box(*shape) {
-            boxed.insert(group as usize);
-        }
         let mut at = fields.heads[group as usize];
         while let Some(slot) = fields.slots.get_mut(at as usize) {
             at = slot.next;
@@ -180,7 +185,7 @@ fn unbox_once(function: &mut Function) -> bool {
             continue;
         }
         let group = groups.find(local) as usize;
-        if kept.contains(group) || !boxed.contains(group) {
+        if kept.contains(group) || !built.contains(group) {
             continue;
         }
         *first = (locals + added.len()) as u32;
@@ -262,11 +267,6 @@ fn unbox_once(function: &mut Function) -> bool {
 /// parameter holds its caller's box.
 fn holds_box(function: &Function, local: Local) -> bool {
     !function.is_param(local) && matches!(function.ty(local), Type::Record(_) | Type::Tag(_))
-}
-
-/// Whether values of the shape are boxes on the heap. A shape without fields is one static box.
-fn has_box(shape: u32) -> bool {
-    shapes::shape(shape).words != 0
 }
 
 /// Whether a field read into a local of type `read` may copy a local of type `value`: the same

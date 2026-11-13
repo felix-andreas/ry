@@ -332,3 +332,39 @@ fn a_box_held_only_by_a_removed_box_is_removed_too() {
     assert_eq!(constructs(&function), 0);
     assert_eq!(field_reads(&function), 0);
 }
+
+#[test]
+fn a_variable_that_only_holds_tags_without_payloads_becomes_their_shape() {
+    let (Some(north), Some(south)) = (shapes::intern(20, &[]), shapes::intern(21, &[])) else {
+        panic!("a tag without a payload is a shape");
+    };
+    let union = Type::Tag(shapes::union_of(&[north, south]));
+    let mut builder = Builder::new(String::from("test"), &[Type::Bool]);
+    let (then, join) = (builder.block(), builder.block());
+    let constant = Constant::Object(shapes::constant(north));
+    let region = builder.emit(union, Op::Const(constant));
+    builder.terminate(Terminator::Branch {
+        condition: Local(0),
+        then,
+        otherwise: join,
+    });
+    builder.switch_to(then);
+    let constant = Constant::Object(shapes::constant(south));
+    builder.push(Some(region), Op::Const(constant));
+    builder.terminate(Terminator::Jump(join));
+    builder.switch_to(join);
+    let passed = builder.emit(Type::Tag(shapes::ANY), Op::Copy(region));
+    let shape = builder.emit(Type::Int, Op::ShapeOf(passed));
+    builder.terminate(Terminator::Return(shape));
+    let mut function = builder.function;
+    unbox(&mut function);
+    // The test of the shape reads a variable, where it would load the shape out of the box.
+    let insts = function.blocks.iter().flat_map(|block| &block.insts);
+    assert!(
+        insts
+            .clone()
+            .all(|inst| matches!(inst.op, Op::Const(Constant::Int(_)) | Op::Copy(_))),
+        "{function}"
+    );
+    assert_eq!(insts.count(), 4);
+}
