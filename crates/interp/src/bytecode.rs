@@ -5547,7 +5547,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (0..length(names))
                             .all(|name| names.element(name).kind() == SexpType::Symbol)
                 }
-                Switch => valid_switch_table(constant(value)?, &constant),
+                Switch => valid_switch_table(constant(value)?, constant),
                 Cache => value < caches,
                 Target => is_start(value),
                 Loop => value < loops,

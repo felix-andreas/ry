@@ -98,10 +98,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
         altrep_string_elt: |object, index| unsafe {
-            Ok(crate::altrep::sexp_elt(object, index as crate::R_xlen_t)?)
+            crate::altrep::sexp_elt(object, index as crate::R_xlen_t)
         },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
-        altrep_wrap: |object| unsafe { Ok(crate::altrep::try_wrap(object)?) },
+        altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
         altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
         altrep_summary: |object, method, remove_na| unsafe {
             Ok(match method {
