@@ -169,11 +169,17 @@
               "ac_cv_func_pown=no"
             ];
             # Ubuntu's GCC hardens by default with exactly these flags; Nix's set adds others
-            # (strict flex arrays, zeroed call-used registers) that move stack layout, and so what
-            # a case that reads GNU R's uninitialized memory prints
-            # (base__replacement_promises_and_errors).
+            # (strict flex arrays, zeroed call-used registers) that move stack layout.
             hardeningDisable = [ "all" ];
             env.NIX_CFLAGS_COMPILE = "-D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fcf-protection";
+            # Ubuntu's GCC links position-independent executables by default, this one does not.
+            # A case that reads a pointer as a vector length (base__replacement_promises_and_errors)
+            # sees a long vector only at a PIE's high heap addresses. R itself is libR plus
+            # Rmain.o, which is already compiled with -fpic; configure's own probes must not link
+            # with -pie.
+            postConfigure = ''
+              substituteInPlace Makeconf --replace-fail "MAIN_LDFLAGS = " "MAIN_LDFLAGS = -pie "
+            '';
             enableParallelBuilding = true;
             postInstall = ''
               HOME="$TMPDIR" "$out/bin/R" CMD INSTALL ${rlang}
