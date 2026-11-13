@@ -98,10 +98,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
         altrep_string_elt: |object, index| unsafe {
-            Ok(crate::altrep::sexp_elt(object, index as crate::R_xlen_t)?)
+            crate::altrep::sexp_elt(object, index as crate::R_xlen_t)
         },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
-        altrep_wrap: |object| unsafe { Ok(crate::altrep::try_wrap(object)?) },
+        altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
         altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
         altrep_summary: |object, method, remove_na| unsafe {
             Ok(match method {
@@ -490,9 +490,11 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let state = interp::interp();
         let handlers = state.handlers.take();
         let restarts = state.restarts.take();
+        let saved = interp::conditions::set_aside(handlers.clone(), restarts.clone());
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
         let result = eval(expression, env);
+        drop(saved);
         let state = interp::interp();
         state.handlers = handlers;
         state.restarts = restarts;

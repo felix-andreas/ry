@@ -933,13 +933,16 @@ print(tryCatch(apply1(named, "bad"), error = conditionMessage))
 
 #[test]
 fn run_warns_when_a_comment_and_an_inline_annotation_disagree() {
-    let script = "#: fn(x: character) -> character\nf <- function(x: integer) x\nprint(f(2L))\n";
+    // Only `x` is typed both ways, so only `x` disagrees, and the run applies the inline
+    // `integer`. The return is typed by the comment alone, so the comment's type applies there
+    // and must hold for the body.
+    let script = "#: fn(x: character) -> integer\nf <- function(x: integer) x\nprint(f(2L))\n";
     for runtime in runtimes() {
         let (status, stdout, stderr) = run_project(runtime, &[("script.R", script)]);
         assert_eq!(status, Some(0), "{runtime}: {stderr}");
         assert!(stdout.contains("[1] 2"), "{runtime}: {stdout}");
         assert!(
-            stderr.contains("annotation-mismatch"),
+            stderr.contains("annotation-mismatch") && stderr.contains("ry uses the inline type"),
             "{runtime}: {stderr}"
         );
     }

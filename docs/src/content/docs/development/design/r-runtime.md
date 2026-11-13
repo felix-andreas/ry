@@ -624,6 +624,68 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
   first tier must be cheap enough that compiling a session's working set costs less than reading a
   cache would, which is the bar `ry load`'s lazy loading sets.
 
+### When code compiles and what it binds
+
+Compiled code calls the base functions GNU R's compiler inlines (`+`, `<-`, `if`, `[`, `c` and the
+rest of its 233 inline handlers) without looking them up, exactly where GNU R 4.6.2 at its default
+optimization level would have compiled the code. A function that masks one of them afterwards
+does not reach that code, as in GNU R:
+
+```r
+minus <- function(a, b) base::`-`(a, b)
+total <- 0
+for (i in 1:40) {
+  if (i == 10) attach(list(`+` = minus), name = "masking_plus")
+  total <- total + 1
+}
+print(total)
+#> [1] 40
+```
+
+**When GNU R compiles.** ry follows `R_CheckJIT`, with the `JIT_score` of the body (a loop scores
+`MIN_JIT_SCORE`, 50):
+
+| closure | score ≥ 50 | score < 50 |
+|---|---|---|
+| over the global environment | first call | second call |
+| over any other environment | second call | never |
+| in a namespace | first call | second call |
+
+GNU R installs a package's closures compiled; ry compiles them at their first call with a loop and
+otherwise at their second, binding as GNU R's installed code does. A loop the tree walker
+evaluates in the global environment compiles when it starts. A function
+defined inside compiled code compiles with it, against its compile-time frames. A closure GNU R
+never compiles compiles at its second call, and a typed one at its first, with a guard on every
+base function it inlines, so it looks each name up as it runs.
+
+**Closures over one body.** Every closure made from one `function` expression shares the body, and
+so do R6's copies of each method. Code compiled for one of them serves the others whose formals and
+srcref are the same, from their first call. Guarded code serves any closure that would also guard.
+Code that binds serves a closure only under GNU R's `jit_env_match`: its top environment is the
+one the code compiled under, and every name its formals and local frames bind was bound in the
+compiling closure's frames too. A closure that masks a base function in its own frames therefore
+never runs a sibling's code that bound it. It compiles its own code with guards, as GNU R marks
+such a closure never to compile.
+
+**What binds.** At compile time, a call binds to base when its head is a symbol that is not one of
+the function's locals (GNU R's `findLocals`: formals, `<-`, `=`, `for` variables, literal `assign`
+targets) or an enclosing compiled function's, and whose first binding outward from the enclosure
+is:
+
+- in a namespace's code, base's binding, for any inline handler;
+- elsewhere, `baseenv()`'s binding for one of GNU R's `languageFuns` (`+`, `<-`, `if`, `function`,
+  `[` and so on); a mask in the global environment or an attached frame keeps the call dynamic.
+
+`::` and `:::` never bind, `local` binds only with one argument, and `function` does not bind when
+its body may call `browser`. Everything else looks the function up as it runs, including every
+name without an inline handler (`sqrt`, `paste`).
+
+**Known differences.** Promise code of a call's arguments compiles when the call site first runs,
+not with its function, so it binds what the names find then, against the function's locals only.
+GNU R's JIT also shares code between two global closures whose bodies are structurally equal, so
+the later one inherits the earlier one's bindings; ry compiles each body object on its own.
+Pinned by the oracle case `base__compile_time_binding`.
+
 ### Code images of installed packages
 
 `R CMD INSTALL` writes `R/<package>.<build>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).

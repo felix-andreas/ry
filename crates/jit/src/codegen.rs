@@ -22,7 +22,7 @@ use {
         runtime::{self, Activation, Exit, offset, outcome, quiet, reason, representation},
     },
     heap::object::{
-        INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
+        INTEGER_PREFIX, LAZY_RECORD, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
         RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS,
         VECTOR_DATA_OFFSET, header_layout,
     },
@@ -811,11 +811,14 @@ impl<'p> Translator<'p> {
                 let record = self.builder.create_block();
                 self.builder.ins().brif(usable, record, &[], taken, &[]);
                 self.builder.switch_to_block(record);
-                // Only a record has a layout word, so it is read after the kind check.
-                let id = self
+                // Only a record has a layout word, so it is read after the kind check. A lazy
+                // record has its layout's shape, so the branch ignores the lazy bit; its fields
+                // are read through `Intrinsic::Field`, which hands a lazy record off.
+                let word = self
                     .builder
                     .ins()
                     .load(I32, flags(), value, RECORD_LAYOUT_OFFSET as i32);
+                let id = self.builder.ins().band_imm_u(word, i64::from(!LAZY_RECORD));
                 let same = self
                     .builder
                     .ins()
@@ -1616,8 +1619,13 @@ impl<'p> Translator<'p> {
             .get(start)
             .and_then(|inst| self.plan.block_at(inst.pc))
             && self.plan.continues(block)
-            && matches!(self.plan.actions.get(start.wrapping_sub(1)), Some(Action::FallThrough))
-            && let Some(previous) = block.checked_sub(1).and_then(|previous| self.plan.blocks.get(previous))
+            && matches!(
+                self.plan.actions.get(start.wrapping_sub(1)),
+                Some(Action::FallThrough)
+            )
+            && let Some(previous) = block
+                .checked_sub(1)
+                .and_then(|previous| self.plan.blocks.get(previous))
         {
             start = previous.start;
         }
@@ -2304,8 +2312,7 @@ impl<'p> Translator<'p> {
                 let vector = self.load_register(args[0]);
                 let sequence = matches!(types[0], Ty::IntSeq | Ty::DblSeq);
                 let (length, first, step) = if sequence {
-                    let (length, first, step) =
-                        self.sequence_info(vector, types[0]);
+                    let (length, first, step) = self.sequence_info(vector, types[0]);
                     (Length::Double(length), Some(first), Some(step))
                 } else {
                     let length = self.builder.ins().load(I64, flags(), vector, LENGTH);

@@ -3,9 +3,9 @@
 use {
     smallvec::SmallVec,
     typed::{
-        ir::{Builder, Constant, Function, Item, Local, Op, Terminator, Type},
+        ir::{Arith, Builder, Constant, Function, Item, Local, Op, Terminator, Type},
         shapes,
-        unbox::{replace_split_lists, unbox},
+        unbox::{remove_unread, replace_split_lists, unbox},
     },
 };
 
@@ -482,4 +482,36 @@ fn a_split_that_is_never_read_is_not_computed() {
     let mut function = builder.function;
     replace_split_lists(&mut function);
     assert!(function.blocks[0].insts.is_empty(), "{function}");
+}
+
+#[test]
+fn an_unread_value_goes_with_what_only_it_read_unless_computing_it_can_fail() {
+    let mut builder = Builder::new(String::from("test"), &[Type::Dbl, Type::I64]);
+    // Nothing reads the copy, and only the copy reads the sum of doubles, so both go.
+    let sum = builder.emit(
+        Type::Dbl,
+        Op::Arith(Arith::Add, Item::Dbl, Local(0), Local(0)),
+    );
+    builder.emit(Type::Dbl, Op::Copy(sum));
+    // A sum of `I64`s gives up the call when it overflows, which it must still do unread.
+    builder.emit(
+        Type::I64,
+        Op::Arith(Arith::Add, Item::I64, Local(1), Local(1)),
+    );
+    let returned = builder.emit(Type::Dbl, Op::Copy(Local(0)));
+    builder.terminate(Terminator::Return(returned));
+    let mut function = builder.function;
+    remove_unread(&mut function);
+    let left: Vec<&Op> = function.blocks[0]
+        .insts
+        .iter()
+        .map(|inst| &inst.op)
+        .collect();
+    assert!(
+        matches!(
+            left[..],
+            [Op::Arith(Arith::Add, Item::I64, ..), Op::Copy(Local(0))]
+        ),
+        "{function}"
+    );
 }
