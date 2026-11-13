@@ -19,8 +19,10 @@ Linux x86_64 is tier 1: its archive must pass the smoke test before a release is
 silicon and Windows x86_64 are best effort. When Windows fails, start the workflow by hand with
 `platforms` set to `unix`, and when macOS fails, with `linux`. The release then lacks those archives,
 its notes say so, and their users stay on the last release that has their archive until a later
-release fixes the build. Windows users then get the extension without a bundled `ry`, which runs the
-`ry` on their `PATH`.
+release fixes the build. The universal `ry.vsix` (no binary) is built and published only when every
+platform has its archive and package. With one missing, VS Code on that platform would install the
+universal package, find no `ry` and fail, so a release with a missing platform ships no `ry.vsix` and
+the Marketplace lists no extension for that platform.
 
 Every step of the workflow past runner setup is a `just` recipe (or `tools/smoke-test.sh`), so each
 one runs locally as well:
@@ -186,7 +188,7 @@ The Windows archive is built for `x86_64-pc-windows-gnullvm` with MSYS2's clang6
 jsonlite and calls the installation's `Rblas.dll` and `Rlapack.dll`, is the first run on Windows.
 
 The VS Code extension is published once per platform, each copy bundling that platform's `ry`,
-plus one copy without a binary (`ry.vsix`) for every other platform. Every copy carries a
+plus, when all of them are present, one copy without a binary (`ry.vsix`) for every other platform. Every copy carries a
 `LICENSE` that combines the extension's MIT licence with ry's `LICENSE`, and
 `THIRD_PARTY_NOTICES`. The Zed extension ships no binary: it downloads the matching archive from the newest
 full GitHub release (`pre_release: false` in `editors/zed/src/lib.rs`, which matches full releases

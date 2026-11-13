@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### The VS Code extension on Windows
+
+The Marketplace had no Windows package for 0.4.4, so VS Code on Windows installed the universal `ry.vsix`, which bundles no binary, and failed with "spawn ry ENOENT" in the log only. A release now publishes the universal `ry.vsix` only when every platform has its package, and the extension shows an error with a link to the installation page when it finds no `ry` to start.
+
 ### The Linux runtime loads on glibc 2.41 and later
 
 The `libR.so` of 0.4.4 had no `PT_GNU_STACK` program header, because BOLT's `-use-gnu-stack` overwrote it. glibc 2.41 and later then refused to load the library ("cannot enable executable stack"), so `ry run` failed on such systems. The release build now links with `-z noexecstack`, restores the header after BOLT, and fails if `libR.so` or `ry` lacks it. A load failure for this cause now says that the runtime was packaged without the header, instead of suggesting a `noexec` mount. Until you upgrade, `GLIBC_TUNABLES=glibc.rtld.execstack=2` works around it.

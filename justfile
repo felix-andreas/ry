@@ -463,7 +463,9 @@ release-check version:
 
 # Unpack the archives in release/VERSION and package the VS Code extension from them: one `.vsix`
 # per platform, bundling that archive's binaries, plus `ry.vsix` without a binary for every other
-# platform. A platform whose archive is missing is skipped with a note, so this runs locally on one
+# platform. A platform whose archive is missing is skipped with a note, and then `ry.vsix` is not
+# built either: VS Code on that platform would install it, find no binary and fail, whereas with
+# no package at all it reports the extension as unavailable there. This runs locally on one
 # machine's archive and in a release workflow started with `platforms` set to `unix` or `linux`.
 release-assets version:
     #!/usr/bin/env bash
@@ -472,10 +474,20 @@ release-assets version:
     dir="release/$version"
     kind=$(just release-kind "$version")
     (cd editors/code && bun install --frozen-lockfile)
+    platforms=(x86_64-unknown-linux-gnu:linux-x64 aarch64-apple-darwin:darwin-arm64 x86_64-pc-windows-gnullvm:win32-x64)
+    complete=1
+    for platform in "${platforms[@]}"; do
+    	target=${platform%%:*}
+    	if [ ! -f "$dir/ry-$target.tar.gz" ] && [ ! -f "$dir/ry-$target.zip" ]; then complete=0; fi
+    done
     # The universal extension goes first, before build-platform-vsix fills editors/code/bin.
-    rm -rf editors/code/bin
-    just build-extension "$kind" --out "../../$dir/ry.vsix"
-    for platform in x86_64-unknown-linux-gnu:linux-x64 aarch64-apple-darwin:darwin-arm64 x86_64-pc-windows-gnullvm:win32-x64; do
+    rm -rf editors/code/bin "$dir/ry.vsix"
+    if [ "$complete" = 1 ]; then
+    	just build-extension "$kind" --out "../../$dir/ry.vsix"
+    else
+    	echo "note: an archive is missing, so the universal ry.vsix was not packaged" >&2
+    fi
+    for platform in "${platforms[@]}"; do
     	target=${platform%%:*}
     	unpacked="$dir/ry-$target"
     	if [ -f "$unpacked.tar.gz" ]; then
