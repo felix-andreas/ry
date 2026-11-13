@@ -2493,7 +2493,7 @@ primitives, and nothing built or installed packages.
   - The previous shape delegated `bin/R` and `bin/Rscript` to GNU R and kept `R/` as sources;
     both are gone.
 - **Rmath, Applic, LINPACK and the Fortran helpers are Rust** (`rmath.rs`, `applic.rs`,
-  `crates/interp/src/linpack.rs`, `utils.rs`). Much of Rmath translates GNU R's nmath sources, which each file's
+  `crates/numeric/src/linpack.rs`, `utils.rs`). Much of Rmath translates GNU R's nmath sources, which each file's
   header names (see "licensing"); LINPACK is written from the published algorithm. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random
   streams through the `rmathtest` package, and `test_rmath` replays them in ry's libR with a
   per-function tolerance that names its reason. The random variates draw uniforms in GNU R's
@@ -4544,7 +4544,6 @@ contract.
 
 **Status:** built.
 
-- **Previous shape.** The ry binary kept a per-root fingerprint map beside its `Loader` (`crates/ry/src/load.rs`), updated by the GNU R `.Call` routines, and its `ReloadWatcher` compared it before each command. `libR.so` has its own `Loader` (`crates/loader/src/ry_runtime.rs`) that the binary cannot see, so ry's console had no watcher, no `load_all()` and no package autoload. The fingerprint was duplicated state outside the loader that owns what is loaded.
 - **Previous shape.** The ry binary kept a per-root fingerprint map beside its `Loader` (`crates/ry/src/load.rs`), updated by the GNU R `.Call` routines, and its `ReloadWatcher` compared it before each command. `libR.so` has its own `Loader` (`crates/libr/src/loader_backend.rs`) that the binary cannot see, so ry's console had no watcher, no `load_all()` and no package autoload. The fingerprint was duplicated state outside the loader that owns what is loaded.
 - **Target shape.** `Loader` records the fingerprint of the sources a plan read (taken before reading, so an edit made mid-read counts later) and promotes it on `commit`. `Loader::changed_roots` reports each committed package whose fingerprint moved, once per change. Both backends ask it: the binary's `ReloadWatcher` for GNU R, and for ry's runtime `libR.so` exports `ry_loader_changed`, which `repl`'s `RuntimeReloadWatcher` calls before each command. `ry_repl` attaches `tools:ry` and runs a startup load, so `ry run` in a package loads it as `ry R` does.
 - **Impact.** One source of truth per loaded package, one console loop on both runtimes, and the reload is the same `.ry_autoreload()`. The check stats `DESCRIPTION`, `NAMESPACE` and the code files in `R/` (the same extension test `collated_r_files` uses, so editor swap files do not reload) without reading them. It overlaps the per-file `stamps` that `Loader::read` keeps, on purpose: `stamps` decides which texts a plan rereads, the fingerprint decides whether to plan at all, and merging them would make the per-command check walk `Collate` too. `crates/loader/tests/test_reload_fuzz.rs` and `test_repl_e2e.rs` pin it.
@@ -7416,7 +7415,6 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 **Status:** built.
 
-- `stats_models.rs::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
 - `stats::models::expand_frame_dot` replaces `.` in a formula's right-hand side with the sum of the frame's other columns only when the dot is reached through formula operators. The sum is wrapped in parentheses unless the dot stands at the top, inside `(`, as a call argument, or as the left operand of `+`, which reproduces GNU R's `terms()` output and deparse exactly.
 
 ## The strict load check analyses only the package
@@ -7442,7 +7440,6 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 **Status:** built.
 
-- **Date is a column type.** `ColumnType::Date` maps to Polars' `Date` (whole days since 1970-01-01) and to an R double with class `"Date"` both ways (`table::convert::RVector::Date`, `libr::frame_altrep::date_vector`, `interp::frame::literal`). A fractional R date floors to its day, as `as.Date` printing does. Typing follows R's own rules for days: date ± number is a date, date - date is `integer[]` days, dates compare only with dates, and any other operator on a date is a `DateOperation` error (`check.rs`, `date_operation`). R itself would give a `difftime` for date - date; the engine has no duration column, so the integer day count is the deliberate shape.
 - **Date is a column type.** `ColumnType::Date` maps to Polars' `Date` (whole days since 1970-01-01) and to an R double with class `"Date"` both ways (`table::convert::RVector::Date`, `libr::frame_altrep::date_vector`, `frames::frame::literal`). A fractional R date floors to its day, as `as.Date` printing does. Typing follows R's own rules for days: date ± number is a date, date - date is `integer[]` days, dates compare only with dates, and any other operator on a date is a `DateOperation` error (`check.rs`, `date_operation`). R itself would give a `difftime` for date - date; the engine has no duration column, so the integer day count is the deliberate shape.
 - **`Ops.Expr` beats `Ops.Date`.** `Expr.col("day") >= as.Date(...)` has two S3 `Ops` methods, which R refuses as incompatible. `chooseOpsMethod.Expr` returns `TRUE` (R >= 4.3 protocol, honored by `interp::dispatch`), so the expression method always wins; the stub's `Ops.Expr` accepts `Date` on either side.
 - **Windows and ranks lower to Polars.** `Expr.over(e, keys)` is `Expr::Window` and `Expr.rank` is `Expr::Rank` (ordinal, ties broken by row, `NA` last). The fast kernels decline both, so they run in Polars; the checker types `over` as per-row with its argument's type and `rank` as `integer[]`. The ordinal row number is `is_null().cum_count()`, because a constant `TRUE` mask is folded by Polars into a scalar of length one.
@@ -10950,7 +10947,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Decision.** Every diagnostic or console sample on the landing page and in the README is the output of the tool, cut to the headline and the underlined line, and never edited by hand. A hand-edited sample drifts from the tool with the next wording change, and nothing reports it.
 - **Shape.** The landing samples are tests in `crates/ry/tests/test_docs.rs`, which compare them with the tool. The README shows diagnostics as SVG panels (`docs/public/diagnostic*.svg`) because GitHub strips ANSI colors; `scripts/render-diagnostic-svg.rs`, whose `PANELS` table names each image's `ry.toml`, renders them from output captured with `CLICOLOR_FORCE=1` and embeds a `prefers-color-scheme` rule so one image serves both themes. `just readme --check` reports a stale panel.
 - **Gap.** The VS Code extension's README holds two plain-text diagnostics that no check covers.
+
 ## The interpreter is an engine crate between a numeric crate and four leaf crates
+
+**Status:** built.
 
 - **Previous shape.** `interp` was one crate of 186,000 lines. It held the evaluator and base R's builtins, and also the numeric ports, the stats package's routines, the graphics engine with its renderer, the `DataFrame` binding and the HTTP client. It depended on `table` (Polars), reqwest with rustls, tiny-skia and ab_glyph, so every crate that needs the evaluator (`jit`, `typed`, `loader`) built after all of them, and an edit to the evaluator re-optimized all 186,000 lines.
 - **What was structurally weak.** The dependency pointed the wrong way. The engine knew the table engine, the rasterizer and the HTTP client by name for a handful of cold calls (tracing the devices' objects, `[` on a table, opening a URL), and in return carried their whole build.

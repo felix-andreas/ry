@@ -65,6 +65,7 @@ review found it.
 |-:|---|
 | 4 | Built. `interp` is the engine (126,000 lines) between `numeric` below it and the leaf crates `stats`, `graphics`, `frames` and `services` above it, and it links no Polars, reqwest, rustls or tiny-skia. An edit to `eval()` costs 82 s on `iterate` (95 s before) and 11 s on `dev`. Cargo recompiles every crate above an edited one, so the engine and its leaves still rebuild after an evaluator edit. The cut that shortens that loop puts the evaluator core above base's builtins, and `backlog.md` holds it under "Open: the evaluator's edit loop" |
 | 7 | Built. The loader's backend for ry's runtime is a module of `libr`, `loader` has no `runtime` feature, and `cargo tree -p ry-lang -i interp` finds nothing |
+| 12 | Built. Every entry in `decisions.md` opens with a status line (`built`, `planned` or `superseded`), with the exceptions to a built entry named in that line, and superseded entries a reader no longer needs are cut. `MEMORY.md` is 44 KB, about 11,000 tokens, and its open work lives in `backlog.md` |
 
 ## The runtime
 
