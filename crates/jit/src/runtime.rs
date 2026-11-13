@@ -17,6 +17,7 @@ use {
         records::NativeKind,
     },
     interp::{
+        Signalling,
         annotations::{self, Entry},
         arith,
         builtins::Arg,
@@ -639,6 +640,28 @@ unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     }
 }
 
+/// Runs `step`, one tier-0 instruction of `activation`. In a closure call without a frame the
+/// instruction signals nothing ([`Signalling`]): an error it raises comes back unsignalled, and
+/// the exit it takes builds the call's frame and signals it there. `None` says the instruction
+/// gave up before a signal that runs R code, so the exit must carry no error, which makes
+/// tier 0 run the instruction again in the call's frame. The instruction runs no R code, so
+/// nothing nests.
+unsafe fn step_unsignalled<T>(activation: &Activation, step: impl FnOnce() -> T) -> Option<T> {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            interp::interp().signalling = Signalling::Immediate;
+        }
+    }
+    if unsafe { layout(activation).inlined.is_none() } {
+        return Some(step());
+    }
+    interp::interp().signalling = Signalling::Deferred;
+    let _restore = Restore;
+    let result = step();
+    (interp::interp().signalling != Signalling::Abandoned).then_some(result)
+}
+
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
 pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate: i32) -> i32 {
     unsafe {
@@ -651,18 +674,21 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                 0
             };
             let mark = heap.handle_mark();
-            let stepped = bytecode::step_one(machine, pc as usize);
+            let stepped = step_unsignalled(activation, || bytecode::step_one(machine, pc as usize));
             heap.release_handles(mark);
             match stepped {
-                Err(unwind) => {
+                None => outcome::FAILED,
+                Some(Err(unwind)) => {
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(Some(_)) => outcome::RETURNED,
-                Ok(None) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
+                Some(Ok(Some(_))) => outcome::RETURNED,
+                Some(Ok(None))
+                    if validate != 0 && !still_valid(compiled(activation), machine, epoch) =>
+                {
                     outcome::INVALIDATED
                 }
-                Ok(None) => outcome::OK,
+                Some(Ok(None)) => outcome::OK,
             }
         })
     }
@@ -678,18 +704,20 @@ pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> 
 /// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
 pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
     unsafe {
-        checked(
-            activation,
-            quiet::FAILED,
-            |activation| match bytecode::quiet_step(machine(activation), pc as usize) {
-                None => quiet::DECLINED,
-                Some(Ok(())) => quiet::STEPPED,
-                Some(Err(unwind)) => {
+        checked(activation, quiet::FAILED, |activation| {
+            let stepped = step_unsignalled(activation, || {
+                bytecode::quiet_step(machine(activation), pc as usize)
+            });
+            match stepped {
+                Some(None) => quiet::DECLINED,
+                Some(Some(Ok(()))) => quiet::STEPPED,
+                Some(Some(Err(unwind))) => {
                     park(activation, unwind);
                     quiet::FAILED
                 }
-            },
-        )
+                None => quiet::FAILED,
+            }
+        })
     }
 }
 

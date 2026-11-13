@@ -6,7 +6,7 @@
 
 use {
     crate::{
-        Interp,
+        Interp, Signalling,
         builtins::{BuiltinDef, Call, internal},
         bytecode, deparse, eval, interp,
         unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
@@ -523,7 +523,7 @@ pub unsafe fn format_error(call: Sexp, message: &str) -> String {
     let call_text = deparse::deparse_first_line(call);
     let first_line = message.lines().next().unwrap_or("");
     let width = call_text.chars().count() + first_line.chars().count();
-    if 18 + width > 77 {
+    if 14 + width > 75 {
         format!("Error in {call_text} : \n  {message}\n")
     } else {
         format!("Error in {call_text} : {message}\n")
@@ -568,6 +568,11 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
             Some(entry) if muffled_by_suppress_warnings(&entry)? => return Ok(()),
             _ => {}
         }
+    }
+    // The hook is R code, which a call without a frame cannot run.
+    if interp().signalling != Signalling::Immediate {
+        interp().signalling = Signalling::Abandoned;
+        return Err(error("a warning waits for its call's frame"));
     }
     let hook = values::install(".signalSimpleWarning")?;
     if crate::heap()

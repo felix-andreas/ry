@@ -5,7 +5,7 @@
 
 use {
     crate::{
-        Frame,
+        Frame, Signalling,
         annotations::Entry,
         builtins::{
             Arg, BuiltinDef, Call, Generic, Kind, NativeArgs, Visibility, builtin, internal,
@@ -1602,6 +1602,9 @@ unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
         Unwind::Error(mut failure) => {
             if failure.call == unbound() {
                 failure.call = blame;
+            }
+            if interp().signalling != Signalling::Immediate {
+                return Unwind::Error(failure);
             }
             conditions::signal_error(failure)
         }
