@@ -3510,7 +3510,23 @@ unsafe fn do_with_restarts(call: &Call<'_>) -> R<Sexp> {
         heap.set_element(restarts, position, restart);
     }
     define_local(symbols().restarts, restarts, frame)?;
-    let value = eval::eval(nth(statements, 6), frame)?;
+    // `if (length(restarts) == 0L) expr else if (length(restarts) == 1L)
+    // withOneRestart(expr, restarts[[1L]]) else withRestartList(expr, restarts)`: base's
+    // `length` and `==` cannot be masked from the base namespace, so with one restart the
+    // conditions need not run.
+    let choice = nth(statements, 6);
+    let single = nth(choice, 3);
+    let statement = if specs.len() == 1
+        && choice.kind() == SexpType::Language
+        && choice.car() == symbols().if_
+        && single.kind() == SexpType::Language
+        && single.car() == symbols().if_
+    {
+        nth(single, 2)
+    } else {
+        choice
+    };
+    let value = eval::eval(statement, frame)?;
     finish(ClosureFrame::Env(frame), value, interp().visible)
 }
 
@@ -3647,13 +3663,12 @@ unsafe fn is_plain_restart(restart: Sexp, frame: Sexp) -> R<bool> {
     {
         return Ok(false);
     }
-    let base = values::base_namespace();
-    for method in [names.dollar_restart, names.dollar_assign_restart] {
-        if crate::dispatch::lookup_method(method, frame, base)?.is_some() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let methods = [names.dollar_restart, names.dollar_assign_restart];
+    Ok(!crate::dispatch::has_any_method(
+        &methods,
+        frame,
+        values::base_namespace(),
+    )?)
 }
 
 /// `withOneRestart(expr, restart)`. After the restart is invoked, a handler that takes no

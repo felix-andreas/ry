@@ -525,6 +525,17 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
     lookup_in_scope(name, &scope)
 }
 
+/// Whether [`lookup_method`] finds any of `names`, building the scope once.
+pub unsafe fn has_any_method(names: &[Sexp], call_env: Sexp, def_env: Sexp) -> R<bool> {
+    let scope = method_scope(call_env, def_env)?;
+    for &name in names {
+        if lookup_in_scope(name, &scope)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The method `name` in `scope`, through the name's row for the part from the top environment
 /// on.
 unsafe fn lookup_in_scope(name: Sexp, scope: &MethodScope) -> R<Option<Sexp>> {
