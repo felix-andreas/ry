@@ -1,0 +1,46 @@
+# The job runs `just ci` in the flake's `ci` dev shell, which pins everything the tests touch: the
+# Rust toolchain, GNU R 4.6.2 as the oracle recorded it, the compiler, glibc and the locales. To
+# change what CI runs or what it runs on, edit the `ci` recipe in the justfile or the shell in
+# flake.nix, not this file. It runs only when started by hand (user decision): the orchestrating
+# agent starts it on main at its hourly check when main has new commits.
+name: CI
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      # The Nix store, the test build and base R need more disk than the runner has free.
+      - name: free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: cachix/install-nix-action@v31
+      # Pulls the shell's GNU R from ry.cachix.org and pushes it when this run had to build it. The
+      # filter keeps out the Rust toolchain, which static.rust-lang.org serves faster than a
+      # rebuild, and crane's dependency build.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ry
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: "-ry-deps-|-rust-|-rustc-|-cargo-|-clippy-|-rustfmt-|-llvm-tools-"
+      # rust-cache keys and prunes the cargo cache with the toolchain on PATH, so the shell's goes
+      # first.
+      - name: toolchain on PATH
+        run: nix develop .#ci -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: just ci
+        run: nix develop .#ci -c just ci

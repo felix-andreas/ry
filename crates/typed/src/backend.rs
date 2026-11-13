@@ -27,8 +27,8 @@ use {
     smallvec::SmallVec,
     ssa::{
         AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC,
-        MemFlagsData, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type as Machine,
-        Value, Variable,
+        MemFlagsData, SigRef, Signature, StackSlotData, StackSlotKind, Type as Machine, Value,
+        Variable,
         types::{F64, I32, I64},
     },
     std::{cell::Cell, sync::atomic::AtomicBool},
@@ -1186,7 +1186,11 @@ impl Emitter<'_> {
                 };
                 SmallVec::from_slice(&[result])
             }
-            Op::CountTrue { program, inputs } => {
+            Op::CountTrue {
+                program,
+                inputs,
+                counts,
+            } => {
                 let words = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
                     8 * inputs.len().max(1) as u32,
@@ -1204,33 +1208,46 @@ impl Emitter<'_> {
                         .ins()
                         .stack_store(I64, word, words, 8 * index as i32);
                 }
-                let steps = self.builder.create_sized_stack_slot(StackSlotData::new(
+                // The steps and, after them, the operand numbers of the counted lists.
+                let codes = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    4 * program.len().max(1) as u32,
+                    4 * (program.len() + counts.len()).max(1) as u32,
                     2,
                 ));
-                for (index, &step) in program.iter().enumerate() {
-                    let step = self.builder.ins().iconst(I32, i64::from(step));
+                let counted = counts.iter().map(|&(operand, _)| operand);
+                for (index, code) in program.iter().copied().chain(counted).enumerate() {
+                    let code = self.builder.ins().iconst(I32, i64::from(code));
                     self.builder
                         .ins()
-                        .stack_store(I64, step, steps, 4 * index as i32);
+                        .stack_store(I64, code, codes, 4 * index as i32);
                 }
                 let out = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    8,
+                    8 * counts.len().max(1) as u32,
                     3,
                 ));
                 let arguments = [
-                    self.builder.ins().stack_addr(I64, steps, 0),
+                    self.builder.ins().stack_addr(I64, codes, 0),
                     self.iconst(program.len() as i64),
                     self.builder.ins().stack_addr(I64, words, 0),
                     self.iconst(inputs.len() as i64),
                     self.iconst(lists),
+                    self.builder
+                        .ins()
+                        .stack_addr(I64, codes, 4 * program.len() as i32),
+                    self.iconst(counts.len() as i64),
                     self.builder.ins().stack_addr(I64, out, 0),
                 ];
                 let status = self.call_words(address!(values::ry_count_true), I32, &arguments);
                 self.fail_if(status, &inst.fail_drops)?;
-                SmallVec::from_slice(&[self.builder.ins().stack_load(I64, I64, out, 0)])
+                for (index, &(_, local)) in counts.iter().enumerate() {
+                    let count = self
+                        .builder
+                        .ins()
+                        .stack_load(I64, I64, out, 8 * index as i32);
+                    self.set(local, &[count])?;
+                }
+                SmallVec::new()
             }
             Op::VectorCompare(op, item, a, b) => {
                 let operation = self.iconst(*op as i64);
@@ -1628,21 +1645,86 @@ impl Emitter<'_> {
                 );
                 SmallVec::from_slice(&[list])
             }
-            Op::Parse(a) => {
+            Op::SplitBounds {
+                string,
+                separator,
+                bounds,
+            } => {
+                let (x, separator) = (self.get(*string)?, self.get(*separator)?);
+                let pieces = bounds.iter().map(|&(index, ..)| index).max().unwrap_or(0);
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16 * pieces,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let limit = self.iconst(i64::from(pieces));
+                let count = self.call(
+                    address!(values::ry_str_split_bounds),
+                    &[I64; 6],
+                    &[I64],
+                    &[x[0], x[1], separator[0], separator[1], limit, out],
+                )[0];
+                // The runtime writes only the pieces the string has. The rest of the slot is
+                // read as it is, into locals that an `Op::Piece` checks the count before using.
+                for &(index, start, end) in bounds {
+                    let offset = 16 * (index as i32 - 1);
+                    let value = self.builder.ins().stack_load(I64, I64, slot, offset);
+                    self.set(start, &[value])?;
+                    let value = self.builder.ins().stack_load(I64, I64, slot, offset + 8);
+                    self.set(end, &[value])?;
+                }
+                SmallVec::from_slice(&[count])
+            }
+            Op::Piece {
+                string,
+                start,
+                end,
+                count,
+                index,
+            } => {
+                let count = self.one(*count)?;
+                let missing =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedLessThan, count, i64::from(*index));
+                self.fail_if(missing, &inst.fail_drops)?;
+                let x = self.get(*string)?;
+                let (start, end) = (self.one(*start)?, self.one(*end)?);
+                let piece = self.call(
+                    address!(values::ry_str_piece),
+                    &[I64; 4],
+                    &[I64, I64],
+                    &[x[0], x[1], start, end],
+                );
+                SmallVec::from_slice(&[piece[0], piece[1]])
+            }
+            Op::Parse { string, parsed } => {
                 let dest = inst
                     .dest
                     .ok_or(Refusal::new("a parse without a destination"))?;
                 let i64 = ty(dest) == Type::I64;
-                let (status, slot) = self.parse(*a, i64)?;
-                let failed = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
-                self.fail_if(failed, &inst.fail_drops)?;
+                let x = self.get(*string)?;
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                // The runtime writes the number only when the string parses.
+                let zero = self.iconst(0);
+                self.builder.ins().stack_store(I64, zero, slot, 0);
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let function = if i64 {
+                    address!(values::ry_str_to_i64)
+                } else {
+                    address!(values::ry_str_to_dbl)
+                };
+                let status = self.call(function, &[I64; 3], &[I32], &[x[0], x[1], out])[0];
+                let valid = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                let valid = self.logical(valid);
+                self.set(*parsed, &[valid])?;
                 let machine = if i64 { I64 } else { F64 };
                 SmallVec::from_slice(&[self.builder.ins().stack_load(I64, machine, slot, 0)])
-            }
-            Op::Parses(i64, a) => {
-                let (status, _) = self.parse(*a, *i64)?;
-                let parsed = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
-                SmallVec::from_slice(&[self.logical(parsed)])
             }
             Op::DictNew => {
                 let dest = inst
@@ -1923,6 +2005,30 @@ impl Emitter<'_> {
                 value
             }
             Arith::Mod | Arith::IntDiv => {
+                // A positive constant divisor is neither zero nor -1, and the remainder needs
+                // moving only when it is negative, which its sign bit says. A power of two
+                // needs no division: the low bits are the floored remainder of a negative
+                // number too, and an arithmetic shift rounds down.
+                if let Some(divisor) = self.builder.constant(y).filter(|&divisor| divisor > 0) {
+                    if divisor & (divisor - 1) == 0 {
+                        return Ok(if op == Arith::Mod {
+                            self.builder.ins().band_imm_u(x, divisor - 1)
+                        } else {
+                            let bits = self.iconst(i64::from(divisor.trailing_zeros()));
+                            self.builder.ins().sshr(x, bits)
+                        });
+                    }
+                    let remainder = self.builder.ins().srem(x, y);
+                    let sign = self.iconst(63);
+                    let negative = self.builder.ins().sshr(remainder, sign);
+                    return Ok(if op == Arith::Mod {
+                        let moved = self.builder.ins().band(negative, y);
+                        self.builder.ins().iadd(remainder, moved)
+                    } else {
+                        let quotient = self.builder.ins().sdiv(x, y);
+                        self.builder.ins().iadd(quotient, negative)
+                    });
+                }
                 let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, y, 0);
                 self.fail_if(zero, &inst.fail_drops)?;
                 let minus_one = self.builder.ins().icmp_imm_s(IntCC::Equal, y, -1);
@@ -2020,6 +2126,9 @@ impl Emitter<'_> {
         Ok(match (reduce, item) {
             (Reduce::Sum, Item::Dbl) => {
                 self.call(address!(values::ry_sum_dbl), &[I64], &[F64], &[x])[0]
+            }
+            (Reduce::ListSum, _) => {
+                self.call(address!(values::ry_list_sum_dbl), &[I64], &[F64], &[x])[0]
             }
             (Reduce::Sum, Item::I64) => {
                 self.reduce_status(address!(values::ry_sum_i64), I64, x, inst)?
@@ -2192,24 +2301,6 @@ impl Emitter<'_> {
             self.store_item(address, item, &values);
         }
         Ok(SmallVec::from_slice(&[pointer]))
-    }
-
-    /// Parses the string `a` as an `I64` or a double into a stack slot, and the runtime's status.
-    fn parse(&mut self, a: Local, i64: bool) -> Result<(Value, StackSlot), Refusal> {
-        let x = self.get(a)?;
-        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            8,
-            3,
-        ));
-        let out = self.builder.ins().stack_addr(I64, slot, 0);
-        let function = if i64 {
-            address!(values::ry_str_to_i64)
-        } else {
-            address!(values::ry_str_to_dbl)
-        };
-        let status = self.call(function, &[I64; 3], &[I32], &[x[0], x[1], out])[0];
-        Ok((status, slot))
     }
 
     /// A call of an R function through [`crate::ry_call_r`], which reads the arguments' words
