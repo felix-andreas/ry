@@ -11209,3 +11209,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
   | `iterate`, not incremental | 95.3 s | 81.9 s |
 
   The engine links no Polars, reqwest, rustls or tiny-skia. An edit to a leaf rebuilds that leaf and `libr` only, except that the engine's own viewer tests install `frames`, so `cargo test -p interp` builds `table` once and rebuilds `frames` with the engine.
+
+## The dev shells' GNU R is cached on every change to its inputs
+
+- **Previous shape.** Only releases pushed the flake to ry.cachix.org, and the CI job pushed the R only when it happened to build it, so a fresh `nix develop` could compile `lib.gnuR` from source.
+- **Target shape.** `nix develop` (`default` and `ci`) downloads everything from `cache.nixos.org` or `ry.cachix.org`. `.github/workflows/cachix.yml` also runs on a push to main that touches `flake.nix`, `flake.lock` or `tools/base-r/**` (the only inputs of `lib.gnuR`), builds just the two shells, and pushes with the filter that leaves out the Rust toolchain and `ry-deps-*`. The `ry` package stays release-only. Because the path filter keeps it rare, it does not spam CI, and the 5 GB cache holds only paths nixpkgs lacks.
