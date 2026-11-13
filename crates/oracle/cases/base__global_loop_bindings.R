@@ -27,6 +27,23 @@ for (i in 1:40) {
 }
 print(total)
 
+# `list2env` and `delayedAssign` replace a global the loop reads, the second with a promise.
+step <- 1
+total <- 0
+for (i in 1:40) {
+  if (i == 10) list2env(list(step = 10), envir = globalenv())
+  if (i == 20) delayedAssign("step", 100, assign.env = globalenv())
+  total <- total + step
+}
+print(total)
+
+# The loop variable itself is removed or reassigned in the body.
+for (i in 1:5) { if (i == 3) rm(i) }
+print(i)
+seen <- integer()
+for (i in 1:5) { seen <- c(seen, i); i <- 100L }
+print(c(seen, i))
+
 # A callee defines the loop's own accumulator in a fresh binding after removing it.
 total <- 0
 reset <- function() { rm("total", envir = globalenv()); assign("total", -1000, envir = globalenv()) }

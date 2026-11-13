@@ -1,0 +1,46 @@
+[stdout]
+| [1] 19
+| [1] 65.97345
+| [1] 12109
+| [1] 2209
+| [1] 5
+| [1]   1   2   3   4   5 100
+| [1] -979
+| [1] 21000
+| [1] 100
+| [1] 22
+| [1] 40 12
+| [1] 3109
+| [1] 61
+| [1] "stopped"
+| [1] 19
+| [1] 820 210
+| [1] 820 210
+| [1] 820 210
+| [1] 820 820
+| [1] 40 20
+| [1] 40 20
+| [1] 40 20
+| [1] 0 6
+| [1] 6
+| [1] 6
+| [1] NA
+| [1] "15"      "integer"
+| [1] 1.5
+| [1] 15  3
+| [1] 15  3
+| [1] 15  3
+| [1] 15  3
+| [1] 15 15
+| a 
+| 7 
+[messages]
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    <-\n
+- The following object is masked from package:base:\n\n    sqrt\n
+[warnings]
+- NAs produced by integer overflow (in s * 1000000L)
+[errors]
+[value]
+double
+| c(a = 7)
