@@ -245,8 +245,10 @@ struct ValueData {
 
 #[derive(Clone, Copy)]
 enum Definition {
-    /// An instruction's result or a block parameter.
-    Own,
+    /// A block parameter.
+    Param,
+    /// A result of this instruction.
+    Result(Inst),
     /// A trivial parameter that SSA construction replaced by the value it always receives.
     Alias(Value),
 }
@@ -533,7 +535,7 @@ impl Builder {
     }
 
     pub fn append_block_param(&mut self, block: Block, ty: Type) -> Value {
-        let value = self.new_value(ty, Definition::Own);
+        let value = self.new_value(ty, Definition::Param);
         if let Some(data) = self.function.blocks.get_mut(block.index()) {
             data.params.push(value);
         }
@@ -754,7 +756,7 @@ impl Builder {
         block: Block,
         pending: &mut Vec<(Block, usize)>,
     ) -> Value {
-        let value = self.new_value(ty, Definition::Own);
+        let value = self.new_value(ty, Definition::Param);
         if let Some(data) = self.function.blocks.get_mut(block.index()) {
             pending.push((block, data.variable_params.len()));
             data.variable_params.push(VariableParam {
@@ -925,7 +927,7 @@ impl Builder {
         self.function.owners.push(block);
         let values: SmallVec<[Value; 4]> = results
             .iter()
-            .map(|&ty| self.new_value(ty, Definition::Own))
+            .map(|&ty| self.new_value(ty, Definition::Result(inst)))
             .collect();
         let list = self.list(&values);
         self.function.result_lists.push(list);
@@ -945,6 +947,19 @@ impl Builder {
             .values
             .get(value.index())
             .map_or(Type::I64, |data| data.ty)
+    }
+
+    /// The integer `value` is when an `iconst` defined it, so a front end can emit the shorter
+    /// code a constant operand allows. A variable read in another block than its definition
+    /// is a parameter until the blocks are sealed, and gives `None`.
+    pub fn constant(&self, value: Value) -> Option<i64> {
+        match self.function.values.get(value.index())?.definition {
+            Definition::Result(inst) => match self.function.ops.get(inst.index())? {
+                &Op::Iconst(_, constant) => Some(constant),
+                _ => None,
+            },
+            Definition::Param | Definition::Alias(_) => None,
+        }
     }
 }
 
