@@ -10563,7 +10563,7 @@ unsafe fn slot_subject_call(
     }
     if subject.is_object() {
         if subject.has_gp(gp::S4_OBJECT)
-            || (definition.name == "[" && crate::frame::is_frame(subject))
+            || (definition.name == "[" && (interp().extensions.tables.is_frame)(subject))
         {
             return Ok(None);
         }

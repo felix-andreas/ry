@@ -89,6 +89,7 @@ pub mod inspect;
 pub mod legacy;
 pub use interp::linpack;
 pub mod lists;
+pub mod loader_backend;
 pub mod macho;
 pub mod memory;
 pub mod print;

@@ -1538,22 +1538,6 @@ fn quiet(a: f64) -> f64 {
     f64::from_bits(a.to_bits() | 0x0008_0000_0000_0000)
 }
 
-/// R 4.6's `R_pow` multiplies out a cube or a fourth power of a base in [-11, 11] instead of
-/// calling C's `pow`, which can differ in the last bit.
-pub fn small_power_product(base: f64, exponent: f64) -> Option<f64> {
-    if !(exponent == 3.0 || exponent == 4.0)
-        || !(-11.0..=11.0).contains(&base)
-        || !crate::system::r_at_least(4, 6)
-    {
-        return None;
-    }
-    Some(if exponent == 4.0 {
-        base * base * base * base
-    } else {
-        base * base * base
-    })
-}
-
 /// `^` with R's special cases, which C's `pow` leaves to the platform: `1^y` and `x^0` are 1
 /// even for `NA`, and an infinite operand gives a defined limit or `NaN` (`(-Inf)^0.5`).
 pub fn power(base: f64, exponent: f64) -> f64 {
@@ -1574,7 +1558,7 @@ pub fn power(base: f64, exponent: f64) -> f64 {
         };
     }
     if base.is_finite() && exponent.is_finite() {
-        return if let Some(product) = small_power_product(base, exponent) {
+        return if let Some(product) = rmath::small_power_product(base, exponent) {
             product
         } else {
             base.powf(exponent)

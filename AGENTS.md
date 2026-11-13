@@ -14,6 +14,7 @@ The crates live in `crates/`:
 - `loader`: the package-development loader behind `ry load`.
 - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
 - `heap`: the R runtime's object model and garbage collector.
+- `interp`: the R interpreter. `numeric` (the numeric kernels) sits below it, and the leaf crates `stats`, `graphics`, `frames` (the `DataFrame` binding) and `services` (the HTTP client) sit above it, so the interpreter links no Polars, rasterizer or HTTP stack.
 - `typed`: the typed core, which compiles strict typed closures to run on native values.
 - `libr`: R's C API, built as an ABI-compatible `libR` shared library.
 - `rcmd`: ry's R home and the `R CMD` commands that install packages against it.

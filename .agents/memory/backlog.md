@@ -43,6 +43,30 @@ The quality bar is four things.
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
 
+## Open: the evaluator's edit loop
+
+`decisions.md`, "The interpreter is an engine crate between a numeric crate and four leaf
+crates", has the shape and the measurements behind this list.
+
+- **Put the evaluator core in a crate above base's builtins.** Cargo recompiles every crate
+  above an edited one, so an edit to `eval()` rebuilds the engine's 126,000 lines (76 s of the
+  82 s loop on `iterate`) and then every leaf, `typed`, `jit` and `libr`. The evaluator core
+  (`eval`, `bytecode`, dispatch, closure application) is about 30,000 of those lines. Move it
+  into a crate that sits above the rest of the engine: the lower crate keeps values, coercion,
+  the unwinding types, environments, builtin registration and the builtins, and calls `eval`
+  and closure application through `fn` pointers (the apply family, `do.call`, dispatch). Tier 0
+  sits above and keeps calling builtin kernels directly, so no hot kernel call goes through a
+  pointer. The top crate re-exports the lower one so `interp::` paths keep working, and the
+  leaves depend on the lower crate, which takes them out of the loop. Measure `eval` reached
+  through a pointer from `lapply` and `do.call` on release before landing. This is also the
+  natural place to start passing the interpreter state as an argument instead of reading the
+  global.
+- **The regex engines and compression libraries stay engine dependencies.** They cost a cold
+  build only, since a dependency compiles once. A leaf for base's string builtins would shorten
+  the cold build of `jit` and `typed`, and nothing else.
+- **`libr` has 24 test binaries, each linked against the whole runtime**, and no fast linker is
+  configured. Both show in `cargo test-release`, not in the edit loop measured above.
+
 ## Open: one switch for every fast path
 
 - `RY_FAST_PATHS=0` is checked inside three prologues only (`fast_paths_enabled` in `crates/interp/src/base_fast_paths.rs`), so every other base and package prologue still runs and a fast-path bug cannot be bisected with it. Install time is the wrong place for the check, because a start-up image already holds installed prologues; check it once where a prologue internal is dispatched. Found while tracing withr's `get_options` prologue, which passed every name in one character vector to `options()` (only the first is read) and so broke `local_options` with an unset first option.
@@ -189,7 +213,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 - **Two signatures the runtime does not read.** A signature that is only the name of a type alias (`#: Pick`, `f: Pick <- function(n) n`) is resolved by the checker and not by the runtime, which reads types where they are written (`syntax::annotation::signature`); the check warns (`Uncompiled::AliasedSignature`). Closing it needs the alias's body at lowering time, for instance by resolving aliases defined in the same file in `syntax::annotation`. A typed function without parameters whose body is a constant or a bare name registers no signature at all (`interp::annotations::register_definition` has no language object to key it by), and the checker says nothing about it.
 - **Over-reports.** A base R function the typed core computes itself (`Lowerer::builtin`: `length`, `sqrt`, `nchar`, `paste0`, `sprintf`, ...) is an R function to the rule, so its value needs a conversion that the compiled code does not. `a:b` is reported although `for (i in a:b)` compiles. Decide whether those base functions become part of typed ry or stay R.
 - **Not judged: how a call enters native code.** A call from top-level or boundary code that the native entry declines has no finding, and the function then runs in the interpreter together with every call it makes with a computed argument. The common case is a ry literal at the call, as in `total([1, 2, 3])`: `jit::native::pure_value` reads ahead only constants, variables, arithmetic and `c()`, so a list, record or tuple literal stays a lazy promise. Two more declines have no finding: a native function that calls R declines a variable argument from interpreted code ("it calls R, which could change a variable an argument reads"), on every call, and the first call of a function that calls a not-yet-loaded R function or converts a value of unknown type waits on the interpreter once. The first one makes a function such as `report(label)` with a `cat` inside always interpreted when top-level code calls it with a variable, and its message advises what the caller already did. Fix the entry first (read ahead a list, record or tuple literal whose items it can read ahead, and convert record and tuple arguments), then report what still declines (a function argument, a `Dict` or `Set` result) as `interpreted` at the call.
-- **Two lists are mirrored by hand.** `native::COMPILED_STD` against `Lowerer::builtin`, and `native::gives_table_value` against `interp::dataframe::gives_table_value`. The agreement test holds every `COMPILED_STD` name to a corpus function that runs natively, but it cannot see a function the typed core compiles and the list leaves out, which shows as a needless `interpreted` warning. A crate both sides can read (the names with native code as one table) would remove the mirror.
+- **Two lists are mirrored by hand.** `native::COMPILED_STD` against `Lowerer::builtin`, and `native::gives_table_value` against `gives_table_value` in `crates/typed/src/lower.rs`. The agreement test holds every `COMPILED_STD` name to a corpus function that runs natively, but it cannot see a function the typed core compiles and the list leaves out, which shows as a needless `interpreted` warning. A crate both sides can read (the names with native code as one table) would remove the mirror.
 
 ### Gaps the typed public ports found
 
@@ -3188,7 +3212,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     the test set up is involved; bisect the file to find it.
   - nlme's `anova.gls` and Orthodont tests differ by about 1e-7 in fitted parameters, and
     `all.equal` there gets a p-value as its tolerance, so it needs near-identical iterates.
-    `nlminb` now runs PORT's drivers (`crates/interp/src/stats_port_minimizer.rs`); rerun these
+    `nlminb` now runs PORT's drivers (`crates/stats/src/port_minimizer.rs`); rerun these
     tests to see what is left.
   - `nlminb` PORT divergences from GNU R (netlib sources: <https://netlib.org/port/>, the `drmn*`,
     `dg7q*`, `dd7d*`, `dl7*`, `ds7*`, `ds3grd` files; never GNU R's `portsrc.f`). Every routine
@@ -3209,7 +3233,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     that case and ry uses NaN; keeping the previous `nreduc` fixes `lower = upper` starts but
     breaks the zero-objective start pinned in `stats__nlminb_port_paths`. Also minor:
     a gradient that returns a list errors on ry and works in GNU R, and a non-numeric
-    objective misses GNU R's "NAs introduced by coercion" warning (`stats_port.rs`, `Objective`).
+    objective misses GNU R's "NAs introduced by coercion" warning (`crates/stats/src/port.rs`, `Objective`).
   - data.table: `S4`, `autoprint`, `knitr`, `other` and `types` pass. `main.Rraw` reports about
     700 failing tests (among them `-xtfrm(col)` on a character column, `scan()` reading
     `000879.17` as an integer, fread's `colClasses` list without names, and a missing "Item 2
@@ -3282,7 +3306,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - Raster compositing allocates a canvas-sized layer for every mark drawn with an operator other
     than `over` and two per group use, re-renders a mask whenever the clip and mask pair changes,
     and renders a definition again at every use, so a chain of groups that each use the one before
-    twice is exponential (`draw_items`, `coverage` in `graphics_render.rs`). Layers sized to the
+    twice is exponential (`draw_items`, `coverage` in `crates/graphics/src/render.rs`). Layers sized to the
     mark's bounds and a per-definition cache of rendered pixmaps would fix both.
   - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
     with cairo's font, so `strwidth` on `png()` differs slightly.

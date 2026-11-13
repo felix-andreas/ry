@@ -2,7 +2,7 @@
 # and the conversions into ry's own values.
 #
 # The functions run only on ry's runtime, which binds them in the `ry` namespace and attaches it as
-# `package:ry`. `crates/interp/src/frame.rs` and `dataframe.rs` implement them, and a test keeps
+# `package:ry`. `crates/frames/src/frame.rs` and `dataframe.rs` implement them, and a test keeps
 # this file's names and the runtime's equal. The standard library is its own namespace, declared
 # in `std.Rtypes`.
 
