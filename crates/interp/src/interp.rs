@@ -66,9 +66,9 @@ pub mod effects;
 pub mod element_access;
 pub mod envir;
 pub mod eval;
-#[cfg(unix)]
 mod fft;
 pub mod file_removal;
+#[cfg(unix)]
 pub mod fork;
 pub mod format;
 pub mod frame;
