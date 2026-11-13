@@ -1228,7 +1228,7 @@ pub unsafe extern "C" fn jit_loop_sequence(
         let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
             Some(value) => {
-                let steps = (interp::interp().hooks.compact_sequence_steps)(value);
+                let steps = values::compact_sequence(value).map(|(_, first, step)| (first, step));
                 let (first, step) = steps.unwrap_or((0.0, 0.0));
                 let sequence = match steps {
                     Some(_) => value,
@@ -1240,6 +1240,41 @@ pub unsafe extern "C" fn jit_loop_sequence(
                 Ok(sequence)
             }
             None => Ok(values::nil()),
+        })
+    }
+}
+
+/// A plain copy of `value` when it is an attribute-free compact sequence of `kind`, for a load
+/// that expects a plain vector, such as a formal declared `integer[]` called with `1:n`, or for
+/// an assignment into a variable the body changes. An attribute-free plain vector of `kind`,
+/// such as the one `a:a` gives, comes back as it is, and anything else gives null, which fails
+/// the caller's guard. The sequence itself stays compact, as GNU R's element reads leave it.
+pub unsafe extern "C" fn jit_sequence_contents(
+    activation: *mut Activation,
+    value: *mut Header,
+    kind: i64,
+) -> *mut Header {
+    unsafe {
+        guarded(activation, std::ptr::null_mut(), |activation| {
+            let Some(value) = Sexp::from_raw(value) else {
+                return std::ptr::null_mut();
+            };
+            if value.kind() as i64 != kind || value.attrib() != values::nil() {
+                return std::ptr::null_mut();
+            }
+            if !value.is_altrep() {
+                return value.as_ptr();
+            }
+            if values::compact_sequence(value).is_none() {
+                return std::ptr::null_mut();
+            }
+            match scoped(|| values::read_contents(value)) {
+                Ok(contents) => contents.as_ptr(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
         })
     }
 }
@@ -1691,6 +1726,27 @@ pub unsafe extern "C" fn jit_dict_get(
                 standard_library::compiled_get_result(dict, usize::try_from(position).ok())
             }
             None => Err(error("Dict.get() reached compiled code without a dict")),
+        })
+    }
+}
+
+/// `from:to` when it makes integers, or `NULL` for tier 0 to make anything else: doubles,
+/// the error for a missing bound, or, after parking it, an exhausted heap's error.
+pub unsafe extern "C" fn jit_colon(activation: *mut Activation, from: f64, to: f64) -> *mut Header {
+    unsafe {
+        checked(activation, std::ptr::null_mut(), |activation| {
+            let range = -f64::from(i32::MAX)..=f64::from(i32::MAX);
+            if !range.contains(&from) || !range.contains(&to) || from != from.floor() {
+                return std::ptr::null_mut();
+            }
+            match scoped(|| arith::colon(from, to)) {
+                Ok(sequence) if sequence.kind() == SexpType::Integer => sequence.as_ptr(),
+                Ok(_) => std::ptr::null_mut(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
         })
     }
 }

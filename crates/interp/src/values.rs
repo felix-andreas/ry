@@ -787,6 +787,9 @@ pub unsafe fn env_length(env: Sexp) -> usize {
 /// fail, so an error from the method is parked like an element accessor's
 /// ([`crate::unwind::park`]) and the length reads as 0 until it is raised.
 unsafe fn altrep_length(object: Sexp) -> usize {
+    if let Some((count, _, _)) = compact_sequence(object) {
+        return count;
+    }
     match (interp().hooks.altrep_length)(object) {
         Ok(count) => count,
         Err(unwind) => {
@@ -808,6 +811,30 @@ pub unsafe fn materialize(object: Sexp) -> R<Sexp> {
     }
 }
 
+/// An ordinary vector with the contents of `object` to read, leaving `object` as it is: a compact
+/// sequence that is not yet expanded is computed into a fresh vector instead of expanding in place.
+/// GNU R prints and formats through element reads, so `x <- 1:10; print(x)` leaves `x` compact
+/// there, and `.Internal(inspect(x))` must report the same afterwards.
+pub unsafe fn read_contents(object: Sexp) -> R<Sexp> {
+    match compact_sequence(object) {
+        Some((count, first, increment)) if object.cdr() == nil() => {
+            let kind = object.kind();
+            let copy = alloc_uninit(kind, count)?;
+            if kind == SexpType::Integer {
+                for (index, slot) in copy.slice_mut::<i32>().iter_mut().enumerate() {
+                    *slot = (first + increment * index as f64) as i32;
+                }
+            } else {
+                for (index, slot) in copy.slice_mut::<f64>().iter_mut().enumerate() {
+                    *slot = first + increment * index as f64;
+                }
+            }
+            Ok(copy)
+        }
+        _ => materialize(object),
+    }
+}
+
 macro_rules! typed_slice {
     ($name:ident, $name_mut:ident, $altrep:ident, $type:ty) => {
         /// The elements, which must be of the matching type. An ALTREP vector is materialized.
@@ -825,6 +852,11 @@ macro_rules! typed_slice {
         #[cold]
         #[inline(never)]
         unsafe fn $altrep<'a>(object: Sexp) -> &'a [$type] {
+            // A compact sequence keeps its expansion in its second data slot, which reads
+            // without a call into the class.
+            if compact_sequence(object).is_some() && object.cdr() != nil() {
+                return object.cdr().slice::<$type>();
+            }
             // The accessor cannot fail, so a method's error is parked, as for elements. The
             // class's own data pointer comes first, since materializing copies the whole vector
             // on every read.
@@ -864,7 +896,7 @@ typed_slice!(raws, raws_mut, raws_altrep, u8);
 #[inline]
 pub unsafe fn int_elt(object: Sexp, index: usize) -> R<i32> {
     if object.is_altrep() {
-        (interp().hooks.altrep_int_elt)(object, index)
+        altrep_int_elt(object, index)
     } else {
         Ok(object.slice::<i32>()[index])
     }
@@ -874,10 +906,41 @@ pub unsafe fn int_elt(object: Sexp, index: usize) -> R<i32> {
 #[inline]
 pub unsafe fn real_elt(object: Sexp, index: usize) -> R<f64> {
     if object.is_altrep() {
-        (interp().hooks.altrep_real_elt)(object, index)
+        altrep_real_elt(object, index)
     } else {
         Ok(object.slice::<f64>()[index])
     }
+}
+
+/// The ALTREP branch of [`int_elt`]. A compact sequence computes the element from its first
+/// element and increment, which is what its class's `Elt` method returns, without the call
+/// through the class's method table that every other class pays.
+#[cold]
+#[inline(never)]
+unsafe fn altrep_int_elt(object: Sexp, index: usize) -> R<i32> {
+    match compact_sequence(object) {
+        Some((_, first, increment)) => Ok((first + increment * index as f64) as i32),
+        None => (interp().hooks.altrep_int_elt)(object, index),
+    }
+}
+
+/// The ALTREP branch of [`real_elt`], read like [`altrep_int_elt`].
+#[cold]
+#[inline(never)]
+unsafe fn altrep_real_elt(object: Sexp, index: usize) -> R<f64> {
+    match compact_sequence(object) {
+        Some((_, first, increment)) => Ok(first + increment * index as f64),
+        None => (interp().hooks.altrep_real_elt)(object, index),
+    }
+}
+
+/// Element `index` of a character ALTREP vector, read through its class's `Elt` method, so a
+/// deferred string vector converts only that element. A plain vector's caller reads
+/// [`string_elt`] instead and keeps the ALTREP test out of its loop.
+#[cold]
+#[inline(never)]
+pub unsafe fn altrep_string_elt(object: Sexp, index: usize) -> R<Sexp> {
+    (interp().hooks.altrep_string_elt)(object, index)
 }
 
 #[inline]
@@ -1393,6 +1456,65 @@ pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
     }
     Ok(copy)
 }
+
+/// GNU R's `R_shallow_duplicate_attr`: a copy of `object` for a caller that changes only its
+/// attributes, which for a long atomic or character vector is a wrapper that shares the data
+/// until something writes to it. Like [`shallow_duplicate`], it drops the Array bit.
+pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
+    let wrappable = matches!(
+        object.kind(),
+        SexpType::Integer
+            | SexpType::Logical
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw
+            | SexpType::String
+    );
+    // An Array's kernels read its storage directly, which a wrapper does not have.
+    if !wrappable || object.is_array() || length(object) < WRAP_THRESHOLD {
+        return shallow_duplicate(object);
+    }
+    let copy = (interp().hooks.altrep_wrap)(object)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
+}
+
+/// The length, first element and increment of a compact integer or double sequence, or `None`
+/// for any other vector. The class's first data slot is GNU R's `c(n, n1, inc)`, which
+/// serialization writes too, so reading it here saves the call into the host on hot paths.
+#[inline]
+pub unsafe fn compact_sequence(object: Sexp) -> Option<(usize, f64, f64)> {
+    if !object.is_altrep() {
+        return None;
+    }
+    let [integer, real] = crate::compact_sequence_classes()?;
+    let class = object.tag();
+    if class != integer && class != real {
+        return None;
+    }
+    let &[count, first, increment] = object.car().slice::<f64>() else {
+        return None;
+    };
+    Some((count as usize, first, increment))
+}
+
+/// The value a complex assignment binds: a wrapper [`shallow_duplicate_attr`] introduced is
+/// dropped for its data once the replacement has copied that data, as GNU R's
+/// `try_assign_unwrap` does. `bound` says whether the variable's binding is the one reference
+/// the value has.
+#[inline]
+pub unsafe fn unwrap_assigned(value: Sexp, bound: bool) -> Sexp {
+    if value.is_altrep() && (value.refcount() == 0 || (value.refcount() == 1 && bound)) {
+        (interp().hooks.altrep_unwrap)(value)
+    } else {
+        value
+    }
+}
+
+/// GNU R's `WRAP_THRESHOLD`: a shorter vector is cheaper to copy than to wrap.
+const WRAP_THRESHOLD: usize = 64;
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     let heap = crate::heap();

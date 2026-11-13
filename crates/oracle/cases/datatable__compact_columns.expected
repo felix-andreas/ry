@@ -1,0 +1,10 @@
+[stdout]
+| [1] 3 2 1
+| [1] 1 2 3
+[messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
+[warnings]
+[errors]
+- could not find function "setfrev" (in setfrev(x))
+[value]

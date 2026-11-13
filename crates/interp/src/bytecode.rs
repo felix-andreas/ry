@@ -1464,41 +1464,59 @@ pub const ARITHS: [(Arith, &str); 13] = [
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
 /// length-one vector and a plain vector is any other; both have no attributes and are not
 /// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
-/// it promises what a plain vector does not (no NA, no attributes) and its operators differ.
+/// it promises what a plain vector does not (no NA, no attributes) and its operators differ. A
+/// compact integer or double sequence (`1:n`, `as.double(1:n)`) is its own kind too, because
+/// compiled code computes its elements instead of loading them.
 pub mod feedback {
-    pub const INTEGER_SCALAR: u16 = 1 << 0;
-    pub const DOUBLE_SCALAR: u16 = 1 << 1;
-    pub const LOGICAL_SCALAR: u16 = 1 << 2;
-    pub const INTEGER_VECTOR: u16 = 1 << 3;
-    pub const DOUBLE_VECTOR: u16 = 1 << 4;
-    pub const LOGICAL_VECTOR: u16 = 1 << 5;
-    pub const LIST: u16 = 1 << 6;
-    pub const OTHER: u16 = 1 << 7;
-    pub const INTEGER_ARRAY: u16 = 1 << 8;
-    pub const DOUBLE_ARRAY: u16 = 1 << 9;
-    pub const LOGICAL_ARRAY: u16 = 1 << 10;
+    pub const INTEGER_SCALAR: u32 = 1 << 0;
+    pub const DOUBLE_SCALAR: u32 = 1 << 1;
+    pub const LOGICAL_SCALAR: u32 = 1 << 2;
+    pub const INTEGER_VECTOR: u32 = 1 << 3;
+    pub const DOUBLE_VECTOR: u32 = 1 << 4;
+    pub const LOGICAL_VECTOR: u32 = 1 << 5;
+    pub const LIST: u32 = 1 << 6;
+    pub const OTHER: u32 = 1 << 7;
+    pub const INTEGER_ARRAY: u32 = 1 << 8;
+    pub const DOUBLE_ARRAY: u32 = 1 << 9;
+    pub const LOGICAL_ARRAY: u32 = 1 << 10;
     /// A `JumpUnless` jumped: its condition was `FALSE`.
-    pub const BRANCH_TAKEN: u16 = 1 << 11;
+    pub const BRANCH_TAKEN: u32 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
-    pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    pub const BRANCH_NOT_TAKEN: u32 = 1 << 12;
     /// A `GetVar` read an active binding, so every read there must call the binding again.
     /// Compiled code records it, and the bit says nothing about the value's type.
-    pub const ACTIVE_BINDING: u16 = 1 << 13;
+    pub const ACTIVE_BINDING: u32 = 1 << 13;
+    /// An attribute-free compact integer sequence.
+    pub const INTEGER_SEQUENCE: u32 = 1 << 15;
+    /// An attribute-free compact double sequence, such as `as.double(1:n)`.
+    pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
 /// values a value-producing instruction made, or the branch bits of a `JumpUnless`. Tier 0 only
 /// adds bits, so what it reports never shrinks until the optimizing tier clears the record.
-pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u16 {
+pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u32 {
     values::ints(code.cdr().element(FEEDBACK))
         .get(pc)
-        .map_or(0, |&bits| bits as u16)
+        .map_or(0, |&bits| bits as u32)
 }
 
 /// The [`feedback`] bit for `value`.
-pub unsafe fn value_kind(value: Sexp) -> u16 {
+pub unsafe fn value_kind(value: Sexp) -> u32 {
     if value.is_altrep() {
-        return feedback::OTHER;
+        let Some([integer, double]) = crate::compact_sequence_classes() else {
+            return feedback::OTHER;
+        };
+        let class = value.tag();
+        return if values::has_attributes(value) {
+            feedback::OTHER
+        } else if class == integer {
+            feedback::INTEGER_SEQUENCE
+        } else if class == double {
+            feedback::DOUBLE_SEQUENCE
+        } else {
+            feedback::OTHER
+        };
     }
     if value.is_array() {
         return match value.kind() {
@@ -6137,7 +6155,7 @@ pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
 /// Marks the `GetVar` at `pc` as one that called an active binding.
 pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
     if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
-        *bits |= i32::from(feedback::ACTIVE_BINDING);
+        *bits |= feedback::ACTIVE_BINDING as i32;
     }
 }
 
@@ -6275,14 +6293,14 @@ impl Activation<'_, '_> {
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(value_kind(value));
+            *self.feedback.add(pc) |= value_kind(value) as i32;
         }
     }
 
     #[inline(always)]
-    unsafe fn record_kind(&self, pc: usize, kind: u16) {
+    unsafe fn record_kind(&self, pc: usize, kind: u32) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(kind);
+            *self.feedback.add(pc) |= kind as i32;
         }
     }
 }
@@ -7011,8 +7029,10 @@ unsafe fn read_element_call<const STRING: bool>(
     ) else {
         // A tail call, and the subject's kind is tested only out of line: tested here, it joins
         // the kind dispatch above, which then compiles to a jump table that the numeric read pays
-        // for.
-        return if STRING {
+        // for. The ALTREP test is a header bit, not a kind, so it stays out of that dispatch.
+        return if subject.is_altrep() {
+            read_altrep_element_call(state, at)
+        } else if STRING {
             None
         } else {
             read_string_element_call(state, at, double)
@@ -7031,6 +7051,85 @@ unsafe fn read_element_call<const STRING: bool>(
         return None;
     }
     let value = element_access::element_value::<STRING>(heap, subject, position)?;
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::CallBuiltin))
+}
+
+/// The ALTREP branch of [`read_element_call`]: `x[i]` or `x[[i]]` for a plain numeric scalar
+/// within bounds and, without attributes, a compact integer or double sequence, computed from
+/// its first element and increment without expanding it, or a deferred string, converting only
+/// that element. Any other ALTREP vector declines to the builtin, whose `Elt` read may run a
+/// package's R code.
+#[cold]
+#[inline(never)]
+unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let heap = &mut *state.heap;
+    let first = *code.add(at + 4) as usize;
+    let subject = *registers.add(first);
+    let index = *registers.add(first + 1);
+    let kind = subject.kind();
+    if subject.attrib() != heap.known().nil
+        || index.is_altrep()
+        || index.attrib() != heap.known().nil
+        || index.length() != 1
+    {
+        return None;
+    }
+    let sequence = values::compact_sequence(subject);
+    let count = match sequence {
+        Some((count, _, _)) => count,
+        None if kind == SexpType::String
+            && subject.tag() == (*state.interp).deferred_string_class =>
+        {
+            subject.length() as usize
+        }
+        None => return None,
+    };
+    let position = match index.kind() {
+        SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
+    if !(position >= 1.0 && position < count as f64 + 1.0) {
+        return None;
+    }
+    let known = *heap.known();
+    let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
+    let second = arguments.cdr();
+    if arguments.tag() != known.nil
+        || second.tag() != known.nil
+        || arguments.car() == known.missing_arg
+        || second.car() == known.missing_arg
+        || activity::enabled()
+    {
+        return None;
+    }
+    let offset = position as usize - 1;
+    let value = match sequence {
+        Some((_, start, step)) => {
+            let element = start + step * offset as f64;
+            let bits = if kind == SexpType::Integer {
+                element as i32 as u32 as u64
+            } else {
+                element.to_bits()
+            };
+            heap.try_alloc_scalar(kind, [bits, 0])?
+        }
+        None => {
+            // An error converting the element (only running out of memory) declines, and the
+            // builtin then converts it again and raises that error.
+            let element = values::altrep_string_elt(subject, offset).ok()?;
+            let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
+            // The store `Heap::set_element` would count into a fresh vector.
+            element.increment_refcount();
+            scalar
+        }
+    };
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
@@ -8968,7 +9067,7 @@ unsafe fn assign_slot_element(
         target
     } else {
         let was_array = target.is_array();
-        let copy = values::shallow_duplicate(target)?;
+        let copy = values::shallow_duplicate_attr(target)?;
         copy.set_array(was_array);
         heap.root(copy);
         copy
@@ -8986,6 +9085,7 @@ unsafe fn assign_slot_element(
     };
     interp().assignment_call = outer;
     let result = result?;
+    let result = values::unwrap_assigned(result, current == result);
     // A warning's calling handler may have looked at the frame, which then holds the variable
     // in its environment instead of the slot.
     if *state.header != nil() {
@@ -10261,7 +10361,7 @@ unsafe fn fused_pass(
                 (Element::Integer, false) => feedback::INTEGER_VECTOR,
                 (Element::Double, false) => feedback::DOUBLE_VECTOR,
             };
-            *state.feedback.add(node[4] as usize) |= i32::from(kind);
+            *state.feedback.add(node[4] as usize) |= kind as i32;
         }
         if reduction.is_some() {
             state.record(words[fusion::REDUCTION_SITE] as usize, fused.value);
@@ -10304,11 +10404,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     }
     // A compact sequence is stepped through by its first element and increment; expanding
     // `1:n` would allocate all n elements the loop reads one at a time.
-    let steps = if sequence.is_altrep() {
-        (interp().hooks.compact_sequence_steps)(sequence)
-    } else {
-        None
-    };
+    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
     let (first, step) = steps.unwrap_or((0.0, 0.0));
     let sequence = match steps {
         Some(_) => sequence,
@@ -11072,7 +11168,7 @@ unsafe fn replace_variable(
     };
     if shared || args[1..].contains(&target) {
         let was_array = target.is_array();
-        target = values::shallow_duplicate(target)?;
+        target = values::shallow_duplicate_attr(target)?;
         target.set_array(was_array);
     }
     heap.root(target);
@@ -11125,6 +11221,11 @@ unsafe fn replace_variable(
         interp().tmp_values.pop();
     }
     let result = result?;
+    let bound = match home {
+        Home::Cell(cell) => cell.cdr() == result,
+        Home::Slot(slot) => *slot == result,
+    };
+    let result = values::unwrap_assigned(result, bound);
     match home {
         Home::Cell(cell) => eval::assign_local(variable, result, env, Some(cell))?,
         // A warning's calling handler may have looked at the frame, which then holds the
@@ -11301,7 +11402,7 @@ pub(crate) unsafe fn call_builtin(
 
 unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     let feedback = constants.element(FEEDBACK);
-    values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
+    values::ints_mut(feedback)[pc] |= value_kind(value) as i32;
 }
 
 /// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the

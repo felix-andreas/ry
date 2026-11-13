@@ -195,6 +195,13 @@ fn seeds_agree_across_tiers() {
             "(n = 3000L)",
             false,
         ),
+        // A block that an inner loop's `break` also enters, after a different sequence was
+        // bound, so its element read must not reuse the sequence checked on the other path.
+        (
+            "x <- 1:n\ns <- 0\nfor (i in 1:n) { for (j in 1:2) { if (i %% 3L == 0L) { x <- n:1; break }; x <- 1:n }; s <- s * 2 + x[i] }\ns",
+            "(n = 30L)",
+            false,
+        ),
         // Subsetting a plain vector, which reaches the element intrinsic.
         (
             "s <- 0\nfor (i in 1:n) s <- s + v[(i %% 2L) + 1L] * v[[1L]]\ns",
