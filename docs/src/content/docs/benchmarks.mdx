@@ -23,9 +23,15 @@ measurement.
 
 ## Public R JIT benchmarks
 
-These are the programs that the Ř (rir) and rcp R compilers are measured on, from the suite of
-Kocourek, Křikava and Vitek, "Copy-and-Patch Just-in-Time Compiler for R" (VMIL 2025): all 57 but
-three that cannot be sized to a few seconds. They are vendored unchanged with their MIT licence, and
+These are the programs that the [Ř](https://github.com/reactorlabs/rir) (rir) and rcp R compilers
+are measured on. They come from the benchmark directory of the
+[r-compile-server](https://github.com/PRL-PRG/r-compile-server/tree/b2b13a3150bddcc2d6dae8c37ecbbf1007170940/client/rsh/inst/benchmarks)
+repository, the suite of Kocourek, Křikava and Vitek,
+"[Copy-and-Patch Just-in-Time Compiler for R](https://ch-rigid.github.io/publications/kocourek_copyandpatch_2025.pdf)"
+(VMIL 2025): all 57 but three that cannot be sized to a few seconds. The suite combines ports of
+[Are We Fast Yet](https://github.com/smarr/are-we-fast-yet), ports of the
+[Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/) and the rcp
+micro-benchmarks. They are vendored unchanged with their MIT licence, and
 each file ends with a driver that runs the program once at a fixed size and prints a checksum and
 its time. The sizes make GNU R 4.6 take about half a second to two seconds per program. Every run
 is a fresh process, so the time includes GNU R's byte compilation and ry's JIT tier-up, though not

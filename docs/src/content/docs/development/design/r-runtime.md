@@ -319,10 +319,10 @@ its limits, or reimplemented R and then struggled with packages. That pattern is
 | CXXR / Rho | Incremental C++ rewrite of R's internals, later with an LLVM JIT | Kept R's API by construction | Discontinued |
 | Riposte (Talbot et al.) | Tracing JIT and parallel VM for vector code | None | Research prototype; showed large gains from fusing vector operations, beside scalar trace compilation |
 | Renjin | JVM interpreter; GCC-Bridge compiled C and Fortran to JVM bytecode | Recompiled, with no raw memory model | No longer maintained; packages relying on pointer-level behavior broke |
-| FastR (Oracle) | Truffle AST interpreter with Graal partial evaluation | Emulated C API over Java objects, so a raw data pointer required native memory to be kept in sync with the Java-side vector | Large speedups on R code, but the native boundary was slow and incomplete; no longer actively developed, last release 22.3 |
+| [FastR](https://github.com/oracle/fastr) (Oracle) | Truffle AST interpreter with Graal partial evaluation | Emulated C API over Java objects, so a raw data pointer required native memory to be kept in sync with the Java-side vector | Large speedups on R code, but the native boundary was slow and incomplete; no longer actively developed, last release 22.3 |
 | TERR (TIBCO, now Spotfire) | Closed-source clean-room engine from the S-PLUS lineage | Own implementation of the C API | Commercial and still shipped; checks CRAN compatibility on every release, which is the cost of not being a fork |
-| Ř / rir (Vitek group) | Bytecode tier plus an optimizing tier with an SSA IR (PIR), speculation, deoptimization and contextual dispatch, LLVM backend | Native: built on a patched GNU R | Large speedups on R-level code in the published evaluations; remains a research VM tied to its GNU R base |
-| rcp (Kocourek, Křikava, Vitek, 2025) | Copy-and-patch JIT from GNU R bytecode, as a package | Native, inside GNU R | 1.15x to 1.91x over GNU R on 57 programs, at about 980 bytecode instructions per millisecond of compile time |
+| [Ř / rir](https://github.com/reactorlabs/rir) (Vitek group) | Bytecode tier plus an optimizing tier with an SSA IR (PIR), speculation, deoptimization and contextual dispatch, LLVM backend | Native: built on a patched GNU R | Large speedups on R-level code in the published evaluations; remains a research VM tied to its GNU R base |
+| [rcp](https://ch-rigid.github.io/publications/kocourek_copyandpatch_2025.pdf) (Kocourek, Křikava, Vitek, 2025) | Copy-and-patch JIT from GNU R bytecode, as a package | Native, inside GNU R | 1.15x to 1.91x over GNU R on 57 programs, at about 980 bytecode instructions per millisecond of compile time |
 
 What carries over to ry:
 
@@ -2144,7 +2144,7 @@ and lets it behave like the R version it finds; the reasoning is in
 - The measured data: `tools/research/data/` and the scripts beside it.
 - loadfast: [github.com/finccam/loadfast](https://github.com/finccam/loadfast), README and
   `TECHNICAL_DEBT.md`.
-- Ř: Flückiger et al., "R Melts Brains: An IR for First-Class Environments and Lazy Effectful
+- Ř: [reactorlabs/rir](https://github.com/reactorlabs/rir) and its [benchmarking tools](https://github.com/reactorlabs/rbenchmarking); Flückiger et al., "R Melts Brains: An IR for First-Class Environments and Lazy Effectful
   Arguments" (DLS 2019) and "Contextual Dispatch for Function Specialization" (OOPSLA 2020).
 - rcp: Kocourek, Křikava and Vitek, "Copy-and-Patch Just-in-Time Compiler for R" (VMIL 2025),
   [d3s.mff.cuni.cz](https://d3s.mff.cuni.cz/publications/kocourek_copyandpatch_2025/).
