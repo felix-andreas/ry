@@ -4903,9 +4903,9 @@ check` releases its trees once, and memoized records are compact" below).
   column changes or the table is dropped. `test_memory.rs` pins the loop at 5 bytes per row, both
   at its peak and held afterwards (measured 4.1 and 4.0).
 - **Impact.** db-benchmark's "`:=` on 1% of rows, 100 times" on 4 cores, the faster of two runs:
-  at 1e7 rows 0.154 s from R and 0.144 s from Rust against data.table's 0.379 s (2.414 s and
-  0.628 s before), and at 1e8 rows 1.118 s and 1.143 s against 3.436 s. The run that builds the
-  index took 0.31 s at 1e7 rows and 3.1 s at 1e8, against 0.45 s and 5.5 s for data.table's
+  at 1e7 rows 0.111 s from R and 0.105 s from Rust against data.table's 0.356 s (2.414 s and
+  0.628 s before), and at 1e8 rows 0.987 s and 1.040 s against 3.079 s. The run that builds the
+  index took 0.26 s at 1e7 rows and 3.0 s at 1e8, against 0.40 s and 4.1 s for data.table's
   first run. The whole 1e7 suite's peak from R fell from 8.4 GB to 4.5 GB; which loop held the
   difference was not isolated.
 - **Known limit of the count.** A holder the counts do not see, such as native code that keeps
