@@ -75,6 +75,17 @@ base_r() {
 	fi
 }
 
+# A GitHub-hosted Linux runner has 16 GB of memory and 4 GB of swap, which the instrumented
+# fat-LTO link of `ry` outgrows: the runner is then killed mid-link, and the job ends with "The
+# runner has received a shutdown signal". Its temporary disk at /mnt has room for more swap.
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$(uname -s)" = Linux ] && [ -d /mnt ] && [ ! -e /mnt/ry-swap ]; then
+	sudo fallocate -l 16G /mnt/ry-swap
+	sudo chmod 600 /mnt/ry-swap
+	sudo mkswap /mnt/ry-swap > /dev/null
+	sudo swapon /mnt/ry-swap
+	free -h >&2
+fi
+
 rm -rf "$work/pgo-raw" "$work/bolt-raw" "$work/runtime" "$work/bolt-instrumented" "$work/build.log"
 mkdir -p "$work/pgo-raw" "$work/bolt-raw" "$work/runtime"
 

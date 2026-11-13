@@ -105,6 +105,17 @@ pub fn constant(id: u32) -> u64 {
     SHAPES.with_borrow_mut(|shapes| shapes.constant(id))
 }
 
+/// The shape whose one static box is at `pointer`, if `pointer` is such a box.
+pub fn constant_shape(pointer: u64) -> Option<u32> {
+    if pointer == 0 {
+        return None;
+    }
+    SHAPES.with_borrow(|shapes| {
+        let id = shapes.constants.iter().position(|&held| held == pointer)?;
+        Some(id as u32)
+    })
+}
+
 /// The union holding exactly these shapes.
 pub fn union_of(members: &[u32]) -> u32 {
     let mut members: SmallVec<[u32; 4]> = SmallVec::from_slice(members);

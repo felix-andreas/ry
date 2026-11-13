@@ -497,13 +497,27 @@ SEXP altreptest_sorted(SEXP x)
     return result;
 }
 
+/* The class and package symbols, read from the class handle's attributes, which hold
+   list(class, package, type) in every GNU R with ALTREP. R_altrep_class_name and
+   R_altrep_class_package exist only from GNU R 4.6, and a package that calls them does not
+   load into an older GNU R. */
+static SEXP class_symbol(SEXP x)
+{
+    return CAR(ATTRIB(ALTREP_CLASS(x)));
+}
+
+static SEXP package_symbol(SEXP x)
+{
+    return CADR(ATTRIB(ALTREP_CLASS(x)));
+}
+
 SEXP altreptest_class(SEXP x)
 {
     if (!ALTREP(x))
         return R_NilValue;
     SEXP result = PROTECT(allocVector(STRSXP, 3));
-    SET_STRING_ELT(result, 0, PRINTNAME(R_altrep_class_name(x)));
-    SET_STRING_ELT(result, 1, PRINTNAME(R_altrep_class_package(x)));
+    SET_STRING_ELT(result, 0, PRINTNAME(class_symbol(x)));
+    SET_STRING_ELT(result, 1, PRINTNAME(package_symbol(x)));
     SET_STRING_ELT(result, 2, mkChar(type2char(TYPEOF(x))));
     UNPROTECT(1);
     return result;
@@ -685,8 +699,8 @@ static void note_class(SEXP x)
         note("  altrep: no");
         return;
     }
-    note("  altrep: %s/%s %s, class handle %s", CHAR(PRINTNAME(R_altrep_class_name(x))),
-         CHAR(PRINTNAME(R_altrep_class_package(x))), type2char(TYPEOF(x)),
+    note("  altrep: %s/%s %s, class handle %s", CHAR(PRINTNAME(class_symbol(x))),
+         CHAR(PRINTNAME(package_symbol(x))), type2char(TYPEOF(x)),
          type2char(TYPEOF(ALTREP_CLASS(x))));
 }
 
@@ -763,16 +777,6 @@ static void probe_region(SEXP x)
 static void probe_elt_3(SEXP x)
 {
     note("  INTEGER_ELT[3]: %d", INTEGER_ELT(x, 3));
-}
-
-/* `name(x, na.rm = TRUE)`, which uses the class's method when it has one. */
-static double summary(const char *name, SEXP x)
-{
-    SEXP call = PROTECT(lang3(install(name), x, ScalarLogical(TRUE)));
-    SET_TAG(CDDR(call), install("na.rm"));
-    double value = asReal(eval(call, R_BaseEnv));
-    UNPROTECT(1);
-    return value;
 }
 
 static void probe_sum(SEXP x)

@@ -448,9 +448,13 @@ unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Lin
 /// Machine code for a lowered function whose shapes are confirmed.
 unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<Compiled, Refusal> {
     let mut ir = lowered.function;
+    unbox::replace_split_lists(&mut ir);
     unbox::unbox(&mut ir);
     fusion::fuse(&mut ir);
     ownership::insert(&mut ir);
+    if std::env::var_os("RY_TYPED_DUMP").is_some() {
+        eprintln!("{ir}");
+    }
     let sites: Vec<usize> = lowered
         .r_calls
         .iter()
