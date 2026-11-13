@@ -404,6 +404,9 @@ pub mod gp {
     /// frame instead of an environment, and its attribute holds the frame's position, the slot
     /// and the frame's header register (`interp::eval::argument_reference`).
     pub const ARGUMENT_REFERENCE: u16 = 1 << 13;
+    /// Byte code that binds base functions when it compiles, as GNU R's compiled code does,
+    /// instead of guarding each name (`interp::bytecode`'s `Compiler::bound_base`).
+    pub const BINDING_CODE: u16 = 1 << 0;
     /// A closure `debug()` flagged, GNU R's `RDEBUG`: every call stops at its first statement
     /// while a debugger is attached.
     pub const CLOSURE_DEBUG: u16 = 1 << 15;
@@ -411,10 +414,19 @@ pub mod gp {
     pub const CLOSURE_STEP: u16 = 1 << 14;
     /// A closure `trace()` flagged, GNU R's `RTRACE`.
     pub const CLOSURE_TRACE: u16 = 1 << 13;
+    /// A closure whose body compiles at its next call, GNU R's `MAYBEJIT`: a function of the
+    /// global environment with a small body, or any other function with a large one, waits one
+    /// call (`R_CheckJIT`).
+    pub const CLOSURE_MAYBE_JIT: u16 = 1 << 6;
+    /// A closure GNU R's JIT never compiles, its `NOJIT`: a small body of a function that is not
+    /// the global environment's.
+    pub const CLOSURE_NO_JIT: u16 = 1 << 5;
     /// Every bit a closure can carry. Each means something different, so no two may share a
     /// position.
-    pub const CLOSURE_BITS: [u16; 5] = [
+    pub const CLOSURE_BITS: [u16; 7] = [
         S4_OBJECT,
+        CLOSURE_NO_JIT,
+        CLOSURE_MAYBE_JIT,
         NATIVE_ENTRY,
         CLOSURE_TRACE,
         CLOSURE_STEP,
@@ -635,6 +647,13 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
         }
     }
 }
+
+/// The bit of a record's layout word that marks the record lazy: it stands for a value of the
+/// typed core and its slots are not filled yet. Slot 0 holds that value's address, and every
+/// slot is marked raw, so the collector traces nothing in it. Compiled field reads compare the
+/// whole layout word with the layout they expect, so a lazy record fails them and takes the
+/// interpreter's path, which fills it first ([`crate::Heap::settle_record`]).
+pub const LAZY_RECORD: u32 = 1 << 31;
 
 /// Where a record's slots start.
 pub const RECORD_DATA_OFFSET: usize = size_of::<RecordObject>();
@@ -1182,7 +1201,17 @@ impl Sexp {
     // Records, tuples and tags. The caller guarantees the object has the record shape.
 
     pub unsafe fn record_layout(self) -> u32 {
-        unsafe { self.payload::<RecordObject>().layout.get() }
+        unsafe { self.payload::<RecordObject>().layout.get() & !LAZY_RECORD }
+    }
+
+    /// Whether the record is lazy ([`LAZY_RECORD`]), so its slots must not be read yet.
+    pub unsafe fn is_lazy_record(self) -> bool {
+        unsafe { self.payload::<RecordObject>().layout.get() & LAZY_RECORD != 0 }
+    }
+
+    /// The address of the typed-core value a lazy record stands for.
+    pub unsafe fn lazy_record_value(self) -> u64 {
+        unsafe { *(self.record_slots() as *const u64) }
     }
 
     pub unsafe fn record_slot_count(self) -> usize {
@@ -1193,9 +1222,10 @@ impl Sexp {
         unsafe { self.payload::<RecordObject>().unboxed.get() }
     }
 
-    /// Slot `index`, which must be below the slot count.
+    /// Slot `index`, which must be below the slot count, of a record that is not lazy.
     pub unsafe fn record_slot(self, index: usize) -> Slot {
         unsafe {
+            debug_assert!(!self.is_lazy_record(), "a lazy record's slot was read");
             let bits = *(self.record_slots() as *const u64).add(index);
             if index < UNBOXED_SLOTS && self.record_unboxed() & (1 << index) != 0 {
                 Slot::decode_raw(bits)
@@ -1210,6 +1240,15 @@ impl Sexp {
         match unsafe { self.record_slot(index) } {
             Slot::Handle(handle) => Some(handle),
             _ => None,
+        }
+    }
+
+    /// The handle in slot `index` as the collector sees it. Unlike [`Sexp::record_handle`] it
+    /// takes a lazy record too, whose slots are all raw, so it finds none there.
+    pub(crate) unsafe fn record_child(self, index: usize) -> Option<Sexp> {
+        unsafe {
+            let (bits, raw) = self.record_slot_bits(index);
+            (!raw).then(|| Sexp(NonNull::new_unchecked(bits as *mut Header)))
         }
     }
 
@@ -1247,6 +1286,18 @@ impl Sexp {
                 *(self.record_slots() as *mut u64).add(index) = slot.encode();
             }
             payload.unboxed.set(unboxed);
+        }
+    }
+
+    /// Makes a fresh, zeroed record lazy: of `layout`, with `slot_count` slots, standing for the
+    /// typed-core value at `value`.
+    pub(crate) unsafe fn init_lazy_record(self, layout: u32, slot_count: usize, value: u64) {
+        unsafe {
+            let payload = self.payload::<RecordObject>();
+            payload.layout.set(layout | LAZY_RECORD);
+            payload.slot_count.set(slot_count as u32);
+            payload.unboxed.set(u64::MAX >> (UNBOXED_SLOTS - slot_count));
+            *(self.record_slots() as *mut u64) = value;
         }
     }
 

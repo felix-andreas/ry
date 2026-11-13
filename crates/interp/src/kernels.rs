@@ -34,6 +34,7 @@ pub enum Reals<'a> {
     Doubles(&'a [f64]),
     Integers(&'a [i32]),
     Scalar(f64),
+    Sequence(Sequence<f64>),
 }
 
 /// A read-only operand of complex arithmetic: complex numbers, or a numeric operand whose
@@ -50,6 +51,17 @@ pub enum Complexes<'a> {
 pub enum Integers<'a> {
     Values(&'a [i32]),
     Scalar(i32),
+    Sequence(Sequence<i32>),
+}
+
+/// The elements of a compact sequence, computed from its first element and increment instead of
+/// read, so a kernel never expands the sequence: `x * seq_len(n)` costs only the sequence's
+/// creation, and the expansion GNU R also makes waits until C code asks for the data pointer.
+#[derive(Clone, Copy)]
+pub struct Sequence<T> {
+    first: T,
+    step: T,
+    length: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,7 +109,7 @@ pub unsafe fn binary(
     if !plain(left) || !plain(right) {
         return Ok(None);
     }
-    let (left_length, right_length) = (left.length() as usize, right.length() as usize);
+    let (left_length, right_length) = (values::length(left), values::length(right));
     let count = if left_length == right_length || right_length == 1 {
         left_length
     } else if left_length == 1 {
@@ -219,7 +231,7 @@ unsafe fn complex_binary(
     {
         return Ok(None);
     }
-    let (left_length, right_length) = (left.length() as usize, right.length() as usize);
+    let (left_length, right_length) = (values::length(left), values::length(right));
     let count = if left_length == right_length || right_length == 1 {
         left_length
     } else if left_length == 1 {
@@ -255,10 +267,10 @@ pub unsafe fn unary(
     operand: Sexp,
     destination: Option<Sexp>,
 ) -> R<Option<Sexp>> {
-    if !plain(operand) || operand.length() == 0 {
+    if !plain(operand) || values::length(operand) == 0 {
         return Ok(None);
     }
-    let count = operand.length() as usize;
+    let count = values::length(operand);
     let kind = if function == Math::Abs && operand.kind() != SexpType::Real {
         SexpType::Integer
     } else {
@@ -301,7 +313,7 @@ pub unsafe fn unary(
 /// code may hold a boxed scalar in more registers than one. A fresh scalar costs little.
 pub unsafe fn fits(destination: Sexp, kind: SexpType, count: usize) -> bool {
     count > 1
-        && plain(destination)
+        && writable(destination)
         && destination.kind() == kind
         && destination.length() as usize == count
 }
@@ -323,13 +335,21 @@ pub fn payload_from_right(
         && right_length != 1
 }
 
-/// Whether a kernel may read `value` directly: a logical, integer or double vector with no
-/// attributes that is neither ALTREP nor an Array.
+/// Whether a kernel may read `value`: a logical, integer or double vector with no attributes
+/// that is not an Array, and is either ordinary or a compact sequence, which [`reals`] and
+/// [`integers`] read as a [`Sequence`] without expanding it.
 pub unsafe fn plain(value: Sexp) -> bool {
     matches!(
         value.kind(),
         SexpType::Logical | SexpType::Integer | SexpType::Real
-    ) && bare(value)
+    ) && value.attrib() == values::nil()
+        && !value.is_array()
+        && (!value.is_altrep() || values::compact_sequence(value).is_some())
+}
+
+/// Whether a kernel may write its result into `value`: a [`plain`] vector that is not ALTREP.
+unsafe fn writable(value: Sexp) -> bool {
+    !value.is_altrep() && plain(value)
 }
 
 /// Whether a vector has no attributes and is neither ALTREP nor an Array.
@@ -347,6 +367,13 @@ pub unsafe fn complexes<'a>(value: Sexp) -> Complexes<'a> {
 
 /// A plain vector's elements as a [`Reals`] operand.
 pub unsafe fn reals<'a>(value: Sexp) -> Reals<'a> {
+    if let Some((length, first, step)) = values::compact_sequence(value) {
+        return Reals::Sequence(Sequence {
+            first,
+            step,
+            length,
+        });
+    }
     match value.kind() {
         SexpType::Real => Reals::Doubles(values::reals(value)),
         _ => Reals::Integers(values::ints(value)),
@@ -355,6 +382,14 @@ pub unsafe fn reals<'a>(value: Sexp) -> Reals<'a> {
 
 /// A plain integer or logical vector's elements as an [`Integers`] operand.
 pub unsafe fn integers<'a>(value: Sexp) -> Integers<'a> {
+    // An integer sequence's first element and increment are integers.
+    if let Some((length, first, step)) = values::compact_sequence(value) {
+        return Integers::Sequence(Sequence {
+            first: first as i32,
+            step: step as i32,
+            length,
+        });
+    }
     Integers::Values(values::ints(value))
 }
 
@@ -466,12 +501,12 @@ pub unsafe fn fused(
     }
     let count = leaves
         .iter()
-        .map(|&leaf| leaf.length() as usize)
+        .map(|&leaf| values::length(leaf))
         .max()
         .unwrap_or(0);
     if count < SHORTEST_FUSED
         || leaves.iter().any(|&leaf| {
-            let length = leaf.length() as usize;
+            let length = values::length(leaf);
             length != 1 && length != count
         })
     {
@@ -518,7 +553,7 @@ pub unsafe fn fused(
         };
         elements[index] = element;
         scalar[index] = match *node {
-            Node::Leaf(leaf) => leaves[leaf].length() == 1,
+            Node::Leaf(leaf) => values::length(leaves[leaf]) == 1,
             Node::Binary(_, left, right) | Node::Logic { left, right, .. } => {
                 scalar[left] && scalar[right]
             }
@@ -534,7 +569,7 @@ pub unsafe fn fused(
 
     let leaf_view = |leaf: usize, start: usize, length: usize| {
         let value = leaves[leaf];
-        let range = if value.length() == 1 {
+        let range = if values::length(value) == 1 {
             0..1
         } else {
             start..start + length
@@ -589,7 +624,7 @@ pub unsafe fn fused(
         reduction.is_none()
             && !declines_midway
             && target.kind() == kind
-            && plain(target)
+            && writable(target)
             && target.length() as usize == count
     });
     // The result overwrites an operand only after a chunk is complete, so the chunk's nodes
@@ -920,6 +955,10 @@ macro_rules! real_reader {
                 let $reader = Constant(value);
                 $body
             }
+            Some(Reals::Sequence(sequence)) => {
+                let $reader = sequence;
+                $body
+            }
             None => {
                 let $reader = Own;
                 $body
@@ -958,6 +997,10 @@ macro_rules! complex_reader {
                     let $reader = Lifted(Widened(values));
                     $body
                 }
+                Reals::Sequence(sequence) => {
+                    let $reader = Lifted(sequence);
+                    $body
+                }
             },
         }
     };
@@ -979,6 +1022,10 @@ macro_rules! input_reader {
                 let $reader = Constant(value);
                 $body
             }
+            Reals::Sequence(sequence) => {
+                let $reader = sequence;
+                $body
+            }
         }
     };
 }
@@ -993,6 +1040,10 @@ macro_rules! integer_reader {
             }
             Some(Integers::Scalar(value)) => {
                 let $reader = Constant(value);
+                $body
+            }
+            Some(Integers::Sequence(sequence)) => {
+                let $reader = sequence;
                 $body
             }
             None => {
@@ -1098,6 +1149,9 @@ fn complex_any(
             lift(widen(values[index % values.len()]))
         }
         Some(Complexes::Numbers(Reals::Scalar(value))) => lift(value),
+        Some(Complexes::Numbers(Reals::Sequence(sequence))) => {
+            lift(sequence.element(index % sequence.length))
+        }
     };
     for (index, element) in output.iter_mut().enumerate() {
         let own = *element;
@@ -1534,6 +1588,77 @@ impl<O> Reader<O> for Own {
     #[inline(always)]
     fn read(self, _index: usize, own: O) -> O {
         own
+    }
+}
+
+impl Sequence<f64> {
+    #[inline(always)]
+    fn element(self, index: usize) -> f64 {
+        self.first + self.step * index as f64
+    }
+}
+
+impl<O> Reader<O> for Sequence<f64> {
+    type Item = f64;
+
+    #[inline(always)]
+    fn length(self) -> Option<usize> {
+        Some(self.length)
+    }
+
+    #[inline(always)]
+    fn skip(self, start: usize) -> Self {
+        Sequence {
+            first: self.element(start),
+            step: self.step,
+            length: self.length - start,
+        }
+    }
+
+    #[inline(always)]
+    fn cut(self, count: usize) -> Self {
+        Sequence {
+            length: count,
+            ..self
+        }
+    }
+
+    #[inline(always)]
+    fn read(self, index: usize, _own: O) -> f64 {
+        self.element(index)
+    }
+}
+
+impl<O> Reader<O> for Sequence<i32> {
+    type Item = i32;
+
+    #[inline(always)]
+    fn length(self) -> Option<usize> {
+        Some(self.length)
+    }
+
+    #[inline(always)]
+    fn skip(self, start: usize) -> Self {
+        Sequence {
+            first: self.read(start, ()),
+            step: self.step,
+            length: self.length - start,
+        }
+    }
+
+    #[inline(always)]
+    fn cut(self, count: usize) -> Self {
+        Sequence {
+            length: count,
+            ..self
+        }
+    }
+
+    // The sequence's elements are within the integer range, so the step never overflows.
+    #[inline(always)]
+    fn read(self, index: usize, _own: O) -> i32 {
+        self.first
+            .wrapping_add(self.step.wrapping_mul(index as i32))
     }
 }
 

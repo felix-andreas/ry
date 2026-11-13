@@ -555,3 +555,112 @@ fn altrep_views_match_ordinary_vectors() {
         r.release_to(mark);
     });
 }
+
+/// Vectors derived from compact sequences and from wrappers by attribute changes, replacement,
+/// reversal and C-level writes into duplicates must each keep their own values: a wrapper
+/// shares its data with the source until either is written, and `Rf_duplicate` returns storage
+/// the caller may write. Every handle is bound to a global variable, so R's copy-on-modify
+/// applies, and after each step every handle is checked against its model.
+#[test]
+fn derived_vectors_never_alias() {
+    let r = r_with_base();
+    for_each_seed(30, |seed| {
+        let mut rng = SplitMix64(seed);
+        let mark = r.protected.get();
+        r.stress(seed % 5 == 4);
+        let mut models: Vec<Vec<c_int>> = Vec::new();
+        let bind = |models: &mut Vec<Vec<c_int>>, value: Sexp, model: Vec<c_int>| {
+            let name = format!("h{}", models.len());
+            r.eval("assign", &[(None, r.string(&name)), (None, value)])
+                .expect("assign");
+            models.push(model);
+        };
+        // Lengths straddle the 64 elements from which an attribute change makes a wrapper.
+        let length = 40 + rng.below(50);
+        let start = rng.below(20) as c_int + 1;
+        let end = start + length as c_int - 1;
+        let compact = if rng.chance(1, 2) {
+            r.eval(":", &[(None, r.integer(start)), (None, r.integer(end))])
+        } else {
+            r.eval(":", &[(None, r.integer(end)), (None, r.integer(start))])
+        }
+        .expect("a sequence");
+        let mut model: Vec<c_int> = (start..=end).collect();
+        if r.integers(compact)[0] != start {
+            model.reverse();
+        }
+        bind(&mut models, compact, model.clone());
+        bind(&mut models, integer_vector(&r, &model), model);
+        for _ in 0..12 {
+            let source = rng.below(models.len());
+            let symbol = r.symbol(&format!("h{source}"));
+            let mut model = models[source].clone();
+            let length = model.len();
+            let derived = match rng.below(6) {
+                0 => {
+                    let classed = r
+                        .eval(
+                            "structure",
+                            &[(None, symbol), (Some("class"), r.string("foo"))],
+                        )
+                        .expect("structure");
+                    r.eval("unclass", &[(None, classed)]).expect("unclass")
+                }
+                1 => {
+                    let names = r
+                        .eval("as.character", &[(None, symbol)])
+                        .expect("as.character");
+                    r.eval("structure", &[(None, symbol), (Some("names"), names)])
+                        .expect("names")
+                }
+                2 => {
+                    let index = rng.below(length);
+                    let value = rng.below(1000) as c_int;
+                    model[index] = value;
+                    r.eval(
+                        "replace",
+                        &[
+                            (None, symbol),
+                            (None, r.integer(index as c_int + 1)),
+                            (None, r.integer(value)),
+                        ],
+                    )
+                    .expect("replace")
+                }
+                3 => {
+                    model.reverse();
+                    r.eval("rev", &[(None, symbol)]).expect("rev")
+                }
+                4 => {
+                    let value = r.eval_expression(symbol).expect("a binding");
+                    let copy = r.keep(unsafe { (r.api().Rf_duplicate)(value) });
+                    let index = rng.below(length);
+                    let element = rng.below(1000) as c_int;
+                    unsafe { *(r.api().INTEGER)(copy).add(index) = element };
+                    model[index] = element;
+                    copy
+                }
+                _ => {
+                    let index = rng.below(length);
+                    let element = r
+                        .eval("[[", &[(None, symbol), (None, r.real(index as f64 + 1.0))])
+                        .expect("[[");
+                    assert_eq!(r.integers(element), vec![model[index]], "seed {seed}");
+                    let doubles = r.eval("as.numeric", &[(None, symbol)]).expect("as.numeric");
+                    let expected: Vec<f64> = model.iter().map(|&value| value as f64).collect();
+                    assert_eq!(r.reals(doubles), expected, "seed {seed}");
+                    continue;
+                }
+            };
+            bind(&mut models, derived, model);
+            for (index, model) in models.iter().enumerate() {
+                let value = r
+                    .eval_expression(r.symbol(&format!("h{index}")))
+                    .expect("a binding");
+                assert_eq!(&r.integers(value), model, "seed {seed}, h{index}");
+            }
+        }
+        r.stress(false);
+        r.release_to(mark);
+    });
+}

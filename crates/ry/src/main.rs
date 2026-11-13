@@ -202,13 +202,7 @@ fn main() -> ExitCode {
         ..
     } = &cli.command
     {
-        return run_load(
-            path,
-            "",
-            |_| expressions.clone(),
-            file.as_deref(),
-            *runtime,
-        );
+        return run_load(path, "", |_| expressions.clone(), file.as_deref(), *runtime);
     }
 
     if let Command::Test {

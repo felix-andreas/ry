@@ -66,9 +66,9 @@ pub mod effects;
 pub mod element_access;
 pub mod envir;
 pub mod eval;
-#[cfg(unix)]
 mod fft;
 pub mod file_removal;
+#[cfg(unix)]
 pub mod fork;
 pub mod format;
 pub mod frame;
@@ -417,9 +417,6 @@ pub struct Hooks {
     /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
     /// host has no compact sequences.
     pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
-    /// The first element and the increment of a compact sequence, or `None` for any other
-    /// value, so that a `for` loop steps through `1:n` without expanding it.
-    pub compact_sequence_steps: unsafe fn(Sexp) -> Option<(f64, f64)>,
     /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
@@ -429,12 +426,22 @@ pub struct Hooks {
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
     pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    /// Element `index` of a character ALTREP vector, a `CHARSXP` from its class's `Elt` method,
+    /// so that reading one string of a deferred string vector converts only that element.
+    pub altrep_string_elt: unsafe fn(Sexp, usize) -> R<Sexp>,
     /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
     /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
     pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
+    /// GNU R's `R_tryWrap` for an integer, logical, double, complex, raw or character vector:
+    /// a wrapper that shares the data until something writes, or a copy when the host has no
+    /// wrapper classes.
+    pub altrep_wrap: unsafe fn(Sexp) -> R<Sexp>,
+    /// GNU R's `R_tryUnwrap`: the data under a wrapper that vouches for nothing and that only
+    /// its binding holds, with the wrapper's attributes moved onto it, or the value itself.
+    pub altrep_unwrap: unsafe fn(Sexp) -> Sexp,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -464,16 +471,16 @@ pub struct Hooks {
     pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
 }
 
-/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
-pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
-
-/// The summaries an ALTREP class may answer for its vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The ALTREP summary methods `sum`, `min` and `max` consult.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AltrepSummary {
     Sum,
     Min,
     Max,
 }
+
+/// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
+pub type NativeSymbol = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
 /// Base's native routines behind `addTaskCallback()`, `removeTaskCallback()` and
 /// `getTaskCallbackNames()`.
@@ -527,8 +534,10 @@ pub struct Interp {
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
-    /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
-    /// the collector still sees them.
+    /// Stacks set aside while others are in effect, kept here so the collector still sees them:
+    /// a calling handler runs with the handlers below its own entry, and code run as if at top
+    /// level (`R_ToplevelExec`, `R_tryEval`, a help server handler) sees none. An entry set aside
+    /// may hold the only reference to its handler closure. See [`conditions::set_aside`].
     pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
     /// Handler entries a frame exit released, which the next handlers established reuse, so a
     /// `tryCatch` in a loop makes no Rust allocation ([`conditions::restore_handlers`]).
@@ -598,6 +607,12 @@ pub struct Interp {
     /// tables the builtins keep.
     pub globals: values::Globals,
     pub hooks: Hooks,
+    /// The host's `compact_intseq` and `compact_realseq` ALTREP classes, `NULL` until it makes
+    /// them, so [`values::compact_sequence`] reads a sequence without a call into the host.
+    pub compact_sequence_classes: [Sexp; 2],
+    /// The host's `deferred_string` ALTREP class, `NULL` until it makes it. Its elements convert
+    /// without running R code, so tier 0 may read one inline.
+    pub deferred_string_class: Sexp,
     pub bytecode: bytecode::State,
     pub random: random::Rng,
     pub connections: connections::Table,
@@ -659,6 +674,8 @@ pub struct Interp {
     pub builtins_env: Option<Sexp>,
     /// The compiled code images of installed packages ([`code_image`]).
     pub code_image: code_image::State,
+    /// The records of typed-core values R holds unread ([`records::LazyRecords`]).
+    pub lazy_records: records::LazyRecords,
 }
 
 struct InterpState {
@@ -691,6 +708,21 @@ pub fn heap() -> &'static mut Heap {
         // instructions in package code.
         debug_assert!(!state.heap.is_null(), "the interpreter is not installed");
         &mut *state.heap
+    }
+}
+
+/// The classes of compact integer and double sequences, or `None` before the interpreter is
+/// installed. It reads without [`interp`]'s panic path, so a hot caller such as the variable-read
+/// feedback stays a leaf function that saves no registers.
+#[inline]
+pub fn compact_sequence_classes() -> Option<[Sexp; 2]> {
+    // SAFETY: single-threaded access, as for `heap`.
+    unsafe {
+        let state = &*STATE.0.get();
+        state
+            .interp
+            .as_ref()
+            .map(|interp| interp.compact_sequence_classes)
     }
 }
 
@@ -748,6 +780,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         suspended_handlers: Vec::new(),
         handler_pool: Vec::new(),
         srcref: heap.known().nil,
+        compact_sequence_classes: [heap.known().nil; 2],
+        deferred_string_class: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: Vec::new(),
@@ -797,6 +831,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         forks: fork::Forks::default(),
         builtins_env: None,
         code_image: code_image::State::default(),
+        lazy_records: records::LazyRecords::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -818,12 +853,14 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
-        compact_sequence_steps: |_| None,
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_string_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_summary: |_, _, _| Ok(None),
         defer_strings: |_| Ok(None),
+        altrep_wrap: |object| unsafe { values::shallow_duplicate(object) },
+        altrep_unwrap: |object| object,
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
@@ -986,6 +1023,7 @@ impl RootSource for InterpRoots {
         unsafe {
             let state = interp();
             state.bytecode.clear_dead(liveness);
+            state.lazy_records.clear_dead(liveness);
         }
     }
 }

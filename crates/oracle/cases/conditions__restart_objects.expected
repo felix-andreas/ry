@@ -1,0 +1,96 @@
+[stdout]
+| [1] "value"
+| [1] TRUE
+| [1] "muffleWarning"
+| List of 11
+|  $ class      : chr "restart"
+|  $ names      : chr [1:6] "name" "exit" "handler" "description" ...
+|  $ name       : chr "muffleWarning"
+|  $ exit_is_env: logi TRUE
+|  $ handler    : chr [1:2] "function () " "NULL"
+|  $ description: chr ""
+|  $ test_args  : chr "c"
+|  $ test_body  : chr "TRUE"
+|  $ test_frame : chr [1:5] "description" "handler" "interactive" "name" ...
+|  $ test_value : logi TRUE
+|  $ interactive: NULL
+| List of 11
+|  $ class      : chr "restart"
+|  $ names      : chr [1:6] "name" "exit" "handler" "description" ...
+|  $ name       : chr "first"
+|  $ exit_is_env: logi TRUE
+|  $ handler    : chr [1:2] "function (x) " "x + 1"
+|  $ description: chr ""
+|  $ test_args  : chr "c"
+|  $ test_body  : chr "TRUE"
+|  $ test_frame : chr [1:5] "description" "handler" "interactive" "name" ...
+|  $ test_value : logi TRUE
+|  $ interactive: NULL
+| List of 11
+|  $ class      : chr "restart"
+|  $ names      : chr [1:6] "name" "exit" "handler" "description" ...
+|  $ name       : chr "second"
+|  $ exit_is_env: logi TRUE
+|  $ handler    : chr [1:2] "function (...) " "NULL"
+|  $ description: chr "described"
+|  $ test_args  : chr "c"
+|  $ test_body  : chr "TRUE"
+|  $ test_frame : chr [1:5] "description" "handler" "interactive" "name" ...
+|  $ test_value : logi TRUE
+|  $ interactive: NULL
+| <restart: first >
+| <restart: second >
+| NULL
+| [1] "description" "handler"     "interactive" "name"        "test"       
+| [1] TRUE
+| [1] "only described"
+| [1] ""
+| NULL
+| NULL
+| [1] "label"       "exit"        "handler"     "description" "test"       
+| [6] "interactive"
+| [1] "mine"    "restart"
+| [1] "name"        "exit"        "handler"     "description" "test"       
+| [6] "interactive"
+| [1] "restart"
+| NULL
+| [1] "done"
+| [1] "first"  "second"
+| g(1)
+| [1] 1
+| g(2)
+| [1] 2
+| [1] "end"
+| [1] "shown"
+| inner handler: twice 
+| [1] "muffleWarning"
+| [1] "muffleMessage"
+| [1] "docall"          "expr"            "makeRestart"     "makeRestartList"
+| [5] "restarts"        "withOneRestart"  "withRestartList"
+| [1] "doWithOneRestart" "expr"             "restart"         
+| [1] "expr"    "restart"
+| [1] "withRestarts"     "withOneRestart"   "doWithOneRestart"
+| [1] TRUE
+| [1] TRUE
+| [1] "name"        "exit"        "handler"     "description" "test"       
+| [6] "interactive"
+| [1] TRUE
+| NULL
+| [1] "docall"          "expr"            "makeRestart"     "makeRestartList"
+| [5] "restarts"        "withOneRestart"  "withRestartList"
+| [1] "doWithOneRestart" "expr"             "restart"         
+| [1] "expr"    "restart"
+| [1] "withRestarts"     "withOneRestart"   "doWithOneRestart"
+| [1] TRUE
+| [1] TRUE
+| [1] "name"        "exit"        "handler"     "description" "test"       
+| [6] "interactive"
+| [1] TRUE
+| [1] 6
+| [1] "invoked by object"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invoked by object"
