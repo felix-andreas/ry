@@ -1,7 +1,7 @@
 //! The loader's R side, which both runtimes share: `runtime.R` applies a plan to the session,
 //! and a plan reaches it as an R list ([`plan_value`]). On GNU R the list travels as an
 //! uncompressed RDS file ([`rds`]), which `readRDS` reads without parsing any R code; on ry's
-//! runtime [`crate::ry_runtime`] builds it on the heap.
+//! runtime `libr`'s `loader_backend` builds it on the heap.
 
 use {
     crate::{Code, LoadError, Plan, SysdataChange},

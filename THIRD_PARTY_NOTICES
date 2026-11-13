@@ -15,6 +15,28 @@ parts of GNU R's sources, distributed under the GNU General Public License, vers
 later, as GNU R is. GNU R is Copyright (C) The R Core Team and the authors named below;
 its sources are at https://www.r-project.org.
 
+crates/graphics/src/engine.rs
+    GNU R src/main/xspline.c (xspline_points)
+        Source code from Xfig 3.2.4, modified for R
+        Copyright (c) 1985-1988 by Supoj Sutanthavibul
+        Parts Copyright (c) 1989-2002 by Brian V. Smith
+        Parts Copyright (c) 1991 by Paul King
+        Parts Copyright (c) 1992 by James Tough
+        Parts Copyright (c) 1998 by Georg Stemmer
+        Parts Copyright (c) 1995 by C. Blanc and C. Schlick
+
+crates/graphics/src/plotmath.rs
+    GNU R src/main/plotmath.c (the whole file)
+        Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
+        Copyright (C) 1998-2022 The R Core Team
+        This source code module:
+        Copyright (C) 1997, 1998 Paul Murrell and Ross Ihaka
+        Copyright (C) 1998-2015 The R Core Team
+
+crates/graphics/src/routines.rs
+    GNU R src/library/graphics/src/plot3d.c (contour label placement, persp)
+        Copyright (C) 1998--2018 The R Core Team
+
 crates/interp/src/arith.rs
     GNU R src/main/complex.c (complex_asin, complex_acos, complex_atan)
         Copyright (C) 2000-2022 The R Core Team
@@ -41,33 +63,6 @@ crates/interp/src/distributions.rs
         Copyright (C) 2005-2020 The R Foundation
         Copyright (C) 1998 Ross Ihaka
 
-crates/interp/src/fft.rs
-    GNU R src/library/stats/src/fft.c (fft_factor, fft_work and their helpers)
-        Copyright (C) 1998--2025 The R Core Team
-        Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
-
-crates/interp/src/graphics.rs
-    GNU R src/library/graphics/src/plot3d.c (contour label placement, persp)
-        Copyright (C) 1998--2018 The R Core Team
-
-crates/interp/src/graphics_engine.rs
-    GNU R src/main/xspline.c (xspline_points)
-        Source code from Xfig 3.2.4, modified for R
-        Copyright (c) 1985-1988 by Supoj Sutanthavibul
-        Parts Copyright (c) 1989-2002 by Brian V. Smith
-        Parts Copyright (c) 1991 by Paul King
-        Parts Copyright (c) 1992 by James Tough
-        Parts Copyright (c) 1998 by Georg Stemmer
-        Parts Copyright (c) 1995 by C. Blanc and C. Schlick
-
-crates/interp/src/plotmath.rs
-    GNU R src/main/plotmath.c (the whole file)
-        Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
-        Copyright (C) 1998-2022 The R Core Team
-        This source code module:
-        Copyright (C) 1997, 1998 Paul Murrell and Ross Ihaka
-        Copyright (C) 1998-2015 The R Core Team
-
 crates/interp/src/random.rs
     GNU R src/nmath/snorm.c (kinderman_ramage)
         Copyright (C) 1998 Ross Ihaka
@@ -89,7 +84,12 @@ crates/interp/src/register_s3_methods.R
     GNU R src/library/base/R/namespace.R (registerS3methods)
         Copyright (C) 1995-2025 The R Core Team
 
-crates/interp/src/rmath.rs
+crates/numeric/src/fft.rs
+    GNU R src/library/stats/src/fft.c (fft_factor, fft_work and their helpers)
+        Copyright (C) 1998--2025 The R Core Team
+        Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
+
+crates/numeric/src/rmath.rs
     GNU R src/nmath/toms708.c (bratio and its helpers, grat_r)
         Based on the C translation of ACM TOMS 708 (Didonato and Morris, 1992), with
         changes by The R Core Team; the file carries no copyright line of its own
@@ -167,12 +167,17 @@ crates/interp/src/rmath.rs
         partly based on Catherine Loader's work,
         (C) 1999-2000 Lucent Technologies, Bell Laboratories
 
-crates/interp/src/stats.rs
-    GNU R src/library/stats/src/lowess.c (clowess, lowest)
-        Copyright (C) 1996 Robert Gentleman and Ross Ihaka
-        Copyright (C) 1999-2025 The R Core Team
+crates/stats/src/hypothesis_tests.rs
+    GNU R src/library/stats/src/swilk.c (swilk)
+        Copyright (C) 2000-2016 The R Core Team
+        Based on Applied Statistics algorithms AS181, R94
+        (C) Royal Statistical Society 1982, 1995
+    GNU R src/library/stats/src/prho.c (prho)
+        Copyright (C) 2000-2016 The R Core Team
+        Copyright (C) 2003 The R Foundation
+        based on AS 89 (C) 1975 Royal Statistical Society
 
-crates/interp/src/stats_loess.rs
+crates/stats/src/loess.rs
     GNU R src/library/stats/src/loessf.f (the ehg and lowes routines)
         The authors of this software are Cleveland, Grosse, and Shyu.
         Copyright (c) 1989, 1992 by AT&T.
@@ -185,13 +190,13 @@ crates/interp/src/stats_loess.rs
         SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
         Copyright (C) 1998-2020 The R Core Team
 
-crates/interp/src/stats_nlm.rs
+crates/stats/src/nlm.rs
     GNU R src/appl/uncmin.c (the line search, trust region and secant updates)
         Copyright (C) 1999-2017 The R Core Team
         Copyright (C) 2003-2017 The R Foundation
         Copyright (C) 1997-1999 Saikat DebRoy
 
-crates/interp/src/stats_optimize.rs
+crates/stats/src/optimize.rs
     GNU R src/appl/integrate.c (QUADPACK's dqagse, dqagie and dqelg)
         Copyright (C) 2001-2023 The R Core Team
     GNU R src/library/stats/src/optimize.c (Brent_fmin)
@@ -199,7 +204,12 @@ crates/interp/src/stats_optimize.rs
         Copyright (C) 2003-2004 The R Foundation
         Copyright (C) 1998--2014 The R Core Team
 
-crates/interp/src/stats_spline.rs
+crates/stats/src/routines.rs
+    GNU R src/library/stats/src/lowess.c (clowess, lowest)
+        Copyright (C) 1996 Robert Gentleman and Ross Ihaka
+        Copyright (C) 1999-2025 The R Core Team
+
+crates/stats/src/spline.rs
     GNU R src/library/stats/src/sbart.c (sbart)
         Derived from the GAMFIT sources, which derive from code by Finbarr O'Sullivan; the file
         carries no copyright line of its own
@@ -207,16 +217,6 @@ crates/interp/src/stats_spline.rs
         Copyright (C) 1998-2016 The R Core Team
     GNU R src/appl/interv.c (findInterval)
         Copyright (C) 2002--2025 The R Core Team
-
-crates/interp/src/stats_tests.rs
-    GNU R src/library/stats/src/swilk.c (swilk)
-        Copyright (C) 2000-2016 The R Core Team
-        Based on Applied Statistics algorithms AS181, R94
-        (C) Royal Statistical Society 1982, 1995
-    GNU R src/library/stats/src/prho.c (prho)
-        Copyright (C) 2000-2016 The R Core Team
-        Copyright (C) 2003 The R Foundation
-        based on AS 89 (C) 1975 Royal Statistical Society
 
 
 2. Other notices
@@ -371,13 +371,13 @@ jpeg-encoder crate, whose IJG terms are listed with it below).
 3. Rust crates and the C libraries they bundle
 ==============================================
 
-482 crates from crates.io are built into ry. Each crate is listed under
+481 crates from crates.io are built into ry. Each crate is listed under
 the licence it is used under (for a choice such as `MIT OR Apache-2.0`, the first
 permissive licence of the choice), with the copyright lines from its licence files.
 The licence texts follow each list; a crate that ships no text of its own is covered
 by the text shown for its licence.
 
-MIT (407 crates)
+MIT (406 crates)
 ----------------
 
 - addr2line 0.25.1 <https://github.com/gimli-rs/addr2line>
@@ -515,8 +515,6 @@ MIT (407 crates)
     Copyright (c) 2019 The Crossbeam Project Developers
 - crossbeam-utils 0.8.21 <https://github.com/crossbeam-rs/crossbeam>
     Copyright (c) 2019 The Crossbeam Project Developers
-- crossterm 0.28.1 <https://github.com/crossterm-rs/crossterm>
-    Copyright (c) 2019 Timon
 - crossterm 0.29.0 <https://github.com/crossterm-rs/crossterm>
     Copyright (c) 2019 Timon
 - crossterm_winapi 0.9.1 <https://github.com/crossterm-rs/crossterm-winapi>
@@ -1253,7 +1251,7 @@ Text 2 of 18 for MIT, used by 38 crates:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 
-Text 3 of 18 for MIT, used by 37 crates:
+Text 3 of 18 for MIT, used by 36 crates:
 
     MIT License
 
