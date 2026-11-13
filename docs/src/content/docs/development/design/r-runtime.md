@@ -623,7 +623,7 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 
 ### Code images of installed packages
 
-`R CMD INSTALL` writes `R/<package>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
+`R CMD INSTALL` writes `R/<package>.<build>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
 After the R code is installed, a fresh session loads the namespace, fetches every binding from the
 lazy-load database, and compiles each closure the fetches made, nested function bodies included.
 When a later session fetches the same record, it notes where each closure's code lies in the image,
@@ -677,7 +677,7 @@ bytecode only").
   keeps only the object bits the encoder can write (the S4 bit) of each constant.
 - **Lifetime.** Waiting code holds its body, its formals and the mapped file. `lazyLoadDBflush`,
   which `unloadNamespace` calls, drops all three for its database.
-- **Writing.** The image is written to `R/<package>.ryc.partial`, synced to disk, and renamed over
+- **Writing.** The image is written to `R/<package>.<build>.ryc.partial`, synced to disk, and renamed over
   the old image, so a crash leaves the old image or the new one. It is never rewritten in place: a
   process that maps the old file would see its pages change under it, or die with `SIGBUS` once
   the file shrank. A failed write removes the staging file.
@@ -691,8 +691,14 @@ fetches.
 
 ### Tiers
 
-**Tier 0 is a register-based bytecode interpreter.** R code compiles to bytecode when a closure is
-first called, unless its bytecode was built ahead of time. Each call site, variable lookup and
+**Tier 0 is a register-based bytecode interpreter.** A closure body compiles to bytecode at its
+second call, or its first if it has a loop, unless its bytecode was built ahead of time. Calls count
+per body expression, not per closure, and the compiled code belongs to the expression: every closure
+made from one `function` expression, and every copy `environment<-` makes (as R6 does for each
+object's methods), runs it from its first call when its formals and srcref are the same objects. The code is freed
+with the last closure that runs it. A
+body changed in place through the C API compiles again for new closures, as in GNU R's JIT cache.
+Each call site, variable lookup and
 arithmetic operation carries an inline cache and a small type profile: observed `SEXPTYPE`, length
 one or not, attributes or none, NA seen or not.
 
@@ -1366,8 +1372,9 @@ treats them in two ways, depending on whether a guarantee exists:
 
 - **Default mode: types are profiles that arrive early.** A function annotated
   `fn(values: double[], scale: double) -> double[]` starts with that type profile before its first
-  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. Only
-  inline annotations reach the runtime; `#:` comments are invisible to it.
+  call, so tier 1 compiles it at its first call instead of after warmup. The guards stay. The
+  runtime reads the signature wherever it is written: inline, on the assigned name, or in the
+  `#:` block above.
 - **Strict mode: types are guarantees where a check backs them.** Strict mode does not report every
   imprecision (it never reports `Any`, nor an `Unknown` nested inside a type, and the stubs use `Any`
   on purpose), so a strict package can still receive an imprecise value from typed code. ry

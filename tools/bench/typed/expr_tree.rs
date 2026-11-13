@@ -1,6 +1,8 @@
-use std::fmt::Display;
+// Builds an expression tree of sums, maxima and negations as a boxed enum, then evaluates it.
+mod harness;
+
+use harness::measure;
 use std::hint::black_box;
-use std::time::Instant;
 
 enum Node {
     Num(f64),
@@ -33,21 +35,4 @@ fn evaluate(node: &Node) -> f64 {
 fn main() {
     let tree = build(21, 5);
     measure("expr_tree", || evaluate(black_box(&tree)) + evaluate(&build(black_box(14), black_box(8))));
-}
-
-fn measure<T: PartialEq + Display>(name: &str, mut run: impl FnMut() -> T) {
-    let started = Instant::now();
-    let value = black_box(run());
-    let cold = started.elapsed().as_secs_f64();
-    let mut best = f64::INFINITY;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let again = black_box(run());
-        best = best.min(started.elapsed().as_secs_f64());
-        if again != value {
-            eprintln!("the benchmark is not deterministic");
-            std::process::exit(1);
-        }
-    }
-    println!("{name} {value} {best:.4} {cold:.4}");
 }

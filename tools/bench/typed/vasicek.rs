@@ -1,6 +1,8 @@
-use std::fmt::Display;
+// Vasicek interest-rate paths: 200 paths stepped 20,000 times, summing the rates of every step.
+mod harness;
+
+use harness::measure;
 use std::hint::black_box;
-use std::time::Instant;
 
 // The shocks must be the exact numbers GNU R draws after set.seed(9), so this ports R's default
 // generator: Mersenne Twister seeded the way R scrambles the seed, and normals by inversion.
@@ -170,23 +172,6 @@ fn vasicek(model: &Model) -> f64 {
 }
 
 fn main() {
-    let model = Model { paths: 200, steps: 2000, r0: 0.03, kappa: 0.5, theta: 0.04, sigma: 0.01, dt: 1.0 / 12.0, seed: 9 };
+    let model = Model { paths: 200, steps: 20_000, r0: 0.03, kappa: 0.5, theta: 0.04, sigma: 0.01, dt: 1.0 / 12.0, seed: 9 };
     measure("vasicek", || vasicek(black_box(&model)));
-}
-
-fn measure<T: PartialEq + Display>(name: &str, mut run: impl FnMut() -> T) {
-    let started = Instant::now();
-    let value = black_box(run());
-    let cold = started.elapsed().as_secs_f64();
-    let mut best = f64::INFINITY;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let again = black_box(run());
-        best = best.min(started.elapsed().as_secs_f64());
-        if again != value {
-            eprintln!("the benchmark is not deterministic");
-            std::process::exit(1);
-        }
-    }
-    println!("{name} {value} {best:.4} {cold:.4}");
 }

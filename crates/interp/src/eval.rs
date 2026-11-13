@@ -93,7 +93,13 @@ pub unsafe fn eval_symbol_reporting(
     if let Some(index) = dot_dot_index(symbol) {
         return dot_dot_value(index, env);
     }
-    let value = find_var(symbol, env)?;
+    // The empty symbol is `R_MissingArg`, whose value in GNU R is itself, so evaluating it is
+    // a missing argument without a name rather than an unbound object.
+    let value = if symbol == missing_arg() {
+        symbol
+    } else {
+        find_var(symbol, env)?
+    };
     if value == unbound() {
         return Err(error_in(
             lexical(),
@@ -101,10 +107,12 @@ pub unsafe fn eval_symbol_reporting(
         ));
     }
     if value == missing_arg() {
-        return Err(error(format!(
-            "argument \"{}\" is missing, with no default",
-            symbol_name(symbol)
-        )));
+        let name = symbol_name(symbol);
+        return Err(error(if name.is_empty() {
+            "argument is missing, with no default".to_string()
+        } else {
+            format!("argument \"{name}\" is missing, with no default")
+        }));
     }
     if value.kind() == SexpType::Promise {
         let forced = force_promise(value)?;
