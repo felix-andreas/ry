@@ -153,10 +153,11 @@ fn discards_closures() -> bool {
 }
 
 /// The lowered expression at `index` of the prepared script, when [`prepare`] lowered it the
-/// way the run would lower it now. The session holds the expression no longer: the caller runs
-/// it once.
+/// way the run would lower it now. The session holds the expression no longer: it is rooted in
+/// the caller's handle scope, which lasts for the one time the caller runs it.
 pub fn lowered(prepared: &Prepared, index: usize, keep_source: bool) -> Option<Sexp> {
     let expression = interp().ahead.lowered.get_mut(index)?.take()?;
+    crate::heap().root(expression);
     (prepared.keep_source == keep_source).then_some(expression)
 }
 

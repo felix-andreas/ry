@@ -278,15 +278,18 @@ pub unsafe fn checked_conversion(conversion: Sexp, list: Sexp, expected: Items) 
     }
     match (found, expected) {
         (Items::Logical | Items::Integer, Items::I64) => {
-            let widened: Vec<i64> = values::ints(list).iter().map(|&item| i64::from(item)).collect();
+            let items = values::ints(list);
+            let widened: Vec<i64> = items.iter().map(|&item| i64::from(item)).collect();
             numbers::list(&widened)
         }
         (Items::Logical | Items::Integer, Items::Double) => {
-            let widened: Vec<f64> = values::ints(list).iter().map(|&item| f64::from(item)).collect();
+            let items = values::ints(list);
+            let widened: Vec<f64> = items.iter().map(|&item| f64::from(item)).collect();
             doubles(&widened)
         }
         (Items::I64, Items::Double) => {
-            let widened: Vec<f64> = list.slice::<i64>().iter().map(|&item| item as f64).collect();
+            let items = list.slice::<i64>();
+            let widened: Vec<f64> = items.iter().map(|&item| item as f64).collect();
             doubles(&widened)
         }
         _ => Err(crate::unwind::error(format!(

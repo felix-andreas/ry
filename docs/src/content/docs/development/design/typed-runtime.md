@@ -105,7 +105,9 @@ R symbols, the base addresses of the value pools) is loaded from a small table t
 fills when it maps the file. The code pages are mapped read-only straight from the file, so the four
 test processes a CI machine runs share one copy of every installed dependency's typed code, and
 only the table is private to each. `ry install` writes the file to a temporary name and renames it
-into place, so a process never maps a half-written file.
+into place, so a process never maps a half-written file. [The typed code file](/development/design/typed-code-file/)
+is the implementation plan: the table as the code's global offset table, the file format, how a
+function attaches at its first call, and the tests.
 
 **Standalone executables.** `ry build --aot --exe main.R` writes one executable in the spirit of
 `bun build --compile`: ry's runtime, the bytecode of the script and of the strict files it sources, and the

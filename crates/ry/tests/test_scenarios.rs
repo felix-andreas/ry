@@ -315,8 +315,8 @@ const TIERINGS: [Tiering; 5] = [
 /// first call: a function called before its callee is defined, a name defined twice or bound to
 /// another function between calls, a definition inside a block, parameters typed by an alias, a
 /// conversion of what R returns, one whose vector is of a narrower type than the checker's or
-/// empty, a literal that warns when it is lowered, a changed `keep.source`, and a script that
-/// stops with an error partway.
+/// empty, a literal that warns when it is lowered, a statement that collects garbage between
+/// its arguments, a changed `keep.source`, and a script that stops with an error partway.
 #[test]
 fn typed_scripts_agree_however_they_compile() {
     if let Some(reason) =
@@ -455,7 +455,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(14) {
+        let mut lines = match rng.below(15) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -599,6 +599,19 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                     format!("print(width_{index}({n} + 1))"),
                 ]
             }
+            13 => vec![
+                // The collection runs in the middle of a statement, whose later arguments
+                // must survive it although the script handed the statement out already.
+                format!("part_{index} <- function(x: F64) -> F64 x / 2"),
+                format!(
+                    "churn_{index} <- function() {{\n  gc()\n  for (k in 1:2000) kept <- \
+                     list(k, \"s\")\n  {n}\n}}"
+                ),
+                format!(
+                    "str(list(first = part_{index}(churn_{index}()), second = \"text {n}\", \
+                     third = c({n}.5, 2.5)))"
+                ),
+            ],
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),
                 format!(

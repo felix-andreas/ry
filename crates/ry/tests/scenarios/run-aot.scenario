@@ -88,6 +88,24 @@ expect stderr "typed: compiled for [Table, I64] -> I64 in"
 expect stderr "typed: compiled 1 function ahead of time in "
 expect stderr lacks "runs in the interpreter"
 
+# A statement stays alive while it runs: the collection in its first argument must not free the
+# arguments after it.
+
+file collect.R
+| half <- function(x: F64) -> F64 x / 2
+| churn <- function() {
+|   gc()
+|   for (k in 1:5000) x <- list(k, "s")
+|   1
+| }
+| z <- list(a = half(churn()), b = "text here", c = c(1.5, 2.5))
+| str(z)
+
+run ry run --runtime ry --aot collect.R
+expect exit 0
+expect stdout " $ b: chr \"text here\""
+expect stdout " $ c: num [1:2] 1.5 2.5"
+
 # The flag is for a script, and for ry's runtime.
 
 unset RY_TYPED_LOG

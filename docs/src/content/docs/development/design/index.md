@@ -109,6 +109,13 @@ types, Rust-like layouts for numbers, strings, lists, records and tags, direct c
 environment, native values freed by compiler-inserted reference counts with in-place reuse, and
 conversion only at the R boundary. It builds to the runtime contract of the native-types design.
 
+### [The typed code file](/development/design/typed-code-file/)
+
+How `ry install` and `ry build --aot` write a package's typed machine code into the installed
+package: position-independent code that every process maps from one file, a per-process table as
+the only private memory, attachment per function at its first call, the file format, the tests
+and the numbers to beat. It also covers the executable `ry build --aot --exe` writes.
+
 ### [Compiled top-level loops](/development/design/top-level-loops/)
 
 Which loops the tree walker evaluates in the global environment compile, how they run on the

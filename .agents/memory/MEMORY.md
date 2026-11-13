@@ -13,7 +13,7 @@ The specs live in the docs site under `docs/src/content/docs/`. `reference/type-
 ## Short-term
 
 - **Vector kernels.** Toward 10x on element-wise code, the next steps are fusing `sum`/`mean` consumers into the fused pass and an AVX-512 `exp` (`crates/interp/src/kernels.rs`, `vector_math.rs`; `backlog.md`, "Open: untyped R against GNU R").
-- **Ahead-of-time compilation.** `ry run --aot` compiles a script's top-level typed functions before it starts. Next is the package code file for `ry build --aot` and `ry install`, which needs a relocatable mode in the typed backend (`backlog.md`, "Open: ahead-of-time compilation").
+- **Ahead-of-time compilation.** `ry run --aot` compiles a script's top-level typed functions before it starts. Next is the package code file for `ry build --aot` and `ry install`: the design is `development/design/typed-code-file.md`, and `backlog.md`, "Open: ahead-of-time compilation", lists the steps in order with files, tests, target numbers and stop rules.
 - **Typed core.** Next are non-constant defaults and box conversion at the boundary (`backlog.md`, "Open: the typed core", with its parts "Gaps the typed public ports found" and "What the `native` check pins and over-reports"). Every program of the public suite has a typed port that runs natively; `typed_benchmarks_run_natively` covers only the kernels and applications, because the public ports run full-size inputs, so check a public port with `RY_TYPED_LOG=1` on a release build. `RY_TYPED_LOG=1` names every typed closure whose call fell back to the interpreter, and `RY_JIT_LOG=1` names each compiled body, each native function, and the instructions left to tier 0.
 
 ## Mid-term
