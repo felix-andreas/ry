@@ -18,7 +18,6 @@ use {
     interp::{
         annotations::{self, Entry},
         arith,
-        builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, TypedCall, profile},
         eval, heap,
         standard_library::{self, CompiledKey},
@@ -842,10 +841,12 @@ pub unsafe extern "C" fn jit_call(
             let epoch = heap().binding_epoch();
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
-                let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
-                for pair in arguments.as_chunks::<2>().0 {
-                    let (kind, bits) = (pair[0] as i32, pair[1]);
-                    let value = match kind {
+                let pairs = arguments.as_chunks::<2>().0;
+                let value = |index: usize| -> R<Sexp> {
+                    let Some(&[kind, bits]) = pairs.get(index) else {
+                        return Err(error("compiled code passed too few arguments"));
+                    };
+                    let value = match kind as i32 {
                         representation::INTEGER => values::scalar_integer(bits as i32)?,
                         representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
                         representation::LOGICAL => values::scalar_logical(bits as i32)?,
@@ -853,51 +854,51 @@ pub unsafe extern "C" fn jit_call(
                             .ok_or_else(|| error("compiled code passed a null argument"))?,
                     };
                     heap.root(value);
-                    args.push(Arg {
-                        tag: values::nil(),
-                        value,
-                    });
-                }
-                if annotations::is_typed(function) {
-                    let typed = TypedCall {
-                        call,
-                        function,
-                        args: &args,
-                        sys_parent: machine.env(),
-                    };
-                    if let Some(value) = crate::native::call(&typed) {
-                        return value;
-                    }
-                    annotations::log_interpreted(call);
-                }
-                // `signature` is what the compiler decided about the callee's annotation checks:
-                // null when they depend on the values, `NULL` for an untyped callee, otherwise
-                // the signature of a typed callee whose arguments' types already satisfy it.
-                let entry = match Sexp::from_raw(signature) {
-                    None => {
-                        // The values are at hand, so the checks read them here instead of
-                        // looking each formal up again in the new frame.
-                        let values: SmallVec<[Sexp; 4]> =
-                            args.iter().map(|arg| arg.value).collect();
-                        annotations::enter_positional(call, function, &values)?
-                    }
-                    Some(signature) if signature == values::nil() => Entry::Checked(None),
-                    Some(signature) => Entry::Checked(Some(signature)),
+                    Ok(value)
                 };
-                // `NULL` from a slot frame names the frame below the callee's as its caller.
-                if let Some(frame) = eval::bind_slots(call, function, &args)? {
-                    return eval::run_frame(
-                        call,
-                        function,
-                        frame,
-                        machine.env(),
-                        &args,
-                        entry,
-                        &[],
-                    );
-                }
-                let env = eval::bind_arguments(call, function, &args, None)?;
-                eval::run_closure(call, function, env, machine.env(), &args, entry)
+                eval::with_positional_args(count as usize, value, |args| {
+                    if annotations::is_typed(function) {
+                        let typed = TypedCall {
+                            call,
+                            function,
+                            args,
+                            sys_parent: machine.env(),
+                        };
+                        if let Some(value) = crate::native::call(&typed) {
+                            return value;
+                        }
+                        annotations::log_interpreted(call);
+                    }
+                    // `signature` is what the compiler decided about the callee's annotation
+                    // checks: null when they depend on the values, `NULL` for an untyped callee,
+                    // otherwise the signature of a typed callee whose arguments' types already
+                    // satisfy it.
+                    let entry = match Sexp::from_raw(signature) {
+                        None => {
+                            // The values are at hand, so the checks read them here instead of
+                            // looking each formal up again in the new frame.
+                            let values: SmallVec<[Sexp; 4]> =
+                                args.iter().map(|arg| arg.value).collect();
+                            annotations::enter_positional(call, function, &values)?
+                        }
+                        Some(signature) if signature == values::nil() => Entry::Checked(None),
+                        Some(signature) => Entry::Checked(Some(signature)),
+                    };
+                    // `NULL` from a slot frame names the frame below the callee's as its caller.
+                    if let Some(frame) = eval::bind_slots(call, function, args)? {
+                        return eval::run_frame(
+                            call,
+                            function,
+                            frame,
+                            machine.env(),
+                            args,
+                            entry,
+                            &[],
+                        );
+                    }
+                    let env = eval::bind_arguments(call, function, args, None)?;
+                    eval::run_closure(call, function, env, machine.env(), args, entry)
+                })
             });
             match result {
                 Err(unwind) => {
