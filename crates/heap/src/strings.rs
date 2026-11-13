@@ -250,7 +250,9 @@ impl StringTable {
         }
     }
 
-    /// [`StringTable::find`], or on a miss the slot the string would take.
+    /// [`StringTable::find`], or on a miss the slot the string would take. The probe is the same
+    /// loop as `find`, so a hit costs nothing extra; only a miss in a table holding tombstones
+    /// walks its probe path again to take the first one.
     #[inline]
     pub unsafe fn find_or_vacancy(
         &self,
@@ -261,18 +263,12 @@ impl StringTable {
         let mask = self.slots.len() - 1;
         let tag = tag(hash);
         let mut index = home(hash, mask);
-        let mut tombstone = None;
         loop {
             let slot = self.slots[index];
             if slot == EMPTY {
-                return Err(Vacancy {
-                    index: tombstone.unwrap_or(index),
-                    generation: self.generation,
-                });
+                break;
             }
-            if slot == TOMBSTONE {
-                tombstone.get_or_insert(index);
-            } else if slot & !ADDRESS_MASK == tag {
+            if slot & !ADDRESS_MASK == tag && slot != TOMBSTONE {
                 let candidate = unsafe { unpack(slot) };
                 if unsafe { candidate.gp() } & gp::ENCODING == encoding_bits
                     && unsafe { same_bytes(candidate, bytes) }
@@ -282,6 +278,17 @@ impl StringTable {
             }
             index = (index + 1) & mask;
         }
+        if self.tombstones != 0 {
+            let mut probe = home(hash, mask);
+            while probe != index && self.slots[probe] != TOMBSTONE {
+                probe = (probe + 1) & mask;
+            }
+            index = probe;
+        }
+        Err(Vacancy {
+            index,
+            generation: self.generation,
+        })
     }
 
     /// [`StringTable::insert`] into the slot `vacancy` names, when nothing has been inserted
