@@ -991,6 +991,32 @@ fn a_string_repeated_across_cards_keeps_each_card_dirty() {
 }
 
 #[test]
+fn a_vector_of_distinct_strings_keeps_a_later_card_dirty() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let strings = heap.alloc_vector(SexpType::String, 1_000).expect("alloc");
+        heap.root(strings);
+        for index in 0..1_000 {
+            let string = heap
+                .mk_char(format!("distinct {index}").as_bytes(), Encoding::Utf8)
+                .expect("mk_char");
+            heap.set_element(strings, index, string);
+        }
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        let young = heap.mk_char(b"young", Encoding::Utf8).expect("mk_char");
+        heap.set_element(strings, 900, young);
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Minor);
+        assert_eq!(strings.element(900).slice::<u8>(), b"young");
+        assert_eq!(strings.element(5).slice::<u8>(), b"distinct 5");
+    }
+}
+
+#[test]
 fn a_frame_filled_across_minor_collections_keeps_every_young_binding() {
     let mut heap = Heap::new();
     heap.update_policy(|policy| policy.verify = true);
@@ -2141,6 +2167,24 @@ fn an_escalation_learns_only_from_intermediate_collections() {
         );
         assert!(stats.intermediate_collections >= 2, "{stats:?}");
         assert_eq!(holder.element(0).element(19_999).slice::<i32>(), &[39]);
+        // The program changes phase: batches small enough to die before a deeper collection
+        // tenures them, which an intermediate collection frees. The retry measures that, and
+        // escalations go back to intermediate collections.
+        for round in 0..400 {
+            let batch = heap.alloc_vector(SexpType::List, 2_000).expect("alloc");
+            heap.set_element(holder, 0, batch);
+            for index in 0..2_000 {
+                let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *element.slice_mut::<i32>().first_mut().expect("one element") = round;
+                heap.set_element(batch, index, element);
+            }
+        }
+        // Without the retry this phase ran only major collections.
+        let after = heap.stats();
+        let intermediate = after.intermediate_collections - stats.intermediate_collections;
+        let major = after.major_collections - stats.major_collections;
+        assert!(intermediate > major, "{stats:?}\n{after:?}");
+        assert_eq!(holder.element(0).element(1_999).slice::<i32>(), &[399]);
     }
 }
 

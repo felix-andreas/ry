@@ -592,6 +592,19 @@ impl HeapGrowth {
 
 const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 
+/// The addresses of the strings one character vector's trace already marked, keyed by address
+/// bits, each with whether the string was younger than the vector in its low bit, which a
+/// CHARSXP's alignment leaves free ([`Heap::mark_strings`]).
+struct RepeatTable([usize; REPEAT_TABLE_SLOTS]);
+
+impl Default for RepeatTable {
+    fn default() -> Self {
+        RepeatTable([0; REPEAT_TABLE_SLOTS])
+    }
+}
+
+const REPEAT_TABLE_SLOTS: usize = 64;
+
 /// How many escalations in a row go straight to a major collection on the prediction alone
 /// before an intermediate one measures the younger old generation again.
 const RETRY_INTERMEDIATE_AFTER: u32 = 4;
@@ -3983,35 +3996,31 @@ impl Heap {
                     self.weak_pairs.push(object);
                 } else if TENURED && object.is_carded() {
                     // A deeper collection derives each card of a tenured vector from scratch:
-                    // dirty exactly where an element is younger than the vector.
-                    // A character vector skips repeated strings as the uncarded path below does,
-                    // but a card needs the repeat's age too, so the table keeps whether each
-                    // string was younger in the low bit of its address, which a CHARSXP's
-                    // alignment leaves free. A string's age cannot change between two of its
-                    // marks, because the first one already aged it.
-                    let strings = object.kind() == SexpType::String;
-                    let mut marked = [0usize; 64];
-                    let length = object.length() as usize;
+                    // dirty exactly where an element is younger than the vector. A card past
+                    // the length (the capacity keeps cards too) holds nothing and comes out clean.
+                    // A card of strings without a single repeat says the vector holds distinct
+                    // strings, like a column of identifiers, where the table only adds its cost
+                    // to every mark, so the cards after it are marked plainly.
+                    let mut strings = object.kind() == SexpType::String;
+                    let mut table = RepeatTable::default();
+                    let elements = object.slice::<Sexp>();
                     let cards = object.cards();
                     for card in 0..object.card_count() {
-                        let start = card * CARD_ELEMENTS;
-                        let mut card_younger = false;
-                        for index in start..(start + CARD_ELEMENTS).min(length) {
-                            let element = object.stored_element(index);
-                            if !strings {
-                                card_younger |= self.mark_child::<TENURED>(element);
-                                continue;
+                        let start = (card * CARD_ELEMENTS).min(elements.len());
+                        let end = (start + CARD_ELEMENTS).min(elements.len());
+                        let chunk = elements.get(start..end).unwrap_or_default();
+                        let card_younger = if strings {
+                            let (younger, repeated) =
+                                self.mark_strings::<TENURED>(chunk, &mut table);
+                            strings = repeated;
+                            younger
+                        } else {
+                            let mut younger = false;
+                            for &element in chunk {
+                                younger |= self.mark_child::<TENURED>(element);
                             }
-                            let address = element.as_ptr() as usize;
-                            let slot = (address >> 4) as u8 as usize % marked.len();
-                            if marked[slot] & !1 == address {
-                                card_younger |= marked[slot] & 1 != 0;
-                                continue;
-                            }
-                            let younger = self.mark_child::<TENURED>(element);
-                            marked[slot] = address | younger as usize;
-                            card_younger |= younger;
-                        }
+                            younger
+                        };
                         *cards.add(card) = if card_younger {
                             CARD_UNTENURED
                         } else {
@@ -4020,25 +4029,17 @@ impl Heap {
                         has_younger |= card_younger;
                     }
                 } else if object.kind() == SexpType::String && object.length() <= 16 {
+                    // A short vector has too few repeats to pay for clearing the table.
                     for &element in object.slice::<Sexp>() {
                         has_younger |= self.mark_child::<TENURED>(element);
                     }
                 } else if object.kind() == SexpType::String {
-                    // A character vector usually repeats a few strings, like a column of
-                    // categories, and marking one again only finds it marked. A small table of
-                    // the addresses this vector already marked skips the repeats. Its elements
-                    // are CHARSXPs, which hold no references, so a skipped repeat loses nothing.
-                    // A short vector has too few repeats to pay for clearing the table.
-                    let mut marked = [0usize; 64];
-                    for &element in object.slice::<Sexp>() {
-                        let address = element.as_ptr() as usize;
-                        let slot = (address >> 4) as u8 as usize % marked.len();
-                        if marked[slot] == address {
-                            continue;
-                        }
-                        marked[slot] = address;
-                        has_younger |= self.mark_child::<TENURED>(element);
-                    }
+                    has_younger |= self
+                        .mark_strings::<TENURED>(
+                            object.slice::<Sexp>(),
+                            &mut RepeatTable::default(),
+                        )
+                        .0;
                 } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
                     for &element in object.slice::<Sexp>() {
                         has_younger |= self.mark_child::<TENURED>(element);
@@ -4071,6 +4072,43 @@ impl Heap {
             Shape::WeakRef | Shape::Primitive => {}
         }
         has_younger
+    }
+
+    /// Marks the strings of a character vector and says whether one of them is younger and
+    /// whether one of them repeated a string the table holds. A character vector usually
+    /// repeats a few strings, like a column of categories, and marking one again only finds it
+    /// marked, so `table` skips the strings this vector already marked. Strings hold no
+    /// references, so a skipped repeat loses nothing but its age, which the table keeps: a
+    /// string cannot age between two of its marks, because the first one aged it.
+    ///
+    /// The table is cheaper than any mark test. A repeat costs a hash of the address and one
+    /// load from a table that stays in L1, about 6 instructions; a mark test must find the
+    /// string's page, size class, word and bit and read the mark and tenured bitmaps, about 25.
+    /// A flat bitmap over a space of strings alone would still need the range check, the shift
+    /// and both bitmap reads, and a mark bit in the string's own header would cost a cache miss
+    /// per element. A string the table misses costs about 11 instructions more than a plain
+    /// mark, which is why a caller stops using it on a vector without repeats.
+    #[inline(always)]
+    unsafe fn mark_strings<const TENURED: bool>(
+        &mut self,
+        strings: &[Sexp],
+        table: &mut RepeatTable,
+    ) -> (bool, bool) {
+        let mut has_younger = false;
+        let mut marked = 0;
+        for &string in strings {
+            let address = string.as_ptr() as usize;
+            let slot = &mut table.0[(address >> 4) as u8 as usize % REPEAT_TABLE_SLOTS];
+            if *slot & !1 == address {
+                has_younger |= *slot & 1 != 0;
+                continue;
+            }
+            let younger = self.mark_child::<TENURED>(string);
+            *slot = address | younger as usize;
+            has_younger |= younger;
+            marked += 1;
+        }
+        (has_younger, marked < strings.len())
     }
 
     /// Marks the elements in the dirty cards of a remembered carded vector that `kind` of
