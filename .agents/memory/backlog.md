@@ -39,12 +39,6 @@ The quality bar is four things.
   'lattice'`) and the `timeseries` workload of `just bench applications` fails.
 - Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
-- `ry check` does not hold a function literal's body to its declared return type, though the typing
-  reference says an explicit return "is enforced": `f <- function(x: integer) -> character x`,
-  `-> NULL x`, and `#: fn(x: integer) -> NULL` over `function(x) x` all check clean (calls
-  included), while ry's runtime stops each call with "the function must return ...". Passing such
-  a function where a function type is expected is reported (`typing-scripts/functions.R.test`,
-  `function_argument_with_wrong_return_is_rejected`).
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
