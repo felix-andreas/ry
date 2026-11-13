@@ -128,9 +128,44 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - Calls from tier-1 code while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
-- A deoptimization exit that materializes the callee's frame, so tier 1 can inline callees with
-  effects. Runtime work (closure calls, argument matching, allocation, collection) dominates
-  `just bench applications` with the JIT off, so this and unboxing are the larger levers.
+- Inlined closure calls without a frame are built (`decisions.md`, "Tier 1 leaves compiled code
+  through frame states"). On `just bench applications` they move one program, `orders` (87 ms
+  against 155 ms, 1.78x), because a call is only inlined into a caller tier 1 compiles, and tier 1
+  compiles 0 to 4 bodies per program (11 on `functional`). Three of those bodies get a frame:
+  one in `orders`, one in `conditions` and one in `timeseries`. In order of expected gain on the
+  applications:
+  - Compile the callers. Most application bodies are refused as "would hand most instructions
+    to tier 0" or "would run nothing natively": their instructions are builtin calls, vector
+    operators and calls of closures with `...` or defaults. Each of those needs a native form
+    in tier 1 before removing the calls between them can pay.
+  - Widen what gets an inlined frame. `RY_JIT_LOG=1` over the 15 applications prints 709
+    refusals: 445 "the call does not pass each formal one argument" (defaults), 115 "the callee
+    has no type feedback yet", 58 "a named, missing or `...` argument", 44 "the callee runs an
+    instruction only tier 0 has", 24 recursive calls, 8 callees too long, 8 callees that needed
+    their frame, 5 arguments with a possible effect that the callee reads, and 2 callees without
+    tier-0 code. Defaults and named arguments are 71% of them, so matching arguments at compile
+    time and binding a default as an unforced formal comes first.
+  - A direct call from compiled code when an inlined frame cannot start. `jit_enter_frame`
+    declines while a calling handler is established, the call instruction then deoptimizes the
+    whole root activation, and a root where that is frequent is recompiled without frames
+    (`NO_FRAMES`). A root that mostly runs under `withCallingHandlers` or `suppressWarnings`,
+    which includes every testthat expectation, therefore calls for real. Calling the callee
+    through the direct-call path instead keeps the root compiled with frames and makes
+    `NO_FRAMES` unnecessary.
+  - Evaluate more arguments before the call. An argument of an inlined callee that mentions one
+    of the callee's formals under a condition stays a promise, which costs the frame when the
+    inner callee reads it (`analysis.rs`, `Lowering.conditional`). Tracking which formals are
+    already forced at the call would allow it.
+  - Enter an inlined frame without the two helper calls (`jit_enter_frame`, `jit_leave_frame`),
+    then delete `Action::Inline` and `effects::effect_free_lookups`, which exist only because
+    the frame path costs those calls.
+  - Plan a callee that has no type feedback from the argument types at the call. Tier 0 runs
+    small closures without an activation and records no feedback for them, so the smallest
+    callees get a frame only through `Action::Inline`.
+  - R-level value nodes and passes in `crates/ssa`. The IR carries frame states, but its
+    instructions are still Cranelift's, and inlining is decided by the planner in
+    `analysis.rs`. Value numbering across an inlined call, guard removal and scalar
+    replacement need typed R-level nodes above the lowering.
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
 
@@ -1085,10 +1120,9 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
   addressing and unboxed scalars, slot frames) close the interpreter and value-representation gaps
   to LuaJIT. The three that remain need one JIT-optimizer track, because each depends on the others:
-  - *Cross-closure inlining with deopt.* Inline hot callees under guards on the binding version and
-    on an observer bit (no `parent.frame`, `sys.call`, `eval` or `environment()` on the inlined
-    frame), and rebuild the callee frames from a snapshot when a guard fails. Needs the enter/leave
-    contract and the observer bitset from "Closure call setup: the 10x end shape" in `decisions.md`.
+  - *Cross-closure inlining with deopt.* Built for callees without loops, `...` or defaults
+    (`decisions.md`, "Tier 1 leaves compiled code through frame states"); what is left is under
+    "Open: JIT on against JIT off".
   - *Allocation sinking.* Escape analysis over the JIT IR, so a temporary vector, a scalar box or a
     short-lived list that never escapes the compiled region is never allocated, and is materialized
     only on a deopt exit. Builds on counted registers.
