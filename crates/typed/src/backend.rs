@@ -1186,7 +1186,11 @@ impl Emitter<'_> {
                 };
                 SmallVec::from_slice(&[result])
             }
-            Op::CountTrue { program, inputs } => {
+            Op::CountTrue {
+                program,
+                inputs,
+                counts,
+            } => {
                 let words = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
                     8 * inputs.len().max(1) as u32,
@@ -1204,33 +1208,46 @@ impl Emitter<'_> {
                         .ins()
                         .stack_store(I64, word, words, 8 * index as i32);
                 }
-                let steps = self.builder.create_sized_stack_slot(StackSlotData::new(
+                // The steps and, after them, the operand numbers of the counted lists.
+                let codes = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    4 * program.len().max(1) as u32,
+                    4 * (program.len() + counts.len()).max(1) as u32,
                     2,
                 ));
-                for (index, &step) in program.iter().enumerate() {
-                    let step = self.builder.ins().iconst(I32, i64::from(step));
+                let counted = counts.iter().map(|&(operand, _)| operand);
+                for (index, code) in program.iter().copied().chain(counted).enumerate() {
+                    let code = self.builder.ins().iconst(I32, i64::from(code));
                     self.builder
                         .ins()
-                        .stack_store(I64, step, steps, 4 * index as i32);
+                        .stack_store(I64, code, codes, 4 * index as i32);
                 }
                 let out = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    8,
+                    8 * counts.len().max(1) as u32,
                     3,
                 ));
                 let arguments = [
-                    self.builder.ins().stack_addr(I64, steps, 0),
+                    self.builder.ins().stack_addr(I64, codes, 0),
                     self.iconst(program.len() as i64),
                     self.builder.ins().stack_addr(I64, words, 0),
                     self.iconst(inputs.len() as i64),
                     self.iconst(lists),
+                    self.builder
+                        .ins()
+                        .stack_addr(I64, codes, 4 * program.len() as i32),
+                    self.iconst(counts.len() as i64),
                     self.builder.ins().stack_addr(I64, out, 0),
                 ];
                 let status = self.call_words(address!(values::ry_count_true), I32, &arguments);
                 self.fail_if(status, &inst.fail_drops)?;
-                SmallVec::from_slice(&[self.builder.ins().stack_load(I64, I64, out, 0)])
+                for (index, &(_, local)) in counts.iter().enumerate() {
+                    let count = self
+                        .builder
+                        .ins()
+                        .stack_load(I64, I64, out, 8 * index as i32);
+                    self.set(local, &[count])?;
+                }
+                SmallVec::new()
             }
             Op::VectorCompare(op, item, a, b) => {
                 let operation = self.iconst(*op as i64);

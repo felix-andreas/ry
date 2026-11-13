@@ -1,7 +1,10 @@
 //! Fuses a count of a logical list with the list comparisons and logical operators that built
-//! it. `List.count_if(time >= t & event, \(b) b)` would otherwise build two lists only to count
-//! one of them; fused, [`Op::CountTrue`] reads `time`, `t` and `event` in one pass, and the
-//! comparisons that built the lists are removed when nothing else reads them.
+//! it, and the counts of one stretch of code with each other. `List.count_if(time >= t & event,
+//! \(b) b)` would otherwise build two lists only to count one of them; fused, [`Op::CountTrue`]
+//! reads `time`, `t` and `event` in one pass, and the comparisons that built the lists are
+//! removed when nothing else reads them. Several such counts in a row, as a statistic over
+//! `time >= t`, `time >= t & treated` and `time == t & event` makes, then become one pass that
+//! computes each shared comparison once.
 //!
 //! The pass follows a counted list back through the instructions that define it, across local
 //! variables and the copies an assignment or an inlined call makes, but only within straight-line
@@ -14,7 +17,8 @@ use {
     crate::{
         ir::{BlockId, Function, Item, Local, Op, Terminator, Type},
         values::{
-            ELEMENTWISE_INPUTS, ELEMENTWISE_STEPS, MASK_AND, MASK_DBL, MASK_I64, MASK_NOT, MASK_OR,
+            COUNTED_LISTS, ELEMENTWISE_INPUTS, ELEMENTWISE_STEPS, MASK_AND, MASK_DBL, MASK_I64,
+            MASK_NOT, MASK_OR,
         },
     },
     rustc_hash::FxHashMap,
@@ -29,55 +33,178 @@ const MAX_RUN: usize = 64;
 const STEP: u32 = 0x80;
 
 /// Fuses every count of a logical list in `function` with the operations that built the list,
-/// then removes those operations where nothing else reads their results.
+/// removes those operations where nothing else reads their results, and then merges the counts
+/// of each stretch of straight-line code into one.
 pub fn fuse(function: &mut Function) {
     let predecessors = jump_predecessors(function);
     let mut absorbed: Vec<(BlockId, usize)> = Vec::new();
     for block in 0..function.blocks.len() {
         for index in 0..function.blocks[block].insts.len() {
-            let Op::CountTrue { program, inputs } = &function.blocks[block].insts[index].op else {
+            let Op::CountTrue {
+                program,
+                inputs,
+                counts,
+            } = &function.blocks[block].insts[index].op
+            else {
                 continue;
             };
-            let [list] = inputs[..] else {
+            let ([list], [(_, count)]) = (&inputs[..], &counts[..]) else {
                 continue;
             };
             if !program.is_empty() {
                 continue;
             }
+            let (list, count) = (*list, *count);
             let run = Run::new(function, &predecessors, BlockId(block as u32), index);
             let mut fusion = Fusion {
                 function,
                 run: &run,
-                inputs: SmallVec::new(),
-                steps: SmallVec::new(),
+                program: Program::default(),
                 absorbed: Vec::new(),
             };
-            let Some(Operand::Step(_)) = fusion.logical(list, run.end) else {
+            let Some(Operand::Step(step)) = fusion.logical(list, run.end) else {
                 continue;
             };
-            if fusion.steps.len() > ELEMENTWISE_STEPS || fusion.inputs.len() > ELEMENTWISE_INPUTS {
+            let program = fusion.program;
+            if !program.fits() {
                 continue;
             }
-            let base = fusion.inputs.len() as u32;
-            let number = |byte: u32| match byte & STEP {
-                0 => byte,
-                _ => base + (byte & !STEP),
-            };
-            let program = fusion
-                .steps
-                .iter()
-                .map(|&step| {
-                    step & 0xFF | number(step >> 8 & 0xFF) << 8 | number(step >> 16 & 0xFF) << 16
-                })
-                .collect();
             absorbed.extend(fusion.absorbed);
             function.blocks[block].insts[index].op = Op::CountTrue {
-                program,
-                inputs: fusion.inputs,
+                counts: SmallVec::from_slice(&[(program.number(Operand::Step(step)), count)]),
+                program: program.encoded(),
+                inputs: program.inputs,
             };
         }
     }
     remove_unread(function, &absorbed);
+    merge_counts(function, &predecessors);
+}
+
+/// Moves each count into the count before it in the same straight-line code, where the earlier
+/// one can compute both: one pass then reads the inputs they share once and computes a step
+/// they share once.
+fn merge_counts(function: &mut Function, predecessors: &[Option<BlockId>]) {
+    for block in 0..function.blocks.len() {
+        let mut index = 0;
+        while index < function.blocks[block].insts.len() {
+            let merged =
+                earlier_count(function, predecessors, block, index).and_then(|(at, earlier)| {
+                    let earlier_op = &function.blocks[at].insts[earlier].op;
+                    let later_op = &function.blocks[block].insts[index].op;
+                    Some((at, earlier, merged(earlier_op, later_op)?))
+                });
+            match merged {
+                Some((at, earlier, op)) => {
+                    function.blocks[at].insts[earlier].op = op;
+                    function.blocks[block].insts.remove(index);
+                }
+                None => index += 1,
+            }
+        }
+    }
+}
+
+/// The count that the count at `index` of `block` can move into: the nearest one before it in
+/// its straight-line code, as its block and index. From that count on, no instruction may
+/// assign an input of the later count, so the inputs hold there what they hold at the later
+/// count, and none may read or assign one of its results. No instruction in between may call a
+/// function either, because the later count can fail, and a failure moved before a call would
+/// keep the call from running.
+fn earlier_count(
+    function: &Function,
+    predecessors: &[Option<BlockId>],
+    block: usize,
+    index: usize,
+) -> Option<(usize, usize)> {
+    let later = &function.blocks[block].insts[index];
+    let Op::CountTrue { inputs, .. } = &later.op else {
+        return None;
+    };
+    let results = later.assigned();
+    let (mut at, mut before) = (block, index);
+    for _ in 0..MAX_RUN {
+        while before > 0 {
+            before -= 1;
+            let inst = &function.blocks[at].insts[before];
+            let assigns = inst
+                .assigned()
+                .iter()
+                .any(|local| inputs.contains(local) || results.contains(local));
+            let reads = inst
+                .op
+                .operands()
+                .iter()
+                .any(|operand| results.contains(operand));
+            if assigns || reads {
+                return None;
+            }
+            match inst.op {
+                Op::CountTrue { .. } => return Some((at, before)),
+                Op::CallR(..) | Op::CallTyped(..) => return None,
+                _ => {}
+            }
+        }
+        at = predecessors[at]?.0 as usize;
+        before = function.blocks[at].insts.len();
+    }
+    None
+}
+
+/// One count that computes what the counts `earlier` and `later` compute, if a pass has room
+/// for the inputs, steps and results of both.
+fn merged(earlier: &Op, later: &Op) -> Option<Op> {
+    let (
+        Op::CountTrue {
+            program,
+            inputs,
+            counts,
+        },
+        Op::CountTrue {
+            program: later_program,
+            inputs: later_inputs,
+            counts: later_counts,
+        },
+    ) = (earlier, later)
+    else {
+        return None;
+    };
+    let mut all = Program::decoded(program, inputs);
+    let mut all_counts: SmallVec<[(Operand, Local); 8]> = counts
+        .iter()
+        .map(|&(number, local)| (operand(number, inputs.len()), local))
+        .collect();
+    let moved_inputs: SmallVec<[Operand; 8]> =
+        later_inputs.iter().map(|&local| all.input(local)).collect();
+    let mut moved_steps: SmallVec<[Operand; 8]> = SmallVec::new();
+    let moved = |number: u32, steps: &[Operand]| match operand(number, later_inputs.len()) {
+        Operand::Input(input) => moved_inputs.get(input as usize).copied(),
+        Operand::Step(step) => steps.get(step as usize).copied(),
+    };
+    for &step in later_program {
+        let code = step & 0xFF;
+        let left = moved(step >> 8 & 0xFF, &moved_steps)?;
+        // `MASK_NOT` has no right operand.
+        let right = match code {
+            MASK_NOT => Operand::Input(0),
+            _ => moved(step >> 16 & 0xFF, &moved_steps)?,
+        };
+        moved_steps.push(all.step(code, left, right));
+    }
+    for &(number, local) in later_counts {
+        all_counts.push((moved(number, &moved_steps)?, local));
+    }
+    if !all.fits() || all_counts.len() > COUNTED_LISTS {
+        return None;
+    }
+    Some(Op::CountTrue {
+        counts: all_counts
+            .iter()
+            .map(|&(operand, local)| (all.number(operand), local))
+            .collect(),
+        program: all.encoded(),
+        inputs: all.inputs,
+    })
 }
 
 /// For each block, the block before it when that block is its only predecessor and ends in a
@@ -143,8 +270,8 @@ impl Run {
             let insts = &function.blocks[id.0 as usize].insts;
             let count = if id == block { index } else { insts.len() };
             for inst in &insts[..count] {
-                if let Some(dest) = inst.dest {
-                    assignments.entry(dest).or_default().push(number);
+                for local in inst.assigned() {
+                    assignments.entry(local).or_default().push(number);
                 }
                 number += 1;
             }
@@ -192,12 +319,105 @@ enum Operand {
     Step(u32),
 }
 
+/// The operand a step or a count of an [`Op::CountTrue`] with `inputs` inputs numbers `number`.
+fn operand(number: u32, inputs: usize) -> Operand {
+    match number.checked_sub(inputs as u32) {
+        Some(step) => Operand::Step(step),
+        None => Operand::Input(number),
+    }
+}
+
+/// The inputs and steps of a count while it is built or merged. A step is
+/// `code | left << 8 | right << 16` as in [`Op::CountTrue`], except that an operand byte is an
+/// input's position or, with [`STEP`] set, an earlier step's, so adding an input renumbers
+/// nothing.
+#[derive(Default)]
+struct Program {
+    inputs: SmallVec<[Local; 4]>,
+    steps: SmallVec<[u32; 8]>,
+}
+
+impl Program {
+    fn decoded(program: &[u32], inputs: &[Local]) -> Program {
+        let mark = |byte: u32| match operand(byte, inputs.len()) {
+            Operand::Input(input) => input,
+            Operand::Step(step) => STEP | step,
+        };
+        Program {
+            inputs: inputs.into(),
+            steps: program
+                .iter()
+                .map(|&step| {
+                    let right = match step & 0xFF {
+                        MASK_NOT => 0,
+                        _ => mark(step >> 16 & 0xFF),
+                    };
+                    step & 0xFF | mark(step >> 8 & 0xFF) << 8 | right << 16
+                })
+                .collect(),
+        }
+    }
+
+    /// The steps as [`Op::CountTrue`] numbers their operands: inputs first, steps after them.
+    fn encoded(&self) -> SmallVec<[u32; 8]> {
+        let number = |byte: u32| match byte & STEP {
+            0 => byte,
+            _ => self.inputs.len() as u32 + (byte & !STEP),
+        };
+        self.steps
+            .iter()
+            .map(|&step| {
+                step & 0xFF | number(step >> 8 & 0xFF) << 8 | number(step >> 16 & 0xFF) << 16
+            })
+            .collect()
+    }
+
+    fn number(&self, operand: Operand) -> u32 {
+        match operand {
+            Operand::Input(input) => input,
+            Operand::Step(step) => self.inputs.len() as u32 + step,
+        }
+    }
+
+    /// Whether one pass of the kernel has room for the inputs and steps.
+    fn fits(&self) -> bool {
+        self.steps.len() <= ELEMENTWISE_STEPS && self.inputs.len() <= ELEMENTWISE_INPUTS
+    }
+
+    fn input(&mut self, local: Local) -> Operand {
+        let position = match self.inputs.iter().position(|&input| input == local) {
+            Some(position) => position,
+            None => {
+                self.inputs.push(local);
+                self.inputs.len() - 1
+            }
+        };
+        Operand::Input(position as u32)
+    }
+
+    /// The step that computes `code` of the two operands, which is an earlier step when one
+    /// already computes it.
+    fn step(&mut self, code: u32, left: Operand, right: Operand) -> Operand {
+        let pack = |operand: Operand| match operand {
+            Operand::Input(input) => input,
+            Operand::Step(step) => STEP | step,
+        };
+        let step = code | pack(left) << 8 | pack(right) << 16;
+        let position = match self.steps.iter().position(|&found| found == step) {
+            Some(position) => position,
+            None => {
+                self.steps.push(step);
+                self.steps.len() - 1
+            }
+        };
+        Operand::Step(position as u32)
+    }
+}
+
 struct Fusion<'f> {
     function: &'f Function,
     run: &'f Run,
-    inputs: SmallVec<[Local; 4]>,
-    /// The steps, with each operand that is a step marked by [`STEP`].
-    steps: SmallVec<[u32; 8]>,
+    program: Program,
     absorbed: Vec<(BlockId, usize)>,
 }
 
@@ -237,7 +457,11 @@ impl Fusion<'_> {
         let function = self.function;
         let inst = &function.blocks[block.0 as usize].insts[index];
         let ty = |local: Local| function.ty(local);
-        let saved = (self.inputs.len(), self.steps.len(), self.absorbed.len());
+        let saved = (
+            self.program.inputs.len(),
+            self.program.steps.len(),
+            self.absorbed.len(),
+        );
         let operand = match inst.op {
             Op::Copy(source) if ty(source) == ty(local) => self.logical(source, number),
             Op::VectorCompare(op, item @ (Item::I64 | Item::Dbl), a, b) if lanes(ty(local)) => {
@@ -247,20 +471,20 @@ impl Fusion<'_> {
                     MASK_DBL
                 } + op as u32;
                 match (self.numeric(a, item, number), self.numeric(b, item, number)) {
-                    (Some(x), Some(y)) => Some(self.step(code, x, y)),
+                    (Some(x), Some(y)) => Some(self.program.step(code, x, y)),
                     _ => None,
                 }
             }
             Op::VectorLogic(and, a, b) if lanes(ty(a)) && lanes(ty(b)) => {
                 let code = if and { MASK_AND } else { MASK_OR };
                 match (self.logical(a, number), self.logical(b, number)) {
-                    (Some(x), Some(y)) => Some(self.step(code, x, y)),
+                    (Some(x), Some(y)) => Some(self.program.step(code, x, y)),
                     _ => None,
                 }
             }
             Op::VectorNot(a) if lanes(ty(a)) => self
                 .logical(a, number)
-                .map(|x| self.step(MASK_NOT, x, Operand::Input(0))),
+                .map(|x| self.program.step(MASK_NOT, x, Operand::Input(0))),
             _ => None,
         };
         match operand {
@@ -271,11 +495,9 @@ impl Fusion<'_> {
                 Some(Operand::Step(step))
             }
             _ => {
-                (self.inputs, self.steps, self.absorbed) = (
-                    self.inputs[..saved.0].into(),
-                    self.steps[..saved.1].into(),
-                    self.absorbed[..saved.2].to_vec(),
-                );
+                self.program.inputs.truncate(saved.0);
+                self.program.steps.truncate(saved.1);
+                self.absorbed.truncate(saved.2);
                 None
             }
         }
@@ -296,26 +518,9 @@ impl Fusion<'_> {
     }
 
     fn input(&mut self, local: Local, read: u32) -> Option<Operand> {
-        if !self.run.unchanged(local, read) {
-            return None;
-        }
-        let position = match self.inputs.iter().position(|&input| input == local) {
-            Some(position) => position,
-            None => {
-                self.inputs.push(local);
-                self.inputs.len() - 1
-            }
-        };
-        Some(Operand::Input(position as u32))
-    }
-
-    fn step(&mut self, code: u32, left: Operand, right: Operand) -> Operand {
-        let pack = |operand: Operand| match operand {
-            Operand::Input(input) => input,
-            Operand::Step(step) => STEP | step,
-        };
-        self.steps.push(code | pack(left) << 8 | pack(right) << 16);
-        Operand::Step(self.steps.len() as u32 - 1)
+        self.run
+            .unchanged(local, read)
+            .then(|| self.program.input(local))
     }
 }
 

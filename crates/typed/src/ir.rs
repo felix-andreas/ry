@@ -189,6 +189,8 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub struct Inst {
+    /// The local the instruction assigns. An [`Op::CountTrue`] has none and assigns the locals
+    /// of its counts, so read [`Inst::assigned`] for what an instruction writes.
     pub dest: Option<Local>,
     pub op: Op,
     /// The operands this instruction takes ownership of, by position in [`Op::operands`]. The
@@ -211,6 +213,14 @@ impl Inst {
 
     pub fn moves(&self, position: usize) -> bool {
         self.moves & (1 << position) != 0
+    }
+
+    /// The locals the instruction assigns.
+    pub fn assigned(&self) -> SmallVec<[Local; 4]> {
+        match &self.op {
+            Op::CountTrue { counts, .. } => counts.iter().map(|&(_, local)| local).collect(),
+            _ => self.dest.into_iter().collect(),
+        }
     }
 }
 
@@ -455,14 +465,17 @@ pub enum Op {
         program: SmallVec<[u32; 8]>,
         inputs: SmallVec<[Local; 4]>,
     },
-    /// How many items of a logical ry list are true, as an `I64`, failing for an `NA` item.
-    /// With an empty `program` the list is input 0; otherwise the list is the last step of
-    /// `program`, which `values::ry_count_true` encodes: comparisons of numeric lists and
-    /// scalars, and `&`, `|` and `!` of their results, fused into one pass with borrowed inputs
-    /// and no list for any step ([`crate::fusion`] builds it).
+    /// How many items of logical ry lists are true, failing for an `NA` item. Each entry of
+    /// `counts` is a list, as its operand number in `program`, and the `I64` local that receives
+    /// its count; the instruction has no other destination. The operands are numbered inputs
+    /// first and the steps of `program` after them, which `values::ry_count_true` encodes:
+    /// comparisons of numeric lists and scalars, and `&`, `|` and `!` of their results, in one
+    /// pass with borrowed inputs and no list for any step ([`crate::fusion`] builds the steps
+    /// and merges the counts of one stretch of code into one pass).
     CountTrue {
         program: SmallVec<[u32; 8]>,
         inputs: SmallVec<[Local; 4]>,
+        counts: SmallVec<[(u32, Local); 4]>,
     },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),

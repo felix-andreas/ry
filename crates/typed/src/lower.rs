@@ -3657,13 +3657,7 @@ impl Lowering<'_> {
             && body == name
             && let Some(list) = list
         {
-            return Ok(self.builder.emit(
-                Type::I64,
-                Op::CountTrue {
-                    program: SmallVec::new(),
-                    inputs: SmallVec::from_slice(&[list]),
-                },
-            ));
+            return Ok(self.count_true(list));
         }
         // A predicate that only compares the item with numbers means the same for the whole
         // list as for each item. It is lowered once with its parameter standing for the list,
@@ -3696,13 +3690,7 @@ impl Lowering<'_> {
             let mask = self.expression(body);
             self.scopes.pop();
             let mask = mask?.ok_or(Refusal::new("a predicate that never completes"))?;
-            return Ok(self.builder.emit(
-                Type::I64,
-                Op::CountTrue {
-                    program: SmallVec::new(),
-                    inputs: SmallVec::from_slice(&[mask]),
-                },
-            ));
+            return Ok(self.count_true(mask));
         }
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
@@ -3777,6 +3765,20 @@ impl Lowering<'_> {
         }
         self.next_position(positions);
         Ok(total)
+    }
+
+    /// The count of the true items of `list`, a logical list.
+    fn count_true(&mut self, list: Local) -> Local {
+        let count = self.builder.local(Type::I64);
+        self.builder.push(
+            None,
+            Op::CountTrue {
+                program: SmallVec::new(),
+                inputs: SmallVec::from_slice(&[list]),
+                counts: SmallVec::from_slice(&[(0, count)]),
+            },
+        );
+        count
     }
 
     /// Whether `body`, a predicate of the one parameter `item` over a `List<F64>`, only compares

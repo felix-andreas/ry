@@ -3507,6 +3507,33 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ a <- [TRUE, TRUE]; b <- [FALSE, FALSE]; FUNCTION(a, b) }",
             ],
         ),
+        // Counts in a row are computed in one pass over the inputs they share, a list counted
+        // as it is among them.
+        (
+            "function(time: List<I64>, event: List<Bool>, treated: List<Bool>, t: I64) -> I64 { \
+             count <- function(mask: List<Bool>) -> I64 List.count_if(mask, function(b) b); \
+             risk <- time >= t; died <- time == t & event; \
+             n <- count(risk); n1 <- count(risk & treated); d <- count(died); \
+             d1 <- count(died & treated); e <- count(event); \
+             n * 10000i64 + n1 * 1000i64 + d * 100i64 + d1 * 10i64 + e }",
+            &[
+                "{ a <- [1i64, 2i64, 2i64, 3i64, 2i64]; b <- [TRUE, TRUE, FALSE, TRUE, TRUE]; \
+                 c <- [FALSE, TRUE, TRUE, TRUE, FALSE]; d <- 2i64; FUNCTION(a, b, c, d) }",
+                "{ a <- List.map(List.range(1, 1000), \\(i) i %% 7i64); \
+                 b <- List.map(List.range(1, 1000), \\(i) i %% 3i64 != 0i64); \
+                 c <- List.map(List.range(1, 1000), \\(i) i %% 2i64 == 0i64); d <- 3i64; \
+                 FUNCTION(a, b, c, d) }",
+            ],
+        ),
+        // A count that reads an earlier count's result, or an input assigned between the two,
+        // keeps its own pass.
+        (
+            "function(x: List<I64>, t: I64) -> I64 { \
+             n <- List.count_if(x > t, function(b) b); m <- List.count_if(x > n, function(b) b); \
+             t <- t + 1i64; k <- List.count_if(x > t, function(b) b); \
+             n * 100i64 + m * 10i64 + k }",
+            &["{ a <- [1i64, 2i64, 3i64, 4i64, 5i64]; b <- 2i64; FUNCTION(a, b) }"],
+        ),
         // The item's name in the predicate hides an outer local of the same name.
         (
             "function(x: List<F64>, v: F64) -> I64 List.count_if(x, function(v: F64) -> Bool v <= 2)",

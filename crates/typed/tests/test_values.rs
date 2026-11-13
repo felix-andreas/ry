@@ -837,26 +837,63 @@ fn fused_counts_follow_three_valued_logic() {
                     _ => None,
                 })
                 .collect();
-            let last = &lanes[lanes.len() - 1];
-            let expected = if lengths.is_empty()
-                || lengths.iter().any(|&found| found != length)
-                || last.contains(&None)
-            {
-                None
-            } else {
-                Some(last.iter().filter(|&&lane| lane == Some(true)).count() as i64)
-            };
-            let mut out = -1i64;
+            // The last step is counted, and with it up to three steps drawn from all of them.
+            let mut counted_steps = vec![lanes.len() - 1];
+            for _ in 0..rng.below(4) {
+                counted_steps.push(rng.below(lanes.len()));
+            }
+            // A logical list input is sometimes counted as it is.
+            let counted_input = inputs
+                .iter()
+                .position(|input| matches!(input, Input::Logicals(_)))
+                .filter(|_| rng.below(3) == 0);
+            let input_items = counted_input.map(|index| match &inputs[index] {
+                Input::Logicals(items) => items.clone(),
+                _ => unreachable!(),
+            });
+            let missing = counted_steps
+                .iter()
+                .any(|&step| lanes[step].contains(&None))
+                || input_items
+                    .as_ref()
+                    .is_some_and(|items| items.contains(&NA));
+            let expected: Option<Vec<i64>> =
+                if lengths.is_empty() || lengths.iter().any(|&found| found != length) || missing {
+                    None
+                } else {
+                    let trues = |step: &usize| {
+                        lanes[*step]
+                            .iter()
+                            .filter(|&&lane| lane == Some(true))
+                            .count() as i64
+                    };
+                    let of_input = input_items
+                        .iter()
+                        .map(|items| items.iter().filter(|&&item| item == 1).count() as i64);
+                    Some(counted_steps.iter().map(trues).chain(of_input).collect())
+                };
+            let counted: Vec<u32> = counted_steps
+                .iter()
+                .map(|&step| (words.len() + step) as u32)
+                .chain(counted_input.map(|index| index as u32))
+                .collect();
+            let mut out = vec![-1i64; counted.len()];
             let status = ry_count_true(
                 program.as_ptr(),
                 program.len() as u32,
                 words.as_ptr(),
                 words.len() as u32,
                 lists,
-                &mut out,
+                counted.as_ptr(),
+                counted.len() as u32,
+                out.as_mut_ptr(),
             );
             let found = (status == 0).then_some(out);
-            assert_eq!(found, expected, "program {program:x?}, seed {}", rng.seed);
+            assert_eq!(
+                found, expected,
+                "program {program:x?}, counted {counted:?}, seed {}",
+                rng.seed
+            );
             for (index, &word) in words.iter().enumerate() {
                 if lists & (1 << index) != 0 {
                     ry_list_drop(word as *mut List);
