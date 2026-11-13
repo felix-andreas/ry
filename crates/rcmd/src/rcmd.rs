@@ -855,7 +855,7 @@ fn hold(lock: File) {
 /// taken. A home from an older ry has no lock file, and the first process to use it adds one.
 fn lock_home(home: &Path) -> Result<Option<File>> {
     let path = home.join(LOCK_FILE);
-    let lock = match File::options().create(true).append(true).open(&path) {
+    let lock = match File::options().create(true).write(true).open(&path) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::Io(path, error)),
@@ -871,7 +871,7 @@ fn lock_cache(cache: &Path) -> Result<File> {
     let path = cache.join(LOCK_FILE);
     let lock = File::options()
         .create(true)
-        .append(true)
+        .write(true)
         .open(&path)
         .map_err(io_error(&path))?;
     lock.lock().map_err(io_error(&path))?;
@@ -899,7 +899,7 @@ fn prune_stale_homes(cache: &Path, current: &Path, _cache_lock: &File) {
         }
         // A staging directory without its lock yet is being created this instant, while a home
         // from an older ry, and one a pruner failed to delete, have no lock to take.
-        let lock = match File::options().append(true).open(entry.join(LOCK_FILE)) {
+        let lock = match File::options().write(true).open(entry.join(LOCK_FILE)) {
             Ok(lock) => Some(lock),
             Err(error) if error.kind() == io::ErrorKind::NotFound && !staging => None,
             Err(_) => continue,
