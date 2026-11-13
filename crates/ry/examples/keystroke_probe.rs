@@ -5,7 +5,7 @@
 use {
     salsa::{Durability, Setter as _},
     semantics::{
-        AnalysisSettings, DataFiles, Db, DocumentKind, ProjectFiles, SourceFile, SpliceCache,
+        AnalysisSettings, DataFiles, Db, DocumentKind, ProjectFiles, SourceFile, TreeStore,
         diagnostics::file_diagnostics,
         metadata::PackageMetadata,
         stubs::{StubSources, shipped_export_manifests, shipped_stub_sources},
@@ -39,7 +39,7 @@ const WALKS: &[&str] = &[
 #[derive(Clone)]
 struct ProbeDatabase {
     storage: salsa::Storage<Self>,
-    splice_cache: Arc<SpliceCache>,
+    trees: Arc<TreeStore>,
 }
 
 impl Default for ProbeDatabase {
@@ -76,7 +76,7 @@ impl Default for ProbeDatabase {
                     }
                 }
             }))),
-            splice_cache: Arc::default(),
+            trees: Arc::default(),
         }
     }
 }
@@ -86,8 +86,8 @@ impl salsa::Database for ProbeDatabase {}
 
 #[salsa::db]
 impl Db for ProbeDatabase {
-    fn splice_cache(&self) -> &SpliceCache {
-        &self.splice_cache
+    fn trees(&self) -> &TreeStore {
+        &self.trees
     }
 }
 

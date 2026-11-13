@@ -182,14 +182,17 @@ reparse is compared with a parse from scratch.
 
 ### Parsing, and why it is not where incrementality happens
 
-`parse(file)` is a per-file query with a splice cache beside it. The cache remembers the file's
-previous text and tree (shared across clones of the storage handle), works out the current edit as
-the longest common prefix and suffix, and lets `syntax::reparse` reparse only the statements the
-edit touched and copying the untouched top-level runs of the old tree around them.
+`parse(file)` is not a query. It returns the file's tree from the host's `TreeStore`
+(`Db::trees`), the one home of syntax trees, which holds at most one tree per file. When the file's
+text differs from the stored tree's, the store works out the edit as the longest common prefix and
+suffix, and `syntax::reparse` reparses only the statements the edit touched and copies the
+untouched top-level runs of the old tree around them. A query that reads a tree records its read of
+the file's text and keeps only what it derives, so no memo holds a file's tree. The one syntax a
+memo keeps is the detached copy of an annotation's subtree, described below.
 
 The spliced tree is byte-identical and error-identical to a parse from scratch. The edit-stream
 fuzzer pins that equivalence, and the splice refuses and falls back to a full parse whenever the
-equivalence is not provable, so the cache is invisible to every query downstream. Invalidation below
+equivalence is not provable, so the store is invisible to every query downstream. Invalidation below
 the level of a whole file stays out of salsa on purpose.
 
 The real incrementality happens one level down, in the item tree. An item's identity interns its
@@ -197,20 +200,29 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident in the server, and `ry check` holds one at a time
+### The host decides how long a tree stays
 
-The server keeps every syntax tree, because an edit reparses one file and every other tree stays
-valid. `ry check` reads each tree in its first pass only, so it does not memoize them. Each worker of
-the syntax pass wraps a file's work in `semantics::with_held_tree`, which parses the file once and
-parks the tree in a thread-local slot that `parse` serves for the rest of that file's work; the
-tree is freed when the worker moves on. In a one-shot database `item_syntax` and
-`item_annotation_syntax` skip their per-item memos as well, because a memo would keep its file's
-tree alive past the syntax pass and buys nothing in a run that never edits. A tree read outside a held
-tree still works: it goes through the `parse_memo` query, which then keeps that file's tree for the
-rest of the run. A full cold check never does this, but a partial cached run, the cache planner's
-surface comparison and `--annotate` read some trees that way. Annotation memos (`file_item_annotations`) store
-detached copies of their subtrees (`syntax::SyntaxNode::detached_subtree`), so on any host an
-annotation never keeps the whole file's tree alive.
+Every host runs the same queries, and the only thing it chooses about trees is the store's
+capacity. The server's store keeps every tree (`TreeStore::default`), because an edit reparses one
+file by splicing its previous tree and a position request can read any tree at any time.
+
+A command that checks once and exits (`RootDatabase::for_command`, which `ry check` uses) reads
+each tree in its first pass and afterwards mostly what was derived from it. Its store is bounded
+(`TreeStore::bounded`) at four trees per core. The worker that runs a file's first pass holds the
+file (`TreeStore::hold`), and a held tree is never dropped, so the pass parses the file once
+however many trees the other workers read meanwhile. The rest of the capacity keeps the most
+recently read trees, which serves a pass that reads an item of a file it does not hold without a
+parse per read. A tree read after it was dropped is parsed again, which costs time and changes no
+result. `test_incremental.rs` pins that a cold check parses each file once on a store of two
+trees, and that it reports what a store that keeps every tree reports.
+
+`item_syntax` is a plain function that returns the item's window of the stored tree, so an item's
+syntax has no memo of its own to keep the file's tree alive. After an edit, each item of the
+edited file lowers again, and `item_hir` comes out equal for the items the edit did not touch, so
+salsa backdates them and cuts off everything downstream. An item's annotations are a per-item
+tracked projection (`item_annotation_syntax`) that stores detached copies of their subtrees
+(`syntax::SyntaxNode::detached_subtree`), so an annotation never keeps the whole file's tree alive
+either.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
@@ -222,14 +234,14 @@ joins it with the rest (a bare `setClass` call is reported only when the file do
 `setClass` itself, and two annotations disagree only when their types differ once aliases
 expand).
 
-The CLI's cold check runs three passes over the files, largest first, spread over the cores.
-The first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each
-file's share of the project-wide maps (`warm_project_folds`), so that no later check derives
-another file's facts on its own thread. The second names every item, so that two threads
-checking files that reach the same item do not block on one claim, and the third assembles the
-diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
-previous tree of every file. `test_incremental.rs` pins that a cold check parses each file once
-and that a one-shot cold check memoizes no tree.
+The CLI's cold check runs its passes over the files, largest first, spread over the cores. The
+first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each file's
+share of the project-wide maps (`warm_project_folds`), so that no later check derives another
+file's facts on its own thread. The second names every item, so that two threads checking files
+that reach the same item do not block on one claim. The project-wide name maps are then built once
+per layer, each on a handle of its own, and the next two passes resolve every item's links and
+every file's cyclic groups (see "Keeping project-wide work cheap"). The last pass assembles the
+diagnostics.
 
 Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
@@ -245,17 +257,16 @@ The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file con
 wall time. Several of them are worth knowing:
 
 - Every salsa read of a tracked function with several arguments interns its key and verifies a
-  memo. So in the server one item check resolves all its frame binders in one query
-  (`item_frame_binders`), and every item check caches the package names and schemes it looks up
-  in `SalsaGlobals`. `package_name` and
-  `test_name` take only the name and read `ProjectFiles` themselves.
+  memo. So an item check resolves every name its naming lists through one query (`item_links`)
+  and reads the answers from that query's arrays. `package_name` and `test_name` take only the
+  name and read `ProjectFiles` themselves.
 - `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
   64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
   compare and reading the kind is a field load. A direct-mapped per-thread cache sits in front of
   the shards, because checkers intern the same few types over and over and those land on the same
   shard mutexes. The entry stores the type's size, which the
   inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
-  one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
+  command that exits loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
   salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
 - The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
@@ -268,8 +279,8 @@ wall time. Several of them are worth knowing:
 - Every item keeps its HIR, naming and check memos for the whole run, so each 8-byte field on
   those values costs about half a megabyte across a 300K-line bench. `ItemNaming::extras` and
   `ItemCheck::editor` keep the rarely populated and the editor-only fields behind one optional
-  box, and a one-shot check skips the per-item binder memo (`item_frame_binders`) and reads the
-  file's binders, a sorted array searched by name, directly.
+  box, and an item's links keep one row per name and one per binding in parallel arrays, with the
+  item's interface edges in the same memo.
 - mimalloc's `realloc` keeps the old block when the new size is at least half of it, so a `Vec`
   shrunk with `into_boxed_slice` or `shrink_to_fit` can still hold twice its length. A buffer that
   stays memoized is allocated at its exact size up front instead.
@@ -376,13 +387,14 @@ When definitions refer to each other in a cycle, the package interface resolves 
 through one canonical fixpoint, so the result never depends on which member happened to be queried
 first:
 
-1. `interface_group` finds the cyclic group an item belongs to. `item_interface_edges` gives each
+1. `item_group` finds the cyclic group an item belongs to. `item_interface_edges` gives each
    item, definition or top-level statement alike, the items its reads resolve to, following
    exactly the resolution a check performs: the frame binder in the item's own file, then the
    test and package layers, and every conditional writer of a name that has no unconditional
-   winner. An iterative Tarjan walk from the item visits only what it reaches, which is enough,
-   because a cycle through the item lies inside that reachable set. Members come back in
-   canonical project order, and the first one keys the group.
+   winner. One iterative Tarjan walk per file (`file_interface_groups`) starts from the file's
+   items and visits only what they reach, which is enough, because a cycle through an item lies
+   inside that item's reachable set. Members come back in canonical project order, and an item
+   finds its group by its position in the file's item tree.
 2. `scc_exports` starts every member at `Unknown` and runs Jacobi rounds until the table of
    exports (each member's scheme and the schemes of the top-level names it binds) stops changing.
    If the round cap is reached, every member is pinned.
@@ -406,9 +418,9 @@ the obvious one.
 
 ### Keeping project-wide work cheap
 
-A check never names the whole project. The interface graph is walked per item, from the items a
-check reaches, and `item_interface_reads`, the set of items and names an item's reads resolve to, is
-a tiny tracked query whose value survives an edit that only shifts ranges.
+A check never names the whole project. The interface graph is walked per file, from that file's
+items, and the walk reads each item's edges from `item_links`, whose value survives an edit that
+only shifts ranges.
 
 The one map that does cover every package item is the set of conditional writers, the items that
 write a top-level name other than their own, which a read with no unconditional winner joins.
@@ -426,27 +438,36 @@ Read per file, that is about 500 memos on a 300,000-line project, and every one 
 file passes on durability alone (see "The language server"). Read per item, it was about 56,000
 memos, which cost every editor request about 35 ms right after a keystroke.
 
-A check never reads a project-wide map either. Each lookup it makes across items goes through a
-firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
-writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
-binder that an immediate or script read sees. The interface edges an item contributes to the group
-walk (`item_interface_edges`) go through `package_name` too. A structural edit re-runs each firewall
-that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
-items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+A check never reads a project-wide map either. It reaches other items through three projections,
+and every host uses the same three:
 
-`ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
-cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
-`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
-A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
-answers each name with a hash probe, instead of interning a name and going through `package_name`
-or `test_name`. A frame binder comes from the file's binders, read once per reader, instead of
-the per-item `item_frame_binders` memo and a `frame_binder` memo per name it does not list. And
-`item_group` finds every cyclic group in one walk over the project (`project_interface_groups`)
-instead of one `interface_group` walk per item; `ry check` runs that walk on a cloned handle
-beside the parallel edge pass. Every read still goes through salsa, so the answers are the same
-facts; only the granularity of the recorded dependencies changes. Under
-`syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.
+| Projection | Keyed by | Answers |
+|---|---|---|
+| `item_links` | item | where the project binds each name the item's naming lists (the binders in its file, a sourced file's definition, the test and package winners and conditional writers), and the item's interface edges |
+| `package_name`, `test_name`, `frame_binder` | name, or item and name | the same bindings for a name the check constructs itself, such as an S3 method's (`Ops.Date`), which no naming lists |
+| `file_interface_groups` | file | the cyclic groups of the file's items |
+
+`item_links` is the item's own projection of the project-wide name maps. A new top-level name
+anywhere re-runs it for every item, and it backdates unless one of the item's own names moved, so a
+new definition re-checks only the items that read its name. Folding the edges into the same memo
+costs one memo per item instead of two.
+
+A constructed name is usually bound nowhere, and a per-item `frame_binder` memo for each such
+lookup comes to about 100,000 memos (about 18 MB) on the finance bench. `package_name` therefore
+also says whether any project file binds the name at top level, from a bitset over symbol indices
+that `project_bound_names` folds from each file's binders. When none does, the item's file has no
+binder for it either, and the lookup stops there without a query.
+
+`crates/semantics/tests/test_incremental.rs` pins these contracts: the queries an edit re-runs, the
+ones a new definition re-runs, and that a check resolves the names it spells through its links
+without a `frame_binder` query. Under
+`syntax::testing::enable_invariants()` every linked lookup is compared with the per-name answer,
+every unbound verdict with `frame_binder`, and every item's group with a walk from that item alone.
+
+A host that only reports diagnostics, such as `ry check`, answers `Db::editor_facts` with false,
+so its item checks leave out expression and pattern types, literal expectations, loop variables,
+selected overloads and callee targets, which only editor features and rewrites read. `ry migrate`
+reads expression types for its rewrites, so it analyses on `RootDatabase::for_command(true)`.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions
