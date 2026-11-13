@@ -59,8 +59,9 @@
             inherit (pkgs) lib;
             # Ubuntu 24.04's GCC is 13.3, and 13.4 no longer pairs up the two halves of a complex
             # sum into one vector add, which swaps the operands and so whether NA or NaN wins
-            # (kernels__complex_na_nan_sums). The compilers come from an older nixpkgs, wrapped
-            # against this one's glibc and libraries; gfortran compiles R's own BLAS.
+            # (kernels__complex_na_nan_sums). The compilers come from an older nixpkgs, wrapped to
+            # link this one's glibc and libraries (they keep their own glibc 2.40 headers);
+            # gfortran compiles R's own BLAS.
             gcc13-3 = import nixpkgs-gcc13-3 { inherit (pkgs.stdenv.hostPlatform) system; };
             gcc = pkgs.wrapCC gcc13-3.gcc13.cc;
             gfortran = pkgs.wrapCC gcc13-3.gfortran13.cc;
@@ -184,7 +185,7 @@
             postInstall = ''
               HOME="$TMPDIR" "$out/bin/R" CMD INSTALL ${rlang}
             '';
-            passthru = { inherit stdenv gfortran; };
+            passthru = { inherit stdenv gfortran lapack; };
             meta = {
               mainProgram = "R";
               platforms = lib.platforms.linux;
@@ -419,6 +420,9 @@
               shellHook = ''
                 export PATH="${gnuR.stdenv.cc}/bin:$PATH"
               '';
+              # ry loads LAPACK and BLAS by soname (crates/interp/src/linalg.rs), which on Ubuntu
+              # finds these very libraries in /usr/lib; Nix's loader never looks there.
+              LD_LIBRARY_PATH = "${gnuR.lapack}/lib";
               # Nix's glibc looks for time zones in its own store path, which has none.
               TZDIR = "${pkgs.tzdata}/share/zoneinfo";
               # The locales oracle cases switch to (`# oracle: requires locale`), which
