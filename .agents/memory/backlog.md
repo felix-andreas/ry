@@ -96,13 +96,16 @@ the host's store", has the shape and the measurements behind this list.
   contain inference variables. Three caches exist only because of the current shape and go with
   it: the per-thread recent-entry cache in front of the interner's shards (`types.rs`), and
   `InferenceTable`'s `resolve_cache` and `definition_cache` (`infer.rs`).
-- **Opening a file settles its diagnostics 8 ms later than with the two paths** (24 ms against
-  16 ms on an idle server on the finance bench, and 100 to 130 ms against 41 to 44 ms for the
-  file open at start-up; `tools/bench/tooling/lsp_latency.py`). Keystroke latency is equal.
-  Not profiled. The likely cause is that opening lowers the file's durability, which makes
-  salsa verify every memo's inputs once, and `project_bound_names` reads a memo of every file
-  where the two-path lookup read only the names the file uses. At start-up the same query is
-  computed for the whole project before the first file's check can finish.
+- **A whole-project check costs about 1.5% more CPU and 11 MB more than with the two paths**
+  (2.61 s against 2.57 s and 248 MB against 237 MB on the finance bench; wall time is equal
+  within run-to-run noise). `item_links` keeps one memo per item, 50,815 on that project, and
+  resolves every name the item's naming lists, where the command's old path resolved a name
+  when the check asked for it and kept no memo. Under callgrind `item_links` is 4.8% of a
+  check's instructions, a quarter of it the lazily built `file_binders`.
+- **The file open at start-up settles about 6 ms later than with the two paths** (44 ms against
+  38 ms at the median of six runs on the finance bench, `tools/bench/tooling/lsp_latency.py`).
+  Not profiled. The opened file's check is not the cause: it runs the same 313 per-item
+  queries on both builds and fewer per-name ones (`crates/ry/examples/cold_open_probe.rs`).
 - **Every item of an edited file lowers again before `item_hir` backdates**, because no memo
   holds the item's syntax. It does not show in request latency after an edit. Lowering only
   the items whose window of the tree changed needs the splice to report which top-level runs

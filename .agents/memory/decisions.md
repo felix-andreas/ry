@@ -8497,41 +8497,59 @@ Each one trades a narrow class of missed errors for a class of false reports see
     maps, in parallel arrays (one row per name, one per binding), and holds the item's interface
     edges and whether its file belongs to the project. It is the item's projection of the
     project-wide maps and backdates unless one of the item's names moved.
-  - A name the check constructs (mostly S3 method names) goes through `package_name`,
-    `test_name` and `frame_binder`. `package_name` also carries whether any project file binds
-    the name, from a symbol-indexed bitset (`project_binders`), and an unbound name skips the
-    `frame_binder` query.
+  - A name the check constructs (mostly S3 method names such as `+.Date`) goes through
+    `package_name`, `test_name` and `frame_binder`. An item of a package file in the project
+    skips `frame_binder` for a name the package layer does not bind. Every named item is a
+    definition, and every other top-level write is a conditional write, so the package layer
+    lists each top-level name a package file binds, and a name it does not list has no binder
+    in the file. The verdict costs no query beyond `package_name`. The helper files' layer
+    (`test_name`) holds a helper file's names the same way, so an item of a helper file skips
+    `frame_binder` on the same test. A test file or a script has no layer over its own names
+    and asks `frame_binder`, which reads the binders of its own file.
   - `file_interface_groups(file)` is one Tarjan walk from the file's items, and an item finds its
     group by its position in the item tree.
   - `SalsaGlobals` keeps one column of resolved schemes indexed by link position, because
     resolving a scheme copies it. The other three caches are gone.
-- **Rejected.** A per-file name-set dependency instead of the bound bit was coarser (any new name
-  in the file re-checks its items). Keeping the edges in their own query cost a second memo per
+- **Rejected.** A project-wide set of bound names, folded from the binders of every file and
+  read by `package_name`, answered "bound anywhere?" for every kind of file, and it was built
+  first. A file's binders need the top-level names of every item that writes a name besides
+  its own, so the fold lowered and named those items in all 1,006 files of the finance bench
+  before the first file's check could finish: one package file's cold diagnostics ran
+  `file_binders` 1,006 times and `item_hir` 9,905 times, most of them for test and script files
+  a package file never sees. It also broke the rule that a check reads a per-name or per-item
+  projection, never a fold over the project. A per-file name set read by the check was coarser
+  (any new name in the file re-checks its items). A `frame_binder` memo per constructed name
+  costs about 100,000 memos (18 MB) on the finance bench, nearly all for names nothing binds.
+  Keeping the edges in their own query cost a second memo per
   item for a value derived from the same inputs. One per-file query for all items' links would
   remove the per-item firewall that keeps a body edit to one item.
 - **Correctness.** Under `enable_invariants()` every linked lookup is compared with the per-name
   answer, every unbound verdict with `frame_binder`, and every item's group with a walk from the
-  item alone. `test_incremental.rs` pins the query counts and that a diagnostics-only host
-  reports what an editor host reports.
+  item alone. `test_incremental.rs` runs that comparison, for a package file and for a helper
+  file, over each way a file binds a name its own check constructs: a definition, a
+  conditional write, a chained write, a write inside a call's argument and a write in a loop.
+  Each of those cases fails when the verdict ignores the winner or the conditional writers.
+  The test also pins the query counts, that a package file's check
+  reads the binders of its own file alone and lowers no item of another file, and that a
+  diagnostics-only host reports what an editor host reports.
 - **Simplicity.** `Db::one_shot`, `NameLookup`, `projected_name_layer`, `project_interface_groups`,
   `interface_group`, `item_interface_reads`, `item_frame_binders`, `parse_memo`,
   `item_syntax_memo`, `with_held_tree` and the `SpliceCache` type are gone.
 - **Performance.** On the finance bench (4 cores, `ry check --no-cache`, seven interleaved
-  runs of each build), wall time is 0.76 to 0.80 s against 0.72 to 0.77 s with the two paths,
-  CPU time is 2.8 to 2.9 s against 2.6 to 2.8 s, and peak RSS is 252 MB against 244 MB. The
-  first single-path build peaked at 276 MB: about 100,000 per-item `frame_binder` memos for
-  constructed names that nothing binds, which the bound bit removes. In the server, a body edit
-  and a signature edit settle in 3 to 4 ms and a new top-level definition in 6 to 7 ms at the
-  median on both builds, and a request right after an edit takes the same time on both (hover
-  1.5 to 2.0 ms). Opening a file costs more: its diagnostics settle in 24 ms against 16 ms on
-  an idle server, and in 100 to 130 ms against 41 to 44 ms for the file open at start-up
-  (`backlog.md`, "Open: the analysis core after the single lookup path").
+  runs of each build), the median wall time is 0.71 s (0.68 to 0.74) against 0.70 s (0.66 to
+  0.72) with the two paths, CPU time is 2.61 s against 2.57 s, and peak RSS is 248 MB against
+  237 MB. The extra memory is the per-item `item_links` memos. In the server
+  (`tools/bench/tooling/lsp_latency.py`, six runs of each build), a body edit and a signature
+  edit settle in 3 ms and a new top-level definition in 5 to 6 ms at the median on both builds.
+  A file opened on an idle server settles its diagnostics in 13 ms at the median on both
+  builds. The file open at start-up settles in 44 ms at the median (38 to 46) against 38 ms
+  (35 to 52) (`backlog.md`, "Open: the analysis core after the single lookup path").
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
   so the re-check stays with the readers of the name. A file's groups list items, not positions
   in the file, so the value stays equal when a statement is added beside a recursive function.
-  An item's links read the project's file list for "is my file in the project", never the
-  bound-names bitset, so a name a test or script adds re-runs no package item's links.
+  An item's links read the project's file list for "is my file in the project" and no fold
+  over the project's names, so a name a test or script adds re-runs no package item's links.
 
 ## The standard library is the `std` namespace, with an optional prelude
 
