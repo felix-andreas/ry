@@ -2094,8 +2094,8 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                let forcing =
-                    load.is_some() && (volatile || self.defaulted.contains_key(&self.slots[slot]));
+                let forcing = load.is_some()
+                    && (volatile || self.defaulted.contains_key(&self.slots[slot]));
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
