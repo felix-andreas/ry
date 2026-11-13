@@ -485,9 +485,11 @@ release-publish version:
     if gh release view "$version" >/dev/null 2>&1; then
     	gh release upload "$version" --clobber "${assets[@]}"
     else
-    	prerelease=""
-    	if [ "$kind" = pre-release ]; then prerelease="--prerelease"; fi
-    	gh release create "$version" $prerelease --target "${GITHUB_SHA:-$(git rev-parse HEAD)}" --title "ry $version" \
+    	# A full release claims "latest" explicitly, because GitHub's automatic choice compares
+    	# semantic versions and an older nightly published as a normal release has a non-semver tag.
+    	flag="--latest"
+    	if [ "$kind" = pre-release ]; then flag="--prerelease"; fi
+    	gh release create "$version" "$flag" --target "${GITHUB_SHA:-$(git rev-parse HEAD)}" --title "ry $version" \
     		--notes "See the [news page](https://ry-lang.org/news/) for what changed." "${assets[@]}"
     fi
     # Without a VSCE_PAT, vsce publishes with trusted publishing (`--oidc`), which needs vsce 4.1 and
