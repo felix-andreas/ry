@@ -82,7 +82,7 @@ mod unix {
             return;
         }
         // The text outlives every signal, and the handler cannot allocate to copy it.
-        drop(BANNER.set(Box::leak(banner.to_owned().into_boxed_str())));
+        BANNER.get_or_init(|| Box::leak(banner.to_owned().into_boxed_str()));
         // The first call loads the unwinder's library, which allocates and takes locks.
         warm_up_native_stack();
         open_probe();
