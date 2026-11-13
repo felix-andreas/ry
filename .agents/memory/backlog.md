@@ -181,7 +181,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
   - `try`, which lowers to an R call of `.ry_try`;
   - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
-  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.reverse`, `List.keep_if`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
+  - about 195 standard library functions with no code in `Lowerer::builtin`, among them `List.first`, `List.last`, `List.get`, `List.drop_at`, `Num.floor`, `Set.contains`, `Result.map` and all of `Bool.*`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
   - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;
   - a function with `-> NULL` that ends in a loop, `<<-`, `...`, named arguments or a left-out default in a call of a typed function, a `Dict` of anything but `I64`, `F64` and `Str`, and `List.map(xs, Num.to_f64)` by name;
   - a variable, parameter or loop variable assigned a value of another layout (`layout_differs` mirrors the lowerer's value classes), branches that set a name to different layouts, and the value of an `if` without `else`;
@@ -198,15 +198,16 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 - **Not compiled natively; the whole function runs in the interpreter:** a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
-  - A local whose literal is reassigned later in a loop or branch stays `double` (`x <- 0` then `x <- x + i` gives `double | F64`), and an annotated local does not type a later literal reassignment (`e: I64 <- 0; e <- 1` gives `I64 | double`).
-  - An annotation does not reach the literals inside a list literal: `bodies: List<Body> <- [(x = 0, ...)]` reports `double` fields, so nbody and fasta spell `0f64`.
-  - `TRUE` and `FALSE` are `logical` even against a `Bool` annotation.
-  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))`).
+  - A local whose literal is reassigned later in a loop stays `double`: `x <- 0` then `x <- x + 1.5` in a `for` body against an `F64` result reports `expected F64, found double`.
+  - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))` against `:Leaf(I64)`).
+  - A literal variable first read as a list index (`cprob_lookup[[j]]`) is decided as `double`, so a later `lookup[[i]] <- j` into a `List<I64>` is an error. The fastaredux ports spell `j <- 1i64`.
 - **A recursive `alias` is refused**, with a message that prints an enormous expanded type; a nominal `type` works.
 - **A walk accumulator types its lambda only once settled.** `List.walk(rows, List.repeat(0f64, n), \(sums, row) sums + row)` checks, but `List.repeat(0, n)` leaves the literal open, so the formal gets no hint and the body reports `T` against the row type. The ports spell `0f64`.
 - **A standard library function passed by name** (`List.map(rows, List.sum)`, `List.map(xs, Num.to_f64)`) is not a typed closure to the typed core, so the ports wrap it in a lambda (`\(row) List.sum(row)`).
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
-- **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes.
+- **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes. It runs at about GNU R's time, the slowest typed port against GNU R. A callgrind profile shows about 450 instructions per byte position, most of them in the `CallTyped` to `matches_at` and in list copies around it, so the cost is the typed core's per-call overhead, not the matching.
+- **A ry list holds no `NaN`**, so the mandelbrot ports freeze a point once `|z| > 2` (`List.map3`) instead of letting it overflow to `NaN` as the R vector code does; the count of points inside the set is the same.
+- **`List.map` over an empty list stops native code** (`Lowerer::map`, `fail_if(empty)`), and the interpreter runs the call again. The interpreter builds an empty map result with `arrays::from_items(&[])`, which has no item type, and the stop keeps the two tiers' values identical. Settle the interpreter's empty result from the checker's type, then drop the stop.
 
 ## Parked: ahead-of-time compilation of typed ry
 
