@@ -960,6 +960,62 @@ fn a_large_list_keeps_young_objects_stored_into_any_card() {
     }
 }
 
+/// A deeper collection marks a repeated string in a tenured character vector once, so the
+/// card of every later copy must still learn that the string is younger than the vector.
+#[test]
+fn a_string_repeated_across_cards_keeps_each_card_dirty() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let strings = heap.alloc_vector(SexpType::String, 1_000).expect("alloc");
+        heap.root(strings);
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        let repeated = heap
+            .mk_char(b"repeated string", Encoding::Utf8)
+            .expect("mk_char");
+        heap.set_element(strings, 0, repeated);
+        heap.set_element(strings, 500, repeated);
+        heap.collect(Collection::Major);
+        let other = heap.mk_char(b"other", Encoding::Utf8).expect("mk_char");
+        heap.set_element(strings, 0, other);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Minor);
+        assert_eq!(strings.element(500).slice::<u8>(), b"repeated string");
+        assert_eq!(
+            heap.mk_char(b"repeated string", Encoding::Utf8),
+            Ok(strings.element(500))
+        );
+    }
+}
+
+#[test]
+fn a_vector_of_distinct_strings_keeps_a_later_card_dirty() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let strings = heap.alloc_vector(SexpType::String, 1_000).expect("alloc");
+        heap.root(strings);
+        for index in 0..1_000 {
+            let string = heap
+                .mk_char(format!("distinct {index}").as_bytes(), Encoding::Utf8)
+                .expect("mk_char");
+            heap.set_element(strings, index, string);
+        }
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        let young = heap.mk_char(b"young", Encoding::Utf8).expect("mk_char");
+        heap.set_element(strings, 900, young);
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Minor);
+        assert_eq!(strings.element(900).slice::<u8>(), b"young");
+        assert_eq!(strings.element(5).slice::<u8>(), b"distinct 5");
+    }
+}
+
 #[test]
 fn a_frame_filled_across_minor_collections_keeps_every_young_binding() {
     let mut heap = Heap::new();
@@ -2151,6 +2207,59 @@ fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
         assert!(stats.major_collections >= 2, "{stats:?}");
         assert_eq!(stats.intermediate_collections, 1, "{stats:?}");
         assert_eq!(list.element(199_999).slice::<i32>(), &[199_999]);
+    }
+}
+
+/// A tenured list that dies keeps what it holds alive through the remembered set until a major
+/// collection, so an intermediate collection frees almost nothing that a major one finds dead.
+/// What a major collection frees must not convince the next escalation to try an intermediate
+/// one, yet an intermediate one still runs now and then to measure again.
+#[test]
+fn an_escalation_learns_only_from_intermediate_collections() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| {
+        policy.young_limit = 64 * 1024;
+        policy.node_limit = 1024 * 1024;
+        policy.min_node_limit = 1024 * 1024;
+    });
+    unsafe {
+        let holder = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.add_global_root(holder);
+        for round in 0..40 {
+            let batch = heap.alloc_vector(SexpType::List, 20_000).expect("alloc");
+            heap.set_element(holder, 0, batch);
+            for index in 0..20_000 {
+                let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *element.slice_mut::<i32>().first_mut().expect("one element") = round;
+                heap.set_element(batch, index, element);
+            }
+        }
+        // Learning from major collections tried an intermediate one before every other major.
+        let stats = heap.stats();
+        assert!(
+            stats.intermediate_collections * 3 <= stats.major_collections,
+            "{stats:?}"
+        );
+        assert!(stats.intermediate_collections >= 2, "{stats:?}");
+        assert_eq!(holder.element(0).element(19_999).slice::<i32>(), &[39]);
+        // The program changes phase: batches small enough to die before a deeper collection
+        // tenures them, which an intermediate collection frees. The retry measures that, and
+        // escalations go back to intermediate collections.
+        for round in 0..400 {
+            let batch = heap.alloc_vector(SexpType::List, 2_000).expect("alloc");
+            heap.set_element(holder, 0, batch);
+            for index in 0..2_000 {
+                let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *element.slice_mut::<i32>().first_mut().expect("one element") = round;
+                heap.set_element(batch, index, element);
+            }
+        }
+        // Without the retry this phase ran only major collections.
+        let after = heap.stats();
+        let intermediate = after.intermediate_collections - stats.intermediate_collections;
+        let major = after.major_collections - stats.major_collections;
+        assert!(intermediate > major, "{stats:?}\n{after:?}");
+        assert_eq!(holder.element(0).element(1_999).slice::<i32>(), &[399]);
     }
 }
 
