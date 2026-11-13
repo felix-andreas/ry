@@ -79,6 +79,17 @@ pub(crate) struct StringTable {
     /// Strings interned since the last collection that are too long for the small-object
     /// space; the space's interned bits track the others.
     young_large: Vec<Sexp>,
+    /// Counts the changes that can fill a vacant slot or move the slots (an insert or a rebuild),
+    /// so a [`Vacancy`] found before an allocation can be checked after it.
+    generation: u32,
+}
+
+/// The slot where a string [`StringTable::find_or_vacancy`] did not find would go: the first
+/// tombstone on its probe path, or the empty slot that ended the path.
+#[derive(Clone, Copy)]
+pub(crate) struct Vacancy {
+    index: usize,
+    generation: u32,
 }
 
 /// Objects are 8-byte aligned (a short string takes a 40-byte slot) and user-space addresses fit
@@ -207,6 +218,7 @@ impl Default for StringTable {
             len: 0,
             tombstones: 0,
             young_large: Vec::new(),
+            generation: 0,
         }
     }
 }
@@ -238,6 +250,58 @@ impl StringTable {
         }
     }
 
+    /// [`StringTable::find`], or on a miss the slot the string would take.
+    #[inline]
+    pub unsafe fn find_or_vacancy(
+        &self,
+        hash: u32,
+        bytes: &[u8],
+        encoding_bits: u16,
+    ) -> Result<Sexp, Vacancy> {
+        let mask = self.slots.len() - 1;
+        let tag = tag(hash);
+        let mut index = home(hash, mask);
+        let mut tombstone = None;
+        loop {
+            let slot = self.slots[index];
+            if slot == EMPTY {
+                return Err(Vacancy {
+                    index: tombstone.unwrap_or(index),
+                    generation: self.generation,
+                });
+            }
+            if slot == TOMBSTONE {
+                tombstone.get_or_insert(index);
+            } else if slot & !ADDRESS_MASK == tag {
+                let candidate = unsafe { unpack(slot) };
+                if unsafe { candidate.gp() } & gp::ENCODING == encoding_bits
+                    && unsafe { same_bytes(candidate, bytes) }
+                {
+                    return Ok(candidate);
+                }
+            }
+            index = (index + 1) & mask;
+        }
+    }
+
+    /// [`StringTable::insert`] into the slot `vacancy` names, when nothing has been inserted
+    /// and the slots have not moved since it was found and the table need not grow. A
+    /// collection in between only turns entries into tombstones, which leaves the slot vacant.
+    pub unsafe fn insert_at(
+        &mut self,
+        vacancy: Vacancy,
+        hash: u32,
+        string: Sexp,
+        space: &mut Space,
+    ) {
+        if vacancy.generation != self.generation
+            || (self.len + self.tombstones + 1) * 8 > self.slots.len() * 7
+        {
+            return unsafe { self.insert(hash, string, space) };
+        }
+        unsafe { self.fill(vacancy.index, hash, string, space) };
+    }
+
     /// Adds `string`, which the table must not hold, and records it as young.
     pub unsafe fn insert(&mut self, hash: u32, string: Sexp, space: &mut Space) {
         if (self.len + self.tombstones + 1) * 8 > self.slots.len() * 7 {
@@ -249,6 +313,11 @@ impl StringTable {
         while self.slots[index] != EMPTY && self.slots[index] != TOMBSTONE {
             index = (index + 1) & mask;
         }
+        unsafe { self.fill(index, hash, string, space) };
+    }
+
+    unsafe fn fill(&mut self, index: usize, hash: u32, string: Sexp, space: &mut Space) {
+        self.generation = self.generation.wrapping_add(1);
         if self.slots[index] == TOMBSTONE {
             self.tombstones -= 1;
         }
@@ -284,6 +353,7 @@ impl StringTable {
             return false;
         }
         self.slots = slots;
+        self.generation = self.generation.wrapping_add(1);
         self.len = len;
         self.tombstones = tombstones;
         self.young_large.clear();
@@ -382,6 +452,7 @@ impl StringTable {
             .next_power_of_two()
             .max(INITIAL_SLOTS);
         self.slots = vec![EMPTY; wanted];
+        self.generation = self.generation.wrapping_add(1);
         let mask = wanted - 1;
         for slot in live {
             let hash = unsafe { unpack(slot).char_hash() };
