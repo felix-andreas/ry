@@ -65,6 +65,41 @@ run ry run --runtime ry reads.R
 expect exit 0
 expect stdout "[1] \"(label = \\\"p\\\", tags = [\\\"a\\\", \\\"b\\\"], x = 1)\"\n(label = \"p\", tags = [\"a\", \"b\"], x = 2)\n[\"a\", \"b\"]\n[1] \"`object` is a ry record, not an R object; convert it with `as.list()`\"\n[1] \"`object` is a ry record, not an R object; convert it with `as.list()`\"\n[1] \"`object` is a ry record, not an R object; convert it with `as.list()`\"\n"
 
+# unique(), duplicated(), match() and %in% hash a list of lazy records and compare them as
+# identical() does, filling only the records whose hashes meet.
+file hashing.R
+| type Node = :Num(value: F64) | :Neg(inner: Node) | :Add(left: Node, right: Node)
+| alias Point = Record{x: F64, label: Str, tags: List<Str>}
+| build <- function(depth: I64, seed: I64) -> Node {
+|   if (depth == 0) return(@Node(:Num(value = Num.to_f64(seed %% 10 + 1))))
+|   left <- build(depth - 1, (seed * 7) %% 1009 + 1)
+|   if (seed %% 5 == 0) return(@Node(:Neg(inner = left)))
+|   right <- build(depth - 1, (seed * 13) %% 1013 + 3)
+|   @Node(:Add(left = left, right = right))
+| }
+| point <- function(x: F64) -> Point (x = x, label = "p", tags = ["a", "b"])
+| shared <- point(1)
+| points <- list(shared, point(2), shared, point(1), point(2), point(3))
+| trees <- list(build(3, 8), build(3, 9), build(3, 8), build(2, 8))
+| print(length(unique(points)))
+| print(duplicated(points))
+| print(match(points, list(point(2), point(1))))
+| print(match(list(point(3)), points))
+| print(points %in% list(point(3)))
+| print(length(unique(trees)))
+| print(duplicated(trees))
+| print(match(trees, list(build(3, 8))))
+| print(identical(points[[1]], points[[4]]))
+| print(identical(trees[[1]], trees[[3]]))
+| print(identical(points, list(point(1), point(2), point(1), point(1), point(2), point(3))))
+| invisible(gc())
+| print(anyDuplicated(points))
+| print(vapply(unique(points), function(p) p$x, 0))
+
+run ry run --runtime ry hashing.R
+expect exit 0
+expect stdout "[1] 3\n[1] FALSE FALSE  TRUE  TRUE  TRUE FALSE\n[1]  2  1  2  2  1 NA\n[1] 6\n[1] FALSE FALSE FALSE FALSE FALSE  TRUE\n[1] 3\n[1] FALSE FALSE  TRUE FALSE\n[1]  1 NA  1 NA\n[1] TRUE\n[1] TRUE\n[1] TRUE\n[1] 3\n[1] 1 2 3\n"
+
 # Under collection stress a collection runs at every allocation, so one runs while each record
 # fills and right after each lazy record is made, in compiled code as well.
 env RY_GC_STRESS 1
