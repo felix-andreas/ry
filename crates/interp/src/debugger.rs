@@ -156,7 +156,7 @@ pub unsafe fn browser() -> R<()> {
     let state = interp();
     if state.debugger.is_none() && crate::console_server::interactive() {
         let terminal = Box::new(crate::console_server::Browse::default());
-        state.debugger = Some(Box::new(Adapter::for_console(terminal)));
+        state.debugger.set(Some(Box::new(Adapter::for_console(terminal))));
     }
     with_adapter(|adapter| adapter.at_statement(Some("breakpoint")))
 }
@@ -197,7 +197,7 @@ unsafe fn with_adapter(body: impl FnOnce(&mut Adapter)) -> R<()> {
         // An editor that attached while this adapter was out, during a `Browse>` stop's
         // expression, keeps its own adapter; the finished stop's adapter goes.
         false if interp().debugger.is_some() => drop(adapter),
-        false => interp().debugger = Some(adapter),
+        false => interp().debugger.set(Some(adapter)),
     }
     match terminating {
         true => Err(Unwind::Jump(Jump::TopLevel)),
@@ -293,7 +293,7 @@ impl Adapter {
         let status = match std::fs::read_to_string(&launch.program) {
             Ok(text) => {
                 let path = canonical_or_given(&launch.program);
-                interp().debugger = Some(self);
+                interp().debugger.set(Some(self));
                 let status = run_program(&text, &path, launch);
                 match interp().debugger.take() {
                     Some(adapter) => {

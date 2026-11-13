@@ -707,7 +707,7 @@ unsafe fn reference_env(reference: Sexp) -> Option<Sexp> {
 
 /// The compiled code a code reference ([`code_reference`]) runs.
 #[inline]
-unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
+pub(crate) unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
     let tag = reference.tag();
     (tag.kind() == SexpType::Bytecode).then_some(tag)
 }
@@ -785,7 +785,7 @@ pub unsafe fn is_reference(value: Sexp) -> bool {
 
 /// The frame position and slot an argument reference names. A reference is released before
 /// its frame returns, so one that names another frame is a broken invariant.
-unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
+pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
     let &[owner, slot, header] = values::ints(reference.attrib()) else {
         panic!("an argument reference lost its target");
     };
@@ -3755,7 +3755,7 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// Replaces the default of each formal in `promised`, which the binding
 /// put in its slot as the bare expression, with a promise of its code over the slot frame at
 /// `owner`.
-unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
+pub(crate) unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
     if promised == 0 {
         return Ok(());
     }

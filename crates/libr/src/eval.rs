@@ -1619,7 +1619,7 @@ pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
-    interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
+    interp::set_object_systems(flags & RUN_FLAG_OBJECT_SYSTEMS != 0);
     interp::interp().prelude = flags & RUN_FLAG_NO_PRELUDE == 0;
     loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
