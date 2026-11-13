@@ -6162,7 +6162,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - *Placement rule.* A plain read pays one ALTREP bit test and nothing else; every ALTREP branch
     is `#[cold] #[inline(never)]` and out of line. Tier 0's in-handler fast paths must not run R
     code or collect, which a package class's `Elt` method may do, so tier 0 reads only compact
-    sequences in the handler (pure arithmetic via `compact_sequence_steps`,
+    sequences in the handler (pure arithmetic via `values::compact_sequence`,
     `read_altrep_element_call` in `crates/interp/src/bytecode.rs`). Any other ALTREP read
     declines to the `[`/`[[` builtin, whose `element_access::altrep_element` reads one element
     through the class's `Elt` method. The JIT reads attribute-free compact integer and double
