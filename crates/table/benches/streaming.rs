@@ -28,6 +28,9 @@ pub fn run(dir: &Path, only: Option<Only>) -> Result<()> {
         "# polars 0.55 streaming engine, {} threads",
         polars_threads()
     );
+    if only == Some(Only::Updates) {
+        return Err("the streaming comparison has no update questions".into());
+    }
     if only != Some(Only::Joins) {
         let x = codes(read(dir, "groupby.csv", true)?)?.lazy();
         let by = |names: &[&str]| {

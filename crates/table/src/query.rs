@@ -10,10 +10,10 @@
 
 use {
     crate::{
-        ColumnType, Error, Result, Schema, Table,
+        ColumnType, Error, Result, RowIndex, Schema, Table,
         factor::{self, Levels},
         group, join,
-        kernel::{Evaluator, Vector, scatter, selected_rows},
+        kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
     },
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
@@ -2391,66 +2391,92 @@ fn assign_with_kernels(
 ) -> Result<bool> {
     let typer = Typer { schema };
     let height = table.height();
-    // Every value is computed before any column changes, because each one reads the table as it
-    // was before the update.
-    let mut values = Vec::with_capacity(assignments.len());
-    let selected = {
-        let frame = table.frame();
-        let selected = match rows {
-            Rows::All => None,
-            Rows::Filter(filter) => {
-                expect_logical(typer.expr(filter)?, "a row filter")?;
-                let evaluator = Evaluator {
-                    frame,
-                    schema,
-                    rows: None,
-                };
-                let Some(selected) = evaluator
-                    .eval(filter)
-                    .and_then(|value| selected_rows(value, height))
-                else {
-                    return Ok(false);
-                };
-                Some(selected)
+    let filtered = match rows {
+        Rows::All => false,
+        Rows::Filter(filter) => {
+            expect_logical(typer.expr(filter)?, "a row filter")?;
+            true
+        }
+        _ => return Ok(false),
+    };
+    // What the types alone decide is checked before the rows are selected, so an update the plan
+    // has to run builds no row index on the way there.
+    let mut targets = Vec::with_capacity(assignments.len());
+    for (name, expr) in assignments {
+        let existing = schema.column(name);
+        let Some(expr) = expr else {
+            if existing.is_none() {
+                return Err(Error::Query(format!(
+                    "cannot remove `{name}`: the table has no such column"
+                )));
             }
-            _ => return Ok(false),
+            continue;
         };
-        let evaluator = Evaluator {
-            frame,
-            schema,
-            rows: selected.as_deref(),
-        };
-        for (name, expr) in assignments {
-            let existing = schema.column(name);
-            let Some(expr) = expr else {
-                if existing.is_none() {
-                    return Err(Error::Query(format!(
-                        "cannot remove `{name}`: the table has no such column"
-                    )));
-                }
-                continue;
+        if !row_wise(expr) || matches!(existing, Some(ColumnType::Factor | ColumnType::Character)) {
+            return Ok(false);
+        }
+        let replaces = !filtered && !collapses(expr);
+        let natural = typer.expr(expr)?;
+        let kind = assigned_type(existing, natural, replaces)?;
+        // A narrowing or parsing write may warn, which the plan's update checks for.
+        if existing.is_some() && (narrows(natural, kind) || parses(natural, kind)) {
+            return Ok(false);
+        }
+        targets.push((name, expr, kind, existing.is_some()));
+    }
+    let indexed = match rows {
+        Rows::Filter(filter) => indexed_rows(table, schema, filter),
+        _ => None,
+    };
+    let scanned = match rows {
+        Rows::Filter(filter) if indexed.is_none() => {
+            let evaluator = Evaluator {
+                frame: table.frame(),
+                schema,
+                rows: None,
             };
-            if !row_wise(expr)
-                || matches!(existing, Some(ColumnType::Factor | ColumnType::Character))
-            {
+            let Some(selected) = evaluator
+                .eval(filter)
+                .and_then(|value| selected_rows(value, height))
+            else {
                 return Ok(false);
-            }
-            let replaces = selected.is_none() && !collapses(expr);
-            let natural = typer.expr(expr)?;
-            let kind = assigned_type(existing, natural, replaces)?;
-            // A narrowing or parsing write may warn, which the plan's update checks for.
-            if existing.is_some() && (narrows(natural, kind) || parses(natural, kind)) {
-                return Ok(false);
-            }
+            };
+            Some(selected)
+        }
+        _ => None,
+    };
+    let selected = match &indexed {
+        Some((index, value)) => Some(index.rows(*value)),
+        None => scanned.as_deref(),
+    };
+    // Every value is computed before any column changes, because each one reads the table as it
+    // was before the update. A value the kernels cannot write into its rows is found here too,
+    // while the table still holds every column.
+    let mut values = Vec::with_capacity(targets.len());
+    {
+        let evaluator = Evaluator {
+            frame: table.frame(),
+            schema,
+            rows: selected,
+        };
+        for (name, expr, kind, exists) in targets {
             let Some(value) = evaluator.eval(expr).and_then(|value| value.cast(kind)) else {
                 return Ok(false);
             };
-            values.push((name, kind, existing.is_some(), value));
+            if let Some(selected) = selected {
+                let stored = match exists {
+                    true => table.frame().column(name)?.dtype().clone(),
+                    false => dtype(kind),
+                };
+                if !scatters(&stored, selected.len(), &value) {
+                    return Ok(false);
+                }
+            }
+            values.push((name, kind, exists, value));
         }
-        selected
-    };
+    }
     for (name, kind, exists, value) in values {
-        let column = match &selected {
+        let column = match selected {
             None => value
                 .into_vector(height)
                 .ok_or_else(|| Error::Query(format!("cannot write into column `{name}`")))?
@@ -2470,6 +2496,37 @@ fn assign_with_kernels(
         table.put_column(column)?;
     }
     Ok(true)
+}
+
+/// The rows a filter of the shape `column == literal` selects, read from the column's row index
+/// when the table holds one. The index lists exactly the rows whose value equals the literal: a
+/// missing value is in no bucket, as `NA == literal` selects no row.
+fn indexed_rows(table: &mut Table, schema: &Schema, filter: &Expr) -> Option<(Arc<RowIndex>, i64)> {
+    let Expr::Binary(BinaryOp::Equal, left, right) = filter else {
+        return None;
+    };
+    let (name, literal) = match (&**left, &**right) {
+        (Expr::Column(name), literal) | (literal, Expr::Column(name)) => (name, literal),
+        _ => return None,
+    };
+    let value = match (schema.column(name)?, literal) {
+        (ColumnType::Integer, Expr::Integer(value)) if *value != i32::MIN => i64::from(*value),
+        (ColumnType::Integer, Expr::Double(value))
+            if value.fract() == 0.0 && value.abs() < f64::from(i32::MAX) =>
+        {
+            *value as i64
+        }
+        (ColumnType::Factor, Expr::Character(label)) => {
+            let dtype = table.frame().column(name).ok()?.dtype();
+            match factor::levels(dtype)?.position(label) {
+                Some(code) => i64::from(code),
+                // No row holds a label the factor lacks.
+                None => -1,
+            }
+        }
+        _ => return None,
+    };
+    Some((table.row_index(name)?, value))
 }
 
 /// One column that `:=` writes.

@@ -43,7 +43,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - Typed ry grows by steps that `just climb` scores on speed against Rust, friendliness cases and soundness fuzzing (`development/design/language-climb.md`, with open targets under "Open questions"). Taste questions go to the orchestrator in one batch.
 - Language gaps: literals, record and tag payloads and empty lists outside elaborated code (`ry load`, `source()`), f-strings, `..rest` patterns, and a literal accumulator through a generic call ("Open: the typed core").
 - Typed code that builds vectors runs at untyped speed ("Typed natives, the rest of the end shape", under "Open: the JIT").
-- `DataFrame`: `:=` on a row subset is the one db-benchmark question data.table wins ("Open: DataFrame").
+- `DataFrame` beats data.table on every db-benchmark question at 1e7 rows; what is open is the 1e8 memory margin, the reference counts some calls leave on a frame, and API gaps ("Open: DataFrame").
 - Records, tuples, tags and the standard library: "Open: findings from the records, library and frame round" and "Open: ry's standard library".
 - Strict mode: friction from typing the benchmark code bases, the cost of a first strict `ry load`, and the top-level rule's follow-ups ("Open: strict-mode friction from typing finbench", "A first strict `ry load` costs the strict check's wall time", "Open: strict mode's top-level rule"). The typed benchmark code bases check clean in strict mode, so a template change that makes one report is a regression or a new friction item.
 
@@ -134,7 +134,7 @@ Most important first. Each line names the open item, and the detail is at its po
 ### Measuring
 
 - **Alternate the two binaries run by run**, measure analysis with `--output json` (the human reporter is quadratic in findings), and compare corpus outputs as unique sorted records. An in-container timing is a two-core number.
-- **An A/B build of another commit needs its own target directory**, or it links the other commit's crates. Code images belong to the build that installed the library (`refuse_foreign_images`, `bench.py`).
+- **An A/B build of another commit needs its own target directory**, or it links the other commit's crates. Where the disk has no room for one, touch every file under `crates/` (never `patches/`, which rebuilds Polars) in a tree before building it. Code images belong to the build that installed the library (`refuse_foreign_images`, `bench.py`).
 - **Compare peak `RssFile` only from the same page-cache state**: evict both builds with `tools/bench/evict.py` first (`decisions.md`, "Peak RSS is judged as anonymous, image and code size, not as one number").
 - **Measure loaders with the same `keep.source`** (`tools/loader-bench`): `ry run` keeps source references and `Rscript` does not.
 - **testthat calls `gc()` after every test file with a teardown**, so suite time and process wall time give different ratios against GNU R.

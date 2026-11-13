@@ -806,20 +806,26 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
-    // The rename and the downgrade to a shared lock happen under the cache's lock, which a
-    // pruner holds while it works, because converting a lock first releases it and a pruner
-    // could otherwise take the new home in between.
+    // The lock is released and retaken on the final path under the cache's lock, which every
+    // pruner holds while it works, so none can take the new home in between. Windows cannot
+    // rename a directory that holds an open file, which is why the lock cannot simply be kept
+    // across the rename.
     let cache_lock = lock_cache(cache)?;
+    drop(lock);
     match fs::rename(&staging, &home) {
         Ok(()) => {
-            lock.lock_shared().map_err(io_error(&home))?;
+            let lock = lock_home(&home)?.ok_or_else(|| {
+                Error::Io(
+                    home.clone(),
+                    io::Error::other("the home vanished while it was locked"),
+                )
+            })?;
             hold(lock);
             prune_stale_homes(cache, &home, &cache_lock);
             Ok(home)
         }
         // Another process renamed its home into place first.
         Err(_) if home.join("etc").join("Makeconf").exists() => {
-            drop(lock);
             fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
             drop(cache_lock);
             cached_home(cache, libr, rcmd, base)

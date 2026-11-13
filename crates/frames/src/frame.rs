@@ -16,7 +16,7 @@
 use {
     heap::{
         large::huge_pages,
-        object::{NA_INTEGER, Sexp, SexpType},
+        object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     interp::{
         builtins::{Arg, BuiltinDef, Call, builtin, special},
@@ -42,7 +42,7 @@ use {
         },
         query::{
             self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
-            Select, SortKey, UnaryOp,
+            Select, SortKey, UnaryOp, Warning,
         },
     },
 };
@@ -618,6 +618,15 @@ unsafe fn do_frame_setkey(call: &Call<'_>) -> R<Sexp> {
 /// Rebinds the variable `name` resolves to from `env` to `value`.
 unsafe fn rebind(name: Sexp, value: Sexp, env: Sexp) -> R<()> {
     match eval::find_cell(name, env) {
+        Some(cell) if cell.has_gp(gp::ACTIVE_BINDING) => {
+            let function = cell.cdr();
+            eval::apply(
+                nil(),
+                function,
+                &[Arg { tag: nil(), value }],
+                values::global_env(),
+            )?;
+        }
         Some(cell) => heap().set_binding_value(cell, value)?,
         None => eval::define(name, value, env)?,
     }
@@ -1206,7 +1215,11 @@ unsafe fn tag_name(tag: Sexp) -> Option<String> {
 /// Runs a query in its own handle scope, signals an error it raised, and sets the visibility.
 pub unsafe fn run(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
     let _pages = huge_pages();
+    let state = interp();
+    let outer = state.frame_queries.len();
+    state.frame_queries.push(subject);
     let result = scope(|| query(call, subject, env));
+    interp().frame_queries.truncate(outer);
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         result => result,
@@ -1258,7 +1271,9 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
             };
             if assigns {
                 assign(subject, table, call, env, |table| {
-                    execute(table, query, call).map(|_| ())
+                    query::execute(table, query)
+                        .map(|executed| executed.warnings)
+                        .map_err(|failure| table_error(call, failure))
                 })?
             } else {
                 finish(table, query, call)?
@@ -1432,7 +1447,8 @@ unsafe fn execute(table: &mut Table, query: Query, call: Sexp) -> R<Output> {
 
 /// Applies an update to `subject`, whose table is `table`, under copy-on-modify: in place when
 /// the variable the call names is the frame's only reference, and otherwise to a fork, which then
-/// replaces that variable.
+/// replaces that variable. The warnings the update returns are raised after the variable holds
+/// the updated frame, so a handler that leaves the call sees the same frame either way.
 ///
 /// The subject must be a variable. A frame reached through an expression such as `lst$a` has no
 /// binding to rebind, and its single reference may be a slot in a list that is itself shared, so
@@ -1442,7 +1458,7 @@ unsafe fn assign(
     table: &mut Table,
     call: Sexp,
     env: Sexp,
-    update: impl FnOnce(&mut Table) -> R<()>,
+    update: impl FnOnce(&mut Table) -> R<Vec<Warning>>,
 ) -> R<Sexp> {
     let name = call.cdr().car();
     if name.kind() != SexpType::Symbol {
@@ -1451,14 +1467,33 @@ unsafe fn assign(
             "`:=` updates a DataFrame stored in a variable; assign it to one first, as in `y <- lst$a; y[, z := 1]`",
         ));
     }
-    if subject.refcount() <= 1 {
-        update(table)?;
-        return Ok(subject);
+    // The frame's reference count says how many objects hold it, not which. The finalizer `wrap`
+    // registers holds one reference for as long as the frame lives, so a count of two leaves one
+    // holder, and the write is in place only when that holder is the variable itself: an active
+    // binding's function can return a frame whose one holder is a list other variables share.
+    // A locked binding takes the fork as well, so that storing the fork raises R's error for it.
+    // A query of this frame that is still running further out planned against its columns, so
+    // an update nested in one of its arguments goes to a fork as well.
+    let held_by_variable = eval::find_cell(name, env).is_some_and(|cell| {
+        !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) && cell.cdr() == subject
+    });
+    let running = interp()
+        .frame_queries
+        .iter()
+        .filter(|&&queried| queried == subject)
+        .count();
+    let (updated, warnings) = if held_by_variable && subject.refcount() <= 2 && running <= 1 {
+        (subject, update(table)?)
+    } else {
+        let mut fork = table.fork();
+        let warnings = update(&mut fork)?;
+        let updated = wrap(fork)?;
+        rebind(name, updated, env)?;
+        (updated, warnings)
+    };
+    for warning in &warnings {
+        conditions::warning_call(call, warning.to_string())?;
     }
-    let mut fork = table.fork();
-    update(&mut fork)?;
-    let updated = wrap(fork)?;
-    rebind(name, updated, env)?;
     Ok(updated)
 }
 
@@ -2454,14 +2489,19 @@ unsafe fn fallback(
             columns.push((name, value));
         }
         let result = assign(subject, table, call, env, |table| {
+            // A later target can fail after an earlier one was stored, and a table updated in
+            // place has no fork to drop, so the targets go to a fork that replaces the table
+            // only when every one of them was stored. The fork shares the columns it keeps.
+            let mut staged = table.fork();
             for (name, column) in columns {
                 match column {
-                    Some(column) => table.set_column(column),
-                    None => table.drop_column(&name),
+                    Some(column) => staged.set_column(column),
+                    None => staged.drop_column(&name),
                 }
                 .map_err(|failure| table_error(call, failure))?;
             }
-            Ok(())
+            *table = staged;
+            Ok(Vec::new())
         })?;
         return Ok(result);
     }

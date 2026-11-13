@@ -1,0 +1,77 @@
+[stdout]
+| 2000 2000 2000 
+| from the promise from the promise from the promise 
+| from the default from the default from the default 
+| boom inner,outer boom inner,outer boom inner,outer 
+| deep error deep error deep error 
+| recovered 1 recovered 2 recovered 3 
+| 16 16 16 
+| [[1]]
+| seen(y + 1L)
+| 
+| [[2]]
+| seen(x = y + 1L)
+| 
+| [[3]]
+| [1] "y + 1L"
+| 
+| [[4]]
+| [1] FALSE
+| 
+| [[5]]
+| reporter(2L)
+| 
+| [[1]]
+| seen(y + 1L)
+| 
+| [[2]]
+| seen(x = y + 1L)
+| 
+| [[3]]
+| [1] "y + 1L"
+| 
+| [[4]]
+| [1] FALSE
+| 
+| [[5]]
+| reporter(2L)
+| 
+| [[1]]
+| seen(y + 1L)
+| 
+| [[2]]
+| seen(x = y + 1L)
+| 
+| [[3]]
+| [1] "y + 1L"
+| 
+| [[4]]
+| [1] FALSE
+| 
+| [[5]]
+| reporter(2L)
+| 
+| [[1]]
+| [1] "middle()"
+| 
+| [[2]]
+| [1] TRUE
+| 
+| [[1]]
+| [1] "middle()"
+| 
+| [[2]]
+| [1] TRUE
+| 
+| [[1]]
+| [1] "middle()"
+| 
+| [[2]]
+| [1] TRUE
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
