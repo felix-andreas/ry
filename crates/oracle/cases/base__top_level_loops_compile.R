@@ -1,5 +1,4 @@
-# A loop the tree walker evaluates in the global environment compiles once it is long enough
-# (a `for` over 16 or more elements, a `while` or `repeat` after 16 iterations), as GNU R
+# A loop the tree walker evaluates in the global environment compiles when it starts, as GNU R
 # compiles every loop there. The compiled loop must behave as the tree walker does.
 for (i in 1:100) last <- i
 print(c(i, last))
