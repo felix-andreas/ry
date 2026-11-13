@@ -1624,19 +1624,25 @@ pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 4;
 /// every host that predates the setting keep the library in scope.
 pub const RUN_FLAG_NO_PRELUDE: c_int = 1 << 5;
 
+/// `ry_run` flag: compile the script's definitions before its first expression runs
+/// (`ry run --aot`), instead of each at its first call.
+pub const RUN_FLAG_AHEAD: c_int = 1 << 6;
+
 /// Every flag `ry_run` and `ry_repl` understand.
 pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
     | RUN_FLAG_OBJECT_SYSTEMS
     | RUN_FLAG_STRICT
     | RUN_FLAG_SITE_PROFILE
     | RUN_FLAG_USER_PROFILE
-    | RUN_FLAG_NO_PRELUDE;
+    | RUN_FLAG_NO_PRELUDE
+    | RUN_FLAG_AHEAD;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
     interp::set_object_systems(flags & RUN_FLAG_OBJECT_SYSTEMS != 0);
     interp::interp().prelude = flags & RUN_FLAG_NO_PRELUDE == 0;
+    interp::interp().ahead.enabled = flags & RUN_FLAG_AHEAD != 0;
     crate::loader_backend::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 

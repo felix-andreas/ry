@@ -41,6 +41,7 @@
     clippy::type_complexity
 )]
 
+pub mod ahead;
 pub mod annotations;
 pub mod apply_results;
 mod approximate;
@@ -242,9 +243,19 @@ pub fn set_object_systems(allowed: bool) {
 /// what the word must hold, apart from the profiling bits.
 pub fn observer_bits() -> u8 {
     let state = interp();
-    (if state.debugger.is_some() { activity::DEBUGGER } else { 0 })
-        | (if moves::tracking() { activity::MOVES } else { 0 })
-        | (if state.object_systems { 0 } else { activity::NO_OBJECT_SYSTEMS })
+    (if state.debugger.is_some() {
+        activity::DEBUGGER
+    } else {
+        0
+    }) | (if moves::tracking() {
+        activity::MOVES
+    } else {
+        0
+    }) | (if state.object_systems {
+        0
+    } else {
+        activity::NO_OBJECT_SYSTEMS
+    })
 }
 
 // A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
@@ -683,6 +694,8 @@ pub struct Interp {
     pub routine_implementations: Vec<Option<builtin_libraries::NativeFn>>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// A script's definitions compiled before the script runs (`ry run --aot`).
+    pub ahead: ahead::State,
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
     pub method_cache: dispatch::MethodCache,
@@ -868,6 +881,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         routine_tables: Vec::new(),
         routine_implementations: Vec::new(),
         annotations: annotations::State::default(),
+        ahead: ahead::State::default(),
         moves: moves::State::default(),
         method_cache: dispatch::MethodCache::default(),
         replacement_symbols: FxHashMap::default(),
@@ -1079,6 +1093,7 @@ impl RootSource for InterpRoots {
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
+            interp.ahead.trace(marker);
             interp.moves.trace(marker);
             interp.library_tags.trace(marker);
         }

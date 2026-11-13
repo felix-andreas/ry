@@ -1345,6 +1345,23 @@ such as `List.append(xs, 1)`.
 - At run time `List.from_r()` stops with an error on an `NA` or an attribute such as a class, and it
   drops names. Setting an attribute on a list, or assigning `NA` into it from R code, turns it into a
   plain R vector.
+- The item type the checker gives `List.from_r(x)` comes from the R code it read, and R code can
+  bind `x` to something else while the program runs. When the vector R hands over has another item
+  type than the checked one, the conversion stops with an error:
+
+  ```r
+  prices <- function() c(1.5, 2.5)
+  count <- function(extra: F64) -> F64 {
+    listed <- List.from_r(prices())
+    Num.to_f64(List.len(listed)) + extra
+  }
+  assign("prices", function() 1:2)
+  count(3)
+  ```
+
+  ```text ry run runtime=ry
+  Error: `List.from_r(prices())` gave a `List<I64>`, and the type checker typed it as a `List<F64>` from the R code it read: convert the vector in R, so that the conversion always gives that type
+  ```
 
 ### List operators
 
@@ -4652,10 +4669,10 @@ calls from the interpreter run in the interpreter with no finding:
   a constant nor a variable;
 - a call that passes a variable to a native function that calls R, because that R code could change
   the variable before R would read the argument;
-- the first call of a native function that calls an R function R has not loaded yet, such as
-  `stats::rnorm`, or that converts a value whose type the code does not tell, such as
-  `List.from_r(kept$price)`: the interpreter runs that call once, which loads the function or
-  gives the type, and later calls run natively;
+- the first call of a native function that calls into a namespace R has not loaded yet, such as
+  `tools::file_ext`, or that converts a value whose type the checker does not know, with
+  `Num.from_r` or with a `List.from_r` such as `List.from_r(get("prices"))`: the interpreter runs
+  that call once, which loads the namespace or gives the type, and later calls run natively;
 - a call of a function that returns a `Dict` or a `Set`.
 
 A native function called from another native function has none of these limits.

@@ -80,7 +80,9 @@ strict file before it runs, and a typed function is compiled before its first ca
 lazy loader first forces its binding, so a session compiles only what it uses, as the mandate for
 `ry load` requires. While the program runs, worker threads compile the functions that a compiled
 function can call, which value tracking lists, so most calls find their callee compiled.
-`ry install` compiles all of a package's typed functions and writes the machine code into the
+`ry run --aot main.R` compiles every typed function of the script before the script starts, so
+that nothing compiles while the program runs. `ry build --aot` on a package, and `ry install`,
+compile all of the package's typed functions and write the machine code into the
 installed package, beside its R code, as part of the package's build output. Each instantiation the checker
 sees is compiled once, as Roc does. Compiling a function at a later call happens only for a generic
 instantiation that untyped code creates and for the second copies in "Facts and guesses".
@@ -105,8 +107,8 @@ test processes a CI machine runs share one copy of every installed dependency's 
 only the table is private to each. `ry install` writes the file to a temporary name and renames it
 into place, so a process never maps a half-written file.
 
-**Standalone executables.** `ry build --exe main.R` writes one executable in the spirit of
-`bun compile`: ry's runtime, the bytecode of the script and of the strict files it sources, and the
+**Standalone executables.** `ry build --aot --exe main.R` writes one executable in the spirit of
+`bun build --compile`: ry's runtime, the bytecode of the script and of the strict files it sources, and the
 code file for their typed code, appended as a section that the executable maps read-only at
 start. Running the executable runs the script as `ry run main.R` does, with its arguments in
 `commandArgs()`. Plain `ry build` on a package writes a source tarball as `devtools::build()` does,
@@ -488,7 +490,7 @@ lists, dense and hashed dicts), count insertion with borrow inference, field mov
 specialization and reuse, the Cranelift backend over the IR, the entry and exit stubs with the
 second copies, value tracking per namespace, lazy compilation with background workers, mapped code
 files with their stamps and per-process table, compilation at `ry install` into the installed
-package, `ry build --exe`, the invalidation of direct calls on unlocking, `ry check --explain`,
+package, `ry build --aot --exe`, the invalidation of direct calls on unlocking, `ry check --explain`,
 the test modes and the Rust twins. The native path in
 `crates/jit/src/native.rs` keeps serving typed code over R types that is not strict-clean.
 
@@ -517,8 +519,30 @@ this draft in five ways:
   `match` over any tag (a tag from R, or a tag field) tests the shapes the process has confirmed,
   and the code compiles again once another shape is confirmed (`decisions.md`, "Typed boxes have
   shapes, and a tag type is a union of them").
-- Code lives in memory for the process. Code files, `ry install` compilation, `ry build --exe`,
-  value tracking, pools and the background workers are not built.
+- Code lives in memory for the process. Code files, `ry install` compilation,
+  `ry build --aot --exe`, value tracking, pools and the background workers are not built.
+
+`ry run --aot` is built for a script ([CLI reference](/reference/cli#compiling-ahead-of-time)).
+Before the script's first expression runs, it lowers every top-level expression, creates the
+closure of each top-level `name <- function` definition, and compiles each one whose parameter
+annotations name a type R can pass, with the typed functions it calls. Three mechanisms make the
+code compiled before the script ran valid once it runs:
+
+- A call of a sibling function resolves to the closure created up front. The compiled call is
+  guarded by that closure's identity like every other global call, and the assignment that defines
+  the function hands out the same closure, so the guard holds.
+- The preflight passes the item type the checker gives a `List.from_r` to the runtime, so the
+  conversion has a type before any call has run. The conversion compares what R gives with that
+  type on every call and stops with an error on a mismatch, in the interpreter and in compiled
+  code alike (`decisions.md`, "`ry run --aot` compiles a script's typed code before it starts").
+- A function a loaded namespace binds lazily is read from the package database when the code
+  compiles.
+
+A function that waits on something only the running program gives (`Num.from_r`, a `List.from_r`
+the checker cannot type, a namespace not loaded yet, a function a block or a sourced file defines)
+compiles at its first call. `RY_AHEAD_MISS=1` drops the closures created up front after the
+compile, so every guess the compiled code made about a sibling fails: the test matrix runs each
+program that way too and expects the same output.
 
 A call whose arguments are unforced promises, a default argument or a construct the lowering does
 not know runs on the native path in `crates/jit/src/native.rs` instead.
@@ -534,7 +558,7 @@ not know runs on the native path in `crates/jit/src/native.rs` instead.
 - **Zero-copy lists to R.** An ALTREP wrapper over a native `List<F64>`, which hands out a
   read-only pointer and copies only when C asks to write, is the candidate if conversion cost shows
   up at the boundary.
-- **Packages in the executable.** `ry build --exe` loads packages from the library. Embedding the
+- **Packages in the executable.** `ry build --aot --exe` loads packages from the library. Embedding the
   R code of the program's packages, and their shared objects, would make the executable portable
   between machines.
 - **First-call compile time.** A function compiled at its first call costs about a millisecond on

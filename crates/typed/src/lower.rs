@@ -112,6 +112,10 @@ pub struct RArgument {
 pub struct Conversion {
     pub call: Sexp,
     pub function: Sexp,
+    /// The item type the checker gave a `List.from_r`, which the preflight writes around the
+    /// call (`.ry_items(List.from_r(x), "F64")`). It types the conversion before the
+    /// interpreter has run it.
+    pub checked: Option<Item>,
 }
 
 /// How a refusal that waits on the interpreter starts. The type a conversion of what an R call
@@ -261,6 +265,7 @@ unsafe fn lower_calling(
         r_calls: Vec::new(),
         r_use: None,
         converted: None,
+        checked_items: None,
         pending: Vec::new(),
     };
     tail_matches(body, &mut lowering.tails);
@@ -411,6 +416,9 @@ struct Lowering<'c> {
     /// The destination of the last converted R call, which tells the conversion that its
     /// argument was one.
     converted: Option<Local>,
+    /// The item type the checker gave the `List.from_r` lowered next
+    /// ([`Conversion::checked`]).
+    checked_items: Option<Item>,
     /// Each empty list literal of records or tags whose item type the code has not shown yet,
     /// with the locals that hold it. The preflight names only the storage of such a list, so it
     /// starts as a list of any tag and takes the item type of the first item appended to it or
@@ -1050,7 +1058,7 @@ impl Lowering<'_> {
                 self.builder.terminate(Terminator::Jump(raise));
                 self.builder.switch_to(raise);
                 let checkpoint = self.checkpoint();
-                let raised = match resolve_function(head, self.env) {
+                let raised = match find_function(head, self.env) {
                     Some(speculation) => {
                         let function = speculation.function;
                         self.speculations.push(speculation);
@@ -1077,7 +1085,7 @@ impl Lowering<'_> {
         if self.lookup(head).is_some() {
             return Err(Refusal::new("a call of a local variable"));
         }
-        let Some(speculation) = resolve_function(head, self.env) else {
+        let Some(speculation) = find_function(head, self.env) else {
             return Err(Refusal(Cow::Owned(format!(
                 "it calls `{name}`, which no binding defines as a function"
             ))));
@@ -1230,7 +1238,7 @@ impl Lowering<'_> {
         }
         let read = rvalues::install("[[")
             .ok()
-            .and_then(|symbol| resolve_function(symbol, self.env))
+            .and_then(|symbol| find_function(symbol, self.env))
             .filter(|speculation| is_base_function(speculation))
             .ok_or(Refusal::new("`[[` is not R's own"))?;
         self.speculations.push(read);
@@ -1275,7 +1283,7 @@ impl Lowering<'_> {
                         .iter()
                         .any(|&(_, operand)| self.is_table(operand));
                 }
-                resolve_function(head, self.env).is_some_and(|speculation| {
+                find_function(head, self.env).is_some_and(|speculation| {
                     is_table_function(&speculation) || returns_table(speculation.function)
                 })
             }
@@ -1298,7 +1306,7 @@ impl Lowering<'_> {
         if tag != rvalues::nil() {
             return None;
         }
-        let speculation = resolve_function(code.car(), self.env)?;
+        let speculation = find_function(code.car(), self.env)?;
         if !is_base_function(&speculation) {
             return None;
         }
@@ -1308,6 +1316,7 @@ impl Lowering<'_> {
             Conversion {
                 call: code,
                 function: speculation.function,
+                checked: None,
             },
         ))
     }
@@ -1877,7 +1886,7 @@ impl Lowering<'_> {
         if !matches!(name.as_str(), "seq_len" | "seq_along" | ":" | "List.range") {
             return Ok(None);
         }
-        let Some(speculation) = resolve_function(head, self.env) else {
+        let Some(speculation) = find_function(head, self.env) else {
             return Ok(None);
         };
         if !is_base_function(&speculation) {
@@ -3124,6 +3133,17 @@ impl Lowering<'_> {
                         .ok_or(Refusal::new("an empty dictionary of an unknown type"))?;
                     return Ok(self.builder.emit(ty, Op::DictNew));
                 }
+                if self.is_library_call(list, "List.from_r", 1)? {
+                    self.checked_items = match constant_string(hint).as_deref() {
+                        Some("I64") => Some(Item::I64),
+                        Some("F64") => Some(Item::Dbl),
+                        Some("Str") => Some(Item::Str),
+                        _ => None,
+                    };
+                    let value = self.value(list);
+                    self.checked_items = None;
+                    return value;
+                }
                 self.value(list)
             }
             ".ry_array" => self.list_literal(&arguments, None, None),
@@ -3396,7 +3416,11 @@ impl Lowering<'_> {
                 let [inner] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a conversion of an unsupported form"));
                 };
-                self.r_use = Some(RUse::Converted(Conversion { call, function }));
+                self.r_use = Some(RUse::Converted(Conversion {
+                    call,
+                    function,
+                    checked: self.checked_items.take(),
+                }));
                 let value = self.value(inner);
                 self.r_use = None;
                 let value = value?;
@@ -4380,7 +4404,7 @@ impl Lowering<'_> {
                 }
                 None => {}
             }
-            let speculation = resolve_function(function, self.env)
+            let speculation = find_function(function, self.env)
                 .ok_or(Refusal::new("a mapped function that does not resolve"))?;
             let found = speculation.function;
             if found.kind() != SexpType::Closure || !interp::annotations::is_typed(found) {
@@ -4435,7 +4459,7 @@ impl Lowering<'_> {
         {
             return Ok(false);
         }
-        match resolve_function(expression.car(), self.env) {
+        match find_function(expression.car(), self.env) {
             Some(speculation) if is_base_function(&speculation) => {
                 self.speculations.push(speculation);
                 Ok(true)
@@ -5757,7 +5781,7 @@ impl Lowering<'_> {
             {
                 return Ok(None);
             }
-            let Some(speculation) = resolve_function(head, self.env) else {
+            let Some(speculation) = find_function(head, self.env) else {
                 return Ok(None);
             };
             if !is_base_function(&speculation) {
@@ -6508,7 +6532,8 @@ unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
 
 /// The type a conversion of what an R call returns gives: fixed for `Str.from_r` and
 /// `Bool.from_r`, and for `Num.from_r` and `List.from_r` the type the conversion gave when the
-/// interpreter last ran it.
+/// interpreter last ran it. A `List.from_r` the interpreter has not run takes the item type the
+/// checker gave it, which the conversion holds the R value to when the code runs.
 unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
     let name = rvalues::symbol_name(conversion.call.car());
     let observed = || interp::numbers::observed_conversion(conversion.call);
@@ -6537,7 +6562,7 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
             Some(_) => Err(Refusal::new(
                 "a `List.from_r` of an R list, whose items typed code cannot take from R yet",
             )),
-            None => Err(awaiting()),
+            None => conversion.checked.map(list).ok_or_else(awaiting),
         },
     }
 }
@@ -6566,10 +6591,14 @@ unsafe fn namespaced_function(head: Sexp) -> Option<Result<Speculation, Refusal>
             rvalues::symbol_name(package)
         )))));
     };
-    // Forcing a lazy-load promise is the interpreter's to do when the code runs.
+    // A lazy-loaded namespace binds each function to a promise that reads it from the package's
+    // database. Reading it changes nothing a program can observe, so the compiler forces it. Any
+    // other promise runs code, which is the interpreter's to do when the code runs.
     if let Some(cell) = interp::heap().frame_cell(namespace, symbol)
         && cell.cdr().kind() == SexpType::Promise
         && cell.cdr().car() == rvalues::unbound()
+        && !(interp::methods_core::is_lazy_load_promise(cell.cdr()).unwrap_or(false)
+            && interp::eval::force_promise(cell.cdr()).is_ok())
     {
         AWAITED.set(Some(Awaited::Promise(cell.cdr())));
         return Some(Err(Refusal(Cow::Owned(format!(
@@ -6683,6 +6712,21 @@ unsafe fn is_base_function(speculation: &Speculation) -> bool {
                 == Some(speculation.cell)
         }
         _ => false,
+    }
+}
+
+/// What a function lookup of `symbol` from `start` finds for code being lowered: the binding,
+/// or, while a script's definitions compile before the script runs, the closure the script
+/// will bind the name to. Such a lookup has no binding to record yet.
+pub unsafe fn find_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
+    match crate::ahead::defined_later(symbol, start) {
+        Some(function) => Some(Speculation {
+            symbol,
+            env: start,
+            cell: rvalues::nil(),
+            function,
+        }),
+        None => resolve_function(symbol, start),
     }
 }
 

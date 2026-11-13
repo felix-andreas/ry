@@ -2573,7 +2573,10 @@ impl Emitter {
                 raw,
                 RECORD_LAYOUT_OFFSET as i32,
             );
-            let lazy = self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, layout, 0);
+            let lazy = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, layout, 0);
             self.fail_if(lazy);
             return Ok(raw);
         }

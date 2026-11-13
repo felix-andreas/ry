@@ -63,12 +63,12 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
-    thin_vec::ThinVec,
     std::{
         hash::{Hash, Hasher},
         ops::Range,
         rc::Rc,
     },
+    thin_vec::ThinVec,
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -476,6 +476,9 @@ pub struct Tier {
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
     pub call: unsafe fn(&TypedCall<'_>) -> Option<R<Sexp>>,
+    /// Called before a script runs, when the session compiles ahead of time, with what the
+    /// script defines at its top level, to compile what can compile before a call.
+    pub ahead: unsafe fn(&crate::ahead::Program<'_>),
 }
 
 /// A call of a typed closure that [`Tier::call`] may run natively. Native code has no frame, so
@@ -7311,7 +7314,10 @@ unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> 
         }
         let returned = eval::leave(resume.depth as usize, result);
         let interp = &mut *state.interp;
-        interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+        interp
+            .bytecode
+            .loop_states
+            .truncate(resume.loop_mark as usize);
         let machine = &mut *state.machine;
         machine.function = resume.function;
         machine.code = resume.code;
@@ -7657,9 +7663,8 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         || (*row).formals != function.car()
         || (*row).body != body
         || (*row).flags & PLAN_FAST == 0
-        || function.has_gp(
-            gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY,
-        )
+        || function
+            .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
         || function == interp.namespace_loader
         || function == interp.do_call
     {
@@ -7673,8 +7678,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     if depth as u32 >= interp.max_depth
         || end > interp.bytecode.registers.capacity()
         || (loops != 0
-            && interp.bytecode.loop_states.len() + loops
-                > interp.bytecode.loop_states.capacity())
+            && interp.bytecode.loop_states.len() + loops > interp.bytecode.loop_states.capacity())
     {
         return None;
     }
@@ -7707,7 +7711,11 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     let owner = interp.slot_owner as usize;
     let compiled = pool_constant(state, call_index + 1);
     let call = pool_constant(state, call_index);
-    let mut cell = if compiled == nil { call.cdr() } else { compiled };
+    let mut cell = if compiled == nil {
+        call.cdr()
+    } else {
+        compiled
+    };
     for index in 0..count {
         let expression = cell.car();
         let kind = *kinds.add(index);
@@ -7947,7 +7955,10 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     let Some(resume) = interp.bytecode.resumes.pop() else {
         unreachable!("the dispatch loop's resume records are above its base");
     };
-    interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+    interp
+        .bytecode
+        .loop_states
+        .truncate(resume.loop_mark as usize);
     let machine = &mut *state.machine;
     machine.function = resume.function;
     machine.code = resume.code;
@@ -9237,8 +9248,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
 #[inline(always)]
 unsafe fn in_place(state: &Activation<'_, '_>, function: Sexp) -> bool {
     let loops = &(*state.interp).bytecode.loop_states;
-    state.resume_base != NO_RESUMES
-        && loops.len() + loop_count(function.cdr()) <= loops.capacity()
+    state.resume_base != NO_RESUMES && loops.len() + loop_count(function.cdr()) <= loops.capacity()
 }
 
 /// What a `CallGeneric` instruction does with the value of a call that ran whole: the pc it

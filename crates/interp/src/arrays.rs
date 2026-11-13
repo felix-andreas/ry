@@ -212,12 +212,25 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// checker knows (`preflight::elaborate`). The names are `"I64"`, `"F64"`, `"Str"` and
 /// `"list"`, the storage of records, tuples, tags and nested lists. A dictionary passes through
 /// unchanged: its `"Dict<K, V>"` name is for typed code, which lays the dictionary out by it.
+///
+/// Around a `List.from_r(x)` the name is also a claim about what R code gives, which the checker
+/// cannot enforce: R code can rebind the function behind `x` after the check. Compiled code is
+/// laid out for the checker's type before the conversion runs, so a list of other items is an
+/// error there, and it is the same error here.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
-    if !list.is_array() || length(list) != 0 {
+    if !list.is_array() {
         return Ok(list);
     }
-    let storage = match values::as_string_scalar(call.arg(1))?.as_deref() {
+    let converted = call.call.cdr().car();
+    let converts = converted.kind() == SexpType::Language
+        && converted.car().kind() == SexpType::Symbol
+        && symbol_name(converted.car()) == "List.from_r";
+    if length(list) != 0 && !converts {
+        return Ok(list);
+    }
+    let name = values::as_string_scalar(call.arg(1))?;
+    let storage = match name.as_deref() {
         Some("I64") => Items::I64,
         Some("F64") => Items::Double,
         Some("Str") => Items::Character,
@@ -228,6 +241,13 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     if list.kind() == storage {
         return Ok(list);
     }
+    if length(list) != 0 {
+        return Err(crate::unwind::error(conversion_mismatch(
+            converted,
+            list,
+            name.as_deref().unwrap_or_default(),
+        )));
+    }
     // `List.with_capacity` set room aside, which the list in its storage keeps.
     if crate::heap().is_resizable(list) {
         return Ok(finish(crate::standard_library::resizable(
@@ -237,6 +257,23 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
         )?));
     }
     Ok(finish(alloc(storage, 0)?))
+}
+
+/// What a `List.from_r` says when it gives a list of other items than the checker typed it with.
+/// `expected` is the checker's item type as `.ry_items` names it.
+pub unsafe fn conversion_mismatch(conversion: Sexp, list: Sexp, expected: &str) -> String {
+    let found = match items(list) {
+        Items::Logical => "Bool",
+        Items::Integer | Items::I64 => "I64",
+        Items::Double => "F64",
+        Items::Character => "Str",
+        Items::RyValues => "list",
+    };
+    format!(
+        "`{}` gave a `List<{found}>`, and the type checker typed it as a `List<{expected}>` from \
+         the R code it read: convert the vector in R, so that the conversion always gives that type",
+        crate::deparse::deparse_first_line(conversion)
+    )
 }
 
 /// An Array of `items`, each a single non-NA value or a ry value, all of one kind; or why they

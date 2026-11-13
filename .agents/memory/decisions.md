@@ -8652,9 +8652,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
   fix if the boundary copy shows up. The design and its test matrix are in
   `development/design/typed-runtime.md`.
 
-## Typed code compiles ahead of time, and `ry build --exe` writes an executable
+## Typed code compiles ahead of time, and `ry build --aot --exe` writes an executable
 
-**Status:** planned. Built so far: typed closures compile in memory at their first call, and plain `ry build` writes a source tarball.
+**Status:** planned. Built so far: `ry run --aot` compiles a script's typed functions before it starts (the entry "`ry run --aot` compiles a script's typed code before it starts"), typed closures otherwise compile in memory at their first call, and plain `ry build` writes a source tarball.
+
+- **Command line (user directive).** Compiling ahead of time is asked for with `--aot`: `ry run --aot main.R` compiles before the program starts, so nothing compiles while it runs; `ry build --aot` on a package compiles into the installed package, and `ry install` does the same; `ry build --aot --exe main.R` writes one executable and comes after the up-front path, because compiling up front matters more than a single file. Without `--aot` typed code compiles at its first call.
 
 - **Chosen shape.** `ry run` and `ry load` compile each typed function of a strict file before its
   first call (when the lazy loader forces its binding, with workers compiling its callees ahead),
@@ -8663,13 +8665,41 @@ Each one trades a narrow class of missed errors for a class of false reports see
   (AGENTS.md, "Performance principles"): an installed package's code file is build output, one
   position-independent file per namespace, mapped read-only and shared between processes, with a
   per-process table for addresses and a stamp of the ry build and callee interface hashes, and code
-  for a script or a package under development is compiled in memory as the session uses it. `ry build --exe` appends that file and the
+  for a script or a package under development is compiled in memory as the session uses it. `ry build --aot --exe` appends that file and the
   untyped bytecode to ry's runtime as a standalone executable. Plain `ry build` keeps writing a
   source tarball, as `devtools::build()` does, because existing workflows rely on it.
 - **Tests.** Every typed program runs interpreted, compiled, and compiled with annotations erased,
   with identical output required, plus `RY_FORCE_GUESS_FAIL`, `RY_CHECK_FACTS` and an empty-pool
   leak check (from Bun's compiler, `prior-art.md`). `ry check --explain` reports slow paths worst
   first by loop depth.
+
+## `ry run --aot` compiles a script's typed code before it starts
+
+**Status:** built for a script's top-level definitions. Not built: the package code file (`ry build --aot`, `ry install`), the executable, sourced files and packages under `ry load`.
+
+- **Previous shape.** The typed core compiled a strict typed closure at its first call, keyed by the closure and the argument types that arrived (`COMPILED` in `crates/typed/src/typed.rs`). Three things existed only once the program ran, so nothing could compile earlier: the closure itself (made when its `name <- function` assignment runs), the type a `List.from_r` or `Num.from_r` gives (learned by letting the interpreter run the conversion once and recording what came back), and a function a namespace binds lazily (a promise the interpreter forced at the first use).
+- **What was weak.** The observed conversion type was a second source of truth beside the checker, which had already typed the same expression, and it cost every converting function one interpreted call before it could compile. On the typed benchmark programs the compile ran inside the measured region: 1 to 6 ms per kernel or application, and 51 ms for `pidigits`.
+- **Target shape.** `ry run --aot` sets a run flag (`RUN_FLAG_AHEAD`). `run_script` then lowers every top-level expression before the first one runs, creates the closure of each top-level `name <- function` definition (`crates/interp/src/ahead.rs`), and hands the list to the tier through `Tier.ahead`. The typed core (`crates/typed/src/ahead.rs`) compiles each definition whose declared parameter types are types R can pass (numbers, `Bool`, `Str`, lists of those, tag unions, tables), and its typed callees with it.
+  - **Sibling calls.** A name the script has not bound yet resolves to the closure created up front (`DEFINED_LATER`, the first definition of each name). The compiled call carries the same speculation as any global call, a function identity checked on every call (`still_resolves`), and the assignment hands out the closure created up front (`ahead::take`), so the check holds once the script has run the definition. A name bound to another function later fails the check and the caller compiles again, as it does without the flag.
+  - **Conversions have the checker's type.** The preflight wraps a `List.from_r(x)` whose item type the checker knows as `.ry_items(List.from_r(x), "F64")` (`"I64"`, `"F64"`, `"Str"`, `"list"`), and the typed lowering takes that as the conversion's type when no call has run yet (`Conversion.checked`). The checker's type is a claim about R code that R code can break after the check (`assign()` over the function that `x` calls), so the conversion compares what R gave with the claimed type on every call and stops with one error, raised by `arrays::conversion_mismatch` in the interpreter and in compiled code alike. Before, the interpreter was the one place that tolerated the mismatch; an error in both keeps the tiers identical, which the alternative (compiled code falling back and compiling again for the other type) would also do at the price of a second code path whose only users are programs the checker mistyped.
+  - **Lazy bindings.** A function that a loaded namespace binds lazily is forced when typed code compiles, in every mode. Forcing reads the package database and runs no user code. A namespace that is not loaded stays a wait, because loading it runs its `.onLoad`.
+  - **Refusals are retried.** A refusal met before the script ran may only say that the script had not run yet, so refusals are dropped after the pass and the first call compiles again.
+- **What still compiles at a first call.** `Num.from_r` (its result type depends on the value: `integer` gives `I64`, `double` gives `F64`), a `List.from_r` the checker cannot type, a call into a namespace not loaded yet, a function defined in a block or a sourced file, and a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no compiled-ahead function calls.
+- **Measured (iterate build, one machine).** All 70 typed benchmark programs (11 kernels, 6 applications, 53 public) print what the first-call run prints and compile nothing after the script starts. The up-front compile takes 1.1 to 5.9 ms on kernels and applications. A program's first run of its measured function gets shorter by the compile it no longer holds: `orders` 3.50 to 1.27 ms, `report` 11.88 to 4.66 ms, `team_scores` 9.45 to 3.97 ms, `log_rank` 34.56 to 22.02 ms, `pidigits` 51 to 2 ms. Warm times and whole-process wall times are equal within noise, because the same compiler does the same work earlier. The checked `List.from_r` type and the forced lazy bindings apply without the flag too: `vasicek`'s first run fell from about 140 ms to 74 ms.
+- **Impact.** Correctness: one error where tiers diverged; every mode runs the same code, so the differential matrix (`typed_scripts_agree_however_they_compile`: interpreted, first call, ahead, ahead with every sibling guess failing under `RY_AHEAD_MISS=1`, ahead with tier 1 forced, annotations erased) holds with identical output. Simplicity: no new code store, since code compiled ahead lives in the table first-call code lives in. Performance: the wall time of a process is unchanged; latency moves from the first calls to before the program. Incremental analysis: untouched, the checker hands one more fact through the preflight.
+- **Pinned by** `run-aot.scenario`, `typed-code-calls-r.scenario`, `typed-table-values.scenario`, `typed_benchmarks_run_natively` and `typed_scripts_agree_however_they_compile` in `crates/ry/tests/test_scenarios.rs`.
+
+## Untyped R code is not compiled to machine code ahead of time
+
+**Status:** built, as a decision not to build: `--aot` compiles typed code only, and untyped code runs on tier 0 with tier 1 compiling hot functions during the run.
+
+- **The question.** Whether `ry run --aot` and `ry build --aot` should also compile untyped R to machine code before the program runs.
+- **What ahead-of-time code for untyped R can use.** Without a profile it has the bytecode and nothing else, which is the baseline tier that measured slower than tier 0 ("No baseline tier, and code images hold bytecode only": forced baseline +7.5% instructions on `testthat_full`, with tier 0's whole dispatch at 2.66% of instructions as the ceiling). Tier 1's speed comes from the types and call targets a run observed, which do not exist before the run.
+- **Measured: what an up-front compile could save.** Runs of the two ry-owned suites on one machine, each program with `RY_JIT=on` and `RY_JIT=off`, cold (first run of the measured function) and warm.
+  - **Applications** (the north star): warm time with the JIT off over on has geometric mean 0.999, so tier 1 buys nothing there yet and compiling it earlier buys nothing either. Tier-1 compile time is 0 to 31 ms per program, a mean of 3.2% of the cold run, and cold over warm is 1.18.
+  - **Kernels:** JIT off over on is 5.199, so tier 1 matters, and its compile is 2 to 9 ms per program (mean 9.07% of the cold run, cold over warm 1.289). That is the most an ahead-of-time compile could remove, and only with the same profile tier 1 had.
+- **Decision.** No native ahead-of-time code for untyped R. On the applications there is nothing to win, and on the kernels the win is bounded by single-digit milliseconds per program while the code would need the run's profile to be as fast as tier 1's.
+- **The avenue left open** is profile-driven, after Leyden's ahead-of-time method profiling (JEP 515, `prior-art.md`): a training run stores tier 1's type and call-target feedback in the package's code file as build output, and the next process compiles hot functions from it at load, before their first call. It starts when the applications suite shows tier 1 winning (JIT off over on well above 1), because until then there is no hot code whose compile is worth moving. Facts-based code (checker types, closed bindings of locked namespaces) is the typed path's business, where the types are sound.
 
 ## The methods package's core runs natively behind hash-guarded prologues
 

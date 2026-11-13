@@ -23,6 +23,7 @@
     clippy::unnecessary_cast
 )]
 
+pub mod ahead;
 pub mod backend;
 pub mod fusion;
 pub mod ir;
@@ -389,16 +390,25 @@ pub fn has_compiled(function: Sexp) -> bool {
     })
 }
 
-/// Whether every function lookup `compiled` assumes still finds the same function.
+/// Whether every function lookup `compiled` assumes still finds the same function. A lookup
+/// that found a definition its script had not run yet assumed no binding, only the function
+/// ([`ahead::defined_later`]).
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
+    let functions = if ahead::compiling_ahead() {
+        lower::find_function
+    } else {
+        lower::resolve_function
+    };
     compiled.speculations.iter().all(|assumed| {
         let resolve = if interp::values::is_function(assumed.function) {
-            lower::resolve_function
+            functions
         } else {
             lower::resolve_value
         };
-        resolve(assumed.symbol, assumed.env)
-            .is_some_and(|now| now.cell == assumed.cell && now.function == assumed.function)
+        resolve(assumed.symbol, assumed.env).is_some_and(|now| {
+            (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
+                && now.function == assumed.function
+        })
     })
 }
 
@@ -1447,12 +1457,25 @@ unsafe fn write_converted(
     if expected != Some(value.kind())
         || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
     {
-        return Err(interp::unwind::error(format!(
-            "`{}` gave a value of type `{}`, and the typed function was compiled for the type it \
-             gave before, {ty:?}: convert the value to one type in R first",
-            interp::deparse::deparse_first_line(conversion.call),
-            value.kind().name()
-        )));
+        let message = match conversion.checked {
+            Some(item) if value.is_array() => interp::arrays::conversion_mismatch(
+                conversion.call,
+                value,
+                match item {
+                    Item::I64 => "I64",
+                    Item::Dbl => "F64",
+                    Item::Str => "Str",
+                    _ => "list",
+                },
+            ),
+            _ => format!(
+                "`{}` gave a value of type `{}`, and the typed function was compiled for the \
+                 type it gave before: convert the value to one type in R first",
+                interp::deparse::deparse_first_line(conversion.call),
+                value.kind().name()
+            ),
+        };
+        return Err(interp::unwind::error(message));
     }
     match ty {
         Type::Dbl => *out = rvalues::reals(value)[0].to_bits(),

@@ -25,10 +25,14 @@ suffixed <- function(names: List<Str>) -> I64 {
   }
   count
 }
+lowest <- function(xs: List<I64>) -> I64 {
+  List.min(xs) |> Result.with_default(0)
+}
 fruit <- ["fig", "pear", "plum"]
 print(dict_tour(fruit))
 numbers <- [1, 2, 3, 4]
 print(list_tour(numbers))
+print(lowest(numbers))
 texts <- ["1", "two", "3", "four"]
 print(failures(texts))
 print(bits(40))

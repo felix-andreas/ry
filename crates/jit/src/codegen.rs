@@ -814,10 +814,10 @@ impl<'p> Translator<'p> {
                 // Only a record has a layout word, so it is read after the kind check. A lazy
                 // record has its layout's shape, so the branch ignores the lazy bit; its fields
                 // are read through `Intrinsic::Field`, which hands a lazy record off.
-                let word = self
-                    .builder
-                    .ins()
-                    .load(I32, flags(), value, RECORD_LAYOUT_OFFSET as i32);
+                let word =
+                    self.builder
+                        .ins()
+                        .load(I32, flags(), value, RECORD_LAYOUT_OFFSET as i32);
                 let id = self.builder.ins().band_imm_u(word, i64::from(!LAZY_RECORD));
                 let same = self
                     .builder

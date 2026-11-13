@@ -138,6 +138,7 @@ pub fn install_mode(mode: Mode) {
         back_edge,
         back_edge_threshold: back_edges,
         call: native::call,
+        ahead: typed::ahead::compile,
     }));
 }
 

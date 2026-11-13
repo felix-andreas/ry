@@ -187,7 +187,11 @@ fn main() -> ExitCode {
     if let Some(session) = cli.command.session(env::var("RY_RUNTIME").ok().as_deref()) {
         // Embedded R assumes it owns the thread it initializes on, so sessions stay on `main`.
         return match session.mode {
-            Mode::Script { file, arguments } => run_script(session.runtime, &file, arguments),
+            Mode::Script {
+                file,
+                arguments,
+                ahead,
+            } => run_script(session.runtime, &file, arguments, ahead),
             Mode::Console {
                 file,
                 keybindings,
@@ -436,7 +440,11 @@ fn release_executable_code() {
 
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
-fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
+fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool) -> ExitCode {
+    if ahead && runtime == Runtime::GnuR {
+        cli::error("`--aot` compiles with ry's runtime, which `--runtime gnu-r` does not start");
+        return ExitCode::from(2);
+    }
     // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
     // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
     // the file's own bytes with the checker's rewrites.
@@ -459,7 +467,10 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
         return ExitCode::from(1);
     };
     let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
-    let flags = runtime_flags(preflight.config());
+    let flags = repl::RuntimeFlags {
+        ahead,
+        ..runtime_flags(preflight.config())
+    };
     drop(preflight);
     match runtime {
         Runtime::Ry => {
@@ -958,6 +969,7 @@ fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
         object_systems: config.check.object_systems,
         strict: config.check.strict,
         prelude: config.check.prelude,
+        ahead: false,
     }
 }
 

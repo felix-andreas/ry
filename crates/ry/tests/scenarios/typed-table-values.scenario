@@ -1,7 +1,7 @@
 # Typed code holds a DataFrame as an opaque value and runs the table API on native code. Table
 # calls nest, operators over `Expr` values are table calls, and a column comes back as a ry list
-# through `List.from_r`. The first call runs in the interpreter, which records the type
-# `List.from_r` gives, and the calls after it run natively with the same result.
+# through `List.from_r`, whose item type is the column's type in the table's schema, so every
+# call runs natively, the first included.
 
 requires ry-runtime
 
@@ -34,8 +34,8 @@ env RY_TYPED_LOG 1
 run ry run --runtime ry totals.R
 expect exit 0
 expect stdout "[1] 100\n[1] 70\n[1] 40"
-expect stderr "typed: `by_region` runs in the interpreter: no code for [Table, I64]: it waits on the interpreter to run `"
 expect stderr "typed: compiled for [Table, I64] -> Dbl"
+expect stderr lacks "runs in the interpreter"
 
 # A column is an R vector, which typed code cannot hold, so reading one outside a conversion is
 # a `native` error in strict mode. Without strict mode the function runs in the interpreter, with

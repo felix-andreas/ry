@@ -1296,7 +1296,9 @@ impl Sexp {
             let payload = self.payload::<RecordObject>();
             payload.layout.set(layout | LAZY_RECORD);
             payload.slot_count.set(slot_count as u32);
-            payload.unboxed.set(u64::MAX >> (UNBOXED_SLOTS - slot_count));
+            payload
+                .unboxed
+                .set(u64::MAX >> (UNBOXED_SLOTS - slot_count));
             *(self.record_slots() as *mut u64) = value;
         }
     }
