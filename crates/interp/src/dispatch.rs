@@ -1511,7 +1511,7 @@ pub unsafe fn slot_frame_finds_method(
     definition: &BuiltinDef,
     args: &[Arg],
 ) -> R<bool> {
-    if eval::lever_off("A") || args.iter().any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
+    if args.iter().any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
         return Ok(true);
     }
     if definition.generic == Generic::None {

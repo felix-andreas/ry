@@ -98,7 +98,7 @@ pub unsafe fn eval_symbol_reporting(
     let value = if symbol == missing_arg() {
         symbol
     } else {
-        find_var_for(symbol, env, true)?
+        find_var(symbol, env)?
     };
     if value == unbound() {
         return Err(error_in(
@@ -175,33 +175,12 @@ pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
         if env == known.global_env {
             return heap.global_cell(symbol).map(|(cell, _)| cell);
         }
-        if env.has_gp(gp::PENDING_FRAME) && !lever_off("C3") && pending_passes(env, symbol) {
-            env = env.enclosure();
-            continue;
-        }
         if let Some(cell) = heap.frame_cell(env, symbol) {
             return Some(cell);
         }
         env = env.enclosure();
     }
     None
-}
-
-/// Whether a lookup of `symbol` passes the pending environment `env` of a live slot frame
-/// without finding a binding, so it can go on to the enclosure without giving the frame its
-/// environment: the frame binds no slot of that name and no method variable such as
-/// `.Generic`. A closure the frame made looks up its free names through here.
-pub unsafe fn pending_passes(env: Sexp, symbol: Sexp) -> bool {
-    let state = interp();
-    let Some(owner) = state.frames.iter().rposition(|frame| frame.pending == env) else {
-        return false;
-    };
-    let frame = &state.frames[owner];
-    frame.env == nil()
-        && slot_content(frame.function, frame.slots as usize, symbol).is_none()
-        && !crate::method_vars(state, owner)
-            .iter()
-            .any(|&(name, _)| name == symbol)
 }
 
 /// The value of a binding cell, calling an active binding's function.
@@ -232,50 +211,13 @@ pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
 
 /// `findVar`: the value bound to `symbol` from `env` outward, or `R_UnboundValue`. Promises are
 /// returned unforced.
-pub unsafe fn find_var(symbol: Sexp, start: Sexp) -> R<Sexp> {
-    find_var_for(symbol, start, false)
-}
-
-/// [`find_var`], which hands an unforced argument reference in a live slot frame's slot to a
-/// caller that `forces` what it finds at once, so the reference cannot be kept.
-unsafe fn find_var_for(symbol: Sexp, start: Sexp, forces: bool) -> R<Sexp> {
+pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
     let _activity = activity::enter(Activity::Lookup, 0);
-    let heap = crate::heap();
-    let known = heap.known();
-    let mut env = start;
-    while env != known.empty_env {
-        if env == known.global_env {
-            if let Some((cell, _)) = heap.global_cell(symbol) {
-                return cell_value(cell);
-            }
-            break;
-        }
-        // A live slot frame's slot answers without giving the frame its environment, except
-        // for an unforced argument reference to a reader that may keep it. A forced one
-        // answers with its value, which is what forcing it would give.
-        if env.has_gp(gp::PENDING_FRAME) && !lever_off("C3") {
-            if pending_passes(env, symbol) {
-                env = env.enclosure();
-                continue;
-            }
-            match pending_slot(env, symbol) {
-                Some(value) if !value.has_gp(gp::ARGUMENT_REFERENCE) || forces => {
-                    return Ok(value);
-                }
-                Some(value) if value.car() != unbound() => return Ok(value.car()),
-                _ => {}
-            }
-        }
-        if let Some(cell) = heap.frame_cell(env, symbol) {
-            return cell_value(cell);
-        }
-        env = env.enclosure();
+    match find_cell(symbol, env) {
+        Some(cell) => cell_value(cell),
+        None if symbol == symbols().tmp => Ok(tmp_value(env)),
+        None => Ok(unbound()),
     }
-    Ok(if symbol == symbols().tmp {
-        tmp_value(start)
-    } else {
-        unbound()
-    })
 }
 
 /// The `*tmp*` a complex assignment running in `env` or an environment it encloses stands for,
@@ -329,23 +271,6 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
                 }
             }
             heap.frame_cell(env, symbol)
-        } else if env.has_gp(gp::PENDING_FRAME) && !lever_off("C3") && pending_passes(env, symbol) {
-            None
-        } else if env.has_gp(gp::PENDING_FRAME)
-            && !lever_off("C3")
-            && let Some(value) = pending_slot(env, symbol)
-        {
-            let value = value_of(value)?;
-            if values::is_function(value) {
-                return Ok(value);
-            }
-            if value == missing_arg() {
-                return Err(error(format!(
-                    "argument \"{}\" is missing, with no default",
-                    symbol_name(symbol)
-                )));
-            }
-            None
         } else {
             heap.frame_cell(env, symbol)
         };
@@ -506,7 +431,7 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
 
 /// Forces a promise over the slots of the live slot frame whose pending environment is `env`:
 /// compiled code runs on the slots, a name reads its slot, and anything else, or a name whose
-/// slot holds an empty argument, evaluates in the pending environment.
+/// slot holds an empty argument, gets the frame's environment and evaluates there.
 #[cold]
 #[inline(never)]
 unsafe fn force_slot_promise(promise: Sexp, env: Sexp) -> R<Sexp> {
@@ -538,14 +463,10 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
             Some(_) => {}
         }
     }
-    // Uncompiled code runs in the pending environment: its reads find the slots, and whatever
-    // reads or writes the environment's bindings gives the frame its environment then.
-    let env = if lever_off("C3") {
-        frame_env(owner, Reify::Site("promise over the frame"))?
-    } else {
-        interp().frames[owner].pending
-    };
-    eval(expression, env)
+    eval(
+        expression,
+        frame_env(owner, Reify::Site("promise over the frame"))?,
+    )
 }
 
 /// Where a name is bound for a live slot frame's pending environment ([`pending_name`]).
@@ -640,26 +561,8 @@ pub unsafe fn pending_slot(env: Sexp, symbol: Sexp) -> Option<Sexp> {
 /// The content of the slot of `function`'s frame at register `header` that binds `symbol`, or
 /// `None` when the slots leave the name to the enclosure: no slot has that name, or it is unbound.
 unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Sexp> {
-    // The formals hold the first slots in their order, whether or not the slot names list them
-    // (a `...` the body only forwards is not named), as reifying binds them.
-    let mut formal = function.car();
-    let mut position = 0;
-    let mut slot = None;
-    while formal.kind() == SexpType::Pairlist {
-        if formal.tag() == symbol {
-            slot = Some(position);
-            break;
-        }
-        position += 1;
-        formal = formal.cdr();
-    }
-    let slot = match slot {
-        Some(slot) => slot,
-        None => {
-            let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
-            (0..values::length(names)).find(|&index| names.element(index) == symbol)?
-        }
-    };
+    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let slot = (0..values::length(names)).find(|&index| names.element(index) == symbol)?;
     let value = *bytecode::register_address(header + 1 + slot);
     (value != unbound()).then_some(value)
 }
@@ -2871,44 +2774,9 @@ pub unsafe fn pending_env_of(header: usize) -> Sexp {
 /// first and with their missing flags, exactly as [`bind_arguments`] and the assignments since
 /// would have bound them. The environment is the frame's from then on, so the slots give up
 /// their references and nothing reads them again.
-/// Temporary measurement switch: `RY_LEVER_OFF` names the levers (`A`, `C1`, `C2`, `C3`) to
-/// turn off.
-pub fn lever_off(lever: &str) -> bool {
-    static OFF: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    OFF.get_or_init(|| std::env::var("RY_LEVER_OFF").unwrap_or_default())
-        .split(',')
-        .any(|name| name == lever)
-}
-
 #[cold]
 #[inline(never)]
 unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
-    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *TRACE.get_or_init(|| std::env::var_os("RY_REIFY_TRACE").is_some()) {
-        let name = match cause {
-            Reify::Builtin(op) => builtin_def(op)?.name,
-            Reify::Site(name) => name,
-        };
-        let head = |call: Sexp| {
-            let car = call.car();
-            if car.kind() == SexpType::Symbol {
-                values::symbol_name(car).to_string()
-            } else {
-                format!("<{:?}>", car.kind())
-            }
-        };
-        let state = interp();
-        let frame = &state.frames[index];
-        let top = state
-            .frames
-            .last()
-            .map_or(String::new(), |top| head(top.call));
-        eprintln!(
-            "REIFY\t{name}\t{}\t{top}\t{}",
-            head(frame.call),
-            state.frames.len() - 1 - index
-        );
-    }
     if activity::enabled() {
         let name = match cause {
             Reify::Builtin(op) => builtin_def(op)?.name,
@@ -3561,7 +3429,7 @@ unsafe fn pending_env_kept(index: usize, result: &R<Sexp>) -> bool {
         Ok(value) => *value == pending,
         Err(Unwind::Jump(Jump::Return { env, value })) => *env == pending || *value == pending,
         Err(Unwind::Jump(Jump::Break { env } | Jump::Next { env })) => *env == pending,
-        Err(Unwind::Jump(Jump::TopLevel) | Unwind::Error(_) | Unwind::Interrupt) => lever_off("C1"),
+        Err(Unwind::Jump(Jump::TopLevel) | Unwind::Error(_) | Unwind::Interrupt) => false,
     };
     if carried || crate::heap().is_preserved(pending) {
         return true;

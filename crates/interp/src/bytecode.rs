@@ -6609,15 +6609,9 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
         return Err(unwind);
     };
     let loops = machine.code.cdr().element(LOOPS);
-    // A slot frame's own environment may be the pending one that `parent.frame()` handed out,
-    // which a jump evaluated there carries without the frame having reified.
-    let env = machine.env();
-    let ours = |target: Sexp| {
-        target == env || (env == nil() && target == eval::pending_env_of(machine.header))
-    };
     let target = match jump {
-        Jump::Break { env: target } if ours(target) => loop_target(loops, pc, true),
-        Jump::Next { env: target } if ours(target) => loop_target(loops, pc, false),
+        Jump::Break { env: target } if target == machine.env() => loop_target(loops, pc, true),
+        Jump::Next { env: target } if target == machine.env() => loop_target(loops, pc, false),
         _ => None,
     };
     match target {
@@ -10578,7 +10572,7 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
 /// element is there and not missing. `None` leaves the read, and the errors a missing or absent
 /// element raises, to the general evaluation.
 unsafe fn slot_dot_dot(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
-    if !state.in_slots() || expression.kind() != SexpType::Symbol || eval::lever_off("C2") {
+    if !state.in_slots() || expression.kind() != SexpType::Symbol {
         return Ok(None);
     }
     let Some(index) = eval::dot_dot_index(expression).filter(|&index| index >= 1) else {
@@ -10946,7 +10940,6 @@ unsafe fn fused_pass(
                 let (cell, local) = match local_cell {
                     Some(cell) => (cell, true),
                     None => match outside_function_frames(constant, enclosure, hint) {
-                        Err(cell) if cell == nil() => return Ok(None),
                         Err(cell) => (cell, false),
                         Ok(enclosure) => match cached_cell(constant, enclosure, cache, slot) {
                             Some(cell) => (cell, false),
@@ -12315,11 +12308,6 @@ unsafe fn lookup_outside(
     let env = start;
     let enclosure = match outside_function_frames(symbol, start, hint) {
         Ok(enclosure) => enclosure,
-        Err(cell) if cell == nil() => {
-            return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call())
-            });
-        }
         Err(cell) => {
             let value = cell.cdr();
             if value.kind() == SexpType::Promise && value.car() != unbound() {
@@ -12474,7 +12462,7 @@ unsafe fn lookup_enclosing_function(
 }
 
 /// The first environment from `env` outward that is not a function frame, or the cell of the
-/// function frame before it that binds `symbol` (`R_NilValue` when a live slot frame binds it). A function frame gains and loses bindings
+/// function frame before it that binds `symbol`. A function frame gains and loses bindings
 /// without moving the symbol's lookup epoch, so the lookup cache cannot cover it and it is
 /// probed on every lookup; for a frame that does not bind the symbol, which is the usual case,
 /// the frame's symbol filter answers with one load. A closure created inside a call, such as
@@ -12493,16 +12481,6 @@ unsafe fn outside_function_frames(symbol: Sexp, env: Sexp, hint: &mut u32) -> Re
 unsafe fn walk_function_frames(symbol: Sexp, mut env: Sexp, hint: &mut u32) -> Result<Sexp, Sexp> {
     let heap = crate::heap();
     while env.has_gp(gp::FUNCTION_FRAME) {
-        // A live slot frame's pending environment is passed when its slots leave the name to
-        // the enclosure, and otherwise left to the general lookup (`R_NilValue` for the cell),
-        // which reads the slot without giving the frame its environment.
-        if env.has_gp(gp::PENDING_FRAME) && !eval::lever_off("C3") {
-            if !eval::pending_passes(env, symbol) {
-                return Err(nil());
-            }
-            env = env.enclosure();
-            continue;
-        }
         if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
             return Err(cell);
         }
