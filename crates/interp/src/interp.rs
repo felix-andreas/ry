@@ -669,6 +669,8 @@ pub struct Interp {
     pub builtins_env: Option<Sexp>,
     /// The compiled code images of installed packages ([`code_image`]).
     pub code_image: code_image::State,
+    /// The records of typed-core values R holds unread ([`records::LazyRecords`]).
+    pub lazy_records: records::LazyRecords,
 }
 
 struct InterpState {
@@ -823,6 +825,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         forks: fork::Forks::default(),
         builtins_env: None,
         code_image: code_image::State::default(),
+        lazy_records: records::LazyRecords::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -1014,6 +1017,7 @@ impl RootSource for InterpRoots {
         unsafe {
             let state = interp();
             state.bytecode.clear_dead(liveness);
+            state.lazy_records.clear_dead(liveness);
         }
     }
 }

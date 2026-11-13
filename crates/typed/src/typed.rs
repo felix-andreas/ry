@@ -38,21 +38,25 @@ use {
         backend::{Callee, Code, Trampoline},
         ir::{Item, Type},
         lower::{Callees, Lowered, RCall, RResult, Speculation},
+        shapes::Shapes,
         values::{Boxed, List, Str},
     },
     heap::{
+        Collection,
         object::{INTEGER_PREFIX, LOGICAL_PREFIX, Sexp, SexpType, Slot, gp},
         records::NativeKind,
         strings::Encoding,
     },
     interp::{
-        annotations::decline, builtins::Arg, bytecode::TypedCall, unwind::Unwind, values as rvalues,
+        annotations::decline, builtins::Arg, bytecode::TypedCall, records::NativeValues,
+        unwind::Unwind, values as rvalues,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     std::{
         borrow::Cow,
         cell::{Cell, RefCell},
+        mem::MaybeUninit,
         time::{Duration, Instant},
     },
 };
@@ -98,6 +102,8 @@ thread_local! {
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
+    /// The live native objects at which [`from_box`] next runs a collection.
+    static NATIVE_COLLECTION_AT: Cell<i64> = const { Cell::new(NATIVE_COLLECTION_FLOOR) };
     /// How long the compilations nested in the one under way took, measured only for the log.
     static NESTED_COMPILE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
@@ -851,7 +857,22 @@ const MIXED_LIST: &str = "it holds a list whose items have different types";
 /// ry list in its fields, with its item type, or why it does not convert. Every shape the
 /// conversion meets is confirmed, since a value of it now exists.
 unsafe fn to_box(value: Sexp) -> Result<(u64, Item), &'static str> {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || to_box_inner(value))
+    shapes::with(|shapes| to_box_in(shapes, value, 0))
+}
+
+/// [`to_box`] with the shape table borrowed, at `depth` levels below the value converted.
+unsafe fn to_box_in(
+    shapes: &mut Shapes,
+    value: Sexp,
+    depth: u32,
+) -> Result<(u64, Item), &'static str> {
+    if depth % STACK_CHECK_LEVELS == 0 {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
+            to_box_inner(shapes, value, depth)
+        })
+    } else {
+        to_box_inner(shapes, value, depth)
+    }
 }
 
 /// Stack space a conversion leaves before it grows the stack, and how much it adds, since a
@@ -859,95 +880,142 @@ unsafe fn to_box(value: Sexp) -> Result<(u64, Item), &'static str> {
 const STACK_RED_ZONE: usize = 64 * 1024;
 const STACK_GROWTH: usize = 1024 * 1024;
 
-unsafe fn to_box_inner(value: Sexp) -> Result<(u64, Item), &'static str> {
+/// How many levels of a tree a conversion descends between two checks of the stack. Asking
+/// how much stack is left costs a thread-local lookup, a sizable part of converting one small
+/// record, and this many levels take far less than the red zone.
+const STACK_CHECK_LEVELS: u32 = 8;
+
+unsafe fn to_box_inner(
+    shapes: &mut Shapes,
+    value: Sexp,
+    depth: u32,
+) -> Result<(u64, Item), &'static str> {
     if value.kind() != SexpType::Record {
         return Err(FIELD);
     }
     if value.is_object() || value.attrib() != rvalues::nil() {
         return Err(CLASSED);
     }
-    let layout = value.record_layout();
     let kind = interp::records::native_kind(value);
+    // A record typed code made and R never filled shares its box, so passing it back is free.
+    if value.is_lazy_record() {
+        let boxed = value.lazy_record_value();
+        values::ry_list_dup(boxed as *mut List);
+        let shape = (*(boxed as *const Boxed)).shape;
+        let item = if kind == NativeKind::Tag {
+            Item::Tag(shapes::ANY)
+        } else {
+            Item::Record(shape)
+        };
+        return Ok((boxed, item));
+    }
+    let layout = value.record_layout();
     if matches!(kind, NativeKind::Dict | NativeKind::Set) {
         return Err(COLLECTION);
     }
     let tagged = kind == NativeKind::Tag;
-    let mut items: SmallVec<[Item; 4]> = SmallVec::new();
-    let mut words: SmallVec<[[u64; 2]; 4]> = SmallVec::new();
-    let release = |items: &[Item], words: &[[u64; 2]]| {
-        for (&item, word) in items.iter().zip(words) {
-            match item {
-                Item::Str => values::ry_str_drop(word[0], word[1]),
-                Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
-                    values::ry_list_drop(word[0] as *mut List)
-                }
-                _ => {}
-            }
-        }
-    };
-    for index in 0..value.record_slot_count() {
+    let count = value.record_slot_count();
+    // Every field takes at least one word, so a record with more fields never fits in a box.
+    if count > MAX_WORDS {
+        return Err(TOO_LARGE);
+    }
+    // The fields convert into buffers on the stack, laid out as the box lays them out, and the
+    // box is allocated once their shape is known.
+    let mut items = [const { MaybeUninit::<Item>::uninit() }; MAX_WORDS];
+    let mut words = [const { MaybeUninit::<u64>::uninit() }; MAX_WORDS];
+    let mut used = 0;
+    for index in 0..count {
         let (item, word) = match value.record_slot(index) {
             Slot::Real(number) => (Item::Dbl, [number.to_bits(), 0]),
             Slot::Integer(number) => (Item::Int, [number as u32 as u64, 0]),
             Slot::Logical(number) => (Item::Lgl, [number as u32 as u64, 0]),
-            Slot::Handle(field) => match field_word(field) {
+            Slot::Handle(field) => match field_word(shapes, field, depth + 1) {
                 Ok(found) => found,
                 Err(reason) => {
-                    release(&items, &words);
+                    release_fields(&items[..index], &words[..used]);
                     return Err(reason);
                 }
             },
         };
-        items.push(item);
-        words.push(word);
+        let size = shapes::item_words(item) as usize;
+        if used + size > MAX_WORDS {
+            drop_field(item, word);
+            release_fields(&items[..index], &words[..used]);
+            return Err(TOO_LARGE);
+        }
+        items[index].write(item);
+        words[used].write(word[0]);
+        if size == 2 {
+            words[used + 1].write(word[1]);
+        }
+        used += size;
     }
-    let Some(shape) = shapes::intern(layout, &items) else {
-        release(&items, &words);
+    let fields = std::slice::from_raw_parts(items.as_ptr() as *const Item, count);
+    let Some(shape) = shapes.converted(layout, fields, tagged) else {
+        release_fields(&items[..count], &words[..used]);
         return Err(TOO_LARGE);
     };
-    if tagged {
-        shapes::confirm(shape);
-    }
     let item = if tagged {
         Item::Tag(shapes::ANY)
     } else {
-        Item::Record(shape)
+        Item::Record(shape.id)
     };
-    let description = shapes::shape(shape);
-    if description.words == 0 {
-        return Ok((shapes::constant(shape), item));
+    if shape.words == 0 {
+        return Ok((shape.constant, item));
     }
-    let boxed = values::ry_box_new(
-        shape,
-        description.objects,
-        description.strings,
-        description.words,
+    let boxed = values::ry_box_new(shape.id, shape.objects, shape.strings, shape.words);
+    std::ptr::copy_nonoverlapping(
+        words.as_ptr() as *const u64,
+        boxed.add(values::BOX_FIELDS) as *mut u64,
+        used,
     );
-    for ((&field, word), &offset) in description
-        .fields
-        .iter()
-        .zip(&words)
-        .zip(&description.offsets)
-    {
-        let at = boxed.add(values::BOX_FIELDS + 8 * offset as usize) as *mut u64;
-        *at = word[0];
-        if field == Item::Str {
-            *at.add(1) = word[1];
-        }
-    }
     Ok((boxed as u64, item))
+}
+
+/// The most words, and so the most fields, a box holds.
+const MAX_WORDS: usize = values::MAX_BOX_WORDS as usize;
+
+/// Drops the converted fields `items`, whose words are `words` in box order, when a conversion
+/// fails partway.
+unsafe fn release_fields(items: &[MaybeUninit<Item>], words: &[MaybeUninit<u64>]) {
+    let mut at = 0;
+    for item in items {
+        let item = item.assume_init();
+        let second = if item == Item::Str {
+            words[at + 1].assume_init()
+        } else {
+            0
+        };
+        drop_field(item, [words[at].assume_init(), second]);
+        at += shapes::item_words(item) as usize;
+    }
+}
+
+/// Drops one converted field.
+unsafe fn drop_field(item: Item, word: [u64; 2]) {
+    match item {
+        Item::Str => values::ry_str_drop(word[0], word[1]),
+        Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
+            values::ry_list_drop(word[0] as *mut List)
+        }
+        Item::Int | Item::Dbl | Item::Lgl | Item::I64 => {}
+    }
 }
 
 /// A record field that is a handle as a box field: a plain scalar, a usable string, an `I64`,
 /// a ry list, or a record, tuple or tag, converted deeply.
-unsafe fn field_word(field: Sexp) -> Result<(Item, [u64; 2]), &'static str> {
+unsafe fn field_word(
+    shapes: &mut Shapes,
+    field: Sexp,
+    depth: u32,
+) -> Result<(Item, [u64; 2]), &'static str> {
     if field.kind() == SexpType::Record {
-        let (boxed, item) = to_box_inner(field)?;
+        let (boxed, item) = to_box_in(shapes, field, depth)?;
         return Ok((item, [boxed, 0]));
     }
     if field.is_array() && !field.is_altrep() && field.attrib() == rvalues::nil() {
-        let (list, item) = list_of_array(field)?;
-        return Ok((Item::Array(shapes::array_of(item)), [list as u64, 0]));
+        let (list, item) = list_of_array(shapes, field, depth)?;
+        return Ok((Item::Array(shapes.array_of(item)), [list as u64, 0]));
     }
     match type_of(field).ok_or(FIELD)? {
         Type::Int => Ok((Item::Int, [rvalues::ints(field)[0] as u32 as u64, 0])),
@@ -968,7 +1036,11 @@ unsafe fn field_word(field: Sexp) -> Result<(Item, [u64; 2]), &'static str> {
 ///
 /// The type comes from the value, not the declaration, which is safe: compiled code that meets
 /// a shape whose field type it cannot use declines, and the interpreter makes the call.
-unsafe fn list_of_array(array: Sexp) -> Result<(*mut List, Item), &'static str> {
+unsafe fn list_of_array(
+    shapes: &mut Shapes,
+    array: Sexp,
+    depth: u32,
+) -> Result<(*mut List, Item), &'static str> {
     let length = rvalues::length(array);
     let item = match array.kind() {
         SexpType::Integer => Item::Int,
@@ -981,7 +1053,7 @@ unsafe fn list_of_array(array: Sexp) -> Result<(*mut List, Item), &'static str> 
             }
             Item::Str
         }
-        SexpType::List => return list_of_objects(array, length),
+        SexpType::List => return list_of_objects(shapes, array, length, depth),
         _ => return Err(FIELD),
     };
     // A bare `[]` is a logical `Array` whatever list it stands for, while one the checker typed
@@ -1007,7 +1079,12 @@ unsafe fn list_of_array(array: Sexp) -> Result<(*mut List, Item), &'static str> 
 }
 
 /// [`list_of_array`] for an `Array` of records, tags or lists, whose items must share one type.
-unsafe fn list_of_objects(array: Sexp, length: usize) -> Result<(*mut List, Item), &'static str> {
+unsafe fn list_of_objects(
+    shapes: &mut Shapes,
+    array: Sexp,
+    length: usize,
+    depth: u32,
+) -> Result<(*mut List, Item), &'static str> {
     if length == 0 {
         return Err(EMPTY_LIST);
     }
@@ -1019,7 +1096,7 @@ unsafe fn list_of_objects(array: Sexp, length: usize) -> Result<(*mut List, Item
     // before a failure, and the rest are null.
     let mut common = None;
     for index in 0..length {
-        let (found, [word, _]) = match field_word(array.element(index)) {
+        let (found, [word, _]) = match field_word(shapes, array.element(index), depth + 1) {
             Ok(converted @ (Item::Record(_) | Item::Tag(_) | Item::Array(_), _)) => converted,
             Ok((item, word)) => {
                 // A scalar never sits in a list of objects, but a stray one must not leak.
@@ -1044,17 +1121,52 @@ unsafe fn list_of_objects(array: Sexp, length: usize) -> Result<(*mut List, Item
     common.map(|item| (list, item)).ok_or(EMPTY_LIST)
 }
 
-/// The R value of the box `boxed`, deeply: a record, tuple or tag of the box's layout.
+/// The R value of the box `boxed`, which stays owned by the caller: a lazy record of the box's
+/// layout that shares the box, so a value R only passes back to typed code is never converted.
+/// R fills it one level at a time as it reads fields ([`settle`]).
 unsafe fn from_box(boxed: u64) -> Result<Sexp, Unwind> {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || from_box_inner(boxed))
+    let (layout, fields) = shapes::fields((*(boxed as *const Boxed)).shape);
+    if fields.is_empty() {
+        let heap = interp::heap();
+        let record = heap.alloc_record_slots(layout, &[])?;
+        heap.root(record);
+        return Ok(record);
+    }
+    // A lazy record keeps its whole native tree alive while the R heap sees one small record,
+    // so trees R drops would never make the collector run. Native objects past a limit run a
+    // minor collection, and the limit doubles past what survives, so values typed code holds
+    // itself cost collections only geometrically often.
+    if values::ry_live_objects() > NATIVE_COLLECTION_AT.get() {
+        interp::heap().collect(Collection::Minor);
+        NATIVE_COLLECTION_AT.set((values::ry_live_objects() * 2).max(NATIVE_COLLECTION_FLOOR));
+    }
+    values::ry_list_dup(boxed as *mut List);
+    interp::records::alloc_lazy(layout, fields.len(), boxed, NATIVE_VALUES)
+        .inspect_err(|_| values::ry_list_drop(boxed as *mut List))
 }
 
-unsafe fn from_box_inner(boxed: u64) -> Result<Sexp, Unwind> {
-    let pointer = boxed as *const u8;
-    let shape = shapes::shape((*(pointer as *const Boxed)).shape);
+/// The fewest live native objects at which [`from_box`] runs a collection.
+const NATIVE_COLLECTION_FLOOR: i64 = 1 << 20;
+
+/// How R fills the lazy records [`from_box`] makes and releases their boxes.
+const NATIVE_VALUES: NativeValues = NativeValues {
+    settle,
+    release: release_box,
+};
+
+/// Fills the lazy record `record` from its box. Scalars and strings become slots, and a record,
+/// tuple or tag field becomes a lazy record of its own, so reading one field of a deep tree
+/// converts one level.
+unsafe fn settle(record: Sexp) -> Result<(), Unwind> {
+    // Filling allocates, and a reader such as compiled code may hold `record` only in a
+    // register. Were it collected mid-fill, the collection would release the box this loop
+    // still reads.
+    interp::heap().root(record);
+    let pointer = record.lazy_record_value() as *const u8;
+    let (_, fields) = shapes::fields((*(pointer as *const Boxed)).shape);
     let mut slots: SmallVec<[Slot; 4]> = SmallVec::new();
-    for (&item, &offset) in shape.fields.iter().zip(&shape.offsets) {
-        let at = pointer.add(values::BOX_FIELDS + 8 * offset as usize) as *const u64;
+    let mut at = pointer.add(values::BOX_FIELDS) as *const u64;
+    for item in fields {
         let word = *at;
         slots.push(match item {
             Item::Int => Slot::Integer(word as u32 as i32),
@@ -1073,14 +1185,18 @@ unsafe fn from_box_inner(boxed: u64) -> Result<Sexp, Unwind> {
                 lo: word,
                 hi: *at.add(1),
             })?),
-            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box_inner(word)?),
+            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box(word)?),
             Item::Array(_) => Slot::Handle(to_r(Type::of_item(item), [word, 0])?),
         });
+        at = at.add(shapes::item_words(item) as usize);
     }
-    let heap = interp::heap();
-    let record = heap.alloc_record_slots(shape.layout, &slots)?;
-    heap.root(record);
-    Ok(record)
+    interp::heap().settle_record(record, &slots);
+    Ok(())
+}
+
+/// Drops the reference a lazy record held to its box.
+unsafe fn release_box(boxed: u64) {
+    values::ry_list_drop(boxed as *mut List)
 }
 
 /// A rooted character vector holding `string`.
