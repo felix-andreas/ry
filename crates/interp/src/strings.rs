@@ -646,9 +646,8 @@ pub unsafe fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<
 /// [`with_byte_buffer`] for text that is UTF-8.
 pub unsafe fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T> {
     with_byte_buffer(|bytes| {
-        // An empty buffer is valid UTF-8, so the conversion keeps its capacity and never fails.
-        let mut text = String::from_utf8(std::mem::take(bytes)).unwrap_or_default();
-        text.clear();
+        // SAFETY: the buffer arrives empty, and an empty buffer is valid UTF-8.
+        let mut text = unsafe { String::from_utf8_unchecked(std::mem::take(bytes)) };
         let result = body(&mut text);
         *bytes = text.into_bytes();
         result
@@ -1274,7 +1273,10 @@ fn push_integer(
         'o' => write!(out, "{bits:o}"),
         'x' => write!(out, "{bits:x}"),
         'X' => write!(out, "{bits:X}"),
-        _ => write!(out, "{}", value.unsigned_abs()),
+        _ => {
+            crate::format::push_decimal(out, i64::from(value.unsigned_abs()));
+            Ok(())
+        }
     }
     .map_err(|_| error("formatting a number failed"))?;
     if let Some(precision) = precision {

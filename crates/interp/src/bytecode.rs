@@ -3276,7 +3276,19 @@ impl Compiler {
         {
             sites.push(self.code.len() as u32);
         }
-        self.code.push(op_word(op));
+        let word = if op == Op::CallBuiltin
+            && let [_, _, call, _, count] = *operands
+            && let Some(&call) = (call as usize)
+                .checked_sub(FIRST_CONSTANT)
+                .and_then(|index| self.constants.get(index))
+            // SAFETY: the compiler roots every constant it holds, and a call is a pairlist.
+            && unsafe { positional_call(call, count as usize) }
+        {
+            POSITIONAL_CALL_BUILTIN_WORD
+        } else {
+            op_word(op)
+        };
+        self.code.push(word);
         self.code.extend_from_slice(operands);
     }
 
@@ -5228,7 +5240,9 @@ impl Compiler {
         let (start, step) = (entry.start as usize, entry.step);
         let mut position = start;
         while position < exit as usize {
-            let op = OPS[(self.code[position] & OP_MASK) as usize];
+            let Some(op) = op_of(self.code[position]) else {
+                panic!("the compiler emitted an invalid code word at {position}");
+            };
             let width = operand_count(op);
             if op == Op::Jump {
                 let operand = self.code[position + 1];
@@ -5766,6 +5780,7 @@ pub fn op_of(word: u32) -> Option<Op> {
     let index = (word & OP_MASK) as usize;
     let op = match OPS.get(index) {
         Some(&op) => op,
+        None if index == POSITIONAL_CALL_BUILTIN => Op::CallBuiltin,
         None if index < HANDLER_COUNT => Op::Arithmetic,
         None => return None,
     };
@@ -5868,8 +5883,20 @@ const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
     (Arith::GreaterEqual, true),
 ];
 
+/// Tier 0's form of [`Op::CallBuiltin`] for a site whose argument cells are all untagged and
+/// none empty ([`positional_call`]), which is a fact of the call. The compiler emits it, so no
+/// code page is written at run time, which keeps the start-up image's privately mapped code
+/// shared between processes. Its handler fills the arguments straight from the registers,
+/// skipping the walk over the call's cells. Like the arithmetic forms, [`op_of`] reports it as
+/// the generic instruction.
+const POSITIONAL_CALL_BUILTIN: usize = OPS.len() + QUICK_ARITHMETIC.len();
+
+/// The code word of [`POSITIONAL_CALL_BUILTIN`].
+const POSITIONAL_CALL_BUILTIN_WORD: u32 =
+    (op_word(Op::CallBuiltin) & !OP_MASK) | POSITIONAL_CALL_BUILTIN as u32;
+
 /// The size of tier 0's handler tables: every generic and specialized opcode.
-const HANDLER_COUNT: usize = OPS.len() + QUICK_ARITHMETIC.len();
+const HANDLER_COUNT: usize = POSITIONAL_CALL_BUILTIN + 1;
 
 // The interpreter turns a code word's low byte back into an `Op` by its discriminant.
 const _: () = {
@@ -6066,7 +6093,9 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     while pc < words.len() {
         let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
         // Specialized forms trust what tier 0 saw when it wrote them, which a file cannot show.
-        if words[pc] as u32 != op_word(op) {
+        // The positional builtin call is the exception: its call constant shows it, and the
+        // operand pass below checks that.
+        if words[pc] as u32 != op_word(op) && words[pc] as u32 != POSITIONAL_CALL_BUILTIN_WORD {
             return Err("a specialized instruction".to_owned());
         }
         operands(op).ok_or("a record instruction")?;
@@ -6163,6 +6192,13 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
         }
         if op == Op::EndStatement && operand(1) > operand(2) {
             return Err(format!("an invalid register range at {pc}"));
+        }
+        if words[pc] as u32 == POSITIONAL_CALL_BUILTIN_WORD
+            && !positional_call(constant(operand(2))?, operand(4))
+        {
+            return Err(format!(
+                "a positional builtin call with other arguments at {pc}"
+            ));
         }
         pc += 1 + operand_count(op);
     }
@@ -7126,10 +7162,11 @@ macro_rules! handlers {
             let mut table: [Handler; HANDLER_COUNT] = [jump::<SINGLE>; HANDLER_COUNT];
             $(table[Op::$op as usize] = $name::<SINGLE>;)*
             let mut index = 0;
-            while OPS.len() + index < HANDLER_COUNT {
+            while index < QUICK_ARITHMETIC.len() {
                 table[OPS.len() + index] = table[Op::Arithmetic as usize];
                 index += 1;
             }
+            table[POSITIONAL_CALL_BUILTIN] = table[Op::CallBuiltin as usize];
             table
         }
     };
@@ -7648,8 +7685,7 @@ unsafe fn read_element_call<const STRING: bool>(
         || second.tag() != known.nil
         || arguments.car() == known.missing_arg
         || second.car() == known.missing_arg
-        || activity::enabled()
-        || crate::utils::PROFILE_TICK.load(std::sync::atomic::Ordering::Relaxed)
+        || activity::hooks() != 0
     {
         return None;
     }
@@ -7872,7 +7908,40 @@ const fn specialized_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HAN
     forms!(
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
     );
+    table[POSITIONAL_CALL_BUILTIN] = positional_call_builtin;
     table
+}
+
+/// The handler of [`POSITIONAL_CALL_BUILTIN`]: the element read of `[` and `[[` first, as for the
+/// generic instruction, then [`op_call_builtin_positional`].
+unsafe fn positional_call_builtin(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = call_builtin_fast(state, at) {
+        dispatch!(state, next);
+    }
+    let instruction = Instruction {
+        code: state.code,
+        at,
+        registers: state.registers,
+    };
+    let flow = op_call_builtin_positional(state, instruction);
+    let pc = advance::<false>(state, at, at + 1 + operand_count(Op::CallBuiltin), flow);
+    if pc == STOP {
+        return;
+    }
+    release(state);
+    dispatch!(state, pc)
+}
+
+/// Whether `count` untagged, non-empty cells make up `call`'s arguments, which lets its
+/// `CallBuiltin` take [`POSITIONAL_CALL_BUILTIN_WORD`].
+unsafe fn positional_call(call: Sexp, count: usize) -> bool {
+    let mut cell = call.cdr();
+    let mut cells = 0;
+    while cell != nil() && cell.tag() == nil() && cell.car() != missing_arg() {
+        cell = cell.cdr();
+        cells += 1;
+    }
+    cell == nil() && cells == count
 }
 
 /// The opcode of the specialized form of `operator` on two integers or on doubles, if there is
@@ -8207,6 +8276,11 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let call = state.constant(instruction, 2);
     let first = instruction.operand(3);
     let count = instruction.operand(4);
+    // The step table, which the optimizing tier runs single instructions through, sends a
+    // positional site here too.
+    if *instruction.code.add(instruction.at) as u32 == POSITIONAL_CALL_BUILTIN_WORD {
+        return op_call_builtin_positional(state, instruction);
+    }
     let definition = eval::builtin_def(function)?;
     if count == 1
         && let Some(unary) = definition.unary
@@ -8246,6 +8320,70 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         cell = cell.cdr();
     }
     let value = call_builtin(definition, call, function, &args, *state.header)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+/// [`op_call_builtin`] at a [`POSITIONAL_CALL_BUILTIN`] site, whose arguments need neither their
+/// tags read nor an empty one rejected.
+#[inline(always)]
+unsafe fn op_call_builtin_positional(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let values = std::slice::from_raw_parts(
+        instruction.registers.add(instruction.operand(3)),
+        instruction.operand(4),
+    );
+    let definition = eval::builtin_def(function)?;
+    if let [value] = values
+        && let Some(unary) = definition.unary
+        && let Some(value) = unary(*value)?
+    {
+        (*state.interp).visible = true;
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
+    if definition.direct.is_some()
+        && !definition.checks.replacement
+        && let Some(value) = eval::call_direct(definition, call, values)?
+    {
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
+    // The arguments copy the registers `first..first + count`, which keep the same values,
+    // rooted, until this instruction writes its result: a nested call's registers start above
+    // this frame's, and growing the register file carries them over. So they need no root of
+    // their own.
+    let env = *state.header;
+    // Every dispatch needs an object (or an S4 value, for `c`) among the arguments, except the
+    // matrix products' argument count error.
+    let dispatches = definition.generic != Generic::None
+        && (definition.generic == Generic::MatrixOps
+            || values
+                .iter()
+                .any(|value| value.is_object() || value.has_gp(gp::S4_OBJECT)));
+    let value = eval::with_positional_args(
+        values.len(),
+        |index| {
+            values
+                .get(index)
+                .copied()
+                .ok_or_else(|| error("a register is out of range"))
+        },
+        |args| {
+            if dispatches {
+                call_builtin(definition, call, function, args, env)
+            } else {
+                eval::call_builtin_positional(definition, call, function, args, env)
+            }
+        },
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
