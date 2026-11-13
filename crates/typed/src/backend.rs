@@ -1645,6 +1645,60 @@ impl Emitter<'_> {
                 );
                 SmallVec::from_slice(&[list])
             }
+            Op::SplitBounds {
+                string,
+                separator,
+                bounds,
+            } => {
+                let (x, separator) = (self.get(*string)?, self.get(*separator)?);
+                let pieces = bounds.iter().map(|&(index, ..)| index).max().unwrap_or(0);
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16 * pieces,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(I64, slot, 0);
+                let limit = self.iconst(i64::from(pieces));
+                let count = self.call(
+                    address!(values::ry_str_split_bounds),
+                    &[I64; 6],
+                    &[I64],
+                    &[x[0], x[1], separator[0], separator[1], limit, out],
+                )[0];
+                // The runtime writes only the pieces the string has. The rest of the slot is
+                // read as it is, into locals that an `Op::Piece` checks the count before using.
+                for &(index, start, end) in bounds {
+                    let offset = 16 * (index as i32 - 1);
+                    let value = self.builder.ins().stack_load(I64, I64, slot, offset);
+                    self.set(start, &[value])?;
+                    let value = self.builder.ins().stack_load(I64, I64, slot, offset + 8);
+                    self.set(end, &[value])?;
+                }
+                SmallVec::from_slice(&[count])
+            }
+            Op::Piece {
+                string,
+                start,
+                end,
+                count,
+                index,
+            } => {
+                let count = self.one(*count)?;
+                let missing =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedLessThan, count, i64::from(*index));
+                self.fail_if(missing, &inst.fail_drops)?;
+                let x = self.get(*string)?;
+                let (start, end) = (self.one(*start)?, self.one(*end)?);
+                let piece = self.call(
+                    address!(values::ry_str_piece),
+                    &[I64; 4],
+                    &[I64, I64],
+                    &[x[0], x[1], start, end],
+                );
+                SmallVec::from_slice(&[piece[0], piece[1]])
+            }
             Op::Parse { string, parsed } => {
                 let dest = inst
                     .dest

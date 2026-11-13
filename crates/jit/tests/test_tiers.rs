@@ -3167,6 +3167,36 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ k <- 1i64; x <- \"\"; FUNCTION(k, x) }",
             ],
         ),
+        // A split whose pieces are only read at fixed positions builds no list. A read past the
+        // last piece is the error the list raises, a piece is read after the string's variable
+        // changed, and a list that is assigned again on a branch or in a loop reads the split
+        // it then holds.
+        (
+            "function(row: Str) -> Str { parts <- Str.split_on(row, \",\")\n \
+             row <- \"x,y,z\"\n \
+             Str.concat(Str.concat(parts[[3]], \"|\"), parts[[1]]) }",
+            &[
+                "{ x <- \"a,b,c\"; FUNCTION(x) }",
+                "{ x <- \",b,a piece long enough for the heap,d\"; FUNCTION(x) }",
+                "{ x <- \"a,b\"; FUNCTION(x) }",
+                "{ x <- \"\"; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(row: Str, other: Str, swap: Bool) -> Str { \
+             parts <- Str.split_on(row, \"::\")\n \
+             if (swap) parts <- Str.split_on(other, \"\")\n \
+             first <- parts[[1]]\n total <- parts[[2]]\n \
+             for (i in List.range(1, 3)) { total <- Str.concat(total, parts[[1]])\n \
+             parts <- Str.split_on(Str.concat(first, Num.to_str(i)), \"1\") }\n \
+             Str.concat(total, parts[[1]]) }",
+            &[
+                "{ x <- \"k1::v1::w\"; y <- \"whole\"; b <- FALSE; FUNCTION(x, y, b) }",
+                "{ x <- \"a string long enough for the heap::é\"; y <- \"\"; b <- FALSE; FUNCTION(x, y, b) }",
+                "{ x <- \"k1::v1\"; y <- \"whole\"; b <- TRUE; FUNCTION(x, y, b) }",
+                "{ x <- \"k1\"; y <- \"whole\"; b <- FALSE; FUNCTION(x, y, b) }",
+            ],
+        ),
         // A loop that wraps its own value constructs a shape the `match` above it must already
         // test for on the first call.
         (

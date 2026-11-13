@@ -214,8 +214,9 @@ pub struct Block {
 #[derive(Clone, Debug)]
 pub struct Inst {
     /// The local the instruction assigns. An [`Op::CountTrue`] has none and assigns the locals
-    /// of its counts, and an [`Op::Parse`] also assigns whether the string parsed, so read
-    /// [`Inst::assigned`] for what an instruction writes.
+    /// of its counts, an [`Op::Parse`] also assigns whether the string parsed, and an
+    /// [`Op::SplitBounds`] also assigns where each piece lies, so read [`Inst::assigned`] for
+    /// what an instruction writes.
     pub dest: Option<Local>,
     pub op: Op,
     /// The operands this instruction takes ownership of, by position in [`Op::operands`]. The
@@ -245,6 +246,10 @@ impl Inst {
         match &self.op {
             Op::CountTrue { counts, .. } => counts.iter().map(|&(_, local)| local).collect(),
             Op::Parse { parsed, .. } => self.dest.into_iter().chain([*parsed]).collect(),
+            Op::SplitBounds { bounds, .. } => {
+                let bounds = bounds.iter().flat_map(|&(_, start, end)| [start, end]);
+                self.dest.into_iter().chain(bounds).collect()
+            }
             _ => self.dest.into_iter().collect(),
         }
     }
@@ -525,6 +530,27 @@ pub enum Op {
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
     Split(Local, Local),
+    /// Where the leading pieces of `Str.split_on(string, separator)` lie in the string, for a
+    /// split whose list nothing needs ([`crate::unbox::replace_split_lists`]). Each entry of
+    /// `bounds` is a piece's 1-based number and the `I64` locals that receive the byte offsets
+    /// of its start and its end. The destination receives how many pieces the string has, as
+    /// an `I64` that stops counting at the largest number in `bounds`. The locals of a piece
+    /// the string lacks hold no meaningful value.
+    SplitBounds {
+        string: Local,
+        separator: Local,
+        bounds: SmallVec<[(u32, Local, Local); 4]>,
+    },
+    /// Piece `index` (1-based) of a string, given the offsets and the count an
+    /// [`Op::SplitBounds`] of the same string gave. Fails when the string has fewer pieces, as
+    /// the read of the list would.
+    Piece {
+        string: Local,
+        start: Local,
+        end: Local,
+        count: Local,
+        index: u32,
+    },
     /// A string parsed as the destination's type (`I64` or `Dbl`) with Rust's number syntax, and
     /// into `parsed` whether it parses, which a double that is `NaN` does not. The destination
     /// is zero when it does not parse.
@@ -628,6 +654,11 @@ impl Op {
             | VectorAffix(_, a, b)
             | RepeatStr(a, b)
             | Split(a, b)
+            | SplitBounds {
+                string: a,
+                separator: b,
+                ..
+            }
             | DictContains(a, b)
             | DictFind(a, b)
             | DictAt(a, b)
@@ -637,6 +668,13 @@ impl Op {
             Set(a, b, c) | DictInsert(a, b, c) | Swap(a, b, c) | Slice(a, b, c) => {
                 SmallVec::from_slice(&[*a, *b, *c])
             }
+            Piece {
+                string,
+                start,
+                end,
+                count,
+                ..
+            } => SmallVec::from_slice(&[*string, *start, *end, *count]),
             DictPut(a, b, c, d) => SmallVec::from_slice(&[*a, *b, *c, *d]),
             Concat(parts, separator) | PasteVectors(parts, separator) => {
                 let mut operands = parts.clone();
@@ -707,6 +745,7 @@ impl Op {
             | ShapeOf(_)
             | ByteCount(_)
             | Split(..)
+            | SplitBounds { .. }
             | Parse { .. }
             | DictContains(..)
             | DictRemove(..)

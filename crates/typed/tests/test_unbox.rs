@@ -5,7 +5,7 @@ use {
     typed::{
         ir::{Builder, Constant, Function, Item, Local, Op, Terminator, Type},
         shapes,
-        unbox::unbox,
+        unbox::{replace_split_lists, unbox},
     },
 };
 
@@ -367,4 +367,119 @@ fn a_variable_that_only_holds_tags_without_payloads_becomes_their_shape() {
         "{function}"
     );
     assert_eq!(insts.count(), 4);
+}
+
+const STRINGS: Type = Type::Vector {
+    item: Item::Str,
+    array: true,
+};
+
+/// `parts <- Str.split_on(text, separator)` of two string parameters, with `parts` a variable
+/// the split's result is copied into.
+fn split(builder: &mut Builder) -> Local {
+    let pieces = builder.emit(STRINGS, Op::Split(Local(0), Local(1)));
+    builder.emit(STRINGS, Op::Copy(pieces))
+}
+
+fn splits(function: &Function) -> usize {
+    function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter(|inst| matches!(inst.op, Op::Split(..)))
+        .count()
+}
+
+#[test]
+fn a_split_only_read_at_constant_positions_builds_no_list() {
+    let mut builder = Builder::new(String::from("test"), &[Type::Str, Type::Str, Type::Bool]);
+    let (then, join) = (builder.block(), builder.block());
+    let parts = split(&mut builder);
+    let third = builder.emit(Type::I64, Op::Const(Constant::I64(3)));
+    let result = builder.emit(Type::Str, Op::Get(parts, third));
+    builder.terminate(Terminator::Branch {
+        condition: Local(2),
+        then,
+        otherwise: join,
+    });
+    builder.switch_to(then);
+    let first = builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+    builder.push(Some(result), Op::Get(parts, first));
+    builder.terminate(Terminator::Jump(join));
+    builder.switch_to(join);
+    builder.terminate(Terminator::Return(result));
+    let mut function = builder.function;
+    replace_split_lists(&mut function);
+    assert_eq!(splits(&function), 0, "{function}");
+    let insts: Vec<&Op> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .map(|inst| &inst.op)
+        .collect();
+    // One measurement finds the two pieces that are read, and each read cuts its own piece
+    // out of the string, checked against the number of pieces.
+    let measured: Vec<u32> = insts
+        .iter()
+        .filter_map(|op| match op {
+            Op::SplitBounds { bounds, .. } => Some(bounds.iter().map(|bound| bound.0)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(measured, [1, 3], "{function}");
+    let read: Vec<u32> = insts
+        .iter()
+        .filter_map(|op| match op {
+            Op::Piece { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(read, [3, 1], "{function}");
+    assert!(
+        !insts.iter().any(|op| matches!(op, Op::Get(..))),
+        "{function}"
+    );
+}
+
+#[test]
+fn a_split_whose_list_is_needed_stays() {
+    // Each use needs the list itself: the function's result, its length, a read at a position
+    // only known when the code runs, a read at a position a second assignment may change, and
+    // a read past the positions a split is measured for.
+    let uses: [fn(&mut Builder, Local) -> Local; 5] = [
+        |_, parts| parts,
+        |builder, parts| builder.emit(Type::I64, Op::Length(parts)),
+        |builder, parts| builder.emit(Type::Str, Op::Get(parts, Local(2))),
+        |builder, parts| {
+            let position = builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+            builder.push(Some(position), Op::Const(Constant::I64(2)));
+            builder.emit(Type::Str, Op::Get(parts, position))
+        },
+        |builder, parts| {
+            let position = builder.emit(Type::I64, Op::Const(Constant::I64(33)));
+            builder.emit(Type::Str, Op::Get(parts, position))
+        },
+    ];
+    for (case, used) in uses.into_iter().enumerate() {
+        let mut builder = Builder::new(String::from("test"), &[Type::Str, Type::Str, Type::I64]);
+        let parts = split(&mut builder);
+        let second = builder.emit(Type::I64, Op::Const(Constant::I64(2)));
+        builder.emit(Type::Str, Op::Get(parts, second));
+        let result = used(&mut builder, parts);
+        builder.terminate(Terminator::Return(result));
+        let mut function = builder.function;
+        replace_split_lists(&mut function);
+        assert_eq!(splits(&function), 1, "case {case}: {function}");
+    }
+}
+
+#[test]
+fn a_split_that_is_never_read_is_not_computed() {
+    let mut builder = Builder::new(String::from("test"), &[Type::Str, Type::Str]);
+    split(&mut builder);
+    builder.terminate(Terminator::Return(Local(0)));
+    let mut function = builder.function;
+    replace_split_lists(&mut function);
+    assert!(function.blocks[0].insts.is_empty(), "{function}");
 }

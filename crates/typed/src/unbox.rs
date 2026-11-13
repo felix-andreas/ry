@@ -25,11 +25,20 @@
 //! the other shapes do not assign. Such a read never runs for those shapes, but the reference
 //! counts treat the variable as live, which is sound because a local starts out as zero and a
 //! zero string, list or box counts as nothing.
+//!
+//! The list `Str.split_on` builds gets the same treatment when its items are only read at
+//! constant positions, as in `parts <- Str.split_on(row, ","); parts[[2]]`
+//! ([`replace_split_lists`]). Its variables are the string, the number of pieces, and where
+//! each piece that is read starts and ends, so a read cuts its piece out of the string and no
+//! list or unread piece is ever allocated.
 
-use crate::{
-    ir::{Constant, Function, Inst, Local, Op, Terminator, Type},
-    ownership::Bits,
-    shapes,
+use {
+    crate::{
+        ir::{Constant, Function, Inst, Item, Local, Op, Terminator, Type},
+        ownership::Bits,
+        shapes,
+    },
+    smallvec::SmallVec,
 };
 
 /// How many times [`unbox`] runs: each run frees the boxes that were only fields of the boxes
@@ -43,6 +52,190 @@ pub fn unbox(function: &mut Function) {
     for _ in 0..MAX_ROUNDS {
         if !unbox_once(function) {
             break;
+        }
+    }
+}
+
+/// The largest position a read of a replaced split list may have. It bounds the stack room one
+/// split takes for its offsets, and a set of read positions fits one word.
+const MAX_PIECES: i64 = 32;
+
+/// Replaces every list of `Str.split_on` that only has items read at constant positions with
+/// the string and the offsets of those pieces in it.
+///
+/// A group of list variables is replaced when every assignment to one of them is a split or a
+/// copy within the group, and every use is a copy within the group or an [`Op::Get`] whose
+/// index is a local that one `I64` constant assigns. A read keeps its failure: an
+/// [`Op::Piece`] fails where the list would have been too short.
+pub fn replace_split_lists(function: &mut Function) {
+    let locals = function.locals.len();
+    let mut groups = Groups {
+        parents: (0..locals as u32).collect(),
+    };
+    // The constant each local holds, for a local that one constant assigns and nothing else.
+    let mut constants: Vec<Option<i64>> = vec![None; locals];
+    let mut assigned = Bits::new(locals);
+    let mut splits = false;
+    for inst in function.blocks.iter().flat_map(|block| &block.insts) {
+        for local in inst.assigned() {
+            let index = local.0 as usize;
+            constants[index] = match inst.op {
+                Op::Const(Constant::I64(value))
+                    if !assigned.contains(index) && !function.is_param(local) =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            };
+            assigned.insert(index);
+        }
+        match (&inst.op, inst.dest) {
+            (&Op::Copy(source), Some(dest))
+                if holds_strings(function, source) && holds_strings(function, dest) =>
+            {
+                groups.join(source, dest);
+            }
+            (Op::Split(..), Some(_)) => splits = true,
+            _ => {}
+        }
+    }
+    if !splits {
+        return;
+    }
+
+    // By the local that names a group: whether its lists stay, whether a split builds one, and
+    // the positions its reads have, as one bit each.
+    let mut kept = Bits::new(locals);
+    let mut built = Bits::new(locals);
+    let mut reads: Vec<u32> = vec![0; locals];
+    for block in &function.blocks {
+        for inst in &block.insts {
+            for local in inst.assigned() {
+                if !holds_strings(function, local) {
+                    continue;
+                }
+                let group = groups.find(local) as usize;
+                match inst.op {
+                    Op::Split(..) => built.insert(group),
+                    Op::Copy(source) if holds_strings(function, source) => {}
+                    _ => kept.insert(group),
+                }
+            }
+            for operand in inst.op.operands() {
+                if !holds_strings(function, operand) {
+                    continue;
+                }
+                let group = groups.find(operand) as usize;
+                let replaceable = match (&inst.op, inst.dest) {
+                    (&Op::Get(_, index), Some(_)) => match constants[index.0 as usize] {
+                        Some(position @ 1..=MAX_PIECES) => {
+                            reads[group] |= 1 << (position - 1);
+                            true
+                        }
+                        _ => false,
+                    },
+                    (Op::Copy(_), Some(dest)) => holds_strings(function, dest),
+                    _ => false,
+                };
+                if !replaceable {
+                    kept.insert(group);
+                }
+            }
+        }
+        if let Terminator::Return(local) = block.terminator
+            && holds_strings(function, local)
+        {
+            kept.insert(groups.find(local) as usize);
+        }
+    }
+
+    // The variables of a replaced local are fresh locals numbered from `first[local]`: the
+    // string, the number of pieces, and the start and the end of each piece its group reads,
+    // in the order of their positions.
+    let mut first: Vec<u32> = vec![NONE; locals];
+    for (index, first) in first.iter_mut().enumerate() {
+        let local = Local(index as u32);
+        if !holds_strings(function, local) {
+            continue;
+        }
+        let group = groups.find(local) as usize;
+        if kept.contains(group) || !built.contains(group) {
+            continue;
+        }
+        *first = function.locals.len() as u32;
+        function.locals.push(Type::Str);
+        let offsets = 1 + 2 * reads[group].count_ones() as usize;
+        let room = function.locals.len() + offsets;
+        function.locals.resize(room, Type::I64);
+    }
+
+    let replaced = |local: Local| first[local.0 as usize] != NONE;
+    // The start of the piece at `position` among the variables of a local whose group reads
+    // the positions `reads`; its end is the local after it.
+    let start_of = |first: u32, reads: u32, position: u32| {
+        let before = (reads & ((1 << (position - 1)) - 1)).count_ones();
+        Local(first + 2 + 2 * before)
+    };
+    for body in &mut function.blocks {
+        let old = std::mem::take(&mut body.insts);
+        body.insts.reserve(old.len());
+        for inst in old {
+            match (&inst.op, inst.dest) {
+                (&Op::Split(string, separator), Some(dest)) if replaced(dest) => {
+                    let first = first[dest.0 as usize];
+                    let reads = reads[groups.find(dest) as usize];
+                    // A list that is never read needs nothing computed at all.
+                    if reads == 0 {
+                        continue;
+                    }
+                    let bounds: SmallVec<[(u32, Local, Local); 4]> = (1..=MAX_PIECES as u32)
+                        .filter(|position| reads & (1 << (position - 1)) != 0)
+                        .map(|position| {
+                            let start = start_of(first, reads, position);
+                            (position, start, Local(start.0 + 1))
+                        })
+                        .collect();
+                    let measure = Op::SplitBounds {
+                        string,
+                        separator,
+                        bounds,
+                    };
+                    body.insts.push(Inst::new(Some(Local(first + 1)), measure));
+                    // The string is copied after it is measured, so that a string that dies
+                    // here is moved into the variable and not counted twice.
+                    body.insts
+                        .push(Inst::new(Some(Local(first)), Op::Copy(string)));
+                }
+                (&Op::Copy(source), Some(dest)) if replaced(dest) => {
+                    let (from, to) = (first[source.0 as usize], first[dest.0 as usize]);
+                    let reads = reads[groups.find(dest) as usize];
+                    let count = if from == to || reads == 0 {
+                        0
+                    } else {
+                        2 + 2 * reads.count_ones()
+                    };
+                    for offset in 0..count {
+                        let local = Local(to + offset);
+                        body.insts
+                            .push(Inst::new(Some(local), Op::Copy(Local(from + offset))));
+                    }
+                }
+                (&Op::Get(list, index), dest) if replaced(list) => {
+                    let first = first[list.0 as usize];
+                    let reads = reads[groups.find(list) as usize];
+                    let position = constants[index.0 as usize].unwrap_or(0) as u32;
+                    let start = start_of(first, reads, position);
+                    let piece = Op::Piece {
+                        string: Local(first),
+                        start,
+                        end: Local(start.0 + 1),
+                        count: Local(first + 1),
+                        index: position,
+                    };
+                    body.insts.push(Inst::new(dest, piece));
+                }
+                _ => body.insts.push(inst),
+            }
         }
     }
 }
@@ -267,6 +460,15 @@ fn unbox_once(function: &mut Function) -> bool {
 /// parameter holds its caller's box.
 fn holds_box(function: &Function, local: Local) -> bool {
     !function.is_param(local) && matches!(function.ty(local), Type::Record(_) | Type::Tag(_))
+}
+
+/// Whether `local` is a variable that holds a list of strings and that the function owns.
+fn holds_strings(function: &Function, local: Local) -> bool {
+    let strings = Type::Vector {
+        item: Item::Str,
+        array: true,
+    };
+    !function.is_param(local) && function.ty(local) == strings
 }
 
 /// Whether a field read into a local of type `read` may copy a local of type `value`: the same

@@ -1164,6 +1164,9 @@ fn string_functions_follow_r_and_the_standard_library() {
             ])
         );
         ry_str_drop(accented.lo, accented.hi);
+        check_split_bounds("é,a part long enough for the heap,", ",");
+        check_split_bounds("a part long enough for the heap", "é");
+        check_split_bounds("né,é,née", "é");
         // Separators at every offset of an eight-byte word, alone and in runs, in texts whose
         // length covers the word-at-a-time part and the tail.
         for length in 0..40usize {
@@ -1183,6 +1186,9 @@ fn string_functions_follow_r_and_the_standard_library() {
                 assert_eq!(read(split), Model::Str(expected), "splitting {text:?}");
                 ry_list_drop(split);
                 ry_str_drop(subject.lo, subject.hi);
+                for separator in [",", "x,", ",,", ""] {
+                    check_split_bounds(&text, separator);
+                }
             }
         }
         let back = ry_list_join(pieces, separator.lo, separator.hi);
@@ -1310,6 +1316,47 @@ fn string_functions_follow_r_and_the_standard_library() {
         }
     }
     assert_eq!(live(), before);
+}
+
+/// Checks the offsets `ry_str_split_bounds` gives, and the pieces `ry_str_piece` cuts at them,
+/// against Rust's `split`, for every limit from one piece to one past the last.
+fn check_split_bounds(text: &str, separator: &str) {
+    let model: Vec<&str> = if separator.is_empty() {
+        vec![text]
+    } else {
+        text.split(separator).collect()
+    };
+    // SAFETY: every string passed is live, and `bounds` has room for `limit` pairs.
+    unsafe {
+        let (subject, by) = (str_of(text), str_of(separator));
+        for limit in 1..=model.len() + 1 {
+            let mut bounds = vec![[u64::MAX; 2]; limit];
+            let found = ry_str_split_bounds(
+                subject.lo,
+                subject.hi,
+                by.lo,
+                by.hi,
+                limit as u64,
+                bounds.as_mut_ptr() as *mut u64,
+            ) as usize;
+            assert_eq!(
+                found,
+                limit.min(model.len()),
+                "the pieces of {text:?} by {separator:?}, up to {limit}"
+            );
+            for (&[start, end], expected) in bounds[..found].iter().zip(&model) {
+                let piece = ry_str_piece(subject.lo, subject.hi, start, end);
+                assert_eq!(
+                    &text_of(piece),
+                    expected,
+                    "a piece of {text:?} by {separator:?}"
+                );
+                ry_str_drop(piece.lo, piece.hi);
+            }
+        }
+        ry_str_drop(subject.lo, subject.hi);
+        ry_str_drop(by.lo, by.hi);
+    }
 }
 
 #[test]

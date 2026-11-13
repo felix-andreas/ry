@@ -2136,6 +2136,70 @@ pub unsafe extern "C" fn ry_str_split(
     list
 }
 
+/// Where the first `pieces` pieces of `Str.split_on` lie in a borrowed string, for a caller
+/// that reads pieces at known positions and needs no list. The byte offsets of each piece's
+/// start and end are written to `bounds`, which has room for `pieces` pairs, and the result is
+/// how many pairs were written. The scan stops at the end of the last piece asked for.
+pub unsafe extern "C" fn ry_str_split_bounds(
+    lo: u64,
+    hi: u64,
+    separator_lo: u64,
+    separator_hi: u64,
+    pieces: u64,
+    bounds: *mut u64,
+) -> u64 {
+    let string = Str { lo, hi };
+    let separator = Str {
+        lo: separator_lo,
+        hi: separator_hi,
+    };
+    let separator = separator.as_str();
+    let pieces = pieces as usize;
+    if pieces == 0 {
+        return 0;
+    }
+    let bounds = bounds as *mut [u64; 2];
+    let text = string.bytes();
+    let mut found = 0;
+    let mut start = 0;
+    if let [byte] = *separator.as_bytes() {
+        let pattern = u64::from(byte) * 0x0101_0101_0101_0101;
+        let mut index = 0;
+        while index < text.len() {
+            let mut matches = separators_in_word(text, index, pattern);
+            while matches != 0 {
+                let at = index + (matches.trailing_zeros() / 8) as usize;
+                bounds.add(found).write([start as u64, at as u64]);
+                found += 1;
+                if found == pieces {
+                    return found as u64;
+                }
+                start = at + 1;
+                matches &= matches - 1;
+            }
+            index += 8;
+        }
+    } else if !separator.is_empty() {
+        for (at, _) in string.as_str().match_indices(separator) {
+            bounds.add(found).write([start as u64, at as u64]);
+            found += 1;
+            if found == pieces {
+                return found as u64;
+            }
+            start = at + separator.len();
+        }
+    }
+    bounds.add(found).write([start as u64, text.len() as u64]);
+    found as u64 + 1
+}
+
+/// The bytes of a borrowed string from `start` to `end`, which [`ry_str_split_bounds`] gave for
+/// the same string, as a string of their own.
+pub unsafe extern "C" fn ry_str_piece(lo: u64, hi: u64, start: u64, end: u64) -> Str {
+    let string = Str { lo, hi };
+    str_from_bytes(string.bytes().get_unchecked(start as usize..end as usize))
+}
+
 /// The top bit of every byte, among the eight of `text` from `index` on, that equals the byte
 /// `pattern` repeats. Bytes past the end of the text never match.
 #[inline]
@@ -2145,6 +2209,11 @@ unsafe fn separators_in_word(text: &[u8], index: usize, pattern: u64) -> u64 {
     let (word, inside) = if remaining >= 8 {
         let word = (text.as_ptr().add(index) as *const u64).read_unaligned();
         (word, u64::MAX)
+    } else if text.len() >= 8 {
+        // The last eight bytes of the text end with the ones wanted, and the shift moves those
+        // to the low end, which is one read where assembling them is several.
+        let word = (text.as_ptr().add(text.len() - 8) as *const u64).read_unaligned();
+        (word >> (8 * (8 - remaining)), (1 << (8 * remaining)) - 1)
     } else {
         // An inline string of up to eight bytes holds them in its first word, zero-padded.
         let word = str_from_bytes(text.get_unchecked(index..)).lo;
