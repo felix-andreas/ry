@@ -303,6 +303,21 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Closures that share a tier-0 body share its lookup hints, so R6-style objects miss them.** Every closure over one `function` expression runs the same code object, and each R6-style object's methods have their own enclosure, so `lookup_function` misses the inline cache that another object's closure filled. Against the main it merged into, shared bodies run the objects workload at +0.21% instructions (7,637.1M to 7,653.3M at `RY_BENCH_REPEAT=2`) and +0.35 MiB peak anonymous RSS (42.64 to 42.99 MiB, median of 5 rounds). By function, on a slightly older main (+0.13%, +10.2M): about 5.9M is `lookup_function` with unchanged code, and 3.4M is `hash_shape`, the check that a body was not changed in place before a new closure takes its code. What the extra resident memory holds is not yet attributed; the `Bodies` columns and the shared code that lives as long as any closure over its body are the suspects. A call protocol that keeps lookup hints per closure or per enclosure, rather than per code object, would recover the first part.
 - **Heap page placement makes peak RSS follow collection timing, not live data** (owner: the GC and heap track). With `formatC()` calling its kernel directly, report allocates less, runs fewer minor collections (105 against 138 on a formatC-only loop), and peaks about 1 MB higher. The GC log's old-generation and nursery bytes and massif's malloc peak match main, and all the extra residency is in one 32 MB arena. Fix the placement so the peak tracks live data; `testing.md`, "Judge a change's peak RSS", exempts such rises until then.
 
+## Measured and not taken: O(1) `Sys.getenv` and `options`
+
+- **Neither is worth an index at today's costs.** On testthat_full (callgrind, `RY_JIT=off`, warm Ir 594.6M per repeat) the scans and walks are:
+
+  | Piece | Warm Ir | Share |
+  |---|---|---|
+  | `find_variable`, the single-name `environ` scan (`crates/interp/src/system.rs`) | 4.51M | 0.76% |
+  | `do_sys_getenv` self: the multi-name scan and the result | 3.66M | 0.62% |
+  | `set_option`, the `.Options` pairlist walk (`crates/interp/src/envir.rs`) | 2.89M | 0.49% |
+  | `option_value`, the `getOption` walk | 2.13M | 0.36% |
+  | `do_options` self: by-name `get_option` byte compares and the result | 2.95M | 0.50% |
+
+  Only the scan and walk parts go away, about 12.5M (2.1%), and a probe per lookup costs some of that back, so the net is about 1.5 to 1.9%. The `environ` scan already rejects most entries after one byte load, glibc style.
+- **The designs, if a profile ever puts these higher:** for options, an index from symbol to pairlist cell beside `.Options`, rebuilt when the binding's head changes, which keeps `.Options` and its order exact (about 1.1% net). For getenv, a slot index validated against the `environ` base pointer and the entry pointer, re-reading the entry's bytes on every hit so C `setenv` and `putenv` stay visible (about 0.8% net); it is derived state, so it needs a stronger case than this.
+
 ## Open: one probe to intern a new string (Track C, strings)
 
 - **`mk_char` probes the string table twice for a string it does not hold.** `find` misses, then `intern_new` calls `StringTable::insert`, which walks the same probe sequence again to find the empty slot (`crates/heap/src/heap.rs`, `crates/heap/src/strings.rs`). A find-or-insert entry that returns the empty slot from the miss would save the second walk. Measured on the report workload (single process, release, callgrind): `paste` and `paste0` run 240k times on scalars that mostly build new strings, and interning costs about 470 Ir per call (`find` 105, `scan` 68, `intern_new` 274), of which the second probe is about 100 Ir per call. The slot must stay valid across the allocation in `new_char`, so the entry has to be re-derived when that allocation ran a collection (which sweeps dead strings from the table) or when the insert has to grow the table.
