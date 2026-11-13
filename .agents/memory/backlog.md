@@ -221,22 +221,21 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 ### Gaps the typed public ports found
 
-Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these, and each port spells around them as noted, so its checksum matches GNU R and it runs natively.
+Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomatic style) hit these. Every port runs natively and prints GNU R's checksum, because it writes around each gap as noted.
 
-- **Not compiled natively; the whole function runs in the interpreter:** a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
+- **Not compiled natively; the whole function runs in the interpreter:**
+  - a standard library function passed by name, as in `List.map(xs, Num.to_f64)` ("a mapped function that is not a typed closure"), so the ports wrap it in a lambda (`\(row) List.sum(row)`);
+  - a `Dict` whose key or value is not `I64`, `F64` or `Str` (`Dict.empty` needs the checker's settled types, which `.ry_items(Dict.empty(), "Dict<Str, I64>")` carries).
 - **One refusal spreads to the callees.** `tree` and `check` in binarytrees compile when a native caller calls them, but under a refused `execute` they run in the interpreter too. A `List<Record>` that an interpreted typed function passes on is "an R value of type `list` that typed code cannot hold" (nbody, fasta).
 - **Literal typing in the checker:**
-  - A local whose literal is reassigned later in a loop stays `double`: `x <- 0` then `x <- x + 1.5` in a `for` body against an `F64` result reports `expected F64, found double`.
+  - A local whose literal is reassigned later in a loop or branch stays `double`: `x <- 0` then `if (n > 1i64) x <- x + 1.5` against an `F64` result reports "expected `F64`, found `double`", so the ports spell `0f64`.
   - Literals inside a nominal constructor stay `double` (`@Tree(:Leaf(1))` against `:Leaf(I64)`).
   - A literal variable first read as a list index (`cprob_lookup[[j]]`) is decided as `double`, so a later `lookup[[i]] <- j` into a `List<I64>` is an error. The fastaredux ports spell `j <- 1i64`.
 - **A recursive `alias` is refused**, with a message that prints an enormous expanded type; a nominal `type` works.
-- **A walk accumulator types its lambda only once settled.** `List.walk(rows, List.repeat(0f64, n), \(sums, row) sums + row)` checks, but `List.repeat(0, n)` leaves the literal open, so the formal gets no hint and the body reports `T` against the row type. The ports spell `0f64`.
-- **A standard library function passed by name** (`List.map(rows, List.sum)`, `List.map(xs, Num.to_f64)`) is not a typed closure to the typed core, so the ports wrap it in a lambda (`\(row) List.sum(row)`).
 - **`Num.sqrt` stops on `NaN`** ("must be a single number, not `NaN`") instead of returning `NaN`.
 - **regexdna matches by hand**, because typed ry has no regular expressions: the port parses each pattern into fixed-length alternatives of byte classes. It runs at about GNU R's time, the slowest typed port against GNU R. A callgrind profile shows about 450 instructions per byte position, most of them in the `CallTyped` to `matches_at` and in list copies around it, so the cost is the typed core's per-call overhead, not the matching.
 - **A ry list holds no `NaN`**, so the mandelbrot ports freeze a point once `|z| > 2` (`List.map3`) instead of letting it overflow to `NaN` as the R vector code does; the count of points inside the set is the same.
 - **`List.map` over an empty list stops native code** (`Lowerer::map`, `fail_if(empty)`), and the interpreter runs the call again. The interpreter builds an empty map result with `arrays::from_items(&[])`, which has no item type, and the stop keeps the two tiers' values identical. Settle the interpreter's empty result from the checker's type, then drop the stop.
-- **Inexpressible:** regexdna needs regular expressions, which typed ry does not have.
 - **Non-constant defaults.** A typed function whose parameter default is not a constant is not compiled by the typed core. (Unverified.)
 - **Typed values outside elaborated code.** The preflight elaborates only code that `ry run` and the console evaluate, so under `ry load` and `source()` these gaps show (`decisions.md`, "The checker decides a literal's run-time type"; unverified):
   - a literal the checker types `I64` runs as `I64` only in elaborated code, so `ry load` and `source()` convert only annotated bindings;
