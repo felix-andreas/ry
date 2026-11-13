@@ -1561,13 +1561,13 @@ data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a t
 generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
-`ry run` beat data.table under GNU R on every group-by and join question and on two of the three
-`:=` loops, and all three runs give the same checksums. The loop that updates 1% of the rows is
-the exception. data.table builds an index on `id4` during the first pass and afterwards writes
-only the matching rows, in place, while a `:=` on a row subset of a DataFrame computes a whole
-new column on every pass. Each cell is the faster of two runs, in seconds, and the last row is
-each engine's peak resident memory over the whole run, which is the loop that adds 100 columns.
-The last column is the same engine driven from Rust, without R.
+`ry run` beat data.table under GNU R on every question, and all three runs give the same
+checksums. The loop that updates 1% of the rows writes only the matching rows, in place, in both
+engines: data.table builds an index on `id4` during the first pass, and a DataFrame builds a row
+index of `id4` on the second `id4 == step` filter and keeps it until `id4` changes. Each cell is
+the faster of two runs, in seconds, and the last row is each engine's peak resident memory over
+the whole run, which is the loop that adds 100 columns. The last column is the same engine
+driven from Rust, without R.
 
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
@@ -1617,6 +1617,13 @@ columns in the engine (`DataFrame.select` of one `Expr.sum` per column), because
 | total | 62.97 | 17.28 | 16.88 |
 | peak memory (GB) | 12.5 | 8.5 | 8.5 |
 <!-- /bench-table:1e8-groupby -->
+
+The two `:=` loops that write existing columns fit at this size as well
+(`just bench-table <dir> --rows 1e8 --updates-only`). The subset loop writes one million rows
+per pass.
+
+<!-- bench-table:1e8-updates -->
+<!-- /bench-table:1e8-updates -->
 
 The join questions are measured separately at db-benchmark's 5 GB size
 (`just bench-table <dir> --rows 1e8 --joins-only`), because their inputs are twice the group-by

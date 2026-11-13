@@ -3247,7 +3247,8 @@ first lines R had already read, leaving R mid-command.
   holds the frame's only reference, and otherwise forks the table (cheap: Arrow buffers are
   shared) and rebinds that variable, searching enclosing scopes, so a global updated inside a
   function is rebound where it lives. The only reference reads as a count of two, because the
-  finalizer every frame carries counts as one (`assign` in `crates/interp/src/frame.rs`). An alias taken before the update keeps the old columns, as the checker models.
+  finalizer every frame carries counts as one (`assign` in `crates/interp/src/frame.rs`). An
+  alias taken before the update keeps the old columns, as the checker models.
   `DataFrame.set_key` always forks and rebinds.
 - **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
   `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
@@ -4796,6 +4797,40 @@ check` releases its trees once, and memoized records are compact" below).
   then gathers the other.
 - **Impact.** Every db-benchmark join at 1e8 rows runs in the kernel. The transient memory of a
   join is the bucket index and one side's row indices; `tests/test_memory.rs` pins it.
+
+## A filtered `:=` reads a row index and writes in place
+
+- **Previous shape.** `x[column == value, target := ...]` compared the whole filter column
+  against the literal on every call, and from R it also copied the whole target column on every
+  call. The copy was a reference-count mistake: the finalizer that `wrap` registers for a frame
+  holds one reference, so a frame that one variable refers to counts two, and `assign` in
+  `crates/interp/src/frame.rs` forked the table unless the count was one. The fork's column was
+  shared with the frame the variable still held, so `scatter` copied it, and the replaced frames
+  stayed allocated until the next collection.
+- **What was weak.** A loop of small updates cost the table's length per pass twice over, which
+  made db-benchmark's "`:=` on 1% of rows, 100 times" the one question data.table won. data.table
+  answers it with a secondary index it builds on the first `id4 == step`.
+- **Target shape.** `assign` writes in place while the count is at most two. `Table` keeps
+  `equality_filters`, a short list of columns with the state of each: scanned once, indexed, or
+  not indexable. `Table::row_index` builds a column's `RowIndex` on the second equality filter
+  since the column last changed, so a one-off update never pays for an index. A `RowIndex` is the
+  join's `Buckets` (`kernel.rs`) over the column's values, built with one stable parallel
+  counting sort, which keeps each value's rows ascending. An Integer column qualifies when its
+  value range is at most twice the rows plus 4,096, and a Factor column always does, by code.
+  `indexed_rows` in `query.rs` recognizes `column == literal` in either order and reads the rows;
+  every other filter scans as before. `scatter_values` writes a long ascending row list on the
+  worker pool by carving the column into disjoint stretches.
+- **The index is a secondary index, not a cache of a slow path.** The first filter still scans,
+  and the scan is as fast as it was. The index answers a different question (all rows of a value)
+  that a repeated filter asks, the way `string_codes` answers a repeated join on a text column.
+  It has one owner and one invalidation point: `forget_column`, which every path that takes,
+  puts, replaces or drops a column already calls, plus `set_key`, which reorders the rows. Forks
+  share it through an `Arc`.
+- **Cost.** 4 bytes per row for the row list plus 4 bytes per distinct value, held until the
+  column changes or the table is dropped.
+- **Not done: a row index for a filter that runs once.** A single `x[id == value, ...]` scans.
+  Building the index reads the column twice and writes a row list as long as it, which is more
+  work than the one scan it would replace.
 
 ## A query without `by` aggregates in the kernel as one group
 
