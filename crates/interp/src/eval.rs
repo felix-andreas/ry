@@ -640,8 +640,26 @@ pub unsafe fn pending_slot(env: Sexp, symbol: Sexp) -> Option<Sexp> {
 /// The content of the slot of `function`'s frame at register `header` that binds `symbol`, or
 /// `None` when the slots leave the name to the enclosure: no slot has that name, or it is unbound.
 unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Sexp> {
-    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
-    let slot = (0..values::length(names)).find(|&index| names.element(index) == symbol)?;
+    // The formals hold the first slots in their order, whether or not the slot names list them
+    // (a `...` the body only forwards is not named), as reifying binds them.
+    let mut formal = function.car();
+    let mut position = 0;
+    let mut slot = None;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbol {
+            slot = Some(position);
+            break;
+        }
+        position += 1;
+        formal = formal.cdr();
+    }
+    let slot = match slot {
+        Some(slot) => slot,
+        None => {
+            let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+            (0..values::length(names)).find(|&index| names.element(index) == symbol)?
+        }
+    };
     let value = *bytecode::register_address(header + 1 + slot);
     (value != unbound()).then_some(value)
 }

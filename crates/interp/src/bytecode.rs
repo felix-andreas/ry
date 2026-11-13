@@ -6013,9 +6013,15 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
         return Err(unwind);
     };
     let loops = machine.code.cdr().element(LOOPS);
+    // A slot frame's own environment may be the pending one that `parent.frame()` handed out,
+    // which a jump evaluated there carries without the frame having reified.
+    let env = machine.env();
+    let ours = |target: Sexp| {
+        target == env || (env == nil() && target == eval::pending_env_of(machine.header))
+    };
     let target = match jump {
-        Jump::Break { env: target } if target == machine.env() => loop_target(loops, pc, true),
-        Jump::Next { env: target } if target == machine.env() => loop_target(loops, pc, false),
+        Jump::Break { env: target } if ours(target) => loop_target(loops, pc, true),
+        Jump::Next { env: target } if ours(target) => loop_target(loops, pc, false),
         _ => None,
     };
     match target {
