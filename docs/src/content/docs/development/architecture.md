@@ -453,14 +453,20 @@ new definition re-checks only the items that read its name. Folding the edges in
 costs one memo per item instead of two.
 
 A constructed name is usually bound nowhere, and a per-item `frame_binder` memo for each such
-lookup comes to about 100,000 memos (about 18 MB) on the finance bench. `package_name` therefore
-also says whether any project file binds the name at top level, from a bitset over symbol indices
-that `project_bound_names` folds from each file's binders. When none does, the item's file has no
-binder for it either, and the lookup stops there without a query.
+lookup comes to about 100,000 memos (about 18 MB) on the finance bench. An item of a package file
+needs none of them. Every top-level name a package file binds is a definition or a conditional
+write of the package layer, so when `package_name` finds neither, the item's file has no binder for
+the name, and the lookup stops there without a query. An item of a test or script file has no such
+layer over its file's names and asks `frame_binder`, which reads the binders of that one file.
+
+No lookup folds the binders of every file. A file's binders come from naming its items, so such a
+fold would lower every item of the project, test files included, before the first file's check
+could finish.
 
 `crates/semantics/tests/test_incremental.rs` pins these contracts: the queries an edit re-runs, the
-ones a new definition re-runs, and that a check resolves the names it spells through its links
-without a `frame_binder` query. Under
+ones a new definition re-runs, that a check resolves the names it spells through its links
+without a `frame_binder` query, and that a package file's check reads the binders of its own file
+alone. Under
 `syntax::testing::enable_invariants()` every linked lookup is compared with the per-name answer,
 every unbound verdict with `frame_binder`, and every item's group with a walk from that item alone.
 
