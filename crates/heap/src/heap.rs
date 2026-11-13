@@ -2125,6 +2125,23 @@ impl Heap {
         self.range_barrier(to, to_start, count);
     }
 
+    /// Counts the elements of `vector` as references and applies the write barrier for them,
+    /// as `set_element` would have one at a time, after a kernel wrote them straight into its
+    /// slots. A gather such as an array permutation runs as a plain slice copy that way.
+    ///
+    /// # Safety
+    /// `vector` is a non-ALTREP vector of handles, and every slot that was overwritten held the
+    /// fill `alloc_vector` writes, which is not counted.
+    pub unsafe fn count_written_elements(&mut self, vector: Sexp) {
+        let count = vector.length() as usize;
+        if vector.flags() & flag_bits::UNTRACKED == 0 {
+            for &value in vector.slice::<Sexp>() {
+                value.increment_refcount();
+            }
+        }
+        self.range_barrier(vector, 0, count);
+    }
+
     /// Moves every element of `from` to the start of `to` and leaves `from` empty. The references
     /// `from` held pass to `to` uncounted, so growing a list by copying it costs one store per
     /// element instead of counting each element into the copy and, when the collector sweeps

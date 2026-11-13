@@ -33,6 +33,8 @@ Measured on one machine against GNU R 4.6.2 (seconds, best of three, release bui
 | `quantile()` of 2 million doubles, 5 times | 1.14 | 0.34 | 0.35 |
 | `sort(x, partial = 1e6)`, 5 times | 0.41 | 0.19 | 0.18 |
 
+Character and list arrays are permuted straight into the result, with no intermediate copy, so `aperm()` of a 100x100x100 character array takes 0.45 s for 200 calls, against 1.54 s before and 1.55 s in GNU R. Wider tiles make `aperm(a, c(3, 1, 2))` of a 200x200x200 array take 0.36 s for 20 calls, against 0.59 s before and 1.49 s in GNU R. `aperm()` of an expression array stops with GNU R's error "unimplemented type 'expression' in 'aperm'", and `t()` with "argument is not a matrix", where both used to permute it.
+
 Scalar array indexing at the top level and `rbind()` of data frames (0.075 s before, 0.037 s after for 200 calls, against 0.025 s) are still slower than GNU R, because their remaining time is in the interpreter's per-call overhead.
 
 ### The VS Code extension on Windows
