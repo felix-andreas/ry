@@ -2021,6 +2021,9 @@ impl Emitter<'_> {
             (Reduce::Sum, Item::Dbl) => {
                 self.call(address!(values::ry_sum_dbl), &[I64], &[F64], &[x])[0]
             }
+            (Reduce::ListSum, _) => {
+                self.call(address!(values::ry_list_sum_dbl), &[I64], &[F64], &[x])[0]
+            }
             (Reduce::Sum, Item::I64) => {
                 self.reduce_status(address!(values::ry_sum_i64), I64, x, inst)?
             }

@@ -819,7 +819,7 @@ unsafe fn elementwise_dbl(
     }
     let mut buffers = Rows::<f64, ELEMENTWISE_STEPS>::new();
     let buffers = buffers.cleared(program.len());
-    let mut total = LongDouble::ZERO;
+    let mut total = 0.0;
     let last = program.len() - 1;
     let mut start = 0;
     while start < length {
@@ -855,12 +855,12 @@ unsafe fn elementwise_dbl(
             }
         }
         if result.is_null() {
-            total = add_all(total, &buffers[last][..chunk]);
+            total = add_in_order(total, &buffers[last][..chunk]);
         }
         start += chunk;
     }
     if result.is_null() {
-        *out = (0.0 + total.to_f64()).to_bits();
+        *out = total.to_bits();
     }
     0
 }
@@ -1533,6 +1533,18 @@ pub unsafe extern "C" fn ry_sum_dbl(a: *mut List) -> f64 {
         None => add_all(LongDouble::ZERO, data).to_f64(),
     };
     if is_na_real(sum) { NA_REAL } else { 0.0 + sum }
+}
+
+/// `List.sum` of an `F64` list: the items added in order in double precision, which is what a
+/// loop written in ry over the same list computes.
+pub unsafe extern "C" fn ry_list_sum_dbl(a: *mut List) -> f64 {
+    add_in_order(0.0, items::<f64>(a))
+}
+
+/// `total` plus every value in order. The compiler may not reorder the additions, so the result
+/// is the same on every machine, and the loop runs at the speed of one addition after another.
+fn add_in_order(total: f64, values: &[f64]) -> f64 {
+    values.iter().fold(total, |total, &value| total + value)
 }
 
 /// `sum` of an integer or logical list. Status 0 with the total, 1 with `NA` for an `NA` item,

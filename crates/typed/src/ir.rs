@@ -317,7 +317,10 @@ pub enum Bits {
 /// A reduction of a vector to a scalar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
+    /// R's `sum`, which accumulates doubles in extended precision.
     Sum,
+    /// `List.sum` of an `F64` list: the items added in order in double precision.
+    ListSum,
     Prod,
     Max,
     Min,

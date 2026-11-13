@@ -1057,7 +1057,12 @@ fn active_bindings_are_called_at_every_compiled_read() {
         jit::install_mode(Mode::Off);
     });
     for (call, &(before, after, value, _, _)) in calls.iter().enumerate() {
-        assert_eq!(after - before, 51, "call {call} read the binding {} times", after - before);
+        assert_eq!(
+            after - before,
+            51,
+            "call {call} read the binding {} times",
+            after - before
+        );
         assert_eq!(value, (before + 1..=after).sum::<i64>(), "call {call}");
     }
     let compiles: u64 = calls.iter().map(|call| call.3).sum();
@@ -1068,7 +1073,11 @@ fn active_bindings_are_called_at_every_compiled_read() {
         "{deoptimizations} deoptimizations over five calls: {calls:?}"
     );
     for (call, row) in calls.iter().enumerate().skip(1) {
-        assert_eq!((row.3, row.4), (0, 0), "call {call} compiled or deoptimized: {calls:?}");
+        assert_eq!(
+            (row.3, row.4),
+            (0, 0),
+            "call {call} compiled or deoptimized: {calls:?}"
+        );
     }
 }
 
@@ -3391,6 +3400,15 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ v <- [1, 2.5, -3]; FUNCTION(v) }",
                 "{ v <- List.from_r(0[0L]); FUNCTION(v) }",
                 "{ v <- [0, 1]; FUNCTION(v) }",
+            ],
+        ),
+        // The sum adds in order in double precision, in one kernel or after an arithmetic one,
+        // and over more items than a kernel handles at a time.
+        (
+            "function(x: List<F64>) -> F64 List.sum(x) + List.sum(x * 1) - 2",
+            &[
+                "{ v <- [1, 1e-16, 1e-16]; FUNCTION(v) }",
+                "{ v <- List.map(List.range(1, 5000), \\(i) Num.to_f64(i) / 7); FUNCTION(v) }",
             ],
         ),
         (

@@ -2700,7 +2700,7 @@ impl Lowering<'_> {
                     } => {
                         let total = self
                             .builder
-                            .emit(Type::Dbl, Op::Reduce(Reduce::Sum, Item::Dbl, a));
+                            .emit(Type::Dbl, Op::Reduce(Reduce::ListSum, Item::Dbl, a));
                         self.fail_if_nan(total);
                         Ok(total)
                     }
