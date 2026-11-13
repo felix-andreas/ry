@@ -2736,14 +2736,28 @@ The end-to-end guard rests on the corpus suites.
   on secondary indices; not measured here). The index holds 4 bytes
   per row until the column changes or the table is dropped, with no way for the user to drop it
   earlier.
-- **A frame keeps a raised reference count after some calls, so its next `:=` copies once.**
-  `nrow(x)` and `capture.output(.Internal(inspect(x)))` each leave the frame's count two higher than before
-  (`.Internal(refcnt(x))` reads 4 where a fresh frame reads 2), while a plain closure call
-  `f(x)` leaves it unchanged. The next `:=` then forks the table and copies the written column,
-  and the fork is a fresh object that later updates write in place. A loop that calls such a
-  function on the frame in every pass copies the column in every pass. The cause is in the
-  interpreter's counting for dispatched and `...` calls, not in the table; it has not been
-  traced further.
+- **S3 dispatch from a compiled closure leaves its subject's reference count one higher per
+  call, so a frame's next `:=` copies.** `nrow(x)`, `ncol(x)`, `NROW(x)`, `head(x)` and
+  `as.list(x)` each leave a frame's count one higher (`.Internal(refcnt(x))` reads 7 after five
+  calls where a fresh frame reads 2), and `print(x)` three higher. A collection lowers nothing.
+  The next `:=` then forks the table and copies the written column; the fork is a fresh object,
+  so later updates write in place, but a loop that calls `nrow(x)` in every pass copies in every
+  pass: 100 passes over 4e6 rows take 1.04 s against 0.08 s without the call. The table is not
+  the cause. `p <- list(1, 2); class(p) <- "foo"; dim.foo <- function(x) c(2L, 1L)` followed
+  by twenty `nrow(p)` calls reads a count of 20, a user closure `function(d) dim(d)[1L]` leaks the
+  same way once it runs compiled, and a plain closure call, a call that dispatches nothing
+  (`NROW` of a plain vector) and a direct `dim(x)`, `length(x)`, `names(x)`, `x$v` or `x[["v"]]`
+  leave the count alone. The suspects are the promise a reified slot frame binds for an argument
+  (`reify` in `eval.rs`) and the frames `Heap::release_frame` defers to a reconcile. The cost
+  outside the table is the same: a vector that looks shared is copied by its next replacement.
+- **A chained `:=` is an error.** `x[id == 1L, v := 5L][id == 2L, v := 6L]` applies the first
+  update and then fails with "`:=` updates a DataFrame stored in a variable", because the second
+  bracket's subject is a call. data.table code chains updates this way, and
+  `ry migrate data-table` does not split the chain.
+- **A `:=` whose value has the wrong length warns from R's `[<-`.** `x[id == 1L, v := 1:3]`
+  with two matching rows falls back to the R path, whose warning names
+  `.Primitive("[<-")(c(10L, 20L, 30L, 40L), c(1L, 3L), 1:3)` instead of the user's call, and then
+  recycles as R does. The kernel should report the length mismatch itself.
 - **An aggregate over a filter that keeps no rows gives one row.** `x[v > 5, .(s = sum(v))]`
   with no matching row prints one row with `s = 0`; data.table gives a table with no rows (and
   `x[v > 5, sum(v)]` gives `0` in both). The verb form, `DataFrame.filter` then

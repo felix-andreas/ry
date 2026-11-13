@@ -545,6 +545,9 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The DataFrames whose `x[i, j, by]` queries are running, outermost first. An update of a
+    /// frame that an outer query is still reading must not write into it.
+    pub frame_queries: Vec<Sexp>,
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
@@ -751,6 +754,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         symbols,
         visible: true,
         returned_values: Vec::new(),
+        frame_queries: Vec::new(),
         assignment_call: None,
         native_entries: Vec::new(),
         namespace_loader: heap.known().nil,

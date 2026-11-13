@@ -2553,6 +2553,17 @@ impl Heap {
         }
     }
 
+    /// Clears a promise made for one argument of a call that has returned, when nothing counts
+    /// a reference to it, as [`Heap::release_slots`] does for a promise only a slot held. A call
+    /// that ran without a frame has nothing else to release its promises, and the collection
+    /// that later frees such a promise does not lower the count of the value it was forced to,
+    /// so that value would look shared for the rest of its life.
+    pub unsafe fn release_argument(&mut self, promise: Sexp) {
+        if promise.kind() == SexpType::Promise && promise.refcount() == 0 {
+            self.release_promise(promise);
+        }
+    }
+
     /// Releases the frames that waited for a reconcile ([`Heap::release_frame`]), in the order
     /// their calls returned, so a callee's frame gives up its promises before its caller's frame
     /// is counted. The roots are flagged [`gc_bits::HELD`]; `frames_held` are the frames a root

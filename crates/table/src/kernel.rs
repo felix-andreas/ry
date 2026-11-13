@@ -1034,6 +1034,21 @@ pub(crate) fn selected_rows(filter: Value, len: usize) -> Option<Vec<u32>> {
         .collect()
 }
 
+/// Whether [`scatter`] can write `value` into `rows` rows of a column stored as `dtype`: the
+/// types match, and a vector holds one element per row. A caller checks this before it moves a
+/// column out of its table, so a value that does not fit leaves the table whole.
+pub(crate) fn scatters(dtype: &DataType, rows: usize, value: &Value) -> bool {
+    match (dtype, value) {
+        (DataType::Int32, Value::Scalar(Scalar::Integer(_)))
+        | (DataType::Float64, Value::Scalar(Scalar::Double(_)))
+        | (DataType::Boolean, Value::Scalar(Scalar::Logical(_))) => true,
+        (DataType::Int32, Value::Vector(Vector::Integer { values, .. })) => values.len() == rows,
+        (DataType::Float64, Value::Vector(Vector::Double { values, .. })) => values.len() == rows,
+        (DataType::Boolean, Value::Vector(Vector::Logical { values, .. })) => values.len() == rows,
+        _ => false,
+    }
+}
+
 /// Writes `value` (one per row of `rows`, or a scalar) into `column` at `rows`. The column's
 /// buffer is reused when nothing else shares it, so a 1% update costs 1% of the column. `value`
 /// must already have the column's type.
@@ -1170,7 +1185,12 @@ fn scatter_values<T: Copy + Send>(
             values[*row as usize - base] = written(start + offset);
         }
     };
-    if rows.len() < PARALLEL_ROWS || !rows.is_sorted_by(|left, right| left < right) {
+    // A row past the end fails the serial loop's bounds check, which is the failure to keep: cut
+    // into runs, the rows after it would be skipped without a word.
+    let in_range = rows
+        .last()
+        .is_some_and(|last| (*last as usize) < values.len());
+    if rows.len() < PARALLEL_ROWS || !in_range || !rows.is_sorted_by(|left, right| left < right) {
         return serial(values, 0, 0, rows);
     }
     let mut runs = Vec::with_capacity(rows.len().div_ceil(CHUNK_ROWS));
@@ -1180,9 +1200,8 @@ fn scatter_values<T: Copy + Send>(
         let next = rows
             .get((index + 1) * CHUNK_ROWS)
             .map_or(base + rest.len(), |row| *row as usize);
-        let Some((stretch, after)) = rest.split_at_mut_checked(next - base) else {
-            break;
-        };
+        // The rows ascend and the last one is in range, so every run's first row is too.
+        let (stretch, after) = rest.split_at_mut(next - base);
         runs.push((stretch, base, index * CHUNK_ROWS, run));
         rest = after;
         base = next;

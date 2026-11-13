@@ -266,7 +266,8 @@ enum EqualityFilter {
 
 /// The rows of an integer or a factor column grouped by value, so that `column == value` selects
 /// its rows without reading the column. data.table builds the same structure as a secondary
-/// index. It costs four bytes per row.
+/// index. It costs four bytes per row and four per bucket, one bucket for each level of a factor
+/// or each integer between the column's least and greatest value.
 #[derive(Debug)]
 pub(crate) struct RowIndex {
     /// The value of the first bucket: the column's least value, or zero for a factor's codes.
@@ -567,11 +568,16 @@ pub fn on_every_worker(task: impl Fn() + Sync) {
 }
 
 impl RowIndex {
-    /// Indexes `column`, or gives `None` for a column of another type and for integers spread
-    /// over a range much wider than the rows, where the bucket bounds would outweigh the rows.
+    /// Indexes `column`, or gives `None` for a column of another type and for one that needs many
+    /// more buckets than it has rows, where the bucket bounds would outweigh the rows: integers
+    /// spread over a wide range, or a factor that kept the levels of a much longer column.
     fn of(column: &Column) -> Option<RowIndex> {
         let height = column.len();
+        let most_buckets = 2 * height as u64 + (1 << 12);
         if let Some(levels) = factor::levels(column.dtype()) {
+            if levels.len() as u64 > most_buckets {
+                return None;
+            }
             let codes = Codes::of(column)?;
             let (radix, validity) = (u32::try_from(levels.len()).ok()?, codes.validity.as_ref());
             let buckets = match &codes.values {
@@ -593,7 +599,7 @@ impl RowIndex {
         } else {
             u64::try_from(i64::from(high) - i64::from(low) + 1).ok()?
         };
-        if span > 2 * height as u64 + (1 << 12) {
+        if span > most_buckets {
             return None;
         }
         // The check above bounds the span by twice the rows, and a table's rows are numbered in
@@ -691,4 +697,37 @@ fn convert(column: Column) -> Result<Column> {
         }
     };
     Ok(column.cast(&target)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::Table,
+        crate::{Result, convert::RVector},
+    };
+
+    /// A factor whose `levels` are numbered labels, with one row per code of `codes`.
+    fn factor_table(codes: &[i32], levels: usize) -> Result<Table> {
+        Table::from_r(vec![(
+            "f".into(),
+            RVector::Factor {
+                codes: codes.to_vec(),
+                levels: (0..levels).map(|level| format!("level{level}")).collect(),
+            },
+        )])
+    }
+
+    #[test]
+    fn a_factor_with_far_more_levels_than_rows_gets_no_row_index() -> Result<()> {
+        let mut sparse = factor_table(&[1, 5000, 3, 5000], 10_000)?;
+        for _ in 0..3 {
+            assert!(sparse.row_index("f").is_none());
+        }
+
+        let mut dense = factor_table(&[1, 3, 2, 3], 3)?;
+        assert!(dense.row_index("f").is_none(), "the first filter scans");
+        let index = dense.row_index("f");
+        assert_eq!(index.map(|index| index.rows(2).to_vec()), Some(vec![1, 3]));
+        Ok(())
+    }
 }

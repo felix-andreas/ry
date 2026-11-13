@@ -1125,7 +1125,16 @@ unsafe fn apply_method(
                     value,
                 });
             }
-            call_builtin(definition, call, method, &forced, sys_parent)
+            let result = call_builtin(definition, call, method, &forced, sys_parent)?;
+            if owned {
+                let heap = crate::heap();
+                for arg in args {
+                    if !eval::is_reference(arg.value) {
+                        heap.release_argument(arg.value);
+                    }
+                }
+            }
+            Ok(result)
         }
         _ => eval::apply(call, method, args, sys_parent),
     }

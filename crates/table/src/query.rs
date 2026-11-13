@@ -13,7 +13,7 @@ use {
         ColumnType, Error, Result, RowIndex, Schema, Table,
         factor::{self, Levels},
         group, join,
-        kernel::{Evaluator, Vector, scatter, selected_rows},
+        kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
     },
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
@@ -2391,14 +2391,41 @@ fn assign_with_kernels(
 ) -> Result<bool> {
     let typer = Typer { schema };
     let height = table.height();
-    // Every value is computed before any column changes, because each one reads the table as it
-    // was before the update.
-    let mut values = Vec::with_capacity(assignments.len());
-    let indexed = match rows {
+    let filtered = match rows {
+        Rows::All => false,
         Rows::Filter(filter) => {
             expect_logical(typer.expr(filter)?, "a row filter")?;
-            indexed_rows(table, schema, filter)
+            true
         }
+        _ => return Ok(false),
+    };
+    // What the types alone decide is checked before the rows are selected, so an update the plan
+    // has to run builds no row index on the way there.
+    let mut targets = Vec::with_capacity(assignments.len());
+    for (name, expr) in assignments {
+        let existing = schema.column(name);
+        let Some(expr) = expr else {
+            if existing.is_none() {
+                return Err(Error::Query(format!(
+                    "cannot remove `{name}`: the table has no such column"
+                )));
+            }
+            continue;
+        };
+        if !row_wise(expr) || matches!(existing, Some(ColumnType::Factor | ColumnType::Character)) {
+            return Ok(false);
+        }
+        let replaces = !filtered && !collapses(expr);
+        let natural = typer.expr(expr)?;
+        let kind = assigned_type(existing, natural, replaces)?;
+        // A narrowing or parsing write may warn, which the plan's update checks for.
+        if existing.is_some() && (narrows(natural, kind) || parses(natural, kind)) {
+            return Ok(false);
+        }
+        targets.push((name, expr, kind, existing.is_some()));
+    }
+    let indexed = match rows {
+        Rows::Filter(filter) => indexed_rows(table, schema, filter),
         _ => None,
     };
     let scanned = match rows {
@@ -2416,45 +2443,36 @@ fn assign_with_kernels(
             };
             Some(selected)
         }
-        Rows::All | Rows::Filter(_) => None,
-        _ => return Ok(false),
+        _ => None,
     };
     let selected = match &indexed {
         Some((index, value)) => Some(index.rows(*value)),
         None => scanned.as_deref(),
     };
+    // Every value is computed before any column changes, because each one reads the table as it
+    // was before the update. A value the kernels cannot write into its rows is found here too,
+    // while the table still holds every column.
+    let mut values = Vec::with_capacity(targets.len());
     {
         let evaluator = Evaluator {
             frame: table.frame(),
             schema,
             rows: selected,
         };
-        for (name, expr) in assignments {
-            let existing = schema.column(name);
-            let Some(expr) = expr else {
-                if existing.is_none() {
-                    return Err(Error::Query(format!(
-                        "cannot remove `{name}`: the table has no such column"
-                    )));
-                }
-                continue;
-            };
-            if !row_wise(expr)
-                || matches!(existing, Some(ColumnType::Factor | ColumnType::Character))
-            {
-                return Ok(false);
-            }
-            let replaces = selected.is_none() && !collapses(expr);
-            let natural = typer.expr(expr)?;
-            let kind = assigned_type(existing, natural, replaces)?;
-            // A narrowing or parsing write may warn, which the plan's update checks for.
-            if existing.is_some() && (narrows(natural, kind) || parses(natural, kind)) {
-                return Ok(false);
-            }
+        for (name, expr, kind, exists) in targets {
             let Some(value) = evaluator.eval(expr).and_then(|value| value.cast(kind)) else {
                 return Ok(false);
             };
-            values.push((name, kind, existing.is_some(), value));
+            if let Some(selected) = selected {
+                let stored = match exists {
+                    true => table.frame().column(name)?.dtype().clone(),
+                    false => dtype(kind),
+                };
+                if !scatters(&stored, selected.len(), &value) {
+                    return Ok(false);
+                }
+            }
+            values.push((name, kind, exists, value));
         }
     }
     for (name, kind, exists, value) in values {

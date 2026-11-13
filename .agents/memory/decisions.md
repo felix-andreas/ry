@@ -4810,16 +4810,35 @@ check` releases its trees once, and memoized records are compact" below).
 - **What was weak.** A loop of small updates cost the table's length per pass twice over, which
   made db-benchmark's "`:=` on 1% of rows, 100 times" the one question data.table won. data.table
   answers it with a secondary index it builds on the first `id4 == step`.
-- **Target shape.** `assign` writes in place while the count is at most two. `Table` keeps
+- **Target shape.** `assign` writes in place when three things hold: the variable's own binding
+  cell holds the frame (so an active binding, whose function may return a frame out of a shared
+  list, never qualifies), the count is at most two, and no outer `x[i, j, by]` query of the same
+  frame is still running (`frame_queries` in the interpreter state lists the running subjects,
+  because an update nested in an argument of such a query would change rows the outer query is
+  reading). Otherwise the update goes to a fork that is assigned back to the variable, through
+  the active binding's function when there is one. Either way the update is stored before its
+  warnings are raised, so a handler that unwinds on the warning sees the same frame whether or
+  not it was shared. `Table` keeps
   `equality_filters`, a short list of columns with the state of each: scanned once, indexed, or
   not indexable. `Table::row_index` builds a column's `RowIndex` on the second equality filter
   since the column last changed, so a one-off update never pays for an index. A `RowIndex` is the
   join's `Buckets` (`kernel.rs`) over the column's values, built with one stable parallel
   counting sort, which keeps each value's rows ascending. An Integer column qualifies when its
-  value range is at most twice the rows plus 4,096, and a Factor column always does, by code.
-  `indexed_rows` in `query.rs` recognizes `column == literal` in either order and reads the rows;
-  every other filter scans as before. `scatter_values` writes a long ascending row list on the
-  worker pool by carving the column into disjoint stretches.
+  value range is at most twice the rows plus 4,096, and a Factor column when its level count is
+  (a ten-row slice of a frame with three million levels would otherwise pay 12 MB of bucket
+  bounds). `assign_with_kernels` in `query.rs` checks every assignment's type before it selects
+  rows and every value's shape (`kernel::scatters`) before it writes, so an update the kernels
+  cannot run builds no index and leaves no half-written column. `indexed_rows` recognizes
+  `column == literal` in either order and reads the rows; every other filter scans as before.
+  `scatter_values` writes a long ascending row list on the worker pool by carving the column into
+  disjoint stretches, and takes the serial, bounds-checked path when the last row lies outside
+  the column.
+- **A builtin S3 method releases the promises its dispatch made.** `dim(x)`, `length(x)`,
+  `names(x)`, `x$v` and `x[["v"]]` on a frame dispatch to builtins, and the dispatch wraps each
+  argument in a forced promise that counts a reference to its value. No frame owns those
+  promises, and a collection that frees one does not lower its value's count, so every such
+  call left the frame looking shared and the next `:=` copied it. `apply_method` in
+  `dispatch.rs` clears them when the builtin returns (`Heap::release_argument`).
 - **The index is a secondary index, not a cache of a slow path.** The first filter still scans,
   and the scan is as fast as it was. The index answers a different question (all rows of a value)
   that a repeated filter asks, the way `string_codes` answers a repeated join on a text column.
@@ -4827,7 +4846,11 @@ check` releases its trees once, and memoized records are compact" below).
   puts, replaces or drops a column already calls, plus `set_key`, which reorders the rows. Forks
   share it through an `Arc`.
 - **Cost.** 4 bytes per row for the row list plus 4 bytes per distinct value, held until the
-  column changes or the table is dropped.
+  column changes or the table is dropped. `test_memory.rs` pins the loop at 5 bytes per row, both
+  at its peak and held afterwards (measured 4.1 and 4.0).
+- **Known limit of the count.** A holder the counts do not see, such as native code that keeps
+  the frame through `R_PreserveObject` or the protect stack, does not stop an in-place write.
+  No DataFrame builtin keeps a frame that way.
 - **Not done: a row index for a filter that runs once.** A single `x[id == value, ...]` scans.
   Building the index reads the column twice and writes a row list as long as it, which is more
   work than the one scan it would replace.
