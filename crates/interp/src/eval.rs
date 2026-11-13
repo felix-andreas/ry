@@ -2516,9 +2516,6 @@ pub unsafe fn call_with_plan(
         });
     }
     let count = shape.slots as usize;
-    let header = state.bytecode.registers.len();
-    bytecode::reserve_registers(header + 1 + count + shape.registers as usize)?;
-    let registers = bytecode::register_address(header);
     let missing_value = missing_arg();
     let (sources, dots_sources) = sources.split_at((shape.formals as usize).min(sources.len()));
     let mut dots = missing_value;
@@ -2532,6 +2529,10 @@ pub unsafe fn call_with_plan(
             )?;
         }
     }
+    // The dots are built first because the window's slots hold stale words until the loops
+    // below write them, and nothing may allocate while they do.
+    let header = interp().bytecode.registers.len();
+    let registers = bytecode::open_window(header, count, shape.registers as usize)?;
     let (mut missing, mut promised) = (0u64, 0u64);
     // Only a formal the call leaves out reads its default, so the walk over the formals goes
     // no further than the last of them.
@@ -3710,12 +3711,7 @@ unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised
 /// is forced and never escapes needs neither a promise nor the frame's pending environment.
 /// The frame owns the references until [`leave`] releases them, and anything that hands the
 /// frame's variables on first turns them into promises ([`materialize_references`]).
-unsafe fn default_references(
-    owner: usize,
-    function: Sexp,
-    header: usize,
-    promised: u64,
-) -> R<()> {
+unsafe fn default_references(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
     let defaults = bytecode::slot_defaults(function)?;
     interp().frames[owner].default_references = interp().references_used;
     let mut pending = promised;

@@ -543,6 +543,29 @@ pub fn reserve_registers(length: usize) -> R<()> {
     grow_registers(length)
 }
 
+/// Opens a call's window at the top of the register file: its header, `slots` slots and
+/// `registers` body registers. The header and the body registers are `NULL`, but the slots are
+/// left as they are, so the caller must write every slot before anything can allocate, because
+/// the collector marks the file up to its length.
+#[inline]
+pub unsafe fn open_window(header: usize, slots: usize, registers: usize) -> R<*mut Sexp> {
+    let file = &mut interp().bytecode.registers;
+    let end = header + 1 + slots + registers;
+    if header != file.len() || end > file.capacity() {
+        reserve_registers(end)?;
+        return Ok(register_address(header));
+    }
+    // SAFETY: the capacity covers `end`; the header and body registers are written here and
+    // the caller writes the slots before the next allocation.
+    unsafe {
+        file.set_len(end);
+        let base = file.as_mut_ptr().add(header);
+        *base = nil();
+        std::slice::from_raw_parts_mut(base.add(1 + slots), registers).fill(nil());
+        Ok(base)
+    }
+}
+
 #[inline(never)]
 fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
