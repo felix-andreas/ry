@@ -2,11 +2,9 @@
 //! load index, and diffs that index against what is loaded to produce a [`Plan`]. A plan says
 //! what to bind, run, and remove, and nothing about how; a backend executes it. Both runtimes
 //! apply it through the same R code ([`r`]): GNU R parses the code from source text, and ry's
-//! interpreter ([`ry_runtime`]) lowers the analysis's syntax trees.
+//! interpreter (`libr`'s `loader_backend`) lowers the analysis's syntax trees.
 
 pub mod r;
-#[cfg(feature = "runtime")]
-pub mod ry_runtime;
 pub mod testing;
 pub mod watch;
 

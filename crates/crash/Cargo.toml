@@ -3,7 +3,7 @@ name = "crash"
 description = "The crash report ry prints when a fatal signal ends the process"
 edition = "2024"
 version.workspace = true
-license = "GPL-2.0-or-later"
+license = "UPL-1.0"
 publish = false
 
 [lib]

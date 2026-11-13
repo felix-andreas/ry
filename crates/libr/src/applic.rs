@@ -27,9 +27,11 @@ use {
         arith::{find_interval, pretty},
         format::format_g,
         random,
-        stats_lbfgsb::{self as lbfgsb, Bound, minimize},
-        stats_nlm::{self as nlm, finite_difference_hessian},
-        stats_optimize::{Integrand, Subintervals, qagi, qags},
+    },
+    stats::{
+        lbfgsb::{self, Bound, minimize},
+        nlm::{self, finite_difference_hessian},
+        optimize::{Integrand, Subintervals, qagi, qags},
     },
     std::ffi::{c_char, c_int, c_void},
 };
@@ -906,7 +908,7 @@ pub unsafe extern "C" fn samin(
 /// stream under a given seed.
 const COOLING_OFFSET: f64 = 1.7182818;
 
-// QUADPACK lives in `interp::stats_optimize`; `Rdqags` and `Rdqagi` adapt it to C integrands
+// QUADPACK lives in `stats::optimize`; `Rdqags` and `Rdqagi` adapt it to C integrands
 // and the caller's work arrays.
 
 /// Integrates `f` over the finite interval `[a, b]` (QUADPACK `dqags`).
@@ -1177,7 +1179,7 @@ pub unsafe extern "C" fn R_pretty(
     result.unit
 }
 
-// UNCMIN, the engine of nlm(), lives in `interp::stats_nlm`; `optif9` and `fdhess` adapt it to
+// UNCMIN, the engine of nlm(), lives in `stats::nlm`; `optif9` and `fdhess` adapt it to
 // C callbacks.
 
 /// The unconstrained minimizer behind `nlm()`. `msg` is a bit set on input (1: allow `n == 1`;

@@ -38,7 +38,9 @@ fn main() {
 /// `RY_EMBED_BASE` names as an archive `repl::extract_base` reads. The archive is a sequence of
 /// entries in path order, each a kind byte (0 for a directory, 1 for a file, 2 for an executable
 /// file), the path's length as a little-endian `u32`, the path with `/` separators, and for a file
-/// its length as a little-endian `u64` and its bytes. It is compressed as a whole, which shrinks
+/// its modification time in nanoseconds since the epoch as a little-endian `u64`, its length as a
+/// little-endian `u64` and its bytes. A code image is valid only for the lazy-load database
+/// whose modification time it recorded, so extraction must restore the times. It is compressed as a whole, which shrinks
 /// the many similar help and lazy-load files far better than compressing each.
 fn embed_base(out_dir: &Path, build: &str) {
     println!("cargo:rerun-if-env-changed=RY_EMBED_BASE");
@@ -129,6 +131,13 @@ fn append_tree(directory: &Path, prefix: &str, build: &str, archive: &mut Vec<u8
             #[cfg(not(unix))]
             let executable = false;
             push_path(archive, if executable { 2 } else { 1 });
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|since| u64::try_from(since.as_nanos()).ok())
+                .unwrap_or(0);
+            archive.extend_from_slice(&modified.to_le_bytes());
             let bytes = fs::read(&path)
                 .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
             archive.extend_from_slice(&(bytes.len() as u64).to_le_bytes());

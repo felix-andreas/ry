@@ -1,0 +1,15 @@
+[package]
+name = "numeric"
+description = "ry's numeric kernels: R's nmath, long double arithmetic, vectorized math, FFT and LINPACK"
+edition = "2024"
+version.workspace = true
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+path = "src/numeric.rs"
+
+[dependencies]
+heap = { path = "../heap" }
+libc = "0.2"
+rustc-hash.workspace = true

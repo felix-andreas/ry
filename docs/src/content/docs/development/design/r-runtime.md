@@ -1192,7 +1192,7 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   reuse, because an overflow halfway through declines to the ordinary code, which must still
   read the old value.
 - **SIMD `exp` and `log`.** On x86-64 with AVX2 and FMA, `exp` and `log` of doubles, alone or
-  inside a fused pass, run four lanes at a time (`crates/interp/src/vector_math.rs`). They are
+  inside a fused pass, run four lanes at a time (`crates/numeric/src/vector_math.rs`). They are
   ports of glibc's `__exp_fma` and `__log_fma`, the variants GNU R calls on such a machine, and
   agree with them bit for bit; the first call compares both on edge values and falls back to
   glibc when they differ. `pnorm` and the `qnorm` tails call the same kernels on batches of
@@ -1563,7 +1563,7 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
 
 ### The design
 
-The engine is `crates/table` and its query IR; `crates/interp/src/frame.rs` makes frames
+The engine is `crates/table` and its query IR; `crates/frames/src/frame.rs` makes frames
 interpreter values and lowers queries into the IR, and `crates/libr/src/frame_altrep.rs` exposes
 columns as ALTREP vectors to native code. The user guide is [DataFrames](/reference/dataframes/).
 
