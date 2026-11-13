@@ -13,7 +13,7 @@ The specs live in the docs site under `docs/src/content/docs/`. `reference/type-
 ## Short-term
 
 - **Vector kernels.** Toward 10x on element-wise code, the next steps are fusing `sum`/`mean` consumers into the fused pass and an AVX-512 `exp` (`crates/interp/src/kernels.rs`, `vector_math.rs`; `backlog.md`, "Open: untyped R against GNU R").
-- **Typed core.** Next are non-constant defaults and box conversion at the boundary (`backlog.md`, "Open: the typed core", with its parts "Gaps the typed public ports found" and "What the `native` check pins and over-reports"). `RY_TYPED_LOG=1` names every typed closure whose call fell back to the interpreter.
+- **Typed core.** Next are non-constant defaults and box conversion at the boundary (`backlog.md`, "Open: the typed core", with its parts "Gaps the typed public ports found" and "What the `native` check pins and over-reports"). `RY_TYPED_LOG=1` names every typed closure whose call fell back to the interpreter, and `RY_JIT_LOG=1` names each compiled body, each native function, and the instructions left to tier 0.
 
 ## Mid-term
 
@@ -32,7 +32,7 @@ Most important first. Each line names the open item, and the detail is at its po
 **Untyped performance**
 
 - The target is 10x GNU R on one thread, and 1.5x is the floor for every workload. The work is the "Untyped performance roadmap" table in `development/design/r-runtime.md`, one row per idea in build order, so update a row's status with the change that builds it. Raw measurements: "Open: untyped R against GNU R".
-- Builtin fast paths (roadmap row (a)) are in progress: `x[[i]]`, `x[[i]] <- v`, `x[i] <- v` and `.Call` cost more instructions than GNU R's, and closure frame setup dominates `structure()` and `format.default` ("Open: untyped R against GNU R", "Open: performance and memory").
+- Builtin fast paths (roadmap row (a) of `decisions.md`, "The road to 3x") are in progress: `x[[i]]`, `x[[i]] <- v`, `x[i] <- v` and `.Call` cost more instructions than GNU R's, and closure frame setup dominates `structure()` and `format.default` ("Open: untyped R against GNU R", "Open: performance and memory").
 - Closure calls and promises: widen promise elision past effect-free callees only after measuring how often the eager path fires ("Open: untyped R against GNU R").
 - JIT: tier 1 runs more instructions than tier 0 alone on `testthat_full`, inlining covers effect-free callees only, `x <- f(x, ...)` is inlined only when `x` is proven plain, and invalidated machine code is never freed ("Open: JIT on against JIT off", "Open: the JIT").
 - Collector: some builder peaks sit above GNU R's, and the collector's share of the three benchmark suites is unmeasured ("Open: collector throughput on the benchmark suites").
@@ -101,7 +101,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - **S4 methods are rewritten at install time (a `.local` wrapper in the lazy-load database)**, so a fix to what `setMethod` runs needs the package reinstalled (`oracle install <pkg>`). `length<-` returns the object itself when the length is unchanged, because `conformMethod` compares with `identical`.
 - **`missing()` counts a defaulted formal as missing only in its own function**, as GNU R's `R_isMissing` does (`eval::is_missing`); methods' `registerNames` depends on it.
 - **`ry run` and the console parse the whole input but lower each top-level expression just before it runs**, because `options(keep.source = TRUE)` affects the expressions after it (`interp::session`).
-- **A parse error inside a `#:` comment is not an R syntax error** (`ParseError::in_annotation`, code `annotation`). The runtime's parser and the console's completeness test skip it, or a malformed comment stops a script GNU R would run.
+- **A parse error inside a `#:` comment is not an R syntax error** (`SyntaxError::in_annotation`, code `annotation`). The runtime's parser and the console's completeness test skip it, or a malformed comment stops a script GNU R would run.
 - **`sys.call()` and `sys.calls()` copy only a frame's call cells** (`envir::call_with_srcref`): `do.call` puts values into the call, and data.table's `cedta()` runs `sys.calls()` on every `[`. `test_call_stack.rs` counts allocations.
 - **A text output connection's target vector is shared with its binding**, so `push_text_line` copies when `maybe_shared` and `textConnectionValue` returns a copy (`connections.rs`).
 - **`perl = TRUE` patterns go through `crates/interp/src/pcre.rs`, never the `pcre2` crate's `Regex`**, which revalidates the subject on every match and makes a global `gsub` quadratic.
@@ -177,7 +177,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - **Inline type grammar defers its trivia** (`Parser::deferred_trivia`): a new `ann_*` path emits through `bump`, `start` or `checkpoint`, never the builder directly.
 - **An annotated binding is recognized only at a statement start** (`Parser::statement`), because R reads `name:TYPE <- v` as `` `:<-` ``. An inline union continues onto a line starting with `|`.
 - **The parser's acceptance gate is zero unadjudicated divergences against tree-sitter, with R as the referee**, judged on the erased text (`erase_inline_annotations`). A new error path adds its golden case (`crates/syntax/tests/errors`).
-- **Formatter placement is token-level** (`last_token_before`, walking back from the offset; a subtree scan is quadratic on deep files), because trailing comments attach inside expression nodes. It refuses only on R-grammar errors. Sweep a corpus with `format_directory` (`RY_FORMAT_DIR`, `test_fuzz.rs`).
+- **Formatter placement is token-level** (`last_token_before`, walking back from the offset; a subtree scan is quadratic on deep files), because trailing comments attach inside expression nodes. It refuses only on R-grammar errors. `ry fmt` on 309,000 lines takes about 0.5 s on four cores; what remains is cursor traversal (a reference-count bump per `SyntaxNode`) and allocation. Sweep a corpus with `format_directory` (`RY_FORMAT_DIR`, `test_fuzz.rs`).
 
 ### IDE, server and console
 
@@ -207,6 +207,7 @@ Most important first. Each line names the open item, and the detail is at its po
 
 ### Testing
 
+- **The IDE fixtures print the token a range covers**, not a byte offset, so a stub addition never forces a re-bless. If one fails after a corpus change, the range is genuinely wrong.
 - **An oracle is trusted only once an injected bug turns it red.** Determinism, idempotence and round-trip checks pass on a uniformly wrong answer.
 - **Give a differential oracle inputs that always exist**: a test pointed only at a gitignored corpus never runs, and the runner hides its skip note.
 - **A foreign renderer's expectations are never bulk-blessed**; adjudicate each case against the typing reference.

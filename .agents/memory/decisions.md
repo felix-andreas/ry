@@ -1672,7 +1672,7 @@ becomes accurate instead of based on a curated subset.
 
 # Decision record: the Zed extension versions on its own line
 
-**Status:** planned. Built so far: the release-metadata test covers VS Code only; the `justfile` writes the CLI's version into the Zed manifest and `just release-check` requires it.
+**Status:** superseded by "Releases are built natively per platform, with the runtime beside the binary" ("One version per release"): the `justfile` writes the CLI's version into the Zed manifest and `just release-check` requires the match. Kept for why the Zed extension locates a binary and bundles none.
 
 Three shipped artifacts carry a version, and only two of them derive from the workspace
 `Cargo.toml`. The CLI is the source of truth. The VS Code extension bundles that binary, so its
@@ -9288,6 +9288,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why not a per-builtin cache.** Every gain comes from not doing work (no interning, no pairlist, no second evaluation), so nothing has to be invalidated.
 - **Impact.** Instructions per call (JIT off, callgrind, GNU R 4.3.3 in parentheses): `attributes` on an xts object 4,183 to 1,786 (2,692); `c(1:3, 4.5)` 4,262 to 2,131 (2,731); `x[[2L]]` 1,150 to 698 (709); `x[["net"]] <- 3` 4,910 to 987 (2,011); `forceAndCall(2, f, x, y)` 5,520 to 4,232 (5,198); `Reduce(f, x)` over 100 elements 748.7k to 423.1k (688.8k). `crates/oracle/cases/builtins__fast_paths.R` pins the edge cases.
 - **Names the runtime asks for by text are interned once.** `typeof` answers from `symbols().type_names`, one CHARSXP per `SEXPTYPE` code filled at start; internal dispatch on `$`, `@`, `$<-`, `@<-` and `seq` passes the generic's symbol from `symbols()` instead of installing it per call; `lapply`/`vapply` bind `X`, `FUN` and `i` through the same table; and a replacement call shares one tail pairlist between its getter and setter calls. `options(c("a", "b"))` reads only `a`, as GNU R does, and `options(character())` is an "invalid argument" error. Pinned by `crates/oracle/cases/strings__interned_names.R`.
+- **`lapply` and `vapply` share `ElementCalls`** (`crates/interp/src/envir.rs`), which writes `i` in place and reads `X[[i]]` directly. It rebinds a fresh `i` whenever the bound integer's reference count moved (`bound_refcount`), because `FUN` may have captured it: a promise or closure that reads `i` later must see its own value. `interp::testing::check_element_access_agreement` fuzzes the direct entries against the AST evaluator, which takes the full builtins.
 - **Not yet done.** The closure call inside `vapply` and `lapply` still allocates `i` and a promise per element; `$<-` and `[[<-` with a new name still take `complex_assign`; `[<-` with a scalar costs 813 instructions against GNU R's 497, almost all of it tier-0 guards and frame lookups.
 
 ## One-argument builtins and small base closures skip dispatch when their arguments are values
@@ -10165,7 +10166,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## Tier-0 superinstructions do not pay
 
-**Status:** built. The branch it names is not verified.
+**Status:** built.
 
 - **Built and measured, not landed.** Eight fused pairs (guard plus `GetFun`, `GetVar` plus `Element` and so on) covered 38.8% of dispatches on testthat_full. Instructions moved +0.08% and the dispatch group fell only from 11.68% to 11.50% of instructions. Paired wall time on one build, with fusion off as the baseline, was +2.86% ± 3.46% on testthat_full (12 pairs) and -0.57% ± 2.59% as the applications geomean (5 rounds).
 - **Why.** Tier-0 dispatch is already threaded (each handler tail-calls the next), so fusing a pair saves one indirect jump while both fast paths still run in full. The lever is work per instruction (guards, lookups, call entry), not the number of dispatches.
@@ -10936,7 +10937,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Previous shape.** The console used upstream crossterm, whose mio reader returns after the first event it parses from an edge-triggered read. The rest of a paste stayed in the reader's buffer until the next readiness edge. reedline then asked for the cursor position and waited its two-second timeout, so a pasted block stalled.
 - **Target shape.** `patches/crossterm` drains the terminal before it returns an event. The `use-dev-tty` reader is not a substitute: its `poll(Duration::ZERO)` reports no event while bytes are buffered, which breaks reedline's event batching and `take_editor_events`. The console enables bracketed paste (`use_bracketed_paste(true)`).
 - **One line per chunk.** R discards the rest of its input buffer when a command raises an error, so the console hands R one line per read (`take_chunk` in `crates/repl/src/console.rs`) and keeps the rest in `pending`. Code a script or a hook queues goes to R as one unit. A read below top level (`readline()`, `menu()`, the browser) is answered from the console, never from `pending`, and Ctrl-C clears `pending`.
-- **Preflight.** `InputFilter::discard` retracts a command the preflight refused, so the session's analysis never holds a command R did not run. The preflight counts a command as ry syntax when it holds an annotation, a ry literal or a qualified `Module.function` name.
+- **Preflight.** `InputFilter::discard` retracts a command the preflight refused, so the session's analysis never holds a command R did not run. The preflight counts a command as ry syntax when it holds an annotation, a `typing:` directive, a ry literal or a qualified `Module.function` name. A `Module.function` counts only when a native namespace declares that function, so `Sys.time` and the S3 method `Ops.money` do not (`crates/ry/src/preflight.rs`).
 - **Tests.** `crates/ry/tests/test_repl_e2e.rs` pins a multi-line paste, an error in the middle of a paste, a nested read during a paste, Ctrl-C with input pending, and a refused command.
 
 ## Landing-page and README samples are captured from the running tools
@@ -10944,5 +10945,5 @@ Each one trades a narrow class of missed errors for a class of false reports see
 **Status:** built.
 
 - **Decision.** Every diagnostic or console sample on the landing page and in the README is the output of the tool, cut to the headline and the underlined line, and never edited by hand. A hand-edited sample drifts from the tool with the next wording change, and nothing reports it.
-- **Shape.** The landing page's `PANELS` table names each sample, and `crates/ry/tests/test_docs.rs` compares them with the tool. The README shows diagnostics as SVG panels because GitHub strips ANSI colors; `scripts/render-diagnostic-svg.rs` renders them from output captured with `CLICOLOR_FORCE=1` and embeds a `prefers-color-scheme` rule so one image serves both themes. `just readme --check` reports a stale panel.
+- **Shape.** The landing samples are tests in `crates/ry/tests/test_docs.rs`, which compare them with the tool. The README shows diagnostics as SVG panels (`docs/public/diagnostic*.svg`) because GitHub strips ANSI colors; `scripts/render-diagnostic-svg.rs`, whose `PANELS` table names each image's `ry.toml`, renders them from output captured with `CLICOLOR_FORCE=1` and embeds a `prefers-color-scheme` rule so one image serves both themes. `just readme --check` reports a stale panel.
 - **Gap.** The VS Code extension's README holds two plain-text diagnostics that no check covers.
