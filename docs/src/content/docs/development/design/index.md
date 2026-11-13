@@ -114,3 +114,9 @@ conversion only at the R boundary. It builds to the runtime contract of the nati
 Which loops the tree walker evaluates in the global environment compile, how they run on the
 environment's bindings without a call frame, and what compiling loops in `eval()`, `local()` and
 `test_that` environments would take.
+
+### [Architecture critique](/development/design/architecture-critique/)
+
+A review of ry's architecture and code quality from outside the tracks that build it: twelve ranked
+findings with file and line evidence, what a greenfield start would build differently, where ry is
+below the state of the art, a measured cold build, and the order in which to act.
