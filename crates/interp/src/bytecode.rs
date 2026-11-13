@@ -4668,7 +4668,9 @@ impl Compiler {
         let (start, step) = (entry.start as usize, entry.step);
         let mut position = start;
         while position < exit as usize {
-            let op = OPS[(self.code[position] & OP_MASK) as usize];
+            let Some(op) = op_of(self.code[position]) else {
+                panic!("the compiler emitted an invalid code word at {position}");
+            };
             let width = operand_count(op);
             if op == Op::Jump {
                 let operand = self.code[position + 1];
