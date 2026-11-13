@@ -934,7 +934,7 @@ forks cannot follow upstream R.
 
 **What it is.** Truffle runs a language as an AST interpreter whose nodes rewrite themselves into
 specialized versions for the types they see, and Graal compiles a hot AST by partial evaluation of
-the interpreter with the tree as a constant.[^truffle] FastR, the Truffle R, ran R code fast but
+the interpreter with the tree as a constant.[^truffle] [FastR](https://github.com/oracle/fastr), the Truffle R, ran R code fast but
 emulated the C API, so packages' native code was slow and incomplete (section 3 of the runtime
 design).
 
