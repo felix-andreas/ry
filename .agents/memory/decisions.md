@@ -6054,7 +6054,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   (`heap::large::Mapped` over mimalloc, eager commit off, purge delay 1e9 ms) as the global
   allocator, and the joins run the same `Plan`s as `ry.R`. A block of a megabyte or more gets its
   own mapping and returns to the kernel when freed, as under `ry run`, so the driver's peak
-  resident memory is the engine's and not that of freed columns mimalloc keeps (11.9 GB from
+  resident memory is the engine's and not that of freed columns mimalloc keeps (12.0 GB from
   Rust against 11.6 GB from R on the 1e8 joins). The driver sums an answer's integer columns
   value by value, because a cast to doubles holds 0.8 GB beside a 1e8-row answer.
 
@@ -6092,7 +6092,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   same build: 0.43 s on reused pages against 0.73 s on fresh huge pages), but it keeps memory
   resident between queries, and the 1e8 joins have about 3 GB to spare. It stays in
   `backlog.md`.
-- **Impact.** IMPACT_PLACEHOLDER
+- **Impact.** Group-by q1 at 1e7 rows in that build is 0.028 s (0.014 s in a release build), and
+  the 1e8 group-by takes 15.5 to 17.9 s from R over three runs against data.table's 59.3 to
+  65.3 s, at the same 8.5 GB peak as on small pages. Scoping the advice costs the queries
+  nothing: the 1e7 joins from R took the same time as with size-only advice over three
+  back-to-back runs of both builds. A script that runs no table operation issues the R heap's
+  two `madvise(MADV_HUGEPAGE)` calls and none from the allocator, as it did before the advice
+  existed.
 - **The gain varies with how fast the kernel finds free 2 MiB blocks.** On one build the 1e8
   joins took 8.1 s from R in one run and 11.1 s in another (9.2 s and 11.3 s from Rust), and a
   Rust-driver run of the slower kind counted about 1,100 direct compaction stalls

@@ -2707,10 +2707,10 @@ The end-to-end guard rests on the corpus suites.
 ## Open: DataFrame
 
 - **The 1e8 joins fit, with about 3 GB to spare; what would widen the margin.** At 1e8 rows the
-  five db-benchmark joins peak at 11.6 GB from R and 11.9 GB from Rust, and data.table is killed
-  at 14.2 GB before its first answer (`development/design/r-runtime.md`, section 7;
+  five db-benchmark joins peak at 11.6 GB from R and 12.0 GB from Rust, and data.table is killed
+  at 14.3 GB before its first answer (`development/design/r-runtime.md`, section 7;
   `tests/test_memory.rs` in `crates/table` pins the bytes per row). What remains, largest first:
-  - **q5 takes 5 to 7 s where q1 to q4 take 0.7 to 1.3 s.** It buckets `join_big`'s 1e8 rows over a
+  - **q5 takes 5 to 7 s where q1 to q4 take 0.7 to 1.5 s.** It buckets `join_big`'s 1e8 rows over a
     key range of 2e8 and gathers 13 columns for 9e7 output rows through random row indices. Not
     profiled yet. Candidates: partition both sides by the key's high bits so each partition's
     buckets fit the cache, and gather the built side's columns in bucket order.
