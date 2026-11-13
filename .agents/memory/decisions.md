@@ -9613,7 +9613,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **One hooks byte.** `heap::activity::HOOKS` holds the activity-summary and profile-tick bits, so the common call tests one byte, which replaces the separate flags rather than adding to them.
 - **One argument shape across the call boundary.** Builtins and closures agree on positional values plus parallel tags (empty when the site has none) as the shape a call boundary takes. The builtin interface `Call { args: &[Arg] }` is unchanged for now; the closure protocol adopts the values-plus-tags shape first.
 - **GC liveness.** The stack array only copies registers `first..first + count`, which stay rooted and unchanged until the instruction writes its result, so it needs no root set of its own.
-- **Impact.** Warm instructions per iteration fall 1.5% on testthat_full, 6.2% on bond_book_full and 1.5% on validation_full, with no measurable compile cost and no growth in anonymous memory. Pinned by the oracle case `builtins__positional_and_tagged_calls`.
+- **Impact.** Warm instructions per iteration fall 1.25% on testthat_full, 5.2% on bond_book_full and 1.3% on validation_full, with no measurable compile cost and no growth in anonymous memory. Pinned by the oracle case `builtins__positional_and_tagged_calls`.
 
 ## Compiled code binds GNU R's inlined base functions at compile time
 
