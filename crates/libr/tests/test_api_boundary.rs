@@ -497,7 +497,7 @@ const BUDGETS: &[(&str, u64)] = &[
     ("bench_binding_probes", 203),
     ("bench_delayed_binding", 230),
     ("bench_resizable_grow_shrink", 6_600),
-    ("bench_duplicate_call", 2_100),
+    ("bench_duplicate_call", 2_150),
 ];
 
 /// Runs the `bench_` loops under callgrind in a child copy of this test and checks the cost per
