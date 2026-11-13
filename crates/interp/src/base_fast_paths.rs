@@ -1406,6 +1406,56 @@ pub(crate) unsafe fn argument(frame: ClosureFrame, symbol: Sexp) -> R<Option<Sex
     Ok(Some(value))
 }
 
+/// A formal as a prologue finds it before forcing anything.
+#[derive(Clone, Copy)]
+enum Formal {
+    /// Left out by the call, so it holds its own default (as [`is_default`] decides): the
+    /// binding's value, a default promise or no value at all. The fast paths run only for base's
+    /// own closures, so a default that is a constant is known without forcing it, and forcing
+    /// it would have no effect the caller could see.
+    Default(Sexp),
+    /// Given by the call: the binding's value, usually a promise.
+    Given(Sexp),
+}
+
+/// The formals `symbols` of `frame`, unforced, which must be listed in the order the closure
+/// declares them; `None` when one is not a formal there. A slot frame's formals are read in one
+/// walk, where reading each with [`argument`] would walk them once per formal.
+unsafe fn formals<const N: usize>(frame: ClosureFrame, symbols: [Sexp; N]) -> Option<[Formal; N]> {
+    let classify = |value: Sexp, missing: bool| {
+        if missing || value == missing_arg() || value == values::unbound() {
+            Formal::Default(value)
+        } else {
+            Formal::Given(value)
+        }
+    };
+    match frame.resolve() {
+        Ok(index) => {
+            let found = eval::slot_formals(index, symbols)?;
+            Some(found.map(|(value, missing)| classify(value, missing)))
+        }
+        Err(env) => {
+            let mut found = [Formal::Default(values::unbound()); N];
+            for (formal, symbol) in found.iter_mut().zip(symbols) {
+                let cell = crate::heap().frame_cell(env, symbol)?;
+                *formal = classify(cell.cdr(), cell.has_gp(gp::BINDING_MISSING));
+            }
+            Some(found)
+        }
+    }
+}
+
+/// The value of a formal the call gave, forced as evaluating its name would.
+unsafe fn force_given(value: Sexp) -> R<Sexp> {
+    let value = if value.kind() == SexpType::Promise {
+        eval::force_promise(value)?
+    } else {
+        value
+    };
+    crate::heap().root(value);
+    Ok(value)
+}
+
 /// Whether the formal `name` holds its own default, untouched: no value at all, or the default
 /// the call bound because the argument was left out. An argument the caller passed on from its
 /// own missing formal is not a default, because forcing it raises an error.
@@ -2368,17 +2418,56 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let frame = ClosureFrame::of(call);
     let symbols = symbols();
-    let Some(x) = argument(frame, symbols.x)? else {
+    let Some(
+        [
+            x,
+            digits,
+            width,
+            format,
+            flag,
+            mode,
+            big_mark,
+            big_interval,
+            small_mark,
+            decimal_mark,
+            preserve_width,
+            zero_print,
+            drop0trailing,
+        ],
+    ) = formals(
+        frame,
+        [
+            symbols.x,
+            symbols.digits,
+            symbols.width,
+            symbols.format,
+            symbols.flag,
+            symbols.mode,
+            symbols.big_mark,
+            symbols.big_interval,
+            symbols.small_mark,
+            symbols.decimal_mark,
+            symbols.preserve_width,
+            symbols.zero_print,
+            symbols.drop0trailing,
+        ],
+    )
+    else {
         return decline();
     };
+    let Formal::Given(x) = x else {
+        return decline();
+    };
+    let x = force_given(x)?;
     if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || x.attrib() != nil() {
         return decline();
     }
-    let Some(flag) = argument(frame, symbols.flag)? else {
-        return decline();
-    };
-    let Some(flag_text) = string_scalar(flag) else {
-        return decline();
+    let flag_text = match flag {
+        Formal::Default(_) => Cow::Borrowed(""),
+        Formal::Given(flag) => match string_scalar(force_given(flag)?) {
+            Some(text) => text,
+            None => return decline(),
+        },
     };
     if !flag_text.bytes().all(|byte| b"0+- #'I".contains(&byte)) {
         return decline();
@@ -2387,16 +2476,17 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     if count == 0 {
         return finish(frame, values::alloc(SexpType::String, 0)?, true);
     }
-    if argument(frame, symbols.mode)? != Some(nil()) {
+    if let Formal::Given(mode) = mode
+        && force_given(mode)? != nil()
+    {
         return decline();
     }
-    let format = if is_supplied(frame, symbols.format)? {
-        let Some(format) = argument(frame, symbols.format)? else {
-            return decline();
-        };
-        format
-    } else {
-        nil()
+    // A format passed on from the caller's own missing formal makes the body's `is.null(format)`
+    // fail, and the error is the body's to raise.
+    let format = match format {
+        Formal::Default(_) => nil(),
+        Formal::Given(format) if eval::value_is_missing(format)? => return decline(),
+        Formal::Given(format) => force_given(format)?,
     };
     let format = if format == nil() {
         if x.kind() == SexpType::Integer {
@@ -2421,16 +2511,10 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         return decline();
     };
     let FiniteCopy { vector, specials } = vector;
-    let Some(width) = argument(frame, symbols.width)? else {
+    let Some(width) = optional_whole_number(given_or(width, nil())?) else {
         return decline();
     };
-    let Some(width) = optional_whole_number(width) else {
-        return decline();
-    };
-    let Some(digits) = argument(frame, symbols.digits)? else {
-        return decline();
-    };
-    let Some(digits) = optional_whole_number(digits) else {
+    let Some(digits) = optional_whole_number(given_or(digits, nil())?) else {
         return decline();
     };
     let width = if width.is_none() && digits.is_none() {
@@ -2481,22 +2565,23 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             values::set_mkchar(result, index, &text)?;
         }
     }
-    let Some(big_mark) = argument(frame, symbols.big_mark)? else {
-        return decline();
+    let big_mark = match big_mark {
+        Formal::Default(_) => Cow::Borrowed(""),
+        Formal::Given(mark) => match string_scalar(force_given(mark)?) {
+            Some(mark) => mark,
+            None => return decline(),
+        },
     };
-    let Some(big_mark) = string_scalar(big_mark) else {
-        return decline();
-    };
+    let is_empty = |value: Sexp| unsafe { string_scalar(value).as_deref() == Some("") };
+    let is_null = |value: Sexp| value == nil();
+    let is_off = |value: Sexp| unsafe { is_false(value) };
     if big_mark.is_empty() {
         // The body's `nzchar(big.mark) || nzchar(small.mark) || decimal.mark != "." ||
         // !is.null(zero.print) || drop0trailing`, forced in that order.
-        if !argument_is(frame, symbols.small_mark, |value| {
-            string_scalar(value).as_deref() == Some("")
-        })? || !decimal_mark_is_point(frame)?
-            || !argument_is(frame, symbols.zero_print, |value| value == nil())?
-            || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
-                is_false(value)
-            })?
+        if !given_is(small_mark, is_empty)?
+            || !decimal_mark_is_point(decimal_mark)?
+            || !given_is(zero_print, is_null)?
+            || !given_is(drop0trailing, is_off)?
         {
             return decline();
         }
@@ -2506,32 +2591,28 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     // `drop0trailing`, `preserve.width`, `big.interval` and `small.mark`, in that order.
     if !big_mark.is_ascii()
         || big_mark == "."
-        || !decimal_mark_is_point(frame)?
-        || !argument_is(frame, symbols.zero_print, |value| value == nil())?
-        || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
-            is_false(value)
-        })?
+        || !decimal_mark_is_point(decimal_mark)?
+        || !given_is(zero_print, is_null)?
+        || !given_is(drop0trailing, is_off)?
     {
         return decline();
     }
-    let Some(preserve_width) = argument(frame, symbols.preserve_width)? else {
-        return decline();
+    let keep_width = match preserve_width {
+        Formal::Default(_) => true,
+        Formal::Given(value) => match string_scalar(force_given(value)?).as_deref() {
+            Some("individual") => true,
+            Some("none") => false,
+            _ => return decline(),
+        },
     };
-    let keep_width = match string_scalar(preserve_width).as_deref() {
-        Some("individual") => true,
-        Some("none") => false,
-        _ => return decline(),
+    let interval = match big_interval {
+        Formal::Default(_) => 3,
+        Formal::Given(value) => match optional_whole_number(force_given(value)?) {
+            Some(Some(interval)) if (1..=1000).contains(&interval) => interval as usize,
+            _ => return decline(),
+        },
     };
-    let Some(interval) = argument(frame, symbols.big_interval)? else {
-        return decline();
-    };
-    let interval = match optional_whole_number(interval) {
-        Some(Some(interval)) if (1..=1000).contains(&interval) => interval as usize,
-        _ => return decline(),
-    };
-    if !argument_is(frame, symbols.small_mark, |value| {
-        string_scalar(value).as_deref() == Some("")
-    })? {
+    if !given_is(small_mark, is_empty)? {
         return decline();
     }
     let marked = values::alloc(SexpType::String, count)?;
@@ -2732,44 +2813,40 @@ unsafe fn is_false(value: Sexp) -> bool {
         && values::ints(value)[0] == 0
 }
 
-/// Forces the formal `symbol` and tests its value; false when it has none.
-unsafe fn argument_is(
-    frame: ClosureFrame,
-    symbol: Sexp,
-    test: impl FnOnce(Sexp) -> bool,
-) -> R<bool> {
-    Ok(argument(frame, symbol)?.is_some_and(test))
+/// The value of `formal`, forced when the call gave it, or `default` when it holds its own
+/// default, which must be a constant.
+unsafe fn given_or(formal: Formal, default: Sexp) -> R<Sexp> {
+    match formal {
+        Formal::Default(_) => Ok(default),
+        Formal::Given(value) => force_given(value),
+    }
+}
+
+/// Whether `formal` passes `test`: forced when the call gave it, and true when it holds its own
+/// default, for a test its constant default passes.
+unsafe fn given_is(formal: Formal, test: impl FnOnce(Sexp) -> bool) -> R<bool> {
+    match formal {
+        Formal::Default(_) => Ok(true),
+        Formal::Given(value) => Ok(test(force_given(value)?)),
+    }
 }
 
 /// Whether `formatC()`'s `decimal.mark` is `"."`. While it holds its own default promise,
 /// unforced, the answer is the `OutDec` option, read as `getOption("OutDec")` reads it, so the
 /// promise and the `getOption()` call it would make are skipped; that call has no side effect,
 /// and the fast path returns before the body could force the promise.
-unsafe fn decimal_mark_is_point(frame: ClosureFrame) -> R<bool> {
-    let symbol = symbols().decimal_mark;
-    if is_default(frame, symbol)? && default_is_unforced(frame, symbol) {
-        let mark = crate::envir::option_value(symbols().out_dec.car());
-        return Ok(string_scalar(mark).as_deref() == Some("."));
-    }
-    argument_is(frame, symbol, |value| {
-        string_scalar(value).as_deref() == Some(".")
-    })
-}
-
-/// Whether the formal `symbol` holds a default promise that has not been forced. The fast paths
-/// run only for base's own closures, so the promise's code is the formal's original default.
-unsafe fn default_is_unforced(frame: ClosureFrame, symbol: Sexp) -> bool {
-    let value = match frame.resolve() {
-        Ok(index) => match eval::slot_formal(index, symbol) {
-            Some((value, _)) => value,
-            None => return false,
-        },
-        Err(env) => match crate::heap().frame_cell(env, symbol) {
-            Some(cell) => cell.cdr(),
-            None => return false,
-        },
+unsafe fn decimal_mark_is_point(formal: Formal) -> R<bool> {
+    let value = match formal {
+        Formal::Default(value)
+            if value.kind() == SexpType::Promise && value.car() == values::unbound() =>
+        {
+            crate::envir::option_value(symbols().out_dec.car())
+        }
+        Formal::Default(value) if value.kind() == SexpType::Promise => value.car(),
+        Formal::Default(_) => return Ok(false),
+        Formal::Given(value) => force_given(value)?,
     };
-    value.kind() == SexpType::Promise && value.car() == values::unbound()
+    Ok(string_scalar(value).as_deref() == Some("."))
 }
 
 /// `pmax(..., na.rm)` when every argument is `NULL` or an atomic vector that is no object, and

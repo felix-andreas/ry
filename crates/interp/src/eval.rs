@@ -2710,6 +2710,36 @@ pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
     None
 }
 
+/// [`slot_formal`] for several formals in one walk of the formals, so `symbols` must be listed
+/// in the order the closure declares them. `None` when the frame is no slot frame without an
+/// environment, or when a symbol is not a formal at its place in that order.
+pub unsafe fn slot_formals<const N: usize>(
+    index: usize,
+    symbols: [Sexp; N],
+) -> Option<[(Sexp, bool); N]> {
+    let frame = interp().frames.get(index)?;
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return None;
+    }
+    let mut found = [(nil(), false); N];
+    let mut formal = frame.function.car();
+    let mut position = 0;
+    for (slot, symbol) in found.iter_mut().zip(symbols) {
+        while formal.kind() == SexpType::Pairlist && formal.tag() != symbol {
+            position += 1;
+            formal = formal.cdr();
+        }
+        if formal.kind() != SexpType::Pairlist {
+            return None;
+        }
+        let value = *bytecode::register_address(frame.slots as usize + 1 + position);
+        *slot = (value, position < 64 && frame.missing & (1 << position) != 0);
+        position += 1;
+        formal = formal.cdr();
+    }
+    Some(found)
+}
+
 /// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
 /// environment it hands out stands for (see [`crate::builtins::Call::env`]).
 pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
