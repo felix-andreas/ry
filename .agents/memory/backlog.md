@@ -1085,6 +1085,22 @@ The rest of the inventory measured cold. The largest hash maps are the large-fra
 `subset::resolve` 0.06. `primitive_formals` is indexed by builtin index and both `Vec<bool>`s
 are bitsets. Left: give `precious` the dense layout of row 11 (B2).
 
+**Making detach cheaper does not clear the bar; detaching less often does (row 9).** Callgrind,
+profiling build, JIT off, `RY_BENCH_REPEAT=2`, whole process. Everything under
+`materialize_references` is the ceiling: conditions 4.43%, timeseries 3.72%, records 3.23%,
+validation 2.72%, testthat 2.61% (80,860 `detach_reference` calls from 32,455 materializations),
+objects 2.11%, team_scores 1.69%, functional 0.98%, strings 0.95%, tables 0.52%, the other five 0.
+About half of it is the conversion every detach needs (the four field writes, `reference_promise`,
+`pending_env`, the frame walk), which only fewer reifies remove (AOT). A cheaper detach removes the
+linear pool search and the per-detach refill (a fresh promise and a 3-int target vector): self
+cost plus refill is at most testthat 0.88%, conditions 1.99%, timeseries 1.71%, validation 1.16%,
+records 3.06%. Records' figure is two collections that happen to trip inside the refill's
+`values::alloc` and would run at the next allocation anyway; without collections the refill is
+about 120 instructions per detach. Realistic gain: testthat 0.5 to 0.8%, every workload under
+1.5%. A dense target array (no target vector) and a pool index stored with the reference would
+take about 0.3 to 0.6%; lazy refill only moves the promise allocation to the next
+`pooled_reference` at that depth.
+
 **Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
 `mkPROMISE` and `NewEnvironment` calls under callgrind; ry counts heap objects freed by kind from
