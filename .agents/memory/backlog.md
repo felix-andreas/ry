@@ -39,12 +39,6 @@ The quality bar is four things.
   'lattice'`) and the `timeseries` workload of `just bench applications` fails.
 - Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
-- `ry check` does not hold a function literal's body to its declared return type, though the typing
-  reference says an explicit return "is enforced": `f <- function(x: integer) -> character x`,
-  `-> NULL x`, and `#: fn(x: integer) -> NULL` over `function(x) x` all check clean (calls
-  included), while ry's runtime stops each call with "the function must return ...". Passing such
-  a function where a function type is expected is reported (`typing-scripts/functions.R.test`,
-  `function_argument_with_wrong_return_is_rejected`).
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
@@ -97,6 +91,25 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
 
+## Parked: cheaper global bindings in top-level loops (tier 0)
+
+Branch `perf/global-loop-tier0` holds the work, which is not merged and not gated.
+- **What it does.** Global reads and writes go through the site's cached binding cell, validated by the existing `Heap::lookup_stamp`, the one stamp tier 1 also checks; no new invalidation source. `lockBinding` and `makeActiveBinding` move no stamp, so every fast path reads the cell's flags. ForStep keeps its variable's cell under the stamp. `x <- left op right` on an unshared scalar global overwrites it in place (reuse bit 2 on `Op::Arithmetic`, `assign_in_place`).
+- **Pinned by** the oracle case `base__global_loop_bindings` (recorded with GNU R 4.6.2; passes on ry-jit, ry-gctorture-young and ry-jit-gctorture). It covers each binding-change path (assign, `<<-`, eval, rm, `sys.source`, `list2env`, `delayedAssign`, attach and detach, masks of `+` and `<-`, `makeActiveBinding`, `lockBinding`, removing or reassigning the loop variable) and in-place captures.
+- **Ir per iteration** of `s <- 0; for (i in 1:N) s <- s + i` (the 2e6 run minus the 1e6 run; GNU R 249, target about 270):
+
+  | part | main | branch | with the draft fast paths |
+  |---|---|---|---|
+  | GetVar x2 | 332 | 142 | |
+  | SetVar plus Arithmetic | 256 | 138 | |
+  | ForStep | 200 | 152 | |
+  | Jump (back edge) | 63 | 63 | |
+  | total | 856 | 495 | 412 |
+
+- **Draft, not gated.** The branch's last commit adds a call-free ForStep path and inline back-edge counting in `jump_fast` (495 to 412). It was not run through the oracle or test_tiers.
+- **Remaining ceilings**, estimated rather than built: GetVar about 40 each (stamp, start and flag checks, kind switch, feedback), the arithmetic plus in-place store about 80 (it re-decodes the SetVar and repeats the stamp check), ForStep about 75. That puts the realistic total near 280 and the ceiling near 220.
+- **Unmeasured:** compile cost, RSS, and the effect on the application workloads, testthat_full and the public suite. Top-level loops may be rare in the applications, so measure the workloads before building more; the lead's bar is 3% on a named workload (2% on testthat).
+
 ## Open: console input in ry's runtime
 
 - Ctrl-C during the script `ry run` queues before its console is not reported to the preflight, because the script goes to R as one unit: the console session keeps the bindings of the script's unrun rest.
@@ -125,12 +138,20 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 
 ### Typed ry against Rust: the programs above twice Rust's time
 
-The bar is twice the Rust twin's time (`tools/bench/typed/`, `just bench typed` on a release build; a single program runs on any build with the typed harness prepended, `ry run main.R` in a scratch project). The ratios below are typed time over Rust time on a release build of a shared machine, so read them as an order, not as results. At or under the bar: `vasicek`, `array_sum`, `sales`, `closures`, `drawdown`, `bond_book`, `array_filter`, `array_dot`, `loop_sum`, `array_map`, `report`, `vector_arith`, `log_rank`, `fib` and `orders`. Every step below has to keep compile time flat: the typed core is single-pass, and the suite reports its total compile time beside `rustc`'s. Compare that total before and after any change to inlining, which is where it grows.
+The bar is twice the Rust twin's time (`tools/bench/typed/`, `just bench typed` on a release build; a single program runs on any build with the typed harness prepended, `ry run main.R` in a scratch project). The ratios below are typed time over Rust time on a release build of a shared machine, so read them as an order, not as results. At or under the bar: `vasicek`, `array_sum`, `sales`, `closures`, `drawdown`, `bond_book`, `array_filter`, `array_dot`, `loop_sum`, `array_map`, `report`, `vector_arith`, `log_rank`, `fib`, `orders` and `team_scores`. Every step below has to keep compile time flat: the typed core is single-pass, and the suite reports its total compile time beside `rustc`'s. Compare that total before and after any change to inlining, which is where it grows.
 
 | Program | Ratio | Top cost | Next step |
 | --- | --- | --- | --- |
 | `expr_tree` | about 12 | The tree is built by untyped R, so every `evaluate` call converts it into boxes (see "Box conversion at the boundary" above). Evaluating a natively built tree is about 4% of the time. | Keep the box beside the R record it came from, or build the tree in typed code. |
-| `team_scores` | about 2.2 | About 1,420 instructions per row (callgrind), spread out: `parsed` is a `List` of `Result` boxes, each holding a record box, so a row allocates two boxes, pushes them on two lists and frees them (about 300 in the runtime, and a third of the roughly 340 in generated code); the scan for the separators and the cut of each piece (about 290); the two number parsers (about 165); the dictionary update (about 130); and the conversion of the `List<Str>` argument on every call (about 150, see below). | `List.map` followed by `List.keep_oks` and `List.walk` fuses into one pass that builds neither list nor box, with `List.len` of either list a counter. Then: a piece that is only parsed is parsed from its offsets without being cut (`Op::Parse` over a range), and the scan compares sixteen bytes at a time. |
+
+`team_scores` is under the bar since its three loops fuse into one (`decisions.md`, "A loop that fills a list is fused with the loop that reads it"). It runs about 890 instructions per row, and two steps would cut more: a piece that is only parsed can be parsed from its offsets without being cut out of the string (`Op::Parse` over a range, about 150 instructions per row for the cuts), and the scan for the separators can compare sixteen bytes at a time (about 180 for the scan).
+
+Loop fusion (`crates/typed/src/loops.rs`) leaves these lists in place:
+
+- **A third stage after two mapped lists.** In `List.map` → `List.map` → a consumer, the first two loops fuse and the third does not. After the first fusion the second list's length is a copy of a copy of the source's length, and its `Set` index is the first consumer's counter, which is assigned from the producer's counter and is not the same variable. `set_source` needs to follow copy chains, and the pass needs a helper that renames an operand, which `crates/typed` does not have.
+- **Loops that share an assigned variable** (a consumer that assigns what the producer reads) stay apart, also where an order of the two bodies exists that keeps every value.
+- **A loop with a call** of R or of a typed function that was not inlined never fuses, because the call could observe the order of the two loops.
+- **A counter nothing else reads.** `unbox::remove_unread` keeps `count = count + 1` when only that instruction reads `count`, so a fused list whose length is never asked for still counts its items.
 
 Two boundary costs sit inside several ratios and belong to no single program: a `List<Str>` argument held by untyped code is converted to a native list on every call, and a numeric list argument is scanned for `NA` on every call (`typed::type_of`). `sales` and `team_scores` pay the first, and a benchmark whose numeric lists are held by untyped code pays the second. A list that records "no `NA`" once, at `List.from_r` or when native code built it, removes the scan.
 
@@ -309,6 +330,21 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Freed large vectors reach the OS only after mimalloc's purge delay** (owner: the GC and heap track). The heap frees a large vector through `release_large_memory`, which calls `std::alloc::dealloc` into mimalloc, and mimalloc keeps the pages resident until its purge delay runs out, so a change that frees more large vectors can raise peak RSS while live data falls, depending on when collections run. Freeing a shared tier-0 body's instruction vectors with its last closure (`decisions.md`, "Closures made at one site share compiled code") showed it: on one build of main the testthat_full peak rose from 41.55 to 41.97 MiB under the default policy but fell from 40.53 to 40.38 MiB with `MIMALLOC_PURGE_DELAY=0`, with an old generation 0.3 to 0.4 MB smaller in `RY_GC_LOG`. On a later main the same change measures 41.71 to 41.62 MiB under the default policy and 40.67 to 40.68 with purge 0 (median peak anonymous RSS of 5 rounds at `RY_BENCH_REPEAT=2`). Release every freed large vector promptly (decommit or purge on free above a size threshold, or an explicit purge after a major collection), then remeasure the default-policy peak.
 - **Closures that share a tier-0 body share its lookup hints, so R6-style objects miss them.** Every closure over one `function` expression runs the same code object, and each R6-style object's methods have their own enclosure, so `lookup_function` misses the inline cache that another object's closure filled. Against the main it merged into, shared bodies run the objects workload at +0.21% instructions (7,637.1M to 7,653.3M at `RY_BENCH_REPEAT=2`) and +0.35 MiB peak anonymous RSS (42.64 to 42.99 MiB, median of 5 rounds). By function, on a slightly older main (+0.13%, +10.2M): about 5.9M is `lookup_function` with unchanged code, and 3.4M is `hash_shape`, the check that a body was not changed in place before a new closure takes its code. What the extra resident memory holds is not yet attributed; the `Bodies` columns and the shared code that lives as long as any closure over its body are the suspects. A call protocol that keeps lookup hints per closure or per enclosure, rather than per code object, would recover the first part.
 - **Heap page placement makes peak RSS follow collection timing, not live data** (owner: the GC and heap track). With `formatC()` calling its kernel directly, report allocates less, runs fewer minor collections (105 against 138 on a formatC-only loop), and peaks about 1 MB higher. The GC log's old-generation and nursery bytes and massif's malloc peak match main, and all the extra residency is in one 32 MB arena. Fix the placement so the peak tracks live data; `testing.md`, "Judge a change's peak RSS", exempts such rises until then.
+
+## Parked: cheaper restart setup in `withRestarts` (branch `perf/restart-setup`)
+
+- **What it does.** The native `withRestarts` prologue (`crates/interp/src/base_fast_paths.rs`) builds restart objects that share one `names` vector and one `"restart"` class vector, both marked not mutable. It looks `makeRestart`, `$.restart` and `$<-.restart` up through pre-installed symbols, makes the default handler and test closures without `eval`, and probes a new binding's frame once instead of twice. With one restart it evaluates `withOneRestart(expr, restarts[[1L]])` directly, skipping `length(restarts) == 0L` and `== 1L`, which the base namespace cannot mask. `is_plain_restart` builds the method scope once for both methods.
+- **Measured.** On team_scores (JIT on, threads pinned), warm Ir went from 2,457.8M to 2,409.2M (-1.98%) per repeat over 14,116 `withRestarts` calls. `make_restart_for` fell from 55M to about 22M. The baseline was a main profile a few commits behind the branch base, not a paired build. The remaining setup is the five inner closures `withRestarts` must define (30M in `bytecode::inner_closure`, mostly its scan of the outer function's constants; `ls()` of the frame shows them, so they stay) and `is_plain_restart`'s method scope (about 18M).
+- **Why parked.** A native muffle in `warning_call` (`conditions.rs`) skips `.signalSimpleWarning`, `withRestarts` and the handler when `suppressWarnings`'s own handler applies, which removes this path from team_scores. What is left matters only for the conditions workload, estimated at 1.5 to 2% there, below the bar.
+- **To revive.** Merge main into the branch and re-measure the conditions workload. The oracle case `conditions__restart_objects` on the branch pins restart fields, names, class, the frame `makeRestart` leaves, copy-on-write of the shared attributes, muffling, `conditionCall`, nested handlers and the frames `withRestarts` leaves; it passes on four engines. The full x3, RSS and `test_tiers` gates were not run.
+
+## Parked: S3 method resolution without a scope walk (branch `perf/s3-resolution`)
+
+- **What it does.** `lookup_in_scope` (`crates/interp/src/dispatch.rs`) resolves a method name in one frame read when the dispatch scope is attached (the calling environment lacks `gp::DETACHED`) and the name's symbol lacks `gp::BOUND_ELSEWHERE`. That sticky bit is set whenever any attached frame other than base binds the symbol, so in that case only the methods table (when it is detached) and base can hold the method. Otherwise the scope walk (calling frames up to the top environment, then the search path) is built once per dispatch, lazily, and shared by every candidate name and by `NextMethod`. `MethodCache` keeps one `MethodRow` record per method name (symbol, string, default name, top, table, stamp, cell) in place of parallel columns, and `default_name` stores `generic.default` in the row. No cache was added.
+- **Invariant check.** With `syntax::testing::enable_invariants()`, each fast resolution is checked against the full walk. `check_s3_lookup_agreement` in `crates/interp/src/testing.rs`, run by `fuzz_s3_method_lookups_agree_with_a_full_walk`, mixes dispatches with random assignments, removals, delayed and active bindings, detached frames and tables. The fuzz test was never built or run.
+- **Measured.** Warm Ir per repeat against a main profile a few commits behind the branch base (not a paired build): objects -1.80% (`resolve_s3` inclusive 5.07% to 3.36%), validation -1.11% (3.34% to 2.40%), testthat -1.05% (2.11% to 1.30%). Timeseries, where `resolve_s3` was 7.43%, was not measured.
+- **Why parked.** The remaining work did not justify its cost under the usage budget.
+- **To revive.** Merge main into the branch, then build and run the fuzz test. Record `crates/oracle/cases/dispatch__method_lookup_scope.R` with `oracle record`; it pins frame, global and table methods, `registerS3method` after the first dispatch, shadowing, implicit classes, `NextMethod` with `.Generic`, `.Class` and `.Method`, and detached tables and frames, and its output matched GNU R 4.6.2 by hand. Measure timeseries, then run the full x3, RSS, `test_tiers` and switch gates. Head: `cdae318ce1e21aeae3d4c588fcb4dc5c6c42444b`.
 
 ## Measured and not taken: O(1) `Sys.getenv` and `options`
 
