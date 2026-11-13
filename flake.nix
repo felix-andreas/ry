@@ -400,11 +400,14 @@
           makeShell =
             rustToolchain: packages:
             (pkgs.mkShell.override { inherit (gnuR) stdenv; }) {
-              # libR links zlib, bzip2 and xz (crates/libr/build.rs).
+              # libR links zlib, bzip2 and xz (crates/libr/build.rs), and `just base-r` links the
+              # recommended packages against LAPACK, BLAS and libgfortran.
               buildInputs = [
                 pkgs.zlib
                 pkgs.bzip2
                 pkgs.xz
+                gnuR.lapack
+                gnuR.gfortran.cc.lib
               ];
               packages = [
                 rustToolchain

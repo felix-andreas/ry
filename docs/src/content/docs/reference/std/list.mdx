@@ -2258,9 +2258,9 @@ List.sum <- function(list)
 </Tabs>
 
 The sum of the elements; `0L` for an empty list. An `integer` sum that overflows is an error, so
-sum doubles, or fold with `Num.add_checked` to get `:Err(:Overflow)` instead. A `double` sum is
-accumulated like R's `sum()`, with more precision than a plain left-to-right fold, so
-`List.sum(xs)` and `sum(xs)` give the same number.
+sum doubles, or fold with `Num.add_checked` to get `:Err(:Overflow)` instead. A `double` sum
+adds the elements from first to last in double precision, as a loop with `+` does. R's `sum()`
+accumulates with more precision, so the two can differ in the last digits.
 
 ```r ry run runtime=ry dput
 List.sum([1, 2, 3])
