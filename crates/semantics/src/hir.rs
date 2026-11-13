@@ -2,6 +2,7 @@
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
 use {
+    crate::dense::DenseId,
     rustc_hash::{FxHashMap, FxHasher},
     std::{
         cell::{Cell, RefCell},
@@ -50,6 +51,16 @@ macro_rules! dense_id {
 
             pub fn index(self) -> usize {
                 (self.0.get() - 1) as usize
+            }
+        }
+
+        impl DenseId for $id {
+            fn from_index(index: usize) -> $id {
+                $id::new(index)
+            }
+
+            fn index(self) -> usize {
+                self.index()
             }
         }
 

@@ -4,6 +4,7 @@
 
 use {
     crate::{
+        dense::DenseId,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
             MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
@@ -23,6 +24,16 @@ use {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BindingId(pub u32);
+
+impl DenseId for BindingId {
+    fn from_index(index: usize) -> BindingId {
+        BindingId(u32::try_from(index).expect("an item holds fewer than u32::MAX bindings"))
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingInfo {

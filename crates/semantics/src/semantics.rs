@@ -1,5 +1,6 @@
 pub mod annotations;
 pub mod check;
+pub mod dense;
 pub mod diagnostics;
 pub mod exhaustiveness;
 pub mod hir;

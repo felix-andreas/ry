@@ -1587,10 +1587,13 @@ impl Worker {
             updated = analysed;
         }
         self.pending_lowering.retain(|owed| owed != &path);
+        // The loaded scripts are a function of each file's `source()` literals, and an edit can
+        // change only the edited file's, so the walk over every file runs only when they did.
+        let sourced_before = self.source_calls(file);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
-        if self.sync_sourced_files() {
+        if self.source_calls(file) != sourced_before && self.sync_sourced_files() {
             self.rebuild_project_files();
         }
         self.refresh_attached(&path);
@@ -1624,16 +1627,7 @@ impl Worker {
             let Some(&file) = self.files.get(&path) else {
                 continue;
             };
-            // The set must be complete, so a request arriving mid-read retries the read on a
-            // fresh handle instead of abandoning the sync.
-            let literals = loop {
-                self.refresh_cancellation();
-                if let Ok(literals) = salsa::Cancelled::catch(AssertUnwindSafe(|| {
-                    semantics::file_source_calls(&self.db, file).clone()
-                })) {
-                    break literals;
-                }
-            };
+            let literals = self.source_calls(file);
             let directory = path.parent().map(Path::to_path_buf);
             for literal in literals {
                 let candidates = directory
@@ -1676,6 +1670,19 @@ impl Worker {
                 || reachable.contains(path)
         });
         changed || self.files.len() != before
+    }
+
+    /// The literal paths `file` passes to `source()`. The loaded set must be complete, so a
+    /// request arriving mid-read retries the read on a fresh handle instead of abandoning it.
+    fn source_calls(&mut self, file: SourceFile) -> Vec<String> {
+        loop {
+            self.refresh_cancellation();
+            if let Ok(literals) = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                semantics::file_source_calls(&self.db, file).clone()
+            })) {
+                break literals;
+            }
+        }
     }
 
     /// Stubs and NAMESPACE are tracked as text, outside the analyzed project.

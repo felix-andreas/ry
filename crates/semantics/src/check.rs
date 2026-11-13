@@ -19,6 +19,7 @@ use {
             apply_definition, numeric_join,
         },
         metadata::{imported_by_name, imports_every_name, is_own_package},
+        dense::{Bitset, Column},
         naming::{
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
@@ -796,7 +797,9 @@ fn check_item_in<'db>(
     top_level_ry_values: bool,
 ) -> ItemCheck<'db> {
     let mut table = InferenceTable::default();
-    table.reserve_resolutions(module.expression_count());
+    let expressions = module.expression_count();
+    let bindings = naming.bindings.len();
+    table.reserve_resolutions(expressions);
     if let Some(globals) = globals {
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
@@ -811,26 +814,33 @@ fn check_item_in<'db>(
         table,
         frame_level: 0,
         discarded_if: None,
-        parameter_hints: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        parameter_hints: Column::new_in(arena, expressions),
         hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         expression_annotations: {
-            let mut annotations = HashMap::with_hasher_in(FxBuildHasher, Arena(arena));
-            annotations.extend(expression_annotations.iter().cloned());
+            let mut annotations = Column::new_in(arena, expressions);
+            for (expression, annotation) in expression_annotations {
+                annotations.insert(*expression, annotation.clone());
+            }
             annotations
         },
-        environment: Environment::default(),
+        environment: Environment {
+            entries: Column::new_in(arena, bindings),
+            facts: Vec::new(),
+            undo: Vec::new(),
+            written: Bitset::new_in(arena, bindings),
+        },
         scheme_arena: Vec::new(),
-        literal_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        recorded: RecordedTypes(vec![None; module.expression_count()]),
-        recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        recorded_expectations: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        recorded_loop_variables: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        selected_overloads: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        callee_targets: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        masked_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        literal_reads: Bitset::new_in(arena, expressions),
+        recorded: RecordedTypes(vec![None; expressions]),
+        recorded_patterns: Column::new_in(arena, module.pattern_count()),
+        recorded_expectations: Column::new_in(arena, expressions),
+        recorded_loop_variables: Column::new_in(arena, expressions),
+        selected_overloads: Column::new_in(arena, expressions),
+        callee_targets: Column::new_in(arena, expressions),
+        masked_reads: Bitset::new_in(arena, expressions),
         unseen_frames: 0,
         column_scopes: Vec::new(),
-        column_misses: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        column_misses: Column::new_in(arena, expressions),
         query_depth: 0,
         errors: Vec::new(),
         record_strict_origins,
@@ -845,19 +855,19 @@ fn check_item_in<'db>(
         return_frames: Vec::new(),
         bare_na_returns: FxHashSet::default(),
         pending_enclosing_writes: Vec::new(),
-        forward_captured: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        capture_joins: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        forward_captured: Bitset::new_in(arena, bindings),
+        capture_joins: Column::new_in(arena, bindings),
         capture_repass_needed: false,
-        superassign_seeds: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        pre_materialized: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        no_default_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        defaulted_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        superassign_seeds: Column::new_in(arena, bindings),
+        pre_materialized: Column::new_in(arena, bindings),
+        no_default_formals: Bitset::new_in(arena, bindings),
+        defaulted_formals: Bitset::new_in(arena, bindings),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        string_values: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        string_values: Column::new_in(arena, bindings),
         value_read_slots: None,
-        computed_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        lookup_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        valued_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        computed_slots: Bitset::new_in(arena, bindings),
+        lookup_slots: Bitset::new_in(arena, bindings),
+        valued_slots: Bitset::new_in(arena, bindings),
         super_assigned: super_assigned_names(module),
         next_non_local_slot: naming
             .bindings
@@ -900,7 +910,7 @@ fn check_item_in<'db>(
             // declared type is then checked against that like any other value.
             (ExpressionKind::Assign { value, .. }, Some((declared, function)))
                 if matches!(module.kind(*value), ExpressionKind::Function { .. })
-                    && !context.expression_annotations.contains_key(value) =>
+                    && !context.expression_annotations.contains_key(*value) =>
             {
                 for (name, constraint) in &declared.binders {
                     context.table.rigid_constraints.insert(*name, *constraint);
@@ -1080,8 +1090,8 @@ fn check_item_in<'db>(
     let native_blockers = if context.record_strict_origins {
         // The declaration as written decides whether a function is judged, so a formal the
         // author left untyped keeps the function out.
-        let mut signatures: FxHashMap<ExprId, FunctionType<'db>> = FxHashMap::default();
-        let mut aliased_signatures: FxHashSet<ExprId> = FxHashSet::default();
+        let mut signatures: Column<ExprId, FunctionType<'db>> = Column::new_in(arena, expressions);
+        let mut aliased_signatures: Bitset<ExprId> = Bitset::new_in(arena, expressions);
         let declared_function = |annotation: &Annotation<'db>| {
             if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
                 return None;
@@ -1119,7 +1129,7 @@ fn check_item_in<'db>(
                 ExpressionKind::Function { .. } => {
                     if let Some((function, aliased)) = context
                         .expression_annotations
-                        .get(&id)
+                        .get(id)
                         .and_then(declared_function)
                     {
                         signatures.insert(id, function);
@@ -1130,7 +1140,7 @@ fn check_item_in<'db>(
                 }
                 ExpressionKind::Assign { value, .. }
                     if matches!(module.kind(value), ExpressionKind::Function { .. })
-                        && !context.expression_annotations.contains_key(&value) =>
+                        && !context.expression_annotations.contains_key(value) =>
                 {
                     let item_annotation = if Some(id) == module.root {
                         annotation
@@ -1139,7 +1149,7 @@ fn check_item_in<'db>(
                     };
                     if let Some((function, aliased)) = context
                         .expression_annotations
-                        .get(&id)
+                        .get(id)
                         .or(item_annotation)
                         .and_then(declared_function)
                     {
@@ -1180,7 +1190,7 @@ fn check_item_in<'db>(
             .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
             .collect();
         let mut patterns = vec![None; module.pattern_count()];
-        for (&id, &ty) in &context.recorded_patterns {
+        for (id, &ty) in context.recorded_patterns.iter() {
             if let Some(slot) = patterns.get_mut(id.index()) {
                 *slot = Some(context.table.resolve(context.db, ty));
             }
@@ -1189,12 +1199,12 @@ fn check_item_in<'db>(
         let literal_expectations = context
             .recorded_expectations
             .iter()
-            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .map(|(id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
         let loop_variables = context
             .recorded_loop_variables
             .iter()
-            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .map(|(id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
         editor = Some(Box::new(EditorFacts {
             expression_types,
@@ -1204,12 +1214,12 @@ fn check_item_in<'db>(
             selected_overloads: context
                 .selected_overloads
                 .iter()
-                .map(|(&callee, &index)| (callee, index))
+                .map(|(callee, &index)| (callee, index))
                 .collect(),
             callee_targets: context
                 .callee_targets
                 .iter()
-                .map(|(&callee, &target)| (callee, target))
+                .map(|(callee, &target)| (callee, target))
                 .collect(),
         }));
     }
@@ -1279,8 +1289,8 @@ fn check_item_in<'db>(
         native_blockers,
         scheme,
         editor,
-        masked_reads: context.masked_reads.into_iter().collect(),
-        column_misses: context.column_misses.into_iter().collect(),
+        masked_reads: context.masked_reads.iter().collect(),
+        column_misses: context.column_misses.drain().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
     }
 }
@@ -1424,13 +1434,14 @@ fn erase_residual_vars_at<'db>(
     rigid
 }
 
-#[derive(Debug, Default)]
-struct Environment<'db> {
-    entries: FxHashMap<BindingId, EnvEntry<'db>>,
+struct Environment<'db, 'a> {
+    entries: Column<'a, BindingId, EnvEntry<'db>>,
     /// What dominating tests showed about slots' values beyond their types. A write to a slot
     /// drops every fact that mentions it.
     facts: Vec<Fact>,
     undo: Vec<Undo<'db>>,
+    /// Scratch for [`Environment::writes_since`], empty between calls.
+    written: Bitset<'a, BindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1468,9 +1479,9 @@ enum EnvEntry<'db> {
     MissingFormal(Ty<'db>),
 }
 
-impl<'db> Environment<'db> {
+impl<'db> Environment<'db, '_> {
     fn get(&self, slot: BindingId) -> Option<EnvEntry<'db>> {
-        self.entries.get(&slot).copied()
+        self.entries.get(slot).copied()
     }
 
     fn set(&mut self, slot: BindingId, entry: EnvEntry<'db>) {
@@ -1526,7 +1537,7 @@ impl<'db> Environment<'db> {
                     self.entries.insert(slot, entry);
                 }
                 Undo::Entry(slot, None) => {
-                    self.entries.remove(&slot);
+                    self.entries.remove(slot);
                 }
                 Undo::Established(fact) => self.facts.retain(|&held| held != fact),
                 Undo::Dropped(fact) => self.facts.push(fact),
@@ -1534,23 +1545,25 @@ impl<'db> Environment<'db> {
         }
     }
 
-    fn writes_since(&self, mark: usize) -> Vec<(BindingId, Option<EnvEntry<'db>>)> {
-        let mut seen = FxHashSet::default();
+    fn writes_since(&mut self, mark: usize) -> Vec<(BindingId, Option<EnvEntry<'db>>)> {
         let mut writes = Vec::new();
         for undo in &self.undo[mark..] {
             let Undo::Entry(slot, _) = undo else {
                 continue;
             };
-            if seen.insert(*slot) {
-                writes.push((*slot, self.entries.get(slot).copied()));
+            if self.written.insert(*slot) {
+                writes.push((*slot, self.entries.get(*slot).copied()));
             }
+        }
+        for (slot, _) in &writes {
+            self.written.remove(*slot);
         }
         writes
     }
 }
 
-/// A map whose table lives in the check's arena: the working maps grow and rehash many times
-/// per item, and the arena frees every superseded table in one step when the check ends.
+/// A map whose table lives in the check's arena, for the few facts whose key is not one of
+/// the item's dense ids. The arena frees every superseded table in one step when the check ends.
 type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, Arena<'a>>;
 type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, Arena<'a>>;
 
@@ -1590,28 +1603,28 @@ struct Checker<'db, 'a> {
     discarded_if: Option<ExprId>,
     /// Parameter types an unannotated function literal takes from the function type its call
     /// argument position expects, by formal position; `None` leaves a formal to inference.
-    parameter_hints: ArenaMap<'a, ExprId, Vec<Option<Ty<'db>>>>,
+    parameter_hints: Column<'a, ExprId, Vec<Option<Ty<'db>>>>,
     /// The ranges of the formals that took their type from a call's expected function type, so
     /// only findings on those say the call supplied the type.
     hinted_parameters: ArenaSet<'a, TextRange>,
-    expression_annotations: ArenaMap<'a, ExprId, Annotation<'db>>,
-    environment: Environment<'db>,
+    expression_annotations: Column<'a, ExprId, Annotation<'db>>,
+    environment: Environment<'db, 'a>,
     scheme_arena: Vec<TypeScheme<'db>>,
     /// The reads that may keep a literal variable open, because they are an operand whose
     /// other operand may decide it. Every other read decides it as R's type.
-    literal_reads: ArenaSet<'a, ExprId>,
+    literal_reads: Bitset<'a, ExprId>,
     recorded: RecordedTypes<'db>,
-    recorded_patterns: ArenaMap<'a, PatId, Ty<'db>>,
-    recorded_expectations: ArenaMap<'a, ExprId, Ty<'db>>,
-    recorded_loop_variables: ArenaMap<'a, ExprId, Ty<'db>>,
-    selected_overloads: ArenaMap<'a, ExprId, usize>,
-    callee_targets: ArenaMap<'a, ExprId, CalleeTarget>,
-    masked_reads: ArenaSet<'a, ExprId>,
+    recorded_patterns: Column<'a, PatId, Ty<'db>>,
+    recorded_expectations: Column<'a, ExprId, Ty<'db>>,
+    recorded_loop_variables: Column<'a, ExprId, Ty<'db>>,
+    selected_overloads: Column<'a, ExprId, usize>,
+    callee_targets: Column<'a, ExprId, CalleeTarget>,
+    masked_reads: Bitset<'a, ExprId>,
     /// How many enclosing `[` index a value that may be a data.table of unknown columns.
     unseen_frames: u32,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
-    column_scopes: Vec<ColumnScope<'db>>,
-    column_misses: ArenaMap<'a, ExprId, ColumnMiss>,
+    column_scopes: Vec<ColumnScope<'db, 'a>>,
+    column_misses: Column<'a, ExprId, ColumnMiss>,
     /// Frame queries being inferred. data.table syntax makes naming resolve a whole
     /// bracket quietly, but inside a frame query ry knows the columns, so a quiet read
     /// that is no column still reads its global.
@@ -1646,21 +1659,21 @@ struct Checker<'db, 'a> {
     /// so the join survives at the definition site.
     pending_enclosing_writes: Vec<(BindingId, Ty<'db>)>,
     /// Slots a closure read before any write reached them (the letrec shape).
-    forward_captured: ArenaSet<'a, BindingId>,
+    forward_captured: Bitset<'a, BindingId>,
     /// Variable-erased join of every write to a captured slot, surviving rollbacks;
     /// forward-capture reads resolve here instead of the empty definition-point entry.
-    capture_joins: ArenaMap<'a, BindingId, Ty<'db>>,
+    capture_joins: Column<'a, BindingId, Ty<'db>>,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
     /// enclosing type on entry, and whether the body's first write has bound it yet.
-    superassign_seeds: ArenaMap<'a, BindingId, (Ty<'db>, bool)>,
+    superassign_seeds: Column<'a, BindingId, (Ty<'db>, bool)>,
     /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
     /// that loop passes re-establish after their rollback.
-    pre_materialized: ArenaMap<'a, BindingId, Ty<'db>>,
-    no_default_formals: ArenaSet<'a, BindingId>,
+    pre_materialized: Column<'a, BindingId, Ty<'db>>,
+    no_default_formals: Bitset<'a, BindingId>,
     /// Unannotated formals with a default; a condition on one does not pin its type.
-    defaulted_formals: ArenaSet<'a, BindingId>,
+    defaulted_formals: Bitset<'a, BindingId>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: ArenaMap<'a, Symbol, BindingId>,
@@ -1669,20 +1682,20 @@ struct Checker<'db, 'a> {
     /// compared by site so a re-pass over the same write keeps it. `None` once a second write
     /// site, or a write of anything else, appears. Queries read it for column names given through a variable
     /// (`.SDcols = cols`, `(cols) := ...`).
-    string_values: ArenaMap<'a, BindingId, Option<StringWrite>>,
+    string_values: Column<'a, BindingId, Option<StringWrite>>,
     /// Slots read somewhere other than as a call head, built on first need.
-    value_read_slots: Option<ArenaSet<'a, BindingId>>,
+    value_read_slots: Option<Bitset<'a, BindingId>>,
     /// Slots whose type the code inferred rather than a declaration stated: those an
     /// unannotated assignment in the body has written so far, and undeclared formals, whose
     /// `NULL` is a placeholder default (NlcOptim's `solqp(H = NULL, ...)`) or the shape an
     /// `is.null()` test gave them (Rsolnp's `if (is.null(eqfun)) ...`).
-    computed_slots: ArenaSet<'a, BindingId>,
+    computed_slots: Bitset<'a, BindingId>,
     /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
     /// so a call through them must suit every member the collection holds.
-    lookup_slots: ArenaSet<'a, BindingId>,
+    lookup_slots: Bitset<'a, BindingId>,
     /// Slots that some write so far gave a type other than `NULL`, so a `NULL` read from them
     /// is a path the code takes rather than a placeholder.
-    valued_slots: ArenaSet<'a, BindingId>,
+    valued_slots: Bitset<'a, BindingId>,
     /// The item's `<<-` target names, sorted.
     super_assigned: Vec<Symbol>,
 }
@@ -1709,7 +1722,7 @@ enum Callable {
 }
 
 /// The evaluation frame of one query `f[i, j, by]`.
-struct ColumnScope<'db> {
+struct ColumnScope<'db, 'a> {
     /// `None` when the frame's columns are not known, which makes every bare name silent.
     columns: Option<Vec<RecordField<'db>>>,
     frame: Option<Symbol>,
@@ -1717,7 +1730,7 @@ struct ColumnScope<'db> {
     bracket: TextRange,
     subset_data: Ty<'db>,
     /// Called names inside the bracket, which never read a column.
-    callees: FxHashSet<ExprId>,
+    callees: Bitset<'a, ExprId>,
     /// The two sides of a join, which `j` can also read as `x.col` and `i.col`.
     join: Option<JoinSides<'db>>,
 }
@@ -2913,7 +2926,7 @@ struct EarlyReturn<'db> {
     value: Option<ExprId>,
 }
 
-impl<'db> Checker<'db, '_> {
+impl<'db, 'a> Checker<'db, 'a> {
     fn recorded_type(&self, id: ExprId) -> Ty<'db> {
         self.recorded
             .get(&id)
@@ -3387,13 +3400,13 @@ impl<'db> Checker<'db, '_> {
                 let (spelling, target, value) = (*spelling, *target, *value);
                 let declares_function = self.declared_function_annotation(id).filter(|_| {
                     matches!(self.module.kind(value), ExpressionKind::Function { .. })
-                        && !self.expression_annotations.contains_key(&value)
+                        && !self.expression_annotations.contains_key(value)
                 });
                 let computed =
-                    declares_function.is_none() && !self.expression_annotations.contains_key(&id);
+                    declares_function.is_none() && !self.expression_annotations.contains_key(id);
                 // An annotated value (`@UserId(5L)`) is typed by its annotation, so it is
                 // never one of the bare literals below.
-                let value_annotated = self.expression_annotations.contains_key(&value);
+                let value_annotated = self.expression_annotations.contains_key(value);
                 let value_ty = match declares_function {
                     Some(declared) => {
                         for (name, constraint) in &declared.binders {
@@ -3417,7 +3430,7 @@ impl<'db> Checker<'db, '_> {
                         let literal = number_literal(self.module, value).filter(|_| {
                             binds_name
                                 && !value_annotated
-                                && !self.expression_annotations.contains_key(&id)
+                                && !self.expression_annotations.contains_key(id)
                         });
                         let value_ty = match literal {
                             Some(literal) => {
@@ -3440,7 +3453,7 @@ impl<'db> Checker<'db, '_> {
                                     kind @ (LiteralKind::String(_) | LiteralKind::Logical(_)),
                                 ) if binds_name
                                     && !value_annotated
-                                    && !self.expression_annotations.contains_key(&id) =>
+                                    && !self.expression_annotations.contains_key(id) =>
                                 {
                                     let constraint = match kind {
                                         LiteralKind::String(_) => Constraint::StrLiteral,
@@ -3453,12 +3466,12 @@ impl<'db> Checker<'db, '_> {
                                 // An annotated binding of a variable may decide the variable's
                                 // literal, so its read stays undecided until the annotation.
                                 ExpressionKind::NameRef(_)
-                                    if self.expression_annotations.contains_key(&id) =>
+                                    if self.expression_annotations.contains_key(id) =>
                                 {
                                     let fresh = self.literal_reads.insert(value);
                                     let ty = self.infer(value);
                                     if fresh {
-                                        self.literal_reads.remove(&value);
+                                        self.literal_reads.remove(value);
                                     }
                                     ty
                                 }
@@ -3467,7 +3480,7 @@ impl<'db> Checker<'db, '_> {
                                 // binding in a typed file they are a ry value too.
                                 _ if binds_name
                                     && !value_annotated
-                                    && !self.expression_annotations.contains_key(&id)
+                                    && !self.expression_annotations.contains_key(id)
                                     && self.binds_ry_value()
                                     && let Some(scalar) =
                                         literal_value_scalar(self.module, value) =>
@@ -3491,11 +3504,11 @@ impl<'db> Checker<'db, '_> {
                 if let Some(&slot) = self.naming.resolutions.get(&target) {
                     match computed {
                         true => self.computed_slots.insert(slot),
-                        false => self.computed_slots.remove(&slot),
+                        false => self.computed_slots.remove(slot),
                     };
                     match self.is_lookup(value) {
                         true => self.lookup_slots.insert(slot),
-                        false => self.lookup_slots.remove(&slot),
+                        false => self.lookup_slots.remove(slot),
                     };
                     // A `<<-` write reaches the readers in sibling closures only once the
                     // defining frame joins it, so until then they still read the `NULL`.
@@ -3563,7 +3576,7 @@ impl<'db> Checker<'db, '_> {
                 );
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 for &value in &literal_arguments {
-                    self.literal_reads.remove(&value);
+                    self.literal_reads.remove(value);
                     let argument = self.recorded_type(value);
                     if self.open_literal_var(argument) {
                         self.default_literal_var(argument, false);
@@ -3651,7 +3664,7 @@ impl<'db> Checker<'db, '_> {
                 // item type and `acc + x` makes the accumulator that type too.
                 let hints: Vec<Option<Ty<'db>>> = self
                     .parameter_hints
-                    .remove(&id)
+                    .remove(id)
                     .filter(|hints| {
                         hints.iter().flatten().any(|&hint| {
                             let hint = self.table.resolve(self.db, hint);
@@ -3998,7 +4011,7 @@ impl<'db> Checker<'db, '_> {
     /// `@trust` and `@if-unknown` do not check the value, and `@new` mints a nominal
     /// rather than declaring a signature.
     fn declared_function_annotation(&self, annotated: ExprId) -> Option<TypeScheme<'db>> {
-        let annotation = self.expression_annotations.get(&annotated)?;
+        let annotation = self.expression_annotations.get(annotated)?;
         if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
             return None;
         }
@@ -4008,7 +4021,7 @@ impl<'db> Checker<'db, '_> {
 
     fn inline_parameters(&self, annotated: ExprId) -> Vec<String> {
         self.expression_annotations
-            .get(&annotated)
+            .get(annotated)
             .map(|annotation| annotation.inline_parameters.clone())
             .unwrap_or_default()
     }
@@ -4019,7 +4032,7 @@ impl<'db> Checker<'db, '_> {
         value: ExprId,
         value_ty: Ty<'db>,
     ) -> Ty<'db> {
-        let Some(annotation) = self.expression_annotations.get(&annotated).cloned() else {
+        let Some(annotation) = self.expression_annotations.get(annotated).cloned() else {
             return value_ty;
         };
         if annotation.declared.is_some() || annotation.new_nominal.is_some() {
@@ -4209,7 +4222,7 @@ impl<'db> Checker<'db, '_> {
         let ty = self.read_slot(id, slot);
         // Only an operand whose other operand is a ry number may still decide a variable
         // written with a literal; every other read makes it R's type.
-        if !self.literal_reads.contains(&id) && self.open_literal_var(ty) {
+        if !self.literal_reads.contains(id) && self.open_literal_var(ty) {
             self.default_literal_var(ty, false);
         }
         if self.unseen_frames > 0
@@ -4329,7 +4342,7 @@ impl<'db> Checker<'db, '_> {
             None => {
                 if self.naming.extras().captured_slots.contains(&slot) {
                     self.forward_captured.insert(slot);
-                    if let Some(&join) = self.capture_joins.get(&slot) {
+                    if let Some(&join) = self.capture_joins.get(slot) {
                         return join;
                     }
                 } else if let Some(observed) = self.materialize_pre_state(slot, false) {
@@ -4353,7 +4366,7 @@ impl<'db> Checker<'db, '_> {
         if self
             .column_scopes
             .iter()
-            .any(|scope| scope.callees.contains(&id))
+            .any(|scope| scope.callees.contains(id))
         {
             return match resolved {
                 Some(_) => None,
@@ -4556,7 +4569,7 @@ impl<'db> Checker<'db, '_> {
                 let literal = spelling != AssignSpelling::Super
                     && literal_strings(self.module, value).is_some();
                 let write = StringWrite { target, value };
-                let tracked = match self.string_values.get(&slot) {
+                let tracked = match self.string_values.get(slot) {
                     None if literal => Some(write),
                     Some(Some(existing)) if literal && *existing == write => Some(write),
                     _ => None,
@@ -4566,7 +4579,7 @@ impl<'db> Checker<'db, '_> {
                     // The rest of this body reads the value just written. The scopes that
                     // hold the variable join it with their own writes once the body ends.
                     let written = self.table.resolve(self.db, value_ty);
-                    if let Some((seed, bound)) = self.superassign_seeds.get(&slot).copied()
+                    if let Some((seed, bound)) = self.superassign_seeds.get(slot).copied()
                         && !bound
                     {
                         // A read before this first write already used the variable as a
@@ -4649,7 +4662,7 @@ impl<'db> Checker<'db, '_> {
         match module.kind(id) {
             ExpressionKind::NameRef(_) => {
                 let slot = self.naming.resolutions.get(&id)?;
-                let write = self.string_values.get(slot)?.as_ref()?;
+                let write = self.string_values.get(*slot)?.as_ref()?;
                 literal_strings(module, write.value)
             }
             ExpressionKind::Paren(inner) => self.column_names(*inner),
@@ -4662,14 +4675,14 @@ impl<'db> Checker<'db, '_> {
             return;
         }
         let written = erase_vars(self.db, self.table.resolve(self.db, value_ty));
-        let joined = match self.capture_joins.get(&slot) {
+        let joined = match self.capture_joins.get(slot) {
             Some(&existing) if existing != written => self.join_types(existing, written),
             Some(&existing) => existing,
             None => written,
         };
-        let changed = self.capture_joins.get(&slot) != Some(&joined);
+        let changed = self.capture_joins.get(slot) != Some(&joined);
         self.capture_joins.insert(slot, joined);
-        if changed && self.forward_captured.contains(&slot) {
+        if changed && self.forward_captured.contains(slot) {
             self.capture_repass_needed = true;
         }
     }
@@ -6238,7 +6251,7 @@ impl<'db> Checker<'db, '_> {
             self.environment.rollback(mark);
             // A read this pass discovered the slot's pre-loop state through the cross-item
             // binding; establish it so the body's writes join into it.
-            for (&slot, &ty) in &self.pre_materialized {
+            for (slot, &ty) in self.pre_materialized.iter() {
                 if self.environment.get(slot).is_none() {
                     self.environment.set(slot, EnvEntry::Mono(ty));
                 }
@@ -6580,11 +6593,11 @@ impl<'db> Checker<'db, '_> {
                                 name,
                                 &self.module[arguments],
                             ),
-                            false => Vec::new(),
+                            false => Bitset::new_in(self.arena, 0),
                         };
                         (forwards, optional_targets)
                     }
-                    _ => (false, Vec::new()),
+                    _ => (false, Bitset::new_in(self.arena, 0)),
                 };
                 let library_name = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) if !forwards => Some(name.as_str()),
@@ -6603,7 +6616,7 @@ impl<'db> Checker<'db, '_> {
                     if let ExpressionKind::NameRef(value_name) = self.module.kind(value)
                         && ((forwards
                             && (argument_name == Some(*value_name)
-                                || optional_targets.get(index).copied().unwrap_or(false)))
+                                || optional_targets.contains(index)))
                             || library_name.zip(argument_name).is_some_and(
                                 |(function, parameter)| {
                                     tests_missing_without_default(function, parameter.as_str())
@@ -6641,7 +6654,7 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         name: &str,
         arguments: &[Argument],
-    ) -> Vec<bool> {
+    ) -> Bitset<'a, usize> {
         let callee_ty = match self.naming.resolutions.get(&callee) {
             Some(&slot) => match self.environment.get(slot) {
                 Some(EnvEntry::Mono(ty)) => Some(ty),
@@ -6657,7 +6670,11 @@ impl<'db> Checker<'db, '_> {
                         && info.range.start() > self.module.range(callee).start()
                 }) =>
                 {
-                    return vec![true; arguments.len()];
+                    let mut targets = Bitset::new_in(self.arena, arguments.len());
+                    for index in 0..arguments.len() {
+                        targets.insert(index);
+                    }
+                    return targets;
                 }
                 None => None,
             },
@@ -6666,16 +6683,16 @@ impl<'db> Checker<'db, '_> {
                 .and_then(|globals| globals.scheme(Symbol::new(name), true))
                 .map(|scheme| scheme.body),
         };
+        let mut targets = Bitset::new_in(self.arena, arguments.len());
         let Some(TyKind::Function(function)) = callee_ty.map(|ty| ty.kind(self.db)) else {
-            return Vec::new();
+            return targets;
         };
         let leaves_unread = |parameter: &Parameter<'db>| {
             parameter.optional
                 && (parameter.default.is_none()
                     || function.missing_tested.contains(&parameter.name))
         };
-        let mut claimed = vec![false; function.named.len()];
-        let mut targets = vec![false; arguments.len()];
+        let mut claimed = Bitset::new_in(self.arena, function.named.len());
         for (index, argument) in arguments.iter().enumerate() {
             let Some(argument_name) = self.module.argument_name(argument) else {
                 continue;
@@ -6685,8 +6702,10 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .position(|parameter| parameter.name.text(self.db) == argument_name.as_str())
             {
-                claimed[formal] = true;
-                targets[index] = leaves_unread(&function.named[formal]);
+                claimed.insert(formal);
+                if leaves_unread(&function.named[formal]) {
+                    targets.insert(index);
+                }
             }
         }
         let pre_rest = function
@@ -6695,7 +6714,7 @@ impl<'db> Checker<'db, '_> {
             .map_or(function.named.len(), |rest| {
                 rest.preceding_named.min(function.named.len())
             });
-        let mut unclaimed = (0..pre_rest).filter(|formal| !claimed[*formal]);
+        let mut unclaimed = (0..pre_rest).filter(|formal| !claimed.contains(*formal));
         for (index, argument) in arguments.iter().enumerate() {
             if argument.name.is_some() {
                 continue;
@@ -6703,7 +6722,9 @@ impl<'db> Checker<'db, '_> {
             let Some(formal) = unclaimed.next() else {
                 break;
             };
-            targets[index] = leaves_unread(&function.named[formal]);
+            if leaves_unread(&function.named[formal]) {
+                targets.insert(index);
+            }
         }
         targets
     }
@@ -7032,7 +7053,7 @@ impl<'db> Checker<'db, '_> {
                 if name == "missing" {
                     return self
                         .no_default_formals
-                        .contains(&slot)
+                        .contains(slot)
                         .then(|| GuardRefinement {
                             true_edge: vec![SlotRefinement::Missing(slot)],
                             false_edge: Vec::new(),
@@ -7810,8 +7831,8 @@ impl<'db> Checker<'db, '_> {
                 self.literal_reads.insert(rhs);
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
-                self.literal_reads.remove(&lhs);
-                self.literal_reads.remove(&rhs);
+                self.literal_reads.remove(lhs);
+                self.literal_reads.remove(rhs);
                 if let Some(result) = self.infer_native_operator(operator, lhs, rhs, left, right) {
                     return result;
                 }
@@ -8996,7 +9017,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&operand)
-                .is_some_and(|slot| self.defaulted_formals.contains(slot))
+                .is_some_and(|slot| self.defaulted_formals.contains(*slot))
     }
 
     /// An unconstrained variable, or an unconstrained rigid so that a rendered `<T>` scheme
@@ -9615,7 +9636,7 @@ impl<'db> Checker<'db, '_> {
             declared.positional.len(),
         );
         let mut positional_index = 0usize;
-        let mut used_named: Vec<bool> = vec![false; declared.named.len()];
+        let mut used_named = Bitset::new_in(self.arena, declared.named.len());
         let mut formal_types: Vec<(Ty<'db>, bool)> = Vec::with_capacity(parameters.len());
         let mut signature = FunctionType {
             positional: Vec::new(),
@@ -9649,7 +9670,7 @@ impl<'db> Checker<'db, '_> {
             // a defaulted or `missing()`-tested formal stays optional.
             let (declared_ty, optional) = match paired {
                 Paired::Named(index) => {
-                    used_named[index] = true;
+                    used_named.insert(index);
                     let field = &declared.named[index];
                     let optional =
                         is_declared_optional(parameter) || field.optional && is_optional(parameter);
@@ -9730,7 +9751,7 @@ impl<'db> Checker<'db, '_> {
             }
         }
         for (index, field) in declared.named.iter().enumerate() {
-            if !used_named[index] {
+            if !used_named.contains(index) {
                 self.errors.push(TypeError {
                     range,
                     kind: TypeErrorKind::AnnotationParameterMismatch {
@@ -10388,7 +10409,7 @@ impl<'db> Checker<'db, '_> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
         let saved_seeds = mem::replace(
             &mut self.superassign_seeds,
-            HashMap::with_hasher_in(FxBuildHasher, Arena(self.arena)),
+            Column::new_in(self.arena, self.naming.bindings.len()),
         );
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
@@ -10413,8 +10434,8 @@ impl<'db> Checker<'db, '_> {
             trailing_ty = self.infer(body);
         }
         // A write the body never reached leaves its seed open; it must not generalize.
-        let seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
-        for (seed, written) in seeds.into_values() {
+        let mut seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
+        for (_, (seed, written)) in seeds.drain() {
             if !written && self.table.unify(self.db, seed, unknown(self.db)).is_err() {
                 panic!("an open superassignment seed always unifies with `Unknown`");
             }
@@ -10866,7 +10887,7 @@ impl<'db> Checker<'db, '_> {
                     .naming
                     .resolutions
                     .get(&value)
-                    .is_some_and(|slot| !self.valued_slots.contains(slot));
+                    .is_some_and(|slot| !self.valued_slots.contains(*slot));
         }
         if !matches!(ty.kind(self.db), TyKind::Null) {
             return false;
@@ -10878,7 +10899,7 @@ impl<'db> Checker<'db, '_> {
         self.naming
             .resolutions
             .get(&value)
-            .is_none_or(|slot| !self.valued_slots.contains(slot))
+            .is_none_or(|slot| !self.valued_slots.contains(*slot))
     }
 
     /// A function stored into a field at top level (`generator_funs$new <- function(...)`) is
@@ -11105,17 +11126,15 @@ impl<'db> Checker<'db, '_> {
         let arena = self.arena;
         self.value_read_slots
             .get_or_insert_with(|| {
-                let mut slots = HashSet::with_hasher_in(FxBuildHasher, Arena(arena));
-                slots.extend(
-                    naming
-                        .resolutions
-                        .iter()
-                        .filter(|(read, _)| !naming.callee_fallbacks.contains_key(read))
-                        .map(|(_, slot)| *slot),
-                );
+                let mut slots = Bitset::new_in(arena, naming.bindings.len());
+                for (read, slot) in naming.resolutions.iter() {
+                    if !naming.callee_fallbacks.contains_key(read) {
+                        slots.insert(*slot);
+                    }
+                }
                 slots
             })
-            .contains(&slot)
+            .contains(slot)
     }
 
     fn is_top_level_slot(&self, slot: BindingId) -> bool {
@@ -13581,7 +13600,7 @@ impl<'db> Checker<'db, '_> {
         self.errors.push(error);
         self.recorded.insert(callee, unknown(self.db));
         // A capture-discovery re-pass must not keep a stale commitment from the first pass.
-        self.selected_overloads.remove(&callee);
+        self.selected_overloads.remove(callee);
         unknown(self.db)
     }
 
@@ -13739,36 +13758,38 @@ impl<'db> Checker<'db, '_> {
         arguments: &[Argument],
         callees: &[Ty<'db>],
     ) -> Vec<CallArgument<'db>> {
-        let deferred = BumpVec::from_iter_in(
-            arguments.iter().map(|argument| {
-                !callees.is_empty()
-                    && argument
-                        .value
-                        .is_some_and(|value| self.needs_parameter_hints(value))
-            }),
-            self.arena,
-        );
+        let mut deferred = Bitset::new_in(self.arena, arguments.len());
+        if !callees.is_empty() {
+            for (index, argument) in arguments.iter().enumerate() {
+                if argument
+                    .value
+                    .is_some_and(|value| self.needs_parameter_hints(value))
+                {
+                    deferred.insert(index);
+                }
+            }
+        }
         let mut call_arguments: Vec<CallArgument<'db>> = arguments
             .iter()
             .map(|argument| self.call_argument(range, argument, None))
             .collect();
         let quoted = self.quoted_arguments(callees, &call_arguments);
         for (index, argument) in arguments.iter().enumerate() {
-            if deferred[index] {
+            if deferred.contains(index) {
                 continue;
             }
-            call_arguments[index].ty = if quoted.get(index).copied().unwrap_or(false) {
+            call_arguments[index].ty = if quoted.contains(index) {
                 Some(unknown(self.db))
             } else {
                 argument.value.map(|value| self.infer(value))
             };
         }
-        if !deferred.contains(&true) {
+        if deferred.is_empty() {
             return call_arguments;
         }
         let hints = self.parameter_hints_for(callees, &call_arguments, &deferred);
         for (index, argument) in arguments.iter().enumerate() {
-            let Some(value) = argument.value.filter(|_| deferred[index]) else {
+            let Some(value) = argument.value.filter(|_| deferred.contains(index)) else {
                 continue;
             };
             if let Some(hint) = hints.get(index).cloned().flatten() {
@@ -13783,22 +13804,35 @@ impl<'db> Checker<'db, '_> {
 
     /// The arguments every candidate callee binds to a quoted formal: code the callee captures
     /// with `substitute()`, which reads names from a frame the caller cannot see.
-    fn quoted_arguments(&self, callees: &[Ty<'db>], arguments: &[CallArgument<'db>]) -> Vec<bool> {
-        let mut quoted = vec![!callees.is_empty(); arguments.len()];
+    fn quoted_arguments(
+        &self,
+        callees: &[Ty<'db>],
+        arguments: &[CallArgument<'db>],
+    ) -> Bitset<'a, usize> {
+        let arena = self.arena;
+        let mut quoted = Bitset::new_in(arena, arguments.len());
+        if callees.is_empty() {
+            return quoted;
+        }
+        for index in 0..arguments.len() {
+            quoted.insert(index);
+        }
         for &callee in callees {
             let resolved = self.table.resolve(self.db, callee);
             let TyKind::Function(function) = resolved.kind(self.db) else {
-                return vec![false; arguments.len()];
+                return Bitset::new_in(arena, 0);
             };
             if function.quoted.is_empty() {
-                return vec![false; arguments.len()];
+                return Bitset::new_in(arena, 0);
             }
-            let arena = self.arena;
             let targets =
                 &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
-            for (flag, target) in quoted.iter_mut().zip(targets) {
-                *flag &= matches!(target, Some(ArgumentTarget::Named(formal))
-                    if function.named.get(*formal).is_some_and(|parameter| function.quoted.contains(&parameter.name)));
+            for (index, target) in targets.iter().enumerate() {
+                if !matches!(target, Some(ArgumentTarget::Named(formal))
+                    if function.named.get(*formal).is_some_and(|parameter| function.quoted.contains(&parameter.name)))
+                {
+                    quoted.remove(index);
+                }
             }
         }
         quoted
@@ -13982,7 +14016,7 @@ impl<'db> Checker<'db, '_> {
         &mut self,
         callees: &[Ty<'db>],
         arguments: &[CallArgument<'db>],
-        deferred: &[bool],
+        deferred: &Bitset<'a, usize>,
     ) -> Vec<Option<Vec<Option<Ty<'db>>>>> {
         let mut agreed: Vec<Option<Vec<Option<Ty<'db>>>>> = vec![None; arguments.len()];
         let mut first_candidate = true;
@@ -14015,9 +14049,9 @@ impl<'db> Checker<'db, '_> {
             // widened, so its formal keeps the hint. Read before the probe binds the variables.
             let state_vars: FxHashSet<InferenceVar> = targets
                 .iter()
-                .zip(deferred)
-                .filter(|(_, deferred)| !**deferred)
-                .filter_map(|(target, _)| target_ty(target))
+                .enumerate()
+                .filter(|(index, _)| !deferred.contains(*index))
+                .filter_map(|(_, target)| target_ty(target))
                 .filter_map(
                     |ty| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
                         TyKind::Var(var) => Some(*var),
@@ -14025,46 +14059,49 @@ impl<'db> Checker<'db, '_> {
                     },
                 )
                 .collect();
-            let accumulators: Vec<Vec<bool>> = targets
+            let accumulators: Vec<Bitset<'a, usize>> = targets
                 .iter()
-                .zip(deferred)
-                .map(|(target, &deferred)| {
+                .enumerate()
+                .map(|(index, target)| {
+                    let mut accumulating = Bitset::new_in(arena, 0);
                     let expected = target_ty(target)
-                        .filter(|_| deferred)
+                        .filter(|_| deferred.contains(index))
                         .map(|expected| self.table.shallow_resolve(self.db, expected));
                     let Some(TyKind::Function(expected)) = expected.map(|ty| ty.kind(self.db))
                     else {
-                        return Vec::new();
+                        return accumulating;
                     };
                     let mut result_vars = FxHashSet::default();
                     self.table
                         .collect_unbound_vars(self.db, expected.ret, &mut result_vars);
                     result_vars.retain(|var| state_vars.contains(var));
-                    expected
+                    let formals = expected
                         .positional
                         .iter()
                         .copied()
-                        .chain(expected.named.iter().map(|parameter| parameter.ty))
-                        .map(|formal| {
-                            let mut formal_vars = FxHashSet::default();
-                            self.table
-                                .collect_unbound_vars(self.db, formal, &mut formal_vars);
-                            !formal_vars.is_disjoint(&result_vars)
-                        })
-                        .collect()
+                        .chain(expected.named.iter().map(|parameter| parameter.ty));
+                    for (formal_index, formal) in formals.enumerate() {
+                        let mut formal_vars = FxHashSet::default();
+                        self.table
+                            .collect_unbound_vars(self.db, formal, &mut formal_vars);
+                        if !formal_vars.is_disjoint(&result_vars) {
+                            accumulating.insert(formal_index);
+                        }
+                    }
+                    accumulating
                 })
                 .collect();
             let mut argument_vars = FxHashSet::default();
-            for (argument, &deferred) in arguments.iter().zip(deferred) {
-                if let (Some(ty), false) = (argument.ty, deferred) {
+            for (index, argument) in arguments.iter().enumerate() {
+                if let (Some(ty), false) = (argument.ty, deferred.contains(index)) {
                     self.table
                         .collect_unbound_vars(self.db, ty, &mut argument_vars);
                 }
             }
             let snapshot = self.table.snapshot();
-            let accepts = arguments.iter().zip(targets.iter()).zip(deferred).all(
-                |((argument, target), &deferred)| {
-                    if deferred {
+            let accepts = arguments.iter().zip(targets.iter()).enumerate().all(
+                |(index, (argument, target))| {
+                    if deferred.contains(index) {
                         return true;
                     }
                     match (argument.ty, target_ty(target)) {
@@ -14082,11 +14119,11 @@ impl<'db> Checker<'db, '_> {
             );
             let candidate: Vec<Option<Vec<Option<Ty<'db>>>>> = targets
                 .iter()
-                .zip(deferred)
+                .enumerate()
                 .zip(&accumulators)
                 .zip(arguments)
-                .map(|(((target, &deferred), accumulators), argument)| {
-                    if !deferred || !accepts {
+                .map(|(((argument_index, target), accumulators), argument)| {
+                    if !deferred.contains(argument_index) || !accepts {
                         return None;
                     }
                     let expected = self.table.shallow_resolve(self.db, target_ty(target)?);
@@ -14128,7 +14165,7 @@ impl<'db> Checker<'db, '_> {
                             .enumerate()
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                if accumulators.get(index).copied().unwrap_or(false)
+                                if accumulators.contains(index)
                                     || (index < declared_count
                                         && matches!(
                                             formal.kind(self.db),
@@ -14228,8 +14265,8 @@ impl<'db> Checker<'db, '_> {
             // here. A formal used only as a function still infers as one.
             if let Some(&binding) = self.naming.resolutions.get(&value)
                 && matches!(resolved.kind(self.db), TyKind::Var(_))
-                && (self.no_default_formals.contains(&binding)
-                    || self.defaulted_formals.contains(&binding))
+                && (self.no_default_formals.contains(binding)
+                    || self.defaulted_formals.contains(binding))
                 && self.reads_as_value(binding)
             {
                 argument.named_function = Some(unknown(self.db));
@@ -14762,40 +14799,33 @@ impl<'db> Checker<'db, '_> {
         // too: the value of a parameter the call left out, as in a getter and setter
         // `function(key, value)` called as a getter, or a variable the callee's scheme leaves
         // free. A variable of the enclosing scope, which a closure returns, keeps its meaning.
-        let mut supplied_positional = vec![false; function.positional.len()];
-        let mut supplied_named = vec![false; function.named.len()];
+        let mut supplied_positional = Bitset::new_in(self.arena, function.positional.len());
+        let mut supplied_named = Bitset::new_in(self.arena, function.named.len());
         for target in targets.iter().flatten() {
             match target {
                 ArgumentTarget::Positional(slot) => {
-                    if let Some(supplied) = supplied_positional.get_mut(*slot) {
-                        *supplied = true;
-                    }
+                    supplied_positional.insert(*slot);
                 }
                 ArgumentTarget::Named(formal) => {
-                    if let Some(supplied) = supplied_named.get_mut(*formal) {
-                        *supplied = true;
-                    }
+                    supplied_named.insert(*formal);
                 }
                 _ => {}
             }
         }
-        let omitted_types: Vec<Ty<'db>> = function
+        let omitted_positional = function
             .positional
             .iter()
-            .zip(&supplied_positional)
-            .filter(|(_, supplied)| !**supplied)
-            .map(|(ty, _)| *ty)
-            .chain(
-                function
-                    .named
-                    .iter()
-                    .zip(&supplied_named)
-                    .filter(|(_, supplied)| !**supplied)
-                    .map(|(parameter, _)| parameter.ty),
-            )
-            .collect();
+            .enumerate()
+            .filter(|(slot, _)| !supplied_positional.contains(*slot))
+            .map(|(_, ty)| *ty);
+        let omitted_named = function
+            .named
+            .iter()
+            .enumerate()
+            .filter(|(formal, _)| !supplied_named.contains(*formal))
+            .map(|(_, parameter)| parameter.ty);
         let mut omitted = FxHashSet::default();
-        for ty in omitted_types {
+        for ty in omitted_positional.chain(omitted_named) {
             collect_vars(self.db, self.table.resolve(self.db, ty), &mut omitted);
         }
         let mut bound = FxHashSet::default();
@@ -15217,7 +15247,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&value)
-                .is_some_and(|slot| !self.computed_slots.contains(slot)))
+                .is_some_and(|slot| !self.computed_slots.contains(*slot)))
     }
 
     /// An element read from a collection, directly or through a variable it was stored in.
@@ -15228,7 +15258,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&expression)
-                .is_some_and(|slot| self.lookup_slots.contains(slot)),
+                .is_some_and(|slot| self.lookup_slots.contains(*slot)),
             _ => false,
         }
     }
@@ -15241,7 +15271,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&value)
-                .is_some_and(|slot| self.computed_slots.contains(slot)),
+                .is_some_and(|slot| self.computed_slots.contains(*slot)),
             ExpressionKind::Call { callee, .. } => matches!(
                 self.module.kind(*callee),
                 ExpressionKind::NameRef(name) if name.as_str() == "switch"
@@ -16006,7 +16036,7 @@ impl<'db> Checker<'db, '_> {
         let frame = variable_name(module, target);
         let bracket = module.range(id);
         let subject_columns = frame_columns(db, subject);
-        let mut callees = FxHashSet::default();
+        let mut callees = Bitset::new_in(self.arena, module.expression_count());
         for value in arguments.iter().filter_map(|argument| argument.value) {
             collect_callees(module, value, &mut callees);
         }
@@ -17207,7 +17237,7 @@ impl<'db> Checker<'db, '_> {
         let resolved = self.table.resolve(db, ty);
         let bare_column = match module.kind(j) {
             ExpressionKind::NameRef(name)
-                if self.masked_reads.contains(&j)
+                if self.masked_reads.contains(j)
                     && source_columns.is_some_and(|columns| {
                         columns.iter().any(|column| column.name.text(db) == name)
                     }) =>
@@ -18834,7 +18864,7 @@ fn string_literals(module: &Module, arguments: &[Argument]) -> Option<Vec<String
         .collect()
 }
 
-fn collect_callees(module: &Module, id: ExprId, callees: &mut FxHashSet<ExprId>) {
+fn collect_callees(module: &Module, id: ExprId, callees: &mut Bitset<ExprId>) {
     let kind = module.kind(id);
     if let ExpressionKind::Call { callee, .. } = kind
         && matches!(module.kind(*callee), ExpressionKind::NameRef(_))
