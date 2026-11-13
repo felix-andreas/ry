@@ -2528,14 +2528,40 @@ pub unsafe fn call_with_plan(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
+    let entered = bind_plan(call, function, shape, sources, args, sys_parent)?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let result =
+        on_large_stack(|| bytecode::run_slots(function, entered.header as usize, shape.slots as usize));
+    leave(entered.depth as usize, result)
+}
+
+/// The first half of [`call_with_plan`]: binds the arguments into a new slot frame and pushes
+/// the call's frame ([`enter`]), leaving the body to the caller, which runs the code
+/// [`Entered::value`] on the slots and then calls [`leave`]. A call that takes the generic
+/// path runs whole here.
+pub unsafe fn bind_plan(
+    call: Sexp,
+    function: Sexp,
+    shape: CallShape,
+    sources: &[i32],
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Entered> {
     let state = interp();
     if state.debugger.is_some()
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        return crate::scope(|| {
+        let value = crate::scope(|| {
             detach_references(args)?;
             apply_closure(call, function, args, sys_parent, None)
+        })?;
+        return Ok(Entered {
+            value,
+            header: crate::NO_SLOTS,
+            depth: 0,
         });
     }
     let count = shape.slots as usize;
@@ -2583,7 +2609,7 @@ pub unsafe fn call_with_plan(
     for index in sources.len()..count {
         *registers.add(1 + index) = unbound;
     }
-    let entered = enter(
+    enter(
         call,
         function,
         sys_parent,
@@ -2592,12 +2618,7 @@ pub unsafe fn call_with_plan(
         header as u32,
         missing,
         promised,
-    )?;
-    if entered.header == crate::NO_SLOTS {
-        return Ok(entered.value);
-    }
-    let result = on_large_stack(|| bytecode::run_slots(function, header, count));
-    leave(entered.depth as usize, result)
+    )
 }
 
 /// Runs a call of `function` without running its body: `run` does what the body would, from a

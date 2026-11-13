@@ -392,6 +392,9 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
     state.frames.truncate(depth);
     // An unwind to top level skips the releases of the calls it leaves, so their argument
     // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 {
+        bytecode::forget_resumes(&mut state.bytecode);
+    }
     if depth == 0 && state.references_used != 0 {
         // SAFETY: `state` is the interpreter's own state, which `release_references` reads
         // through `interp()`, and it is not used after this call.

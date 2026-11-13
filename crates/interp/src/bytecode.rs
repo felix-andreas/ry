@@ -116,6 +116,13 @@ pub struct State {
     bodies: Bodies,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
+    /// What the dispatch loop resumes as each callee it entered in place returns, innermost
+    /// last ([`Resume`]).
+    resumes: Vec<Resume>,
+    /// The `for` loop states of the bodies entered in place. Allocated once at
+    /// [`LOOP_STATE_CAPACITY`] and never grown past it, so a running body's states stay where
+    /// they are while deeper calls take and return theirs.
+    loop_states: Vec<LoopState>,
     /// GNU R's JIT level (`compiler::enableJIT`), 3 by default. It decides only what compiled
     /// code binds at compile time, since ry compiles at every level: at 0 GNU R compiles no
     /// closure, and below 3 no top-level loop, so such code guards its base functions as GNU R's
@@ -130,6 +137,8 @@ impl Default for State {
             bodies: Bodies::default(),
             tier: None,
             call_plans: CallPlans::default(),
+            resumes: Vec::new(),
+            loop_states: Vec::with_capacity(LOOP_STATE_CAPACITY),
             jit_level: 3,
         }
     }
@@ -435,6 +444,10 @@ unsafe fn hash_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
 /// The register file holds this many registers across all active frames. Deep recursion runs
 /// out of C stack or `expressions` long before it runs out of registers.
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
+
+/// How many `for` loop states the bodies entered in place hold between them. A call whose body
+/// would need more runs through [`run_at`], which keeps its states on the Rust stack.
+const LOOP_STATE_CAPACITY: usize = 1 << 14;
 
 /// A threshold no counter is compared against. Counters saturate at `i32::MAX`, so a
 /// threshold of that value would otherwise fire once a counter saturates.
@@ -6895,6 +6908,10 @@ struct Activation<'m, 'a> {
     exit: R<Sexp>,
     /// Where a single-stepped instruction continues, or [`STOP`] once the activation finished.
     stepped: usize,
+    /// How many [`Resume`] records [`State::resumes`] held when this dispatch loop started:
+    /// the records above it are the callers of bodies this loop entered in place.
+    /// [`NO_RESUMES`] for an activation that runs single instructions, whose calls nest.
+    resume_base: usize,
 }
 
 impl Activation<'_, '_> {
@@ -7008,6 +7025,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         &RUN_HANDLERS
     };
     if !SINGLE {
+        state.resume_base = (*state.interp).bytecode.resumes.len();
         release(&state);
     }
     (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
@@ -7091,7 +7109,183 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
         registers,
         exit: Ok(nil()),
         stepped: STOP,
+        resume_base: NO_RESUMES,
         machine,
+    }
+}
+
+/// Points `state` at the activation its machine now describes, after the dispatch loop entered
+/// a callee in place or returned from one.
+#[inline(always)]
+unsafe fn reload(state: &mut Activation<'_, '_>) {
+    let machine = &*state.machine;
+    let constants = machine.code.cdr();
+    state.feedback = if *pool_ints(constants, PROFILE).add(profile::RECORDING) != 0 {
+        pool_ints(constants, FEEDBACK)
+    } else {
+        std::ptr::null_mut()
+    };
+    state.code = machine.code.car().data().cast::<i32>().cast_const();
+    state.registers = register_address(machine.base);
+    let slots = pool_entry(constants, SLOTS);
+    state.slot_map = if slots == nil() {
+        std::ptr::null()
+    } else {
+        pool_ints(slots, 0).cast_const()
+    };
+    state.constants = constants;
+    state.cache = LookupCache::of(machine.code);
+    state.header = register_address(machine.header);
+    state.mark = machine.mark;
+}
+
+/// Forgets the callers of bodies entered in place, for an unwind to top level that skipped
+/// their returns.
+pub fn forget_resumes(state: &mut State) {
+    state.resumes.clear();
+    state.loop_states.clear();
+}
+
+/// [`Activation::resume_base`] of an activation that enters no callee in place.
+const NO_RESUMES: usize = usize::MAX;
+
+/// The caller of a body the dispatch loop entered in place: what [`Machine`] held for it, and
+/// what its call instruction still has to do once the callee returns.
+struct Resume {
+    function: Sexp,
+    code: Sexp,
+    header: usize,
+    base: usize,
+    mark: usize,
+    loops: *mut [LoopState],
+    /// Where the caller's call instruction is in its code.
+    call_at: usize,
+    /// The callee's frame, which [`eval::leave`] pops.
+    depth: u32,
+    /// [`Interp::references_used`] before the call collected its arguments.
+    references: u32,
+    /// How many [`State::loop_states`] were in use before the callee took its own.
+    loop_mark: u32,
+}
+
+/// Continues the dispatch loop in the body of the call [`eval::enter`] set up as `entered`,
+/// for the call instruction at `call_at`, and answers where: the callee's first instruction,
+/// or wherever the loop goes on when the optimizing tier ran the body whole.
+unsafe fn enter_in_place(
+    state: &mut Activation<'_, '_>,
+    call_at: usize,
+    function: Sexp,
+    entered: eval::Entered,
+    slots: usize,
+    references: u32,
+) -> usize {
+    let code = entered.value;
+    let bytecode = &mut (*state.interp).bytecode;
+    let loop_mark = bytecode.loop_states.len();
+    let count = loop_count(code);
+    bytecode
+        .loop_states
+        .extend(std::iter::repeat_n(LoopState::default(), count));
+    let loops: *mut [LoopState] = bytecode.loop_states.get_unchecked_mut(loop_mark..);
+    let machine = &mut *state.machine;
+    bytecode.resumes.push(Resume {
+        function: machine.function,
+        code: machine.code,
+        header: machine.header,
+        base: machine.base,
+        mark: machine.mark,
+        loops: std::ptr::from_mut(std::mem::replace(&mut machine.loops, &mut *loops)),
+        call_at,
+        depth: entered.depth,
+        references,
+        loop_mark: loop_mark as u32,
+    });
+    machine.function = function;
+    machine.code = code;
+    machine.header = entered.header as usize;
+    machine.base = entered.header as usize + 1 + slots;
+    (*state.heap).root(code);
+    machine.mark = (*state.heap).handle_mark();
+    reload(state);
+    let register_count = *pool_ints(state.constants, REGISTERS) as usize;
+    if let Err(unwind) = reserve_registers(state.machine.base + register_count) {
+        return finished(state, Err(unwind));
+    }
+    let profile = pool_ints(state.constants, PROFILE);
+    let entries = (*profile.add(profile::ENTRIES)).saturating_add(1);
+    *profile.add(profile::ENTRIES) = entries;
+    if entries < *profile.add(profile::NEXT) {
+        return 0;
+    }
+    scheduled_entry_in_place(state, entries)
+}
+
+/// [`run_scheduled_entry`] for a body entered in place.
+#[inline(never)]
+unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32) -> usize {
+    let event = entry_event(state.machine, entries);
+    // The tier may have started or stopped the body's recording.
+    reload(state);
+    match event {
+        Some(TierExit::Finished(result)) => finished(state, result),
+        Some(TierExit::Resume { pc, pending }) => match pending {
+            Some(unwind) => failed::<false>(state, pc, unwind),
+            None => pc,
+        },
+        None => 0,
+    }
+}
+
+/// Where the dispatch loop goes on once the running activation has ended with `result`: in the
+/// caller that entered it in place, after its call instruction or at a loop target the unwind
+/// names there, or nowhere ([`STOP`]) when the activation is the one the loop started with or
+/// no caller takes the unwind. An in-place callee leaves through here on every way out, as it
+/// would leave [`run_at`] and [`eval::leave`] were the call a Rust call.
+unsafe fn finished(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> usize {
+    loop {
+        let bytecode = &mut (*state.interp).bytecode;
+        if bytecode.resumes.len() <= state.resume_base {
+            state.exit = result;
+            return STOP;
+        }
+        let Some(resume) = bytecode.resumes.pop() else {
+            unreachable!("the dispatch loop's resume records are above its base");
+        };
+        bytecode.registers.truncate(state.machine.base);
+        let env = *state.header;
+        if env != nil() {
+            env.set_gp_bits(gp::COMPILED_FRAME, false);
+        }
+        if let Err(Unwind::Error(failure)) = result {
+            result = Err(conditions::signal_error(failure));
+        }
+        let returned = eval::leave(resume.depth as usize, result);
+        let interp = &mut *state.interp;
+        interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+        let machine = &mut *state.machine;
+        machine.function = resume.function;
+        machine.code = resume.code;
+        machine.header = resume.header;
+        machine.base = resume.base;
+        machine.mark = resume.mark;
+        machine.loops = &mut *resume.loops;
+        reload(state);
+        if interp.references_used != resume.references {
+            eval::release_references(resume.references);
+        }
+        let at = resume.call_at;
+        match returned {
+            Ok(value) => {
+                state.record(at, value);
+                *state.registers.add(*state.code.add(at + 1) as usize) = value;
+                release(state);
+                return after_instruction(state.code, at);
+            }
+            Err(unwind) => match continue_after(state.machine, at, unwind) {
+                Ok(pc) => return pc,
+                Err(unwind) => result = Err(unwind),
+            },
+        }
     }
 }
 
@@ -7182,10 +7376,7 @@ unsafe fn advance<const SINGLE: bool>(
     match flow {
         Ok(Flow::Next) => next,
         Ok(Flow::Goto(pc)) => pc,
-        Ok(Flow::Done(value)) => {
-            state.exit = Ok(value);
-            STOP
-        }
+        Ok(Flow::Done(value)) => finished(state, Ok(value)),
         Err(unwind) => failed::<SINGLE>(state, at, unwind),
     }
 }
@@ -7206,10 +7397,7 @@ unsafe fn failed<const SINGLE: bool>(
     };
     match resumed {
         Ok(pc) => pc,
-        Err(unwind) => {
-            state.exit = Err(unwind);
-            STOP
-        }
+        Err(unwind) => finished(state, Err(unwind)),
     }
 }
 
@@ -7286,10 +7474,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         {
             match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
-                BackEdge::Finished(result) => {
-                    state.exit = result;
-                    return;
-                }
+                BackEdge::Finished(result) => pc = finished(state, result),
                 BackEdge::Unwound { pc: resume, unwind } => {
                     pc = failed::<SINGLE>(state, resume, unwind);
                 }
@@ -8508,6 +8693,30 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                 function,
             ) {
                 Some((shape, sources)) => {
+                    if in_place(state, function) {
+                        return Ok(Flow::Goto(
+                            match eval::bind_plan(call, function, shape, sources, &args, sys_parent)
+                            {
+                                Ok(entered) if entered.header == crate::NO_SLOTS => {
+                                    after_call(state, instruction, references, entered.value)
+                                }
+                                Ok(entered) => enter_in_place(
+                                    state,
+                                    instruction.at,
+                                    function,
+                                    entered,
+                                    shape.slots as usize,
+                                    references,
+                                ),
+                                Err(unwind) => {
+                                    if (*state.interp).references_used != references {
+                                        eval::release_references(references);
+                                    }
+                                    return Err(unwind);
+                                }
+                            },
+                        ));
+                    }
                     eval::call_with_plan(call, function, shape, sources, &args, sys_parent)
                 }
                 None => match eval::direct_sources(function, call)? {
@@ -8555,6 +8764,43 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// Whether the dispatch loop may run the body of `function`, which a call instruction is about
+/// to call through its plan, in place of calling it: the loop runs whole activations, and the
+/// body's loop states fit [`State::loop_states`].
+#[inline(always)]
+unsafe fn in_place(state: &Activation<'_, '_>, function: Sexp) -> bool {
+    let loops = &(*state.interp).bytecode.loop_states;
+    state.resume_base != NO_RESUMES
+        && loops.len() + loop_count(function.cdr()) <= loops.capacity()
+}
+
+/// What a `CallGeneric` instruction does with the value of a call that ran whole: the pc it
+/// goes on at.
+#[inline(always)]
+unsafe fn after_call(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+    references: u32,
+    value: Sexp,
+) -> usize {
+    if (*state.interp).references_used != references {
+        eval::release_references(references);
+    }
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    after_instruction(instruction.code, instruction.at)
+}
+
+/// The pc after the instruction at `at`. A call instruction of another opcode makes its call
+/// as `CallGeneric` does, so the pc after a call is read from the code.
+#[inline(always)]
+unsafe fn after_instruction(code: *const i32, at: usize) -> usize {
+    let Some(op) = op_of(*code.add(at) as u32) else {
+        unreachable!("a call instruction has an opcode");
+    };
+    at + 1 + operand_count(op)
 }
 
 /// The arguments of the closure call `call` at `instruction`, each compiled to run as a promise
