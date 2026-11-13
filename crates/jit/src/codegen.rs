@@ -1616,8 +1616,13 @@ impl<'p> Translator<'p> {
             .get(start)
             .and_then(|inst| self.plan.block_at(inst.pc))
             && self.plan.continues(block)
-            && matches!(self.plan.actions.get(start.wrapping_sub(1)), Some(Action::FallThrough))
-            && let Some(previous) = block.checked_sub(1).and_then(|previous| self.plan.blocks.get(previous))
+            && matches!(
+                self.plan.actions.get(start.wrapping_sub(1)),
+                Some(Action::FallThrough)
+            )
+            && let Some(previous) = block
+                .checked_sub(1)
+                .and_then(|previous| self.plan.blocks.get(previous))
         {
             start = previous.start;
         }
@@ -2304,8 +2309,7 @@ impl<'p> Translator<'p> {
                 let vector = self.load_register(args[0]);
                 let sequence = matches!(types[0], Ty::IntSeq | Ty::DblSeq);
                 let (length, first, step) = if sequence {
-                    let (length, first, step) =
-                        self.sequence_info(vector, types[0]);
+                    let (length, first, step) = self.sequence_info(vector, types[0]);
                     (Length::Double(length), Some(first), Some(step))
                 } else {
                     let length = self.builder.ins().load(I64, flags(), vector, LENGTH);

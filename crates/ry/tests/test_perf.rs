@@ -16,7 +16,8 @@
 #![cfg(unix)]
 
 use std::{
-    fs,
+    fs::{self, Permissions},
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
     time::Instant,
@@ -387,11 +388,8 @@ fn two_builds_alternate_starts_without_displacing_each_others_images() {
             "{name} does not carry the identity {first}"
         );
         fs::write(other.join(name), patched).expect("write the second build");
-        let mut permissions = fs::metadata(binary.with_file_name(name))
-            .expect("the build's permissions")
-            .permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(other.join(name), permissions).expect("make the copy executable");
+        fs::set_permissions(other.join(name), Permissions::from_mode(0o755))
+            .expect("make the copy executable");
     }
     for name in ["ry-rcmd", "libRblas.so", "libRlapack.so"] {
         if binary.with_file_name(name).exists() {
