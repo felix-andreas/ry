@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### A crash leaves a report
+
+A process that ends in SIGSEGV, SIGBUS or SIGABRT, for example a segmentation fault in a package's compiled code, now prints a report on standard error before it dies: the ry version, the signal with the faulting address and its cause, the R call stack with function names, and the native stack. It then dies by the same signal, so exit statuses and core dumps are unchanged. Windows prints no report yet. See [the CLI reference](/reference/cli#crash-reports).
+
 ### The VS Code extension on Windows
 
 The Marketplace had no Windows package for 0.4.4, so VS Code on Windows installed the universal `ry.vsix`, which bundles no binary, and failed with "spawn ry ENOENT" in the log only. A release now publishes the universal `ry.vsix` only when every platform has its package, and the extension shows an error with a link to the installation page when it finds no `ry` to start.
