@@ -3496,7 +3496,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     let fresh = self.literal_reads.insert(value);
                                     let ty = self.infer(value);
                                     if fresh {
-                                        self.literal_reads.remove(&value);
+                                        self.literal_reads.remove(value);
                                     }
                                     ty
                                 }
