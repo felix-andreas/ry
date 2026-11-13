@@ -12,7 +12,8 @@
 # a running query of the same frame goes to a copy, so the outer query reads the rows it began
 # with, and an outer update then stores its own result over the nested one. Exit code that
 # updates a frame the function is returning leaves the returned frame alone, and a locked
-# binding raises R's error and keeps its rows.
+# binding raises R's error and keeps its rows. An update of several columns that fails on a
+# later one changes none of them, although the frame it would have written into has no copy.
 
 requires ry-runtime
 
@@ -117,6 +118,13 @@ file rules.R
 | unlockBinding("x", environment())
 | cat(message, "\n")
 | cat("a locked binding keeps its rows:", x$v, "\n")
+| reversed <- function(values) rev(values) + 1L
+| x <- make()
+| message <- tryCatch(x[, c("v", "zz") := list(reversed(v), NULL)], error = function(caught) conditionMessage(caught))
+| cat(message, "\n")
+| cat("an update that fails on a later target changes nothing:", names(x), x$v, "\n")
+| tryCatch(x[id == 1L, c("v", "id", "zz") := list(reversed(v), NULL, NULL)], error = function(caught) NULL)
+| cat("nor does a filtered one that removes a column first:", names(x), x$v, "\n")
 
 run ry run --runtime ry rules.R
 expect exit 0
@@ -137,3 +145,6 @@ expect stdout "exit code leaves the returned frame alone: 10 20 30 40 while the 
 expect stdout "and a function's own returned frame: 10 20 30 40"
 expect stdout "cannot change value of locked binding for 'x'"
 expect stdout "a locked binding keeps its rows: 10 20 30 40"
+expect stdout "the frame has no column `zz`"
+expect stdout "an update that fails on a later target changes nothing: id v 10 20 30 40"
+expect stdout "nor does a filtered one that removes a column first: id v 10 20 30 40"

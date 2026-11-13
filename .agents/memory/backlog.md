@@ -42,6 +42,10 @@ The quality bar is four things.
 - `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
   structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
   already drops it.
+- A temporary passed on through `...` is modified in place by the callee, and `..1` then reads
+  the modified value: `g <- function(v) { v[1] <- 99; v }; f1 <- function(...) { a <- g(...);
+  ..1 }; f1(c(1, 2))` gives `99 2`, and GNU R gives `1 2`. The cause is unverified; the
+  suspect is the count of a forwarded promise's value, which the `...` list still reaches.
 - `UseMethod` differs from GNU R in two ways, and the two together crash.
   - Inside `try()` it dispatches: `g <- function(x) { r <- try(UseMethod("g"), silent = TRUE);
     ... }` runs `g.default` in ry. GNU R raises "'UseMethod' used in an inappropriate fashion"

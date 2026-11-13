@@ -2591,13 +2591,18 @@ unsafe fn fallback(
             columns.push((name, value));
         }
         let result = assign(subject, table, call, env, |table| {
+            // A later target can fail after an earlier one was stored, and a table updated in
+            // place has no fork to drop, so the targets go to a fork that replaces the table
+            // only when every one of them was stored. The fork shares the columns it keeps.
+            let mut staged = table.fork();
             for (name, column) in columns {
                 match column {
-                    Some(column) => table.set_column(column),
-                    None => table.drop_column(&name),
+                    Some(column) => staged.set_column(column),
+                    None => staged.drop_column(&name),
                 }
                 .map_err(|failure| table_error(call, failure))?;
             }
+            *table = staged;
             Ok(Vec::new())
         })?;
         return Ok(result);

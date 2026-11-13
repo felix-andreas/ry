@@ -4818,7 +4818,12 @@ check` releases its trees once, and memoized records are compact" below).
   reading). Otherwise the update goes to a fork that is assigned back to the variable, through
   the active binding's function when there is one. Either way the update is stored before its
   warnings are raised, so a handler that unwinds on the warning sees the same frame whether or
-  not it was shared. `Table` keeps
+  not it was shared. An update that fails changes nothing, and with no fork to drop that is each
+  path's own job: the kernels and the plan compute every column and check every removal before
+  they store one, and the path that evaluates the values in R (`fallback` in `frame.rs`) stores
+  its columns into a fork that replaces the table only after the last one, because a removal of
+  a missing column fails there after earlier columns are stored. The fork shares the columns it
+  keeps, so it costs a column list. `Table` keeps
   `equality_filters`, a short list of columns with the state of each: scanned once, indexed, or
   not indexable. `Table::row_index` builds a column's `RowIndex` on the second equality filter
   since the column last changed, so a one-off update never pays for an index. A `RowIndex` is the
