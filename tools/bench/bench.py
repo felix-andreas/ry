@@ -10,9 +10,10 @@ The five suites, each described by the suite.toml in its directory:
   applications  Application workloads: our calls, dispatch, conditions, records and tables.
   typed         Typed ry against Rust: every typed kernel and application beside its Rust twin.
 
-In the first four the engines are GNU R, ry, and ry typed: a program whose suite.toml entry names a
-`typed_source` (its own `<name>.typed.R`, or a variant's identical one) also runs that typed version
-in strict mode. Every run is a fresh process. A round runs every program on
+In the first four the engines are GNU R, ry, ry typed, and ry typed with `--aot`: a program whose
+suite.toml entry names a `typed_source` (its own `<name>.typed.R`, or a variant's identical one)
+also runs that typed version in strict mode, once compiled at each function's first call and once
+compiled before the program starts (`ry run --aot`). Every run is a fresh process. A round runs every program on
 every engine once, programs in an order shuffled per round and engines in an order shuffled per
 program, so no engine always follows another and inherits its cache state, and a drift of the
 machine's speed hits all engines alike. Each suite first evicts every ry build's files from the
@@ -39,6 +40,14 @@ under 0.1 s (a program whose GNU R time is that short is also left out of the ge
 `wide_interval` when the interval of a ratio reaches more than 10% from its median (such programs
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
 typed program, with the refusal that `RY_TYPED_LOG` printed.
+
+Compiling ahead moves a program's compile time; it does not remove it. A public program times
+itself, so with `--aot` its clock would leave out the compile that the other engines' clocks hold.
+The runner therefore adds the time `RY_TYPED_LOG` reports for the compile before the program starts
+to that clock, and the column counts the same work as the others. The kernels and applications
+harnesses time warm runs, which no compile is part of on either typed engine, and they also time
+the first run of the program in the process. A row stores that as `first_seconds`, the median over
+rounds per engine, which is where compiling ahead shows: the first run compiles nothing.
 
 The typed suite also stores each program's `compile_seconds`: what `rustc` took to compile the Rust
 twin, and what the typed core took to compile the typed program, which is the sum of the times in
@@ -129,6 +138,9 @@ STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 AWAITING = "it waits on the interpreter to run `"
 # A `RY_TYPED_LOG` line for a function the typed core compiled ends with the time that took.
 COMPILED = re.compile(r"(?:compiled for .* in|refused .* after) (?P<microseconds>\d+) us$")
+# The `RY_TYPED_LOG` line `ry run --aot` prints once it has compiled a script's functions, before
+# the script's first expression runs (crates/typed/src/ahead.rs).
+COMPILED_AHEAD = re.compile(r"^typed: compiled \d+ functions? ahead of time in (?P<microseconds>\d+) us$", re.M)
 
 
 def main():
@@ -221,8 +233,10 @@ def main():
 # Suites and engines.
 
 class Engine:
-    def __init__(self, key, label, command, env, typed=False):
+    def __init__(self, key, label, command, env, typed=False, ahead=False):
         self.key, self.label, self.command, self.env, self.typed = key, label, command, env, typed
+        # Whether the engine compiles a program's typed functions before the program starts.
+        self.ahead = ahead
 
 
 def baseline_key(suite):
@@ -268,6 +282,7 @@ def engines(args, suite):
     typed = suite in TYPED_SUITES
     if typed:
         table.append(Engine("ry_typed", "ry typed", ry, ry_env, typed=True))
+        table.append(Engine("ry_typed_aot", "ry typed, AOT", ry + ["--aot"], ry_env, typed=True, ahead=True))
     if args.jit_off:
         table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
@@ -705,7 +720,7 @@ class WorkloadRunner:
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         _, checksum, median, _, cold = lines[-1].split()
-        return {"seconds": float(median), "checksum": checksum, "cold": float(cold), **memory_fields(memory)}
+        return {"seconds": float(median), "checksum": checksum, "first": float(cold), **memory_fields(memory)}
 
     def typed_log(self, text, engine):
         """What `RY_TYPED_LOG` reports for one run of a typed source under the harness: the refusal
@@ -803,12 +818,21 @@ class PublicRunner:
             script = self.work / f"{program['id']}.R"
             script.write_text((root / program["typed_source"]).read_text())
             stem = pathlib.Path(program["typed_source"]).name.removesuffix(".typed.R")
-        status, out, err, _, memory = spawn(engine.command + [str(script)], engine.env, cwd=source.parent)
+        # The program's clock starts after the compile of an engine that compiles ahead, so the
+        # log supplies that time. Its lines are written before the clock starts.
+        env = dict(engine.env, RY_TYPED_LOG="1") if engine.ahead else engine.env
+        status, out, err, _, memory = spawn(engine.command + [str(script)], env, cwd=source.parent)
         lines = [line for line in out.splitlines() if line.startswith(stem + " ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         _, checksum, seconds = lines[-1].split()
-        return {"seconds": float(seconds), "checksum": checksum, **memory_fields(memory)}
+        seconds = float(seconds)
+        if engine.ahead:
+            compiled = COMPILED_AHEAD.search(err)
+            if compiled is None:
+                return {"seconds": None, "reason": "the run does not report what it compiled ahead of time"}
+            seconds += int(compiled["microseconds"]) / 1e6
+        return {"seconds": seconds, "checksum": checksum, **memory_fields(memory)}
 
     def typed_refusal(self, program, engine):
         """The refusals `RY_TYPED_LOG` reports for the typed program, or None. Measured once,
@@ -1030,6 +1054,8 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                                      "reason": f"checksum {checksums[0]}, {baseline.label} printed {reference}"})
             median = statistics.median(run["seconds"] for run in runs)
             row["seconds"][engine.key] = round(median, 6)
+            if all("first" in run for run in runs):
+                row.setdefault("first_seconds", {})[engine.key] = round(statistics.median(run["first"] for run in runs), 6)
             for field in MEMORY_PARTS.values():
                 sizes = [run[field] for run in runs if field in run]
                 if sizes:
@@ -1127,6 +1153,14 @@ def print_table(results, table):
               f"(95% interval {mean['low']:.2f} to {mean['high']:.2f}; above 1 means {label[key]} is faster)")
     for build, size in results["meta"].get("libr_text_bytes", {}).items():
         print(f"\nlibR.so .text of {build}: {size / 1024 / 1024:.2f} MiB ({size} bytes)")
+    first = [row for row in results["programs"] if row.get("first_seconds")]
+    if first:
+        print("\nFirst run of the program in its process, which holds what compiles at a first call\n")
+        print("| program | " + " | ".join(label[key] for key in keys) + " |")
+        print("| --- |" + " ---: |" * len(keys))
+        for row in first:
+            cells = [duration(row["first_seconds"][key]) if key in row["first_seconds"] else "" for key in keys]
+            print(f"| {row['display']} | " + " | ".join(cells) + " |")
     compiled = [row for row in results["programs"] if row.get("compile_seconds")]
     # Only the engines whose compile time was measured get a column: a `--baseline` build has none.
     timed = [key for key in keys if any(key in row["compile_seconds"] for row in compiled)]

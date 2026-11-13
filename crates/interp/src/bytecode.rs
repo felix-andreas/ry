@@ -476,6 +476,9 @@ pub struct Tier {
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
     pub call: unsafe fn(&TypedCall<'_>) -> Option<R<Sexp>>,
+    /// Called before a script runs, when the session compiles ahead of time, with what the
+    /// script defines at its top level, to compile what can compile before a call.
+    pub ahead: unsafe fn(&crate::ahead::Program<'_>),
 }
 
 /// A call of a typed closure that [`Tier::call`] may run natively. Native code has no frame, so

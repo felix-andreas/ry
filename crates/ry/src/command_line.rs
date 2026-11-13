@@ -95,6 +95,16 @@ pub enum Command {
         /// Do not load the package the working directory belongs to into the console
         #[arg(long, conflicts_with = "script")]
         no_load: bool,
+        /// Compile the script's typed functions before it starts, instead of each at its
+        /// first call
+        // `requires` alone does not refuse `--aot -i FILE`: an option that conflicts with a
+        // required argument lifts the requirement, so every console option is named here.
+        #[arg(
+            long,
+            requires = "script",
+            conflicts_with_all = ["interactive", "keybindings", "no_load"]
+        )]
+        aot: bool,
         /// Write a summary of where the run spent its time to FILE when it ends. The summary
         /// holds no source code, identifiers or data, so it is safe to share
         #[arg(long, value_name = "FILE")]
@@ -353,6 +363,8 @@ pub enum Mode {
     Script {
         file: PathBuf,
         arguments: Vec<String>,
+        /// Compile the script's typed functions before it starts (`ry run --aot`).
+        ahead: bool,
     },
     /// Open the console, after running `file` when there is one.
     Console {
@@ -373,14 +385,15 @@ impl Command {
                 session,
                 runtime,
                 no_load,
+                aot,
                 ..
             } => Session {
                 runtime: resolve_runtime(*runtime, runtime_variable, Runtime::Ry),
-                mode: session_mode(session, !no_load),
+                mode: session_mode(session, !no_load, *aot),
             },
             Command::R { session, no_load } => Session {
                 runtime: Runtime::GnuR,
-                mode: session_mode(session, !no_load),
+                mode: session_mode(session, !no_load, false),
             },
             Command::Repl {
                 keybindings,
@@ -416,11 +429,12 @@ pub fn resolve_runtime(
     .unwrap_or(default)
 }
 
-fn session_mode(session: &SessionArguments, load_package: bool) -> Mode {
+fn session_mode(session: &SessionArguments, load_package: bool, ahead: bool) -> Mode {
     match session.script.split_first() {
         Some((file, arguments)) => Mode::Script {
             file: PathBuf::from(file),
             arguments: arguments.to_vec(),
+            ahead,
         },
         None => Mode::Console {
             file: session.interactive.clone(),

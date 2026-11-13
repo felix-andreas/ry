@@ -31,7 +31,7 @@ use {
         },
         time::{Duration, Instant},
     },
-    syntax::testing::cargo_build,
+    syntax::testing::{SplitMix64, cargo_build, for_each_seed},
 };
 
 #[test]
@@ -145,6 +145,9 @@ const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 /// interpreter fails nothing and shows only as time (500 times as much for `array_dot`). Each
 /// program runs once with `RY_TYPED_LOG`, which names every typed function a call of falls back
 /// to the interpreter, and why.
+///
+/// Each program then runs with `--aot`, which must give the same result and compile every typed
+/// function before the program starts, so that none compiles during the run.
 #[test]
 fn typed_benchmarks_run_natively() {
     if let Some(reason) =
@@ -208,6 +211,38 @@ fn typed_benchmarks_run_natively() {
         if !fallbacks.is_empty() {
             failures.push(format!("{name}:\n{}", fallbacks.join("\n")));
         }
+        let ahead = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry", "--aot"])
+            .arg(&script)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            .env("RY_BENCH_REPEAT", "1")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        let ahead_stderr = String::from_utf8_lossy(&ahead.stderr);
+        // The harness prints the program's name and result, then the times.
+        let result = |stdout: &[u8]| {
+            String::from_utf8_lossy(stdout)
+                .split_whitespace()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if !ahead.status.success() || result(&ahead.stdout) != result(&output.stdout) {
+            failures.push(format!(
+                "{name} compiled ahead of time gives `{}`, not `{}`:\n{ahead_stderr}",
+                result(&ahead.stdout),
+                result(&output.stdout)
+            ));
+            continue;
+        }
+        match ahead_stderr.split_once(" ahead of time in ") {
+            Some((_, after)) if !after.contains("typed: compiled for") => {}
+            _ => failures.push(format!(
+                "{name} compiles during its run under `--aot`:\n{ahead_stderr}"
+            )),
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
@@ -229,6 +264,402 @@ fn typed_fallbacks(stderr: &str) -> Vec<(&str, &str)> {
                 .is_some_and(|(_, why)| why.starts_with(AWAITING))
         })
         .collect()
+}
+
+/// One way [`typed_scripts_agree_however_they_compile`] runs a script.
+struct Tiering {
+    name: &'static str,
+    environment: &'static [(&'static str, &'static str)],
+    ahead: bool,
+}
+
+/// The interpreter alone, code compiled at each function's first call, code compiled before the
+/// script starts, the same with every closure made ahead thrown away (so all of that code was
+/// compiled for functions the script never binds, and every assumption it made about the script
+/// fails), and compiling ahead with a tier 1 that compiles at once.
+const TIERINGS: [Tiering; 5] = [
+    Tiering {
+        name: "interpreted",
+        environment: &[("RY_JIT", "off")],
+        ahead: false,
+    },
+    Tiering {
+        name: "compiled at first call",
+        environment: &[],
+        ahead: false,
+    },
+    Tiering {
+        name: "compiled ahead",
+        environment: &[],
+        ahead: true,
+    },
+    Tiering {
+        name: "compiled ahead, closures discarded",
+        environment: &[("RY_AHEAD_MISS", "1")],
+        ahead: true,
+    },
+    Tiering {
+        name: "compiled ahead, tier 1 forced",
+        environment: &[("RY_JIT", "force")],
+        ahead: true,
+    },
+];
+
+/// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each
+/// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists, and every
+/// run must end with the same exit code, standard output and standard error. A script whose
+/// meaning does not rest on its annotations also runs with the annotations erased, which must
+/// print the same.
+///
+/// The scripts are built from the shapes that make compiling ahead differ from compiling at a
+/// first call: a function called before its callee is defined, a name defined twice or bound to
+/// another function between calls, a definition inside a block, parameters typed by an alias, a
+/// conversion of what R returns, one whose vector is of a narrower type than the checker's or
+/// empty, a literal that warns when it is lowered, a statement that collects garbage between
+/// its arguments, a changed `keep.source`, and a script that stops with an error partway.
+#[test]
+fn typed_scripts_agree_however_they_compile() {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
+        eprintln!("typed scripts: skipped, {reason}");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &Path, tiering: &Tiering| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
+        command.args(["run", "--runtime", "ry"]);
+        if tiering.ahead {
+            command.arg("--aot");
+        }
+        let output = command
+            .arg(script)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            .env_remove("RY_JIT")
+            .env_remove("RY_AHEAD_MISS")
+            .envs(tiering.environment.iter().copied())
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // The typed core's log says when each function compiled, which is what differs.
+        let (log, errors): (Vec<&str>, Vec<&str>) =
+            stderr.lines().partition(|line| line.starts_with("typed: "));
+        (
+            status_code(output.status),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            errors.join("\n"),
+            log.join("\n"),
+        )
+    };
+    let (mut scripts, mut ahead, mut nothing_late) = (0, 0, 0);
+    for_each_seed(16, |seed| {
+        let (text, erasable) = typed_script(&mut SplitMix64(seed));
+        let script = directory.path().join(format!("script_{seed}.R"));
+        fs::write(&script, &text).expect("write the script");
+        let (code, stdout, stderr, _) = run(&script, &TIERINGS[0]);
+        for tiering in &TIERINGS[1..] {
+            let (other_code, other_stdout, other_stderr, log) = run(&script, tiering);
+            assert_eq!(
+                (code, &stdout, &stderr),
+                (other_code, &other_stdout, &other_stderr),
+                "seed {seed}: {} differs from {}:\n{text}",
+                tiering.name,
+                TIERINGS[0].name
+            );
+            if tiering.name == "compiled ahead" {
+                let (before, after) = log
+                    .split_once(" ahead of time in ")
+                    .unwrap_or_else(|| panic!("seed {seed}: nothing was compiled ahead:\n{log}"));
+                ahead += usize::from(!before.ends_with("typed: compiled 0 functions"));
+                nothing_late += usize::from(!after.contains("typed: compiled for"));
+            }
+        }
+        if erasable {
+            let erased = directory.path().join(format!("erased_{seed}.R"));
+            fs::write(&erased, &text).expect("write the script to erase");
+            let status = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .args(["debug", "erase"])
+                .arg(&erased)
+                .current_dir(directory.path())
+                .status()
+                .expect("run ry debug erase");
+            assert!(status.success(), "seed {seed}: erasing failed:\n{text}");
+            let (erased_code, erased_stdout, ..) = run(&erased, &TIERINGS[1]);
+            assert_eq!(
+                (code, &stdout),
+                (erased_code, &erased_stdout),
+                "seed {seed}: the script prints something else with its annotations erased:\n{text}"
+            );
+        }
+        scripts += 1;
+    });
+    // The harness is about code compiled before a script runs, so it must reach it. A script
+    // that compiles nothing later is rarer, because several of the units compile at a first
+    // call by design: a rebound name, a definition inside a block, a `Num.from_r`.
+    assert!(
+        scripts < 8 || (ahead * 4 >= scripts * 3 && nothing_late > 0),
+        "of {scripts} scripts, {ahead} compiled functions ahead and {nothing_late} compiled \
+         nothing later"
+    );
+}
+
+/// A session limits how many closures it compiles, because a running program can make closures
+/// without end. A script's own definitions are not such closures: all of them compile before the
+/// script starts, and the function the script then calls is among them.
+#[test]
+fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead() {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
+        eprintln!("many definitions: skipped, {reason}");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut text = String::new();
+    for index in 0..4200 {
+        text.push_str(&format!("f{index} <- function(x: F64) -> F64 x + {index}.5\n"));
+    }
+    text.push_str("hot <- function(x: F64) -> F64 x * 2.5\nprint(hot(1))\nprint(f4199(1))\n");
+    let script = directory.path().join("many.R");
+    fs::write(&script, text).expect("write the script");
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .args(["run", "--runtime", "ry", "--aot"])
+        .arg(&script)
+        .current_dir(directory.path())
+        .env("RY_TYPED_LOG", "1")
+        .env_remove("RY_JIT")
+        .env_remove("RY_AHEAD_MISS")
+        .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+        .output()
+        .expect("run ry");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[1] 2.5\n[1] 4200.5\n", "{stderr}");
+    let (_, after) = stderr
+        .split_once("typed: compiled 4201 functions ahead of time in ")
+        .unwrap_or_else(|| panic!("not every definition compiled ahead:\n{}", last_lines(&stderr)));
+    assert!(!after.contains("typed: "), "the run compiled or refused later:\n{after}");
+}
+
+fn last_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(5)..].join("\n")
+}
+
+/// A script of typed functions and the calls that print what they give, and whether it means
+/// the same with its annotations erased. Every number is printed as an `F64`, which prints the
+/// same whether or not the checker made the literals behind it `I64`.
+fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
+    let mut parts: Vec<Vec<String>> = Vec::new();
+    let mut erasable = true;
+    for index in 0..rng.below(4) + 2 {
+        let n = rng.below(9) + 2;
+        let mut lines = match rng.below(15) {
+            0 => {
+                let operator = ["+", "*", "-"][rng.below(3)];
+                let mut definitions = vec![
+                    format!(
+                        "sum_{index} <- function(n: I64) -> I64 {{\n  total <- 0\n  for (i in \
+                         List.range(1, n)) total <- total + square_{index}(i)\n  total\n}}"
+                    ),
+                    format!("square_{index} <- function(x: I64) -> I64 x {operator} x"),
+                ];
+                if rng.chance(1, 2) {
+                    definitions.reverse();
+                }
+                definitions.push(format!("print(Num.to_f64(sum_{index}({n})))"));
+                definitions
+            }
+            1 => vec![
+                format!(
+                    "mean_{index} <- function(xs: List<F64>) -> F64 List.sum(xs) / \
+                     Num.to_f64(List.len(xs))"
+                ),
+                format!(
+                    "spread_{index} <- function(n: I64) -> F64 mean_{index}([1.5, Num.to_f64(n), \
+                     0.25])"
+                ),
+                format!("print(spread_{index}({n}))"),
+                format!("print(mean_{index}([2.5, {n}.5]))"),
+            ],
+            2 => {
+                let keyword = ["type", "alias"][rng.below(2)];
+                vec![
+                    format!("{keyword} Shape_{index} = :Circle(radius: F64) | :Square(side: F64)"),
+                    format!(
+                        "both_{index} <- function(size: F64) -> F64 area_{index}(:Circle(radius \
+                         = size)) + area_{index}(:Square(side = size))"
+                    ),
+                    format!(
+                        "area_{index} <- function(shape: Shape_{index}) -> F64 {{\n  match \
+                         (shape) {{\n    :Circle(radius = r) => 3 * r * r\n    :Square(side = \
+                         s) => s * s\n  }}\n}}"
+                    ),
+                    format!("print(both_{index}({n}.5))"),
+                    format!("print(area_{index}(:Square(side = {n}.25)))"),
+                ]
+            }
+            3 => vec![
+                format!("step_{index} <- function(x: I64) -> I64 x + 1"),
+                format!("twice_{index} <- function(x: I64) -> I64 step_{index}(step_{index}(x))"),
+                format!("print(Num.to_f64(twice_{index}({n})))"),
+                format!("step_{index} <- function(x: I64) -> I64 x + 100"),
+                format!("print(Num.to_f64(twice_{index}({n})))"),
+            ],
+            4 => vec![
+                format!("first_{index} <- function(x: F64) -> F64 x + 0.5"),
+                format!("through_{index} <- function(x: F64) -> F64 first_{index}(x) * 2"),
+                format!("print(through_{index}({n}))"),
+                format!("kept_{index} <- first_{index}"),
+                format!("first_{index} <- function(x: F64) -> F64 x - 0.5"),
+                format!("print(through_{index}({n}))"),
+                format!("print(kept_{index}({n}))"),
+            ],
+            5 => vec![
+                format!("quarter_{index} <- function(x: F64) -> F64 half_{index}(half_{index}(x))"),
+                format!("if (TRUE) {{\n  half_{index} <- function(x: F64) -> F64 x / 2\n}}"),
+                format!("print(quarter_{index}({n}))"),
+            ],
+            6 => vec![
+                format!(
+                    "count_{index} <- function(n: I64) -> F64 {{\n  xs <- \
+                     List.from_r(base::seq_len(Num.to_r(n)) * 0.5)\n  List.sum(xs)\n}}"
+                ),
+                format!("print(count_{index}({n}))"),
+                format!("print(count_{index}({n} + 1))"),
+            ],
+            7 => vec![
+                format!("alias Point_{index} = Record{{x: F64, y: F64}}"),
+                format!("norm_{index} <- function(p: Point_{index}) -> F64 p$x * p$x + p$y * p$y"),
+                format!(
+                    "far_{index} <- function(scale: F64) -> F64 norm_{index}((x = scale, y = 2 * \
+                     scale))"
+                ),
+                format!("print(far_{index}({n}.5))"),
+            ],
+            8 => vec![
+                format!(
+                    "shout_{index} <- function(s: Str, loud: Bool) -> Str if (loud) \
+                     Str.concat(s, \"!\") else s"
+                ),
+                format!("print(shout_{index}(\"seed {n}\", TRUE))"),
+                format!("print(shout_{index}(\"seed {n}\", FALSE))"),
+            ],
+            9 => vec![
+                "options(keep.source = TRUE)".to_owned(),
+                format!(
+                    "fib_{index} <- function(n: I64) -> I64 if (n < 2) n else fib_{index}(n - 1) \
+                     + fib_{index}(n - 2)"
+                ),
+                format!("print(Num.to_f64(fib_{index}({n})))"),
+                "options(keep.source = FALSE)".to_owned(),
+            ],
+            10 => {
+                let mut definitions = vec![
+                    format!(
+                        "even_{index} <- function(n: I64) -> Bool if (n == 0) TRUE else \
+                         odd_{index}(n - 1)"
+                    ),
+                    format!(
+                        "odd_{index} <- function(n: I64) -> Bool if (n == 0) FALSE else \
+                         even_{index}(n - 1)"
+                    ),
+                ];
+                if rng.chance(1, 2) {
+                    definitions.reverse();
+                }
+                definitions.push(format!("print(even_{index}({n}))"));
+                definitions
+            }
+            11 => vec![
+                // Lowering the literal signals a warning, which must wait for the statement's
+                // turn and for the handler the statement before it may have set.
+                format!("near_{index} <- function(x: F64) -> F64 x + 0.25"),
+                ["options(warn = 1)", "options(warn = 0)"][rng.below(2)].to_owned(),
+                format!("print(near_{index}({n}.5L))"),
+                "options(warn = 0)".to_owned(),
+            ],
+            12 => {
+                // R code the checker types as `double` gives integers here, or no items at
+                // all, and the conversion gives the checker's `List<F64>` in every tier.
+                let vector = if rng.chance(1, 2) {
+                    format!("abs(-{n}:{n})")
+                } else {
+                    format!("abs(-{n}:{n})[0]")
+                };
+                vec![
+                    format!("whole_{index} <- function() {vector}"),
+                    format!(
+                        "width_{index} <- function(k: I64) -> F64 {{\n  xs <- \
+                         List.from_r(whole_{index}())\n  Num.to_f64(List.sum(xs)) + \
+                         Num.to_f64(k)\n}}"
+                    ),
+                    format!("print(width_{index}({n}))"),
+                    format!("print(width_{index}({n} + 1))"),
+                ]
+            }
+            13 => vec![
+                // The collection runs in the middle of a statement, whose later arguments
+                // must survive it although the script handed the statement out already.
+                format!("part_{index} <- function(x: F64) -> F64 x / 2"),
+                format!(
+                    "churn_{index} <- function() {{\n  gc()\n  for (k in 1:2000) kept <- \
+                     list(k, \"s\")\n  {n}\n}}"
+                ),
+                format!(
+                    "str(list(first = part_{index}(churn_{index}()), second = \"text {n}\", \
+                     third = c({n}.5, 2.5)))"
+                ),
+            ],
+            _ => vec![
+                format!("plain_{index} <- function(x) x + 1"),
+                format!(
+                    "#: fn(x: F64) -> F64\nvia_r_{index} <- function(x) \
+                     Num.from_r(plain_{index}(Num.to_r(x)))"
+                ),
+                format!("print(via_r_{index}({n}))"),
+                format!("print(via_r_{index}({n}.5))"),
+            ],
+        };
+        if index == 0 && rng.chance(1, 3) {
+            lines.push("print(\"between\")".to_owned());
+        }
+        parts.push(lines);
+    }
+    // Statements of different parts mix, each part keeping its own order, so a definition
+    // often comes after calls of other functions have run.
+    let mut statements = Vec::new();
+    while !parts.is_empty() {
+        let part = rng.below(parts.len());
+        statements.push(parts[part].remove(0));
+        if parts[part].is_empty() {
+            parts.swap_remove(part);
+        }
+    }
+    match rng.below(8) {
+        0 => {
+            // The argument check of a typed function fails, which erased code has none of.
+            erasable = false;
+            statements.push("strict_end <- function(x: I64) -> I64 x * x".to_owned());
+            statements.push("print(Num.to_f64(strict_end(\"a\")))".to_owned());
+            statements.push("print(\"not reached\")".to_owned());
+        }
+        1 => {
+            statements.push("gone_end <- function(x: F64) -> F64 x + 1".to_owned());
+            statements.push("uses_end <- function(x: F64) -> F64 gone_end(x)".to_owned());
+            statements.push("print(uses_end(1))".to_owned());
+            statements.push("rm(gone_end)".to_owned());
+            statements.push("print(uses_end(2))".to_owned());
+            statements.push("print(\"not reached\")".to_owned());
+        }
+        2 => {
+            statements.push("stop(\"the script ends here\")".to_owned());
+            statements.push("after_end <- function(x: F64) -> F64 x".to_owned());
+        }
+        _ => {}
+    }
+    (statements.join("\n") + "\n", erasable)
 }
 
 /// Functions `ry check` passes as native that the typed core still runs in the interpreter: the

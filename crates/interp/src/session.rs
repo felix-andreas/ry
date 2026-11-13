@@ -685,6 +685,7 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
         }))
     });
     let outcome = run_script(&text, source_name);
+    crate::ahead::finish();
     SCRIPT_INPUT.with(|input| input.replace(previous));
     outcome
 }
@@ -738,7 +739,21 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
     'parse: loop {
         let rest = &text[start..];
         let (script, failure) = crate::lower::parse_script_prefix(rest);
-        for node in &script.expressions {
+        // Only the script as first parsed compiles ahead: text parsed again after an expression
+        // read some of it as data is run as a console would run it.
+        let prepared = if start == 0 && interp().ahead.enabled {
+            match crate::ahead::prepare(&script, keep_source()) {
+                Ok(prepared) => Some(prepared),
+                Err(unwind) => {
+                    report_toplevel(unwind);
+                    write_console(b"Execution halted\n", true);
+                    return Outcome::Failed;
+                }
+            }
+        } else {
+            None
+        };
+        for (index, node) in script.expressions.iter().enumerate() {
             let end = usize::from(node.text_range().end()).min(rest.len());
             let next_line = rest[end..]
                 .find('\n')
@@ -750,14 +765,21 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
                 }
             });
             let mark = crate::heap().handle_mark();
-            let succeeded =
-                match crate::lower::lower_script_expression(&script, node, keep_source()) {
-                    Ok(expression) => run_toplevel(expression),
-                    Err(unwind) => {
-                        report_toplevel(unwind);
-                        false
-                    }
-                };
+            let keep_source = keep_source();
+            let lowered = match prepared
+                .as_ref()
+                .and_then(|prepared| crate::ahead::lowered(prepared, index, keep_source))
+            {
+                Some(expression) => Ok(expression),
+                None => crate::lower::lower_script_expression(&script, node, keep_source),
+            };
+            let succeeded = match lowered {
+                Ok(expression) => run_toplevel(expression),
+                Err(unwind) => {
+                    report_toplevel(unwind);
+                    false
+                }
+            };
             crate::heap().release_handles(mark);
             // A script stops at its first error unless `options(error =)` holds a handler, which
             // GNU R runs and then carries on with the next expression.
