@@ -102,6 +102,10 @@ the host's store", has the shape and the measurements behind this list.
   resolves every name the item's naming lists, where the command's old path resolved a name
   when the check asked for it and kept no memo. Under callgrind `item_links` is 4.8% of a
   check's instructions, a quarter of it the lazily built `file_binders`.
+- **The file open at start-up settles about 6 ms later than with the two paths** (44 ms against
+  38 ms at the median of six runs on the finance bench, `tools/bench/tooling/lsp_latency.py`).
+  Not profiled. The opened file's check is not the cause: it runs the same 313 per-item
+  queries on both builds and fewer per-name ones (`crates/ry/examples/cold_open_probe.rs`).
 - **Every item of an edited file lowers again before `item_hir` backdates**, because no memo
   holds the item's syntax. It does not show in request latency after an edit. Lowering only
   the items whose window of the tree changed needs the splice to report which top-level runs

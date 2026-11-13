@@ -2105,7 +2105,7 @@ pub struct ItemLinks<'db> {
     /// [`item_interface_edges`].
     edges: ThinVec<Item<'db>>,
     /// Whether the item's file is one of the project's, so that the package layer holds every
-    /// top-level name a package file binds.
+    /// top-level name a package file binds, and the helper layer every one a helper file binds.
     file_in_project: bool,
 }
 
@@ -3176,19 +3176,28 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             )
         };
         let package = layer(false);
+        let test = match self.kind {
+            DocumentKind::Test | DocumentKind::TestHelper => layer(true),
+            _ => NameLayer::default(),
+        };
         // A name a check constructs for itself (the S3 method `Ops.Date` of an operand's
         // class) is bound almost nowhere, and an item asks for dozens of them, so a
         // `frame_binder` memo for each would outnumber every other memo. A package file
         // needs none: each top-level name it binds is a definition or a conditional write of
         // the package layer, so a name that layer does not bind has no binder in the file.
-        // Another kind of file has no such layer over its own names and asks.
-        let unbound =
-            self.kind == DocumentKind::Package && self.links.file_in_project && !package.binds();
+        // The helper files' layer holds a helper file's names the same way. A test file or a
+        // script has no layer over its own names and asks.
+        let unbound = self.links.file_in_project
+            && match self.kind {
+                DocumentKind::Package => !package.binds(),
+                DocumentKind::TestHelper => !test.binds(),
+                _ => false,
+            };
         if unbound && syntax::testing::invariants_enabled() {
             assert_eq!(
                 frame_binder(),
                 None,
-                "the package layer does not bind `{name}`, yet the item's package file does"
+                "the layer of the item's file does not bind `{name}`, yet the file does"
             );
         }
         NameBindings {
@@ -3200,10 +3209,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                 true => *sourced_name_definition(self.db, self.file, name),
                 false => None,
             },
-            test: match self.kind {
-                DocumentKind::Test | DocumentKind::TestHelper => layer(true),
-                _ => NameLayer::default(),
-            },
+            test,
             package,
         }
     }

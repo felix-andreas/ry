@@ -456,12 +456,13 @@ A constructed name is usually bound nowhere, and a per-item `frame_binder` memo 
 lookup comes to about 100,000 memos (about 18 MB) on the finance bench. An item of a package file
 needs none of them. Every top-level name a package file binds is a definition or a conditional
 write of the package layer, so when `package_name` finds neither, the item's file has no binder for
-the name, and the lookup stops there without a query. An item of a test or script file has no such
-layer over its file's names and asks `frame_binder`, which reads the binders of that one file.
+the name, and the lookup stops there without a query. The helper files' layer (`test_name`) holds
+a helper file's names the same way. An item of a test file or a script has no layer over its
+file's names and asks `frame_binder`, which reads the binders of that one file.
 
-No lookup folds the binders of every file. A file's binders come from naming its items, so such a
-fold would lower every item of the project, test files included, before the first file's check
-could finish.
+No lookup folds the binders of every file. A file's binders come from naming each item that writes
+a name besides its own, so such a fold would lower those items in every file of the project, test
+files included, before the first file's check could finish.
 
 `crates/semantics/tests/test_incremental.rs` pins these contracts: the queries an edit re-runs, the
 ones a new definition re-runs, that a check resolves the names it spells through its links

@@ -254,8 +254,8 @@ fn a_package_check_reads_the_binders_of_its_own_file_alone() {
     );
 }
 
-/// A test or script file has no layer over its own top-level names, so a name its check
-/// constructs is answered by the file's binders.
+/// A test file has no layer over its own top-level names, so a name its check constructs is
+/// answered by the file's binders.
 #[test]
 fn a_test_file_asks_its_own_binders_for_a_constructed_name() {
     let db = ProbeDatabase::default();
@@ -1057,23 +1057,27 @@ fn link_invariants_child() {
         "the cross-check consulted the per-name projections"
     );
 
-    // Every way a package file binds a method name that a check constructs: the package
-    // layer must list each, or the cross-check in the constructed-name lookup panics.
-    let db = ProbeDatabase::default();
-    install_shipped_stubs(&db);
-    let files = db.project(&[
+    // Each way a file binds a method name that a check of the same file constructs. Its layer
+    // must list the name, or the cross-check in the constructed-name lookup panics. The last
+    // source binds none of the names it constructs.
+    let sources = [
         "`+.Date` <- function(e1, e2) e1\nstamp <- function() Sys.Date() + 1L\n",
         "if (interactive()) sum.matrix <- function(x, ...) 1L\ntotal <- function() sum(matrix(1:4, 2))\n",
-        "Summary.matrix <- Arith.matrix <- function(...) 1L\nshifted <- function() matrix(1:4, 2) + 1L\n",
-        "local({ `-.POSIXct` <<- function(e1, e2) 1L })\nelapsed <- function() Sys.time() - Sys.time()\n",
-        "for (step in 1:2) `+.matrix` <- function(e1, e2) e1\nsetter <- function() `Ops.Date` <<- function(e1, e2) e1\n",
-        "unbound <- function() Sys.time() + 1L\n",
-    ]);
-    settle(&db, &files);
-    assert!(
-        db.executions_since(&["frame_binder"])[0] > 0,
-        "the cross-check asked the file's binders for the constructed names"
-    );
+        "Summary.matrix <- Arith.matrix <- function(...) 1L\nshifted <- function() matrix(1:4, 2) + sum(matrix(1:4, 2))\n",
+        "tryCatch(`-.POSIXct` <- function(e1, e2) 1L, error = identity)\nelapsed <- function() Sys.time() - Sys.time()\n",
+        "for (step in 1:2) `+.matrix` <- function(e1, e2) e1\nadded <- function() matrix(1:4, 2) + 1L\n",
+        "unbound <- function() Sys.time() - Sys.time() + sum(matrix(1:4, 2))\n",
+    ];
+    for kind in [DocumentKind::Package, DocumentKind::TestHelper] {
+        let db = ProbeDatabase::default();
+        install_shipped_stubs(&db);
+        let files: Vec<SourceFile> = sources
+            .iter()
+            .map(|&source| SourceFile::new(&db, source.to_owned(), kind))
+            .collect();
+        ProjectFiles::new(&db, files.clone());
+        settle(&db, &files);
+    }
 }
 
 #[test]

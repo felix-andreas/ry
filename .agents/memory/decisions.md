@@ -8502,9 +8502,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
     skips `frame_binder` for a name the package layer does not bind. Every named item is a
     definition, and every other top-level write is a conditional write, so the package layer
     lists each top-level name a package file binds, and a name it does not list has no binder
-    in the file. The verdict costs no query beyond `package_name`. An item of a test or script
-    file has no such layer over its own names and asks `frame_binder`, which reads the binders
-    of its own file.
+    in the file. The verdict costs no query beyond `package_name`. The helper files' layer
+    (`test_name`) holds a helper file's names the same way, so an item of a helper file skips
+    `frame_binder` on the same test. A test file or a script has no layer over its own names
+    and asks `frame_binder`, which reads the binders of its own file.
   - `file_interface_groups(file)` is one Tarjan walk from the file's items, and an item finds its
     group by its position in the item tree.
   - `SalsaGlobals` keeps one column of resolved schemes indexed by link position, because
@@ -8524,9 +8525,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
   remove the per-item firewall that keeps a body edit to one item.
 - **Correctness.** Under `enable_invariants()` every linked lookup is compared with the per-name
   answer, every unbound verdict with `frame_binder`, and every item's group with a walk from the
-  item alone. `test_incremental.rs` runs that comparison over each way a package file binds a
-  constructed name (a definition, a conditional write, a chained write, a write inside a call,
-  a loop and a function body). It also pins the query counts, that a package file's check
+  item alone. `test_incremental.rs` runs that comparison, for a package file and for a helper
+  file, over each way a file binds a name its own check constructs: a definition, a
+  conditional write, a chained write, a write inside a call's argument and a write in a loop.
+  Each of those cases fails when the verdict ignores the winner or the conditional writers.
+  The test also pins the query counts, that a package file's check
   reads the binders of its own file alone and lowers no item of another file, and that a
   diagnostics-only host reports what an editor host reports.
 - **Simplicity.** `Db::one_shot`, `NameLookup`, `projected_name_layer`, `project_interface_groups`,
@@ -8536,10 +8539,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
   runs of each build), the median wall time is 0.71 s (0.68 to 0.74) against 0.70 s (0.66 to
   0.72) with the two paths, CPU time is 2.61 s against 2.57 s, and peak RSS is 248 MB against
   237 MB. The extra memory is the per-item `item_links` memos. In the server
-  (`tools/bench/tooling/lsp_latency.py`, three runs of each build), a body edit and a signature
+  (`tools/bench/tooling/lsp_latency.py`, six runs of each build), a body edit and a signature
   edit settle in 3 ms and a new top-level definition in 5 to 6 ms at the median on both builds.
-  A file opened on an idle server settles its diagnostics in 12 to 13 ms against 12 to 14 ms,
-  and the file open at start-up settles in 38 to 46 ms against 35 to 52 ms.
+  A file opened on an idle server settles its diagnostics in 13 ms at the median on both
+  builds. The file open at start-up settles in 44 ms at the median (38 to 46) against 38 ms
+  (35 to 52) (`backlog.md`, "Open: the analysis core after the single lookup path").
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
   so the re-check stays with the readers of the name. A file's groups list items, not positions
