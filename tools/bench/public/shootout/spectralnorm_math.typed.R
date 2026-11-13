@@ -4,9 +4,17 @@
 # method on the tridiagonal matrix (tred2 and tqli, eigenvalues only).
 execute <- function(n: I64) -> F64 {
   m <- List.join_map(List.range(1, n), \(j) List.map(List.range(1, n), \(i) eval_a(i, j)))
-  # t(m) %*% m: entry (i, j) is the dot product of columns i and j.
+  # t(m) %*% m: entry (i, j) is the dot product of columns i and j, so the product is symmetric
+  # and each dot product fills two entries.
   columns <- List.map(List.range(1, n), \(j) List.sublist(m, (j - 1) * n + 1, n))
-  mtm <- List.join_map(columns, \(cj) List.map(columns, \(ci) List.sum(ci * cj)))
+  mtm <- List.repeat(0f64, n * n)
+  for (j in List.range(1, n)) {
+    for (i in List.range(1, j)) {
+      dot <- List.sum(columns[[i]] * columns[[j]])
+      mtm[[(j - 1) * n + i]] <- dot
+      mtm[[(i - 1) * n + j]] <- dot
+    }
+  }
   Num.sqrt(List.max(eigenvalues(mtm, n)) |> Result.with_default(0f64))
 }
 
@@ -14,7 +22,8 @@ eval_a <- function(i: I64, j: I64) -> F64
   1 / Num.to_f64(((i + j - 2) * (i + j - 1)) %/% 2 + i)
 
 eigenvalues <- function(matrix: List<F64>, n: I64) -> List<F64> {
-  # a[[i, j]] is a[[(j - 1) * n + i]]; the matrix is symmetric, so the layout does not matter.
+  # a[[i, j]] is a[[(i - 1) * n + j]], row by row, so the loops over k read neighbouring items.
+  # The input is symmetric, so the layout does not change it.
   a <- matrix
   d <- List.repeat(0f64, n)
   e <- List.repeat(0f64, n)
@@ -24,37 +33,37 @@ eigenvalues <- function(matrix: List<F64>, n: I64) -> List<F64> {
     h <- 0f64
     if (l > 1) {
       scale <- 0f64
-      for (k in List.range(1, l)) scale <- scale + Num.abs(a[[(k - 1) * n + i]])
+      for (k in List.range(1, l)) scale <- scale + Num.abs(a[[(i - 1) * n + k]])
       if (scale == 0) {
-        e[[i]] <- a[[(l - 1) * n + i]]
+        e[[i]] <- a[[(i - 1) * n + l]]
       } else {
         for (k in List.range(1, l)) {
-          a[[(k - 1) * n + i]] <- a[[(k - 1) * n + i]] / scale
-          h <- h + a[[(k - 1) * n + i]] * a[[(k - 1) * n + i]]
+          a[[(i - 1) * n + k]] <- a[[(i - 1) * n + k]] / scale
+          h <- h + a[[(i - 1) * n + k]] * a[[(i - 1) * n + k]]
         }
-        f <- a[[(l - 1) * n + i]]
+        f <- a[[(i - 1) * n + l]]
         g <- if (f >= 0) 0 - Num.sqrt(h) else Num.sqrt(h)
         e[[i]] <- scale * g
         h <- h - f * g
-        a[[(l - 1) * n + i]] <- f - g
+        a[[(i - 1) * n + l]] <- f - g
         f <- 0f64
         for (j in List.range(1, l)) {
           g <- 0f64
-          for (k in List.range(1, j)) g <- g + a[[(k - 1) * n + j]] * a[[(k - 1) * n + i]]
-          if (l > j) for (k in List.range(j + 1, l)) g <- g + a[[(j - 1) * n + k]] * a[[(k - 1) * n + i]]
+          for (k in List.range(1, j)) g <- g + a[[(j - 1) * n + k]] * a[[(i - 1) * n + k]]
+          if (l > j) for (k in List.range(j + 1, l)) g <- g + a[[(k - 1) * n + j]] * a[[(i - 1) * n + k]]
           e[[j]] <- g / h
-          f <- f + e[[j]] * a[[(j - 1) * n + i]]
+          f <- f + e[[j]] * a[[(i - 1) * n + j]]
         }
         hh <- f / (h + h)
         for (j in List.range(1, l)) {
-          f <- a[[(j - 1) * n + i]]
+          f <- a[[(i - 1) * n + j]]
           g <- e[[j]] - hh * f
           e[[j]] <- g
-          for (k in List.range(1, j)) a[[(k - 1) * n + j]] <- a[[(k - 1) * n + j]] - (f * e[[k]] + g * a[[(k - 1) * n + i]])
+          for (k in List.range(1, j)) a[[(j - 1) * n + k]] <- a[[(j - 1) * n + k]] - (f * e[[k]] + g * a[[(i - 1) * n + k]])
         }
       }
     } else {
-      e[[i]] <- a[[(l - 1) * n + i]]
+      e[[i]] <- a[[(i - 1) * n + l]]
     }
     d[[i]] <- h
     i <- i - 1
