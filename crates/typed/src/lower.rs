@@ -168,6 +168,10 @@ const MAX_TYPED_INLINE_DEPTH: usize = 4;
 /// The most calls and operators the body of a typed function may hold and still inline into
 /// its callers.
 const MAX_INLINE_CALLS: usize = 48;
+/// The most calls of itself a function may hold and still lower into itself once. Each call
+/// is another copy of the body to compile, so a function that recurses from many places, as an
+/// evaluator of a tree with several node kinds does, would multiply its compile time.
+const MAX_SELF_CALLS: usize = 2;
 /// How deeply expressions nest, which bounds the lowering's own recursion.
 const MAX_NESTING: usize = 256;
 
@@ -1078,17 +1082,22 @@ impl Lowering<'_> {
             }
             let values = self.call_arguments(&arguments)?;
             // A small function lowers into its caller, where its records need no allocation
-            // and its arguments no call. A function that calls itself lowers into itself once,
-            // which halves the calls a recursion makes, and into no other caller.
+            // and its arguments no call. A function that calls itself from a place or two
+            // lowers into itself once, which halves the calls a recursion makes, and into no
+            // other caller.
             let body = interp::bytecode::closure_body(function);
-            let recursion = (function != self.closure).then_some(head);
+            let mut own_calls = if function == self.closure {
+                MAX_SELF_CALLS
+            } else {
+                0
+            };
             if function.tag() == self.env
                 && !self.inlining.contains(&function)
                 && !self.called.contains(&function)
                 && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
                 && rvalues::pairlist_items(function.car()).len() == values.len()
                 && !tail_invisible(body)
-                && small_body(body, recursion, &mut 0)
+                && small_body(body, head, &mut own_calls, &mut 0)
             {
                 self.inlining.push(function);
                 let value = self.inline(function.car(), body, 0, &values, crate::storage);
@@ -5832,24 +5841,33 @@ unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
 
 /// Whether `expression`, the body of a typed function, is small enough to lower into a caller:
 /// at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which would
-/// leave the caller, or a call of `recursion`, the function's own name when the caller is
-/// another function.
-unsafe fn small_body(expression: Sexp, recursion: Option<Sexp>, calls: &mut usize) -> bool {
+/// leave the caller, and at most `own_calls` calls of `own`, the function's own name.
+unsafe fn small_body(
+    expression: Sexp,
+    own: Sexp,
+    own_calls: &mut usize,
+    calls: &mut usize,
+) -> bool {
     if expression.kind() != SexpType::Language {
         return true;
     }
     *calls += 1;
     let head = expression.car();
     if *calls > MAX_INLINE_CALLS
-        || Some(head) == recursion
         || head.kind() == SexpType::Symbol && rvalues::symbol_name(head) == "return"
     {
         return false;
     }
-    small_body(head, recursion, calls)
+    if head == own {
+        if *own_calls == 0 {
+            return false;
+        }
+        *own_calls -= 1;
+    }
+    small_body(head, own, own_calls, calls)
         && rvalues::pairlist_items(expression.cdr())
             .into_iter()
-            .all(|(_, item)| small_body(item, recursion, calls))
+            .all(|(_, item)| small_body(item, own, own_calls, calls))
 }
 
 /// Whether `expression` calls `return` outside nested function literals.
