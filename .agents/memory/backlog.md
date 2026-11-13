@@ -2736,16 +2736,17 @@ The end-to-end guard rests on the corpus suites.
   on secondary indices; not measured here). The index holds 4 bytes
   per row until the column changes or the table is dropped, with no way for the user to drop it
   earlier.
-- **`capture.output(x)` and `str(x)` leave one reference count on `x` per call, so a frame's
-  next `:=` copies once.** Five `capture.output(print(x))` calls on a fresh frame read a count
-  of 8 against 2, and five `str(x)` calls read 7; `print`, `format`, `head`, `summary`,
-  `as.data.frame`, `nrow` and friends leave the count alone. The fork is a fresh object, so the
-  updates after it write in place. The table is not the cause: a classed list shows the same
-  rise. In both functions a frame returns while one of its promises is counted twice
-  (`Heap::clear_frame` clears a promise only at a count of 1), and the collection that later
-  frees the promise does not lower its value's count. The second holder is not identified;
-  `capture.output` keeps its frame for a local text connection, and `str.default` defines
-  closures in its frame.
+- **A call that puts a frame in a local list leaves one reference count on it, so the frame's
+  next `:=` copies once.** `capture.output(x)` (its `withVisible` result is a list), `str(x)`
+  and any `function(v) { kept <- list(v); ... }` do this: five such calls on a fresh vector read
+  a count of 6 against 1, in ry and in GNU R alike, because neither lowers an element's count
+  when the list that held it dies with its frame; only a collection frees the list, and a
+  collection lowers no count. data.table never notices, since its `:=` writes in place whatever
+  the count says. `print`, `format`, `head`, `summary`, `as.data.frame`, `nrow` and friends
+  leave the count alone, and the fork is a fresh object, so the updates after it write in
+  place. Closing this needs the heap to release a list's elements when a frame's clearing drops
+  the list to zero holders, which is sound only where the list cannot be the frame's result or
+  sit on the evaluation stack.
 - **A chained `:=` is an error.** `x[id == 1L, v := 5L][id == 2L, v := 6L]` applies the first
   update and then fails with "`:=` updates a DataFrame stored in a variable", because the second
   bracket's subject is a call. data.table code chains updates this way, and
