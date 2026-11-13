@@ -523,6 +523,8 @@ def run_suite(suite, manifest, missing, args, meta):
     finally:
         runner.close()
     print_table(results, table)
+    for key, found in results["worst"].items():
+        print(f"Worst program, {results['engines'][key]}: {found['id']} at {found['ratio']:.2f}x")
     for row in results["programs"]:
         for key, found in row.get("per_block", {}).items():
             print(f"{row['display']}, {results['engines'][key]}: per-block geometric mean of GNU R / engine "
@@ -1180,12 +1182,25 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                 means[key] = {"median": round(point, 4), "low": round(low, 4), "high": round(high, 4),
                               "programs": len(per_program)}
         return means
+    def worst_programs():
+        """Each engine's slowest program by median ratio, among those the geometric mean counts."""
+        found = {}
+        for engine in table[1:]:
+            counted = [(row["ratio"][engine.key]["median"], row["id"]) for row in rows
+                       if engine.key in row["ratio"] and not any(
+                           flag["kind"] == "too_short" and flag["engine"] in (table[0].key, engine.key)
+                           for flag in row["flags"])]
+            if counted:
+                ratio, name = min(counted) if kind == "speedup" else max(counted)
+                found[engine.key] = {"id": name, "ratio": ratio}
+        return found
+
     results = {
         "schema": SCHEMA, "suite": suite, "name": manifest["name"],
         "meta": dict(meta, too_short_seconds=floor, rounds=args.rounds, extra_rounds=args.extra_rounds, seed=args.seed),
         "engines": {engine.key: engine.label for engine in table},
         "baseline": baseline.key, "ratio_kind": kind,
-        "programs": rows, "geomean": geomeans(included),
+        "programs": rows, "geomean": geomeans(included), "worst": worst_programs(),
     }
     if pairs:
         results["paired_geomean"] = geomeans(paired_included)
