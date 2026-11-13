@@ -868,11 +868,14 @@ pin these contracts:
 - An inserted statement re-checks only the reads it intercepts.
 - A body edit re-derives one item's load facts and its own file's index layer, a `NAMESPACE` edit
   re-derives no item, and a statement that only moved keeps its load facts.
-- A one-shot check (`ProbeDatabase::one_shot`) runs no `package_name`, `test_name` or
-  `interface_group` and one `project_interface_groups`, reports exactly what the incremental check
-  reports, and agrees with the per-name and per-item answers under invariants (checked in a child
-  process, because invariants are process-wide and would perturb the counting tests). The
-  incremental database still goes through the per-name and per-item firewalls.
+- An edit parses one file, a cold check parses each file once, and a diagnostics-only host
+  (`ProbeDatabase::diagnostics_only`) keeps a bounded number of trees and reports exactly what an
+  editor host reports.
+- A check resolves the names it spells through `item_links` without a `frame_binder` query, and
+  finds its cyclic groups with one `file_interface_groups` walk per file.
+- Under invariants, the links agree with the per-name answers and each file's groups with a walk
+  from the item alone (checked in a child process, because invariants are process-wide and would
+  perturb the counting tests).
 
 The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to
 `Unknown`, and that a chain of 4,096 links resolves without overflowing the analysis thread's stack.

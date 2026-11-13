@@ -1071,7 +1071,7 @@ invariant the performance harness can watch.
 
 # Decision record: the interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order
 
-**Status:** built, except `interface_sccs`, which "Decision record: a file's check names only what its interface reaches" supersedes.
+**Status:** built, except `interface_sccs` and the per-item `interface_group` walk: groups come from one walk per file ("Decision record: every host resolves names through one path, and trees live in the host's store"), and an item reads its edges from `item_links`.
 
 A corpus-scale finding from the multi-core instrument drove this. Pre-forcing the per-file phases
 gave 64852 findings, and forcing file diagnostics directly gave 64835. Both counts were stable
@@ -1726,7 +1726,7 @@ new is stored and no query is added: the lookup is a hash probe plus a descent i
 
 # Decision record: a check reads per-name firewalls, never project-wide maps
 
-**Status:** built.
+**Status:** built, except `interface_group` and the per-name lookups for names an item spells, which "Decision record: every host resolves names through one path, and trees live in the host's store" replaces with `file_interface_groups` and `item_links`. `package_name`, `test_name` and `frame_binder` serve the names a check constructs.
 
 `item_check` used to resolve cross-item reads against three whole maps that it read eagerly:
 `package_definitions`, which holds every winner in the project, the membership of
@@ -2947,7 +2947,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 
 ## Syntax trees are evicted, and only small syntax facts are memoized
 
-**Status:** built, except tree eviction, which "Decision record: every host keeps every tree" supersedes.
+**Status:** built, except tree eviction and `RootDatabase::one_shot`, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes. Kept for the rule that tree readers are memoized queries with small results.
 
 Tree eviction itself is superseded: see "Decision record: every host keeps every tree" below.
 The small memoized syntax facts remain.
@@ -3964,7 +3964,7 @@ first lines R had already read, leaving R mid-command.
 
 ## Cold-check constant costs: one green walk per file, immortal interning, high durability
 
-**Status:** built, except the salsa-interned `Name` and `Ty`, which "Types and names are hash-consed outside salsa" supersedes.
+**Status:** built, except the salsa-interned `Name` and `Ty`, which "Types and names are hash-consed outside salsa" supersedes, and `item_frame_binders`, which `item_links` replaces ("Decision record: every host resolves names through one path, and trees live in the host's store").
 
 - **Previous shape.** Each per-file syntax collector and the syntax lints walked the red tree
   separately. `annotation_rule_diagnostics` rebuilt the project's duplicate-type map for every
@@ -4567,7 +4567,7 @@ contract.
 
 # Decision record: a file's check names only what its interface reaches
 
-**Status:** built.
+**Status:** built, except the per-item `interface_group` walk and `item_interface_reads`: one walk per file finds the groups and `item_links` holds the edges ("Decision record: every host resolves names through one path, and trees live in the host's store").
 
 - **Previous source of truth.** Cyclic interface groups came from one project-wide query,
   `interface_sccs`, which built the reference graph over every item of every file and condensed it
@@ -4693,7 +4693,7 @@ explicit allocators".
 
 # Decision record: every host keeps every tree
 
-**Status:** built, except for `ry check`, which "Decision record: a cold check holds one parse tree per worker" supersedes.
+**Status:** built for the server. A command keeps a bounded number of trees in its `TreeStore` ("Decision record: every host resolves names through one path, and trees live in the host's store"). Kept for the measurement that salsa LRU capacities serialize parallel reads.
 
 The server still keeps every tree; `ry check` now releases them once (see "Decision record: `ry
 check` releases its trees once, and memoized records are compact" below).
@@ -4725,7 +4725,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 # Decision record: `ry check` releases its trees once, and memoized records are compact
 
-**Status:** built, except the tree release (`release_trees`), which "Decision record: a cold check holds one parse tree per worker" supersedes.
+**Status:** built, except the tree release (`release_trees`) and `item_interface_reads`, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes.
 
 - **Previous source.** `ry check` kept every tree to the end, because salsa's LRU records each
   read under one mutex per query. The checker recorded strict-mode origins for every item, and
@@ -5646,7 +5646,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 # Decision record: a new top-level name costs one project fold
 
-**Status:** built.
+**Status:** built, except that `item_interface_edges` is part of `item_links`, which reads the project name maps once per item ("Decision record: every host resolves names through one path, and trees live in the host's store").
 
 - **Before.** A name being typed is a new top-level definition on every keystroke. That re-ran
   `package_definitions` and `duplicate_binding_map`, two folds over every package file's
@@ -7142,41 +7142,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 ## One-shot checks record coarse dependencies
 
-**Status:** built.
+**Status:** superseded by "Decision record: every host resolves names through one path, and trees live in the host's store", which removes `Db::one_shot`. Kept for two measurements that still shape the code.
 
-- **Previous shape.** `ry check --no-cache` ran on the same database shape as the language server:
-  every cross-item name lookup interned a `QueryName` and went through the tracked `package_name` or
-  `test_name` firewall, and every item found its cyclic group with its own `interface_group` walk.
-  That recorded about 340 k salsa edges for name lookups alone, which a check that never edits
-  never replays. Separately, the token-only green builder had stopped sharing nodes, which cost
-  about 70 MiB of peak memory.
-- **Target shape.**
-  - `Db::one_shot()` (true only for `RootDatabase::one_shot`, which `ry check` uses) switches
-    `name_layer` to read `package_definitions` and the conditional-writer maps directly, and
-    `item_group` to read `project_interface_groups`, one iterative Tarjan walk over every item.
-    Every read still goes through salsa, so the answers are the same facts at a coarser
-    dependency granularity. Under `enable_invariants()` both are compared against the per-name and
-    per-item answers, and `test_incremental.rs` pins that the one-shot path runs no firewall
-    query, reports the same findings, and that the incremental path keeps its firewalls.
-  - `ry check` runs the group walk once on a throwaway database handle. It records one edge per
-    item, salsa keeps that capacity in the handle's reused query-stack frame, and every later query
-    at the same depth then cleared a table sized for the project (about 0.75 G instructions,
-    depending on which thread ran the walk).
-  - Node sharing in the tree builder is gone with rowan; the flat tree (the record "The syntax
-    tree is ry's own flat preorder arena") stores each file once without it.
-  - A one-shot check reads each name's project layer once per lookup: `NameLookup` resolves the
-    project maps (`package_definitions` and the conditional-writer maps, or their test
-    counterparts) once per query instead of two salsa fetches per name, and the incremental path
-    keeps the `projected_name_layer` firewall, cross-checked under `enable_invariants()`.
-  - On a one-shot check an unlisted frame binder (a name the item interface did not list, looked up
-    in an enclosing function's frame) is answered by building `FrameBinders::of` once per item
-    instead of one `frame_binder` query execution per name, which recorded about 216 k query
-    executions on the finance bench.
-  - The global allocator enters mimalloc through `mi_malloc` and friends when the alignment is at
-    most 16 and no larger than the size; the `mimalloc` crate always took the aligned path.
-- **Impact.** Callgrind on the finance bench went from 22.8 G to 22.0 G instructions, and
-  interleaved medians from 1.60 s to 1.48 s wall, 5.2 s to 4.8 s of CPU and 445 to 431 MiB, with
-  byte-identical findings. The 1 s target is not met (`backlog.md`, "Check cache follow-ups").
+- A walk that records one salsa edge per project item leaves its handle's reused query-stack
+  frame sized for the project, and every later query at the same depth then clears a table of
+  that size (about 0.75 G instructions on the finance bench). `ry check` therefore builds each
+  project-wide name map on a throwaway database handle.
+- The global allocator enters mimalloc through `mi_malloc` and friends when the alignment is at
+  most 16 and no larger than the size; the `mimalloc` crate always took the aligned path.
 
 ## R's dynamic help server runs on the interpreter thread, only while R waits
 
@@ -8245,7 +8218,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 # Decision record: a cold check holds one parse tree per worker
 
-**Status:** built.
+**Status:** built, except `with_held_tree`, `parse_memo`, the per-item syntax memos and `Db::one_shot`, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes: trees live in the host's `TreeStore`, and `RootDatabase::for_command(editor_facts)` replaces both one-shot constructors.
 
 - **Previous source.** `ry check` memoized every file's tree in the syntax pass and then released
   them all at once (`release_trees`, a serial LRU eviction of about 56 ms on finance). Per-item
@@ -8293,7 +8266,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 # Decision record: the one-shot check scans kind columns and overlaps its serial phases
 
-**Status:** built.
+**Status:** built, except the one-shot frame-binder path, `project_interface_groups` and the `SalsaGlobals::layer` memo, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes.
 
 - **Previous source.** Whole-file readers (lints, write-token counts, used namespace tokens, the
   syntax sites) visited every element in preorder and tested each one. Item HIR, binder memos and
@@ -8332,6 +8305,78 @@ Each one trades a narrow class of missed errors for a class of false reports see
   are what remain, besides `infer_ordinary_call`.
 - **Incremental.** The server path keeps every memo and firewall. The new scans are pure reads of
   one tree, and the throwaway handles share the one-shot database's memos.
+
+# Decision record: the checker's per-item facts are columns and bitsets indexed by dense id
+
+**Status:** built.
+
+- **Previous source of truth.** `Checker` held 22 hash containers keyed by `ExprId`, `PatId` or
+  `BindingId`, nine of them sets, and call matching allocated a `vec![false; n]` per call.
+- **What was structurally weak.** An item numbers its expressions, patterns and bindings from
+  zero, so every probe hashed a key that was already an array index, and the hottest table
+  (`Environment.entries`) was probed on every variable read.
+- **Target shape.** `crates/semantics/src/dense.rs` has `Column<K, V>` (one optional value per
+  id) and `Bitset<K>` (one bit per id), both in the check arena and both unallocated until the
+  first write, because most columns stay empty for most items. The first write sizes a column
+  for every id the item minted. The checker's tables and its per-call scratch sets use them.
+- **Impact.** Same findings on every fixture suite. A fact is an array slot, iteration is in id
+  order (so no result depends on hash order), and the arena frees every column in one step.
+
+# Decision record: every host resolves names through one path, and trees live in the host's store
+
+**Status:** built.
+
+- **Previous source of truth.** `Db::one_shot()` chose between two implementations of three
+  lookups. The server interned a name and read `package_name` or `test_name`, resolved frame
+  binders through `item_frame_binders` and a `frame_binder` memo per unlisted name, and found an
+  item's cyclic group with a per-item `interface_group` walk. `ry check` read the project-wide
+  maps through `NameLookup`, built the frame binders inside the check, and read one
+  `project_interface_groups` walk. Trees had three homes: the tracked `parse_memo` and per-item
+  `item_syntax_memo` on the server, a thread-local slot (`with_held_tree`) in `ry check`, and the
+  splice cache's copy of the previous tree beside both.
+- **What was structurally weak.** One fact had two code paths, so the command and the server
+  could disagree, and only an invariants cross-check compared them. `SalsaGlobals` kept four
+  hash-map caches in front of the per-name queries, which existed because a salsa read per name
+  cost more than the fact. A tree's lifetime was decided in three places.
+- **Target shape.**
+  - `TreeStore` (`Db::trees`) is the one home of syntax trees, and `parse` is a plain function
+    that reads it. It splices on a changed text, and its capacity is the host's only choice:
+    every tree for the server, four per worker for a command (`RootDatabase::for_command`).
+  - `item_syntax` is a plain window of the stored tree. An edited file's items lower again and
+    backdate on `item_hir` equality.
+  - `item_links(item)` resolves every name the item's naming lists against the project name
+    maps, in parallel arrays (one row per name, one per binding), and holds the item's interface
+    edges and whether its file belongs to the project. It is the item's projection of the
+    project-wide maps and backdates unless one of the item's names moved.
+  - A name the check constructs (mostly S3 method names) goes through `package_name`,
+    `test_name` and `frame_binder`. `package_name` also carries whether any project file binds
+    the name, from a symbol-indexed bitset (`project_binders`), and an unbound name skips the
+    `frame_binder` query.
+  - `file_interface_groups(file)` is one Tarjan walk from the file's items, and an item finds its
+    group by its position in the item tree.
+  - `SalsaGlobals` keeps one column of resolved schemes indexed by link position, because
+    resolving a scheme copies it. The other three caches are gone.
+- **Rejected.** A per-file name-set dependency instead of the bound bit was coarser (any new name
+  in the file re-checks its items). Keeping the edges in their own query cost a second memo per
+  item for a value derived from the same inputs. One per-file query for all items' links would
+  remove the per-item firewall that keeps a body edit to one item.
+- **Correctness.** Under `enable_invariants()` every linked lookup is compared with the per-name
+  answer, every unbound verdict with `frame_binder`, and every item's group with a walk from the
+  item alone. `test_incremental.rs` pins the query counts and that a diagnostics-only host
+  reports what an editor host reports.
+- **Simplicity.** `Db::one_shot`, `NameLookup`, `projected_name_layer`, `project_interface_groups`,
+  `interface_group`, `item_interface_reads`, `item_frame_binders`, `parse_memo`,
+  `item_syntax_memo`, `with_held_tree` and the `SpliceCache` type are gone.
+- **Performance.** On the finance bench (4 cores, `ry check --no-cache`), wall time is 0.85 to
+  0.88 s against 0.75 to 0.89 s with the two paths, CPU time is equal (2.8 to 2.9 s against 2.6
+  to 3.0 s), and peak RSS is 253 MB against 243 MB. The first single-path build peaked at
+  276 MB: about 100,000 per-item `frame_binder` memos for constructed names that nothing binds,
+  which the bound bit removes. In the server, a body edit and a signature edit settle in 3 ms
+  and a new top-level definition in 6 ms at the median, the same as before; a request right
+  after an edit costs about 0.3 ms more, because the edited file's items lower again.
+- **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
+  verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
+  so the re-check stays with the readers of the name.
 
 ## The standard library is the `std` namespace, with an optional prelude
 

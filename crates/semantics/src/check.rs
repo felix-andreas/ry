@@ -6,6 +6,7 @@ use {
         DataPath, Db, TypeDefinitions,
         annotations::Annotation,
         data_file_layout,
+        dense::{Bitset, Column},
         diagnostics::nearest_name,
         exhaustiveness::{MatchFinding, match_findings},
         hir::{
@@ -19,7 +20,6 @@ use {
             apply_definition, numeric_join,
         },
         metadata::{imported_by_name, imports_every_name, is_own_package},
-        dense::{Bitset, Column},
         naming::{
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
