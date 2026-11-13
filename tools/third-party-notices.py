@@ -11,8 +11,9 @@ come through Cargo (font metrics, bundled algorithms) are fixed below. The Rust 
 package that `ry-lang` or `libr` reaches through normal dependency edges on any target, from
 `cargo metadata`, with the licence files each crate ships.
 
-`--check` also enforces the licence rule in LICENSE: a workspace crate that reaches `interp`
-through normal or build dependencies must be GPL-2.0-or-later, and no other crate may be.
+`--check` also enforces the licence rule in LICENSE: a workspace crate that is or reaches
+`numeric`, the lowest crate with translated code, through normal or build dependencies must be
+GPL-2.0-or-later, and no other crate may be.
 """
 
 import json
@@ -25,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "THIRD_PARTY_NOTICES"
 SHIPPED_ROOTS = ("ry-lang", "libr")
-R_DERIVED_ROOT = "interp"
+R_DERIVED_ROOT = "numeric"
 
 # The licence chosen from an `A OR B` expression, best first: the shortest GPL-compatible
 # permissive terms win, so a dual MIT/Apache crate is taken under MIT.

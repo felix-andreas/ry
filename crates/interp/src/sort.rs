@@ -1987,7 +1987,7 @@ fn complex_less(left: Rcomplex, right: Rcomplex) -> bool {
 /// GNU R's `rsort_with_index`: a shell sort with Knuth's gaps (1, 4, 13, 40, ...) that orders
 /// `(key, payload)` pairs by key, NaN last. It is not stable, and graphics code that draws in
 /// this order (`persp`'s facets) must break ties the way GNU R does.
-pub(crate) fn rsort_with_index<T: Copy>(items: &mut [(f64, T)]) {
+pub fn rsort_with_index<T: Copy>(items: &mut [(f64, T)]) {
     let greater = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
         (true, false) => true,
         (false, false) => left > right,
@@ -3091,7 +3091,7 @@ unsafe fn attributes_identical(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped
 /// GNU R compares row names as `attr(x, "row.names")` reads them, so the compact `c(NA, n)`
 /// equals the integers `1:n` it stands for.
 unsafe fn row_names_identical(left: Sexp, right: Sexp, flags: &IdenticalFlags) -> bool {
-    let compact = crate::stats_models::compact_row_count;
+    let compact = values::compact_row_count;
     let counts_up = |row_names: Sexp, count: usize| {
         row_names.kind() == SexpType::Integer
             && values::ints(row_names)

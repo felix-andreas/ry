@@ -137,7 +137,7 @@ pub unsafe fn read_line(prompt: &str) -> Option<String> {
     }
     // A command may have changed a viewed object in place, so its sorted and filtered rows are
     // derived again on the next page.
-    crate::viewer::forget_orders();
+    (crate::interp().extensions.viewer.forget_orders)();
     platform::read_line(prompt)
 }
 
@@ -186,7 +186,7 @@ unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
     match request.command.as_str() {
         "ryGlobals" => {
             let mark = crate::heap().handle_mark();
-            let globals = crate::viewer::globals();
+            let globals = (crate::interp().extensions.viewer.globals)();
             crate::heap().release_handles(mark);
             Ok(globals)
         }
@@ -198,11 +198,13 @@ unsafe fn answer_plain(request: &Request) -> Result<Value, String> {
                 .ok_or("the request needs an `expression`")?;
             let mark = crate::heap().handle_mark();
             let opened = crate::debugger::evaluate_text(expression, crate::values::global_env())
-                .and_then(|value| crate::viewer::open(value, expression));
+                .and_then(|value| (crate::interp().extensions.viewer.open)(value, expression));
             crate::heap().release_handles(mark);
             opened
         }
-        "ryTable" | "ryRelease" => crate::viewer::request(&request.command, &request.arguments),
+        "ryTable" | "ryRelease" => {
+            (crate::interp().extensions.viewer.request)(&request.command, &request.arguments)
+        }
         command => Err(format!("`{command}` is not supported")),
     }
 }
@@ -417,7 +419,7 @@ mod platform {
         },
         crate::{
             debugger::evaluate_text,
-            graphics_engine, help_server, interp,
+            help_server, interp,
             unwind::{INTERRUPT_REQUESTED, INTERRUPTS_PENDING},
             values::{self, global_env},
         },
@@ -789,16 +791,11 @@ mod platform {
     /// The current plot as svg text, or `None` when it is the one sent last or there is none.
     unsafe fn plot_svg() -> Result<Option<String>, String> {
         install_plot_device()?;
-        if graphics_engine::no_devices() {
-            return Ok(None);
-        }
         // With a device open, the current one is a real device and nothing is opened here.
-        let dd = graphics_engine::current_device()
-            .map_err(|_| "the current device is the null device".to_owned())?;
-        let stamp = graphics_engine::display_list_stamp(dd);
-        if graphics_engine::display_list_is_empty(dd)
-            || PLOTTED_STAMP.swap(stamp, Ordering::Relaxed) == stamp
-        {
+        let Some(stamp) = (interp().extensions.graphics.current_plot_stamp)()? else {
+            return Ok(None);
+        };
+        if PLOTTED_STAMP.swap(stamp, Ordering::Relaxed) == stamp {
             return Ok(None);
         }
         // The copy runs with warnings muffled and closes whatever device it opened on every
@@ -980,7 +977,7 @@ mod platform {
             );
         }
         for connection in subscribers {
-            let body = crate::viewer::open(object, title)?;
+            let body = (crate::interp().extensions.viewer.open)(object, title)?;
             send(
                 connection,
                 json!({ "type": "event", "event": "ryView", "body": body }),

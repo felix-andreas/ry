@@ -23,7 +23,10 @@ fn child() {
             fn recurse(depth: u64) -> u64 {
                 let padding = [depth as u8; 512];
                 std::hint::black_box(&padding);
-                recurse(depth + 1) + u64::from(padding[0])
+                match std::hint::black_box(true) {
+                    true => recurse(depth + 1) + u64::from(padding[0]),
+                    false => 0,
+                }
             }
             std::hint::black_box(recurse(0));
         }

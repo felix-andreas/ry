@@ -1244,6 +1244,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "frames"
+version = "0.4.4"
+dependencies = [
+ "heap",
+ "interp",
+ "libmimalloc-sys",
+ "rustc-hash",
+ "serde_json",
+ "table",
+]
+
+[[package]]
 name = "fs4"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1416,6 +1428,21 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
+]
+
+[[package]]
+name = "graphics"
+version = "0.4.4"
+dependencies = [
+ "ab_glyph",
+ "bincode",
+ "flate2",
+ "heap",
+ "interp",
+ "jpeg-encoder",
+ "libc",
+ "syntax",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -1823,34 +1850,29 @@ dependencies = [
 name = "interp"
 version = "0.4.4"
 dependencies = [
- "ab_glyph",
- "bincode",
  "bzip2",
  "encoding_rs",
  "fancy-regex",
  "flate2",
+ "frames",
  "glob",
  "heap",
  "jiff",
- "jpeg-encoder",
  "libc",
- "libmimalloc-sys",
  "lzma-rust2",
  "memchr",
+ "numeric",
  "pcre2-sys",
  "rcmd",
  "regex",
  "regex-automata",
  "regex-syntax",
- "reqwest",
  "rustc-hash",
  "serde_json",
  "smallvec",
  "stacker",
  "syntax",
- "table",
  "thin-vec",
- "tiny-skia",
  "unicode-width 0.2.2",
  "windows-sys 0.61.2",
  "zstd",
@@ -2099,6 +2121,8 @@ version = "0.4.4"
 dependencies = [
  "cc",
  "dirs",
+ "frames",
+ "graphics",
  "heap",
  "interp",
  "jit",
@@ -2111,9 +2135,12 @@ dependencies = [
  "polars-arrow",
  "rcmd",
  "rustc-hash",
+ "semantics",
  "serde_json",
+ "services",
  "smallvec",
  "stacker",
+ "stats",
  "syntax",
  "table",
  "unicode-width 0.2.2",
@@ -2157,10 +2184,7 @@ name = "loader"
 version = "0.4.4"
 dependencies = [
  "bincode",
- "heap",
- "interp",
  "notify",
- "rcmd",
  "rustc-hash",
  "salsa",
  "semantics",
@@ -2413,6 +2437,15 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "numeric"
+version = "0.4.4"
+dependencies = [
+ "heap",
+ "libc",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -4092,6 +4125,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "services"
+version = "0.4.4"
+dependencies = [
+ "interp",
+ "reqwest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4311,6 +4352,16 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "stats"
+version = "0.4.4"
+dependencies = [
+ "heap",
+ "interp",
+ "libc",
+ "numeric",
+]
 
 [[package]]
 name = "streaming-decompression"

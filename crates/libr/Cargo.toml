@@ -19,18 +19,25 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 heap = { path = "../heap" }
 interp = { path = "../interp" }
+stats = { path = "../stats" }
+graphics = { path = "../graphics" }
+frames = { path = "../frames" }
+services = { path = "../services" }
 serde_json.workspace = true
 jit = { path = "../jit" }
-loader = { path = "../loader", features = ["runtime"] }
+loader = { path = "../loader" }
 libc = "0.2"
 mimalloc = { version = "0.1", features = ["local_dynamic_tls", "v2"] }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 polars = { version = "0.55", default-features = false }
 polars-arrow = { version = "0.55", default-features = false }
+rcmd = { path = "../rcmd" }
 rustc-hash.workspace = true
+semantics = { path = "../semantics" }
 smallvec = { version = "1.15", features = ["union"] }
 unicode-width.workspace = true
 stacker.workspace = true
+syntax = { path = "../syntax" }
 table = { path = "../table" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -41,8 +48,6 @@ cc = "1.2"
 
 [dev-dependencies]
 libloading = "0.8"
-rcmd = { path = "../rcmd" }
-syntax = { path = "../syntax" }
 
 [[test]]
 name = "test_frame_altrep"
