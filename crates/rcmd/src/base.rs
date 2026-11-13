@@ -411,13 +411,12 @@ fn run_image_writer(
         root,
         work,
         "ry-rcmd base code images",
-        &[
-            OsStr::new("R"),
+        &r_arguments(&[
             OsStr::new("--vanilla"),
             OsStr::new("--no-echo"),
             OsStr::new("-f"),
             driver.as_os_str(),
-        ],
+        ]),
     ) {
         eprintln!("Warning: the code images of the base packages were not written\n{error}");
     }
@@ -436,8 +435,7 @@ fn run_image_writer(
             root,
             work,
             "ry-rcmd code image",
-            &[
-                OsStr::new("R"),
+            &r_arguments(&[
                 OsStr::new("--vanilla"),
                 OsStr::new("--no-echo"),
                 OsStr::new("-f"),
@@ -448,7 +446,7 @@ fn run_image_writer(
                 work.as_os_str(),
                 OsStr::new("none"),
                 OsStr::new("false"),
-            ],
+            ]),
         ) {
             eprintln!("Warning: the code image of '{name}' was not written\n{error}");
         }
@@ -484,6 +482,17 @@ for (package in packages) {
 }
 invisible(.Internal(ryCodeImageWrite(FALSE, FALSE)))
 "#;
+
+/// The arguments that run R code through the front end. `bin/R.exe` on Windows is R already,
+/// while the Unix front end is `ry-rcmd`, which takes the mode first.
+fn r_arguments<'a>(options: &[&'a OsStr]) -> Vec<&'a OsStr> {
+    let mut arguments = Vec::with_capacity(options.len() + 1);
+    if Platform::HOST != Platform::Windows {
+        arguments.push(OsStr::new("R"));
+    }
+    arguments.extend_from_slice(options);
+    arguments
+}
 
 fn run_in_home(
     front_end: &Path,
