@@ -2388,6 +2388,12 @@ fn plain_kinds_match(table: PlainKeys<'_>, x: PlainKeys<'_>) -> bool {
 /// Writes to `positions`, for each element of `x`, the 1-based position of the first equal
 /// element of `table`, or 0. Both sides have the same kind ([`plain_kinds_match`]). `false` when
 /// strings that are not ASCII make pointer equality inexact, and the general path must run.
+///
+/// # Safety
+///
+/// `table` and `x` must come from [`plain_keys`] on ordinary (not ALTREP) vectors that stay
+/// rooted and unmodified for the call, so that their slices and `CHARSXP` pointers stay valid.
+/// `positions` must have the length of `x`.
 unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mut [i32]) -> bool {
     match (table, x) {
         (PlainKeys::Integer(table), PlainKeys::Integer(x)) => {
@@ -2427,6 +2433,11 @@ unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mu
 /// Which elements repeat an earlier one (a later one with `from_last`), or `None` when strings
 /// that are not ASCII make pointer equality inexact. `first_only` as for
 /// [`duplicated_elements`].
+///
+/// # Safety
+///
+/// `keys` must come from [`plain_keys`] on an ordinary (not ALTREP) vector that stays rooted
+/// and unmodified for the call, so that its slice and `CHARSXP` pointers stay valid.
 unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool, first_only: bool) -> Option<Bits> {
     match keys {
         PlainKeys::Integer(values) => {
