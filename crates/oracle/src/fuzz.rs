@@ -2,10 +2,10 @@
 //!
 //! A program is a sequence of independent blocks, each a shape the runtime has to get right:
 //! hot functions with scalar and vector loops (so `RY_JIT=force` compiles them), element reads
-//! and writes, closures, S3 dispatch, `switch`, `repeat`, `Recall`, environments, attributes,
-//! NA propagation, integer overflow, recycling and condition handling. Most blocks are
-//! well-typed and print what they compute, so a difference shows up in stdout as well as in the
-//! last value. A share of the expressions are ill-typed on purpose (a string in arithmetic, a
+//! and writes, closures, lazy arguments, S3 dispatch, `switch`, `repeat`, `Recall`, environments,
+//! attributes, NA propagation, integer overflow, recycling and condition handling. Most blocks
+//! are well-typed and print what they compute, so a difference shows up in stdout as well as in
+//! the last value. A share of the expressions are ill-typed on purpose (a string in arithmetic, a
 //! length-two condition, a missing variable, a call with the wrong arity); those sit inside
 //! `tryCatch` and print the error message, and a few programs end in an uncaught error.
 //!
@@ -61,7 +61,7 @@ const WORDS: [&str; 8] = ["alpha", "b", "", "Gamma", "delta e", "x1", "NA", "zz"
 
 impl Generator {
     fn block_text(&mut self) -> String {
-        match self.rng.below(28) {
+        match self.rng.below(29) {
             0..=3 => self.hot_scalar_loop(),
             4..=5 => self.vector_writes(),
             6 => self.while_and_repeat(),
@@ -85,6 +85,7 @@ impl Generator {
             24 => self.loop_variable_aliasing(),
             25 => self.named_appends(),
             26 => self.slabs_and_rounding(),
+            27 => self.lazy_arguments(),
             _ => self.global_scalars(),
         }
     }
@@ -264,6 +265,42 @@ impl Generator {
         format!(
             "h{k} <- function(n) {{\n  steps <- 0L\n  repeat {{\n    if (n == 1) break\n    n <- if (n %% 2 == 0) n / 2 else 3 * n + 1\n    steps <- steps + 1L\n    if (steps >= {limit}L) break\n  }}\n  c(n = n, steps = steps)\n}}\nfor (r in 1:3) s{k} <- h{k}({start})\nprint(s{k})\nprint(vapply({start}:{}, function(j) h{k}(j)[[\"steps\"]], numeric(1)))\n",
             start + 4
+        )
+    }
+
+    /// A root that passes a local on through two calls while a branch that has not run yet
+    /// rebinds that local from the middle callee, before or after the inner callee would read
+    /// the argument. Compiled code runs such calls without frames and may evaluate the argument
+    /// ahead of the call, so when the branch runs, the frames it rebuilds must bind each formal
+    /// forced or unforced exactly as the calls left it. Each callee runs alone first, because
+    /// `RY_JIT=force` compiles the root at its second call and inlines only callees it knows.
+    fn lazy_arguments(&mut self) -> String {
+        let k = self.block;
+        let argument = ["x", "x * 2", "x + 1"][self.rng.below(3)];
+        let (leaf, warm, call) = match self.rng.below(3) {
+            0 => (
+                "function(y) {\n  if (y < 0) stop(\"negative\")\n  y\n}",
+                format!("leaf{k}(1)"),
+                format!("leaf{k}({argument})"),
+            ),
+            1 => (
+                "function(a, c) {\n  if (c < 0) stop(\"negative\")\n  if (c > 1) a else 0\n}",
+                format!("leaf{k}(2, {})", [0, 2][self.rng.below(2)]),
+                format!("leaf{k}({argument}, flag)"),
+            ),
+            _ => (
+                "function(a, c) {\n  if (c < 0) stop(\"negative\")\n  c + 1\n}",
+                format!("leaf{k}(2, 0)"),
+                format!("leaf{k}({argument}, flag)"),
+            ),
+        };
+        let rebind = "  if (flag > 0) assign(\"w\", 99, parent.frame())\n";
+        let (before, after) = match self.rng.chance(1, 2) {
+            true => (rebind, ""),
+            false => ("", rebind),
+        };
+        format!(
+            "leaf{k} <- {leaf}\nfor (i in 1:30) {warm}\nmiddle{k} <- function(x, flag) {{\n{before}  r <- {call}\n{after}  x + r\n}}\nfor (i in 1:30) middle{k}(1, 0)\nroot{k} <- function(flag) {{\n  w <- 1\n  middle{k}(w, flag)\n}}\nfor (i in 1:40) root{k}(0)\nfor (flag in c(0, 1, 2, 0)) print(root{k}(flag))\n"
         )
     }
 
