@@ -526,17 +526,26 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     WARNINGS.set(WARNINGS.get() + 1);
     let call = resolve_call(call);
     let message = message.into();
-    // Without a handler for the warning, `.signalSimpleWarning` only runs the default handler.
-    // Its frames are then observable only when `options(warn = 2)` turns the warning into an
-    // error, whose handlers and traceback see them.
-    if crate::base_fast_paths::fast_paths_enabled()
-        && !handled(&[b"simpleWarning", b"warning", b"condition"])
-        && warn_level() < 2
-    {
-        return default_warning(call, &message);
-    }
-    if crate::base_fast_paths::fast_paths_enabled() && muffled_by_suppress_warnings()? {
-        return Ok(());
+    if crate::base_fast_paths::fast_paths_enabled() {
+        match find_handler(&interp().handlers, &WARNING_CLASSES) {
+            // Without a handler for the warning, `.signalSimpleWarning` only runs the default
+            // handler. Its frames are then observable only when `options(warn = 2)` turns the
+            // warning into an error, whose handlers and traceback see them.
+            None if warn_level() < 2 => return default_warning(call, &message),
+            // An exiting handler runs after the unwind to its `tryCatch`, so the frames and the
+            // restart `.signalSimpleWarning` would set up are gone before it sees the condition,
+            // which is `simpleWarning(message, call)`.
+            Some(entry) if !entry.calling => {
+                let condition = make_condition(&message, call, &WARNING_CLASS_NAMES)?;
+                interp().handlers = entry.next.clone();
+                return Err(jump(Jump::Return {
+                    env: entry.target,
+                    value: exiting_result(condition, call, entry.handler)?,
+                }));
+            }
+            Some(entry) if muffled_by_suppress_warnings(&entry)? => return Ok(()),
+            _ => {}
+        }
     }
     let hook = values::install(".signalSimpleWarning")?;
     if crate::heap()
@@ -556,21 +565,19 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     default_warning(call, &message)
 }
 
-/// Whether `base::suppressWarnings` muffles a simple warning signalled now: the topmost handler
-/// for `simpleWarning`, `warning` or `condition` is the calling handler that `suppressWarnings`
-/// establishes, and its `classes` name one of those three. That handler only tests the class and
-/// invokes the `muffleWarning` restart, so nothing it would run is observable, and the frames of
+/// The classes of a simple warning, as bytes to match handler classes and as names to build one.
+const WARNING_CLASSES: [&[u8]; 3] = [b"simpleWarning", b"warning", b"condition"];
+const WARNING_CLASS_NAMES: [&str; 3] = ["simpleWarning", "warning", "condition"];
+
+/// Whether `base::suppressWarnings` muffles a simple warning whose topmost matching handler is
+/// the calling handler `handler`: it is the handler that `suppressWarnings` establishes, and its
+/// `classes` name one of the warning's classes. That handler only tests the class and invokes the
+/// `muffleWarning` restart, so nothing it would run is observable, and the frames of
 /// `.signalSimpleWarning` and `withRestarts` are seen only by handlers that do run. Any other
 /// handler, or a `classes` whose value is still an unevaluated expression, takes the R route.
-unsafe fn muffled_by_suppress_warnings() -> R<bool> {
-    let Some(handler) = find_handler(
-        &interp().handlers,
-        &[b"simpleWarning", b"warning", b"condition"],
-    ) else {
-        return Ok(false);
-    };
+unsafe fn muffled_by_suppress_warnings(handler: &Handler) -> R<bool> {
     let closure = handler.handler;
-    if !handler.calling || closure.kind() != SexpType::Closure {
+    if closure.kind() != SexpType::Closure {
         return Ok(false);
     }
     // The handler is recognised by its body being the function literal inside the
