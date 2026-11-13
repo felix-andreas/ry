@@ -3455,15 +3455,31 @@ impl Lowering<'_> {
         let value = self
             .apply(callable, &[element])?
             .ok_or(Refusal::new("a mapped function that never completes"))?;
-        let value_item = self.builder.ty(value).item().ok_or(Refusal::new(
-            "a mapped function whose value is not a scalar",
-        ))?;
+        // A ry list holds no `NA`, so a logical a mapped function returns into one must be
+        // settled, and an `NA` stops the native code as a missing item does in the interpreter.
+        let value = if to_array && self.builder.ty(value) == Type::Lgl {
+            self.builder.emit(Type::Bool, Op::Truth(value))
+        } else {
+            value
+        };
+        let value_ty = self.builder.ty(value);
+        let value_item = if to_array {
+            value_ty.held_item()
+        } else {
+            value_ty.item()
+        }
+        .ok_or(Refusal::new("a mapped function whose value is not a scalar"))?;
         let result_item = declared.unwrap_or(value_item);
-        let value = self.convert_scalar(value, result_item)?;
+        let settled = value_ty == Type::Bool && result_item == Item::Lgl;
+        let value = if settled {
+            value
+        } else {
+            self.convert_scalar(value, result_item)?
+        };
         let output_ty = if name == "vapply" {
             Type::vector(result_item)
         } else if to_array {
-            if matches!(result_item, Item::Int | Item::Lgl) {
+            if result_item == Item::Int || (result_item == Item::Lgl && !settled) {
                 return Err(Refusal::new("a `List.map` to a list of R scalars"));
             }
             Type::Vector {
@@ -4218,6 +4234,11 @@ impl Lowering<'_> {
         let value = self
             .apply(callable, &elements)?
             .ok_or(Refusal::new("a mapped function that never completes"))?;
+        let value = if self.builder.ty(value) == Type::Lgl {
+            self.builder.emit(Type::Bool, Op::Truth(value))
+        } else {
+            value
+        };
         let result_item = self.builder.ty(value).held_item().ok_or(Refusal::new(
             "a mapped function whose value a list cannot hold",
         ))?;

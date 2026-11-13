@@ -1,6 +1,7 @@
 # A row of points is iterated as two lists of F64, the real and the imaginary parts, because
-# typed ry has no complex numbers. An orbit that overflows to NaN is outside the set; R's complex
-# multiplication turns the same overflow into an infinity, which is outside the set too.
+# typed ry has no complex numbers. A list of F64 cannot hold NaN, which an orbit that keeps
+# squaring past the escape radius reaches as Inf - Inf, so a point stops moving once
+# |z| > 2. Such an orbit only grows, so it stays outside the set as R's diverging one does.
 execute <- function(n: I64) -> List<Str> {
   lim <- 2f64
   iter <- 50
@@ -18,8 +19,8 @@ execute <- function(n: I64) -> List<Str> {
     zi <- List.repeat(0f64, n)
     i <- 0
     while (i < iter) {
-      next_zr <- zr * zr - zi * zi + cr
-      zi <- zr * zi * 2 + ci
+      next_zr <- List.map3(zr, zi, cr, \(r, im, c) if (r * r + im * im > 4) r else r * r - im * im + c)
+      zi <- List.map2(zr, zi, \(r, im) if (r * r + im * im > 4) im else r * im * 2 + ci)
       zr <- next_zr
       i <- i + 1
     }

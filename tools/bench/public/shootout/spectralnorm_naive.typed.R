@@ -9,7 +9,7 @@ execute <- function(n: I64) -> F64 {
 }
 
 eval_a <- function(i: I64, j: I64) -> F64
-  1 / Num.to_f64((i + j) * (i + j + 1) %/% 2 + i + 1)
+  1 / Num.to_f64(((i + j) * (i + j + 1)) %/% 2 + i + 1)
 
 times_a <- function(u: List<F64>, n: I64) -> List<F64> {
   ret <- List.repeat(0f64, n)

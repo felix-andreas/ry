@@ -4,7 +4,7 @@ execute <- function(n: I64) -> F64 {
   cache <- List.repeat(0f64, n * n)
   for (i in List.range(1, n))
     for (j in List.range(1, n))
-      cache[[(j - 1) * n + i]] <- 1 / Num.to_f64((i + j - 2) * (i + j - 1) %/% 2 + i)
+      cache[[(j - 1) * n + i]] <- 1 / Num.to_f64(((i + j - 2) * (i + j - 1)) %/% 2 + i)
 
   # Both products copy the cache element by element, as the R program does through eval_A.
   copy <- \() {
@@ -25,7 +25,7 @@ execute <- function(n: I64) -> F64 {
 }
 
 transpose <- function(m: List<F64>, n: I64) -> List<F64>
-  List.join_map(List.range(1, n), \(j) List.map(List.range(1, n), \(i) m[[(j - 1) * n + i]]))
+  List.join_map(List.range(1, n), \(j) List.map(List.range(1, n), \(i) m[[(i - 1) * n + j]]))
 
 times <- function(u: List<F64>, m: List<F64>, n: I64) -> List<F64>
   List.map(List.range(1, n), \(j) List.sum(u * List.sublist(m, (j - 1) * n + 1, n)))

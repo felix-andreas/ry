@@ -14,14 +14,14 @@ execute <- function(n: I64) -> F64 {
 }
 
 eval_a <- function(i: I64, j: I64) -> F64
-  1 / Num.to_f64((i + j - 2) * (i + j - 1) %/% 2 + i)
+  1 / Num.to_f64(((i + j - 2) * (i + j - 1)) %/% 2 + i)
 
 # outer(seq(n), seq(n), FUN = eval_A)
 outer_a <- function(n: I64) -> List<F64>
   List.join_map(List.range(1, n), \(j) List.map(List.range(1, n), \(i) eval_a(i, j)))
 
 transpose <- function(m: List<F64>, n: I64) -> List<F64>
-  List.join_map(List.range(1, n), \(j) List.map(List.range(1, n), \(i) m[[(j - 1) * n + i]]))
+  List.join_map(List.range(1, n), \(j) List.map(List.range(1, n), \(i) m[[(i - 1) * n + j]]))
 
 times <- function(u: List<F64>, m: List<F64>, n: I64) -> List<F64>
   List.map(List.range(1, n), \(j) List.sum(u * List.sublist(m, (j - 1) * n + 1, n)))

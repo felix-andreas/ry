@@ -11,7 +11,7 @@ execute <- function(n: I64) -> F64 {
 }
 
 eval_a <- function(i: I64, j: I64) -> F64
-  1 / Num.to_f64((i + j - 2) * (i + j - 1) %/% 2 + i)
+  1 / Num.to_f64(((i + j - 2) * (i + j - 1)) %/% 2 + i)
 
 eigenvalues <- function(matrix: List<F64>, n: I64) -> List<F64> {
   # a[[i, j]] is a[[(j - 1) * n + i]]; the matrix is symmetric, so the layout does not matter.
