@@ -1951,6 +1951,30 @@ impl Emitter<'_> {
                 value
             }
             Arith::Mod | Arith::IntDiv => {
+                // A positive constant divisor is neither zero nor -1, and the remainder needs
+                // moving only when it is negative, which its sign bit says. A power of two
+                // needs no division: the low bits are the floored remainder of a negative
+                // number too, and an arithmetic shift rounds down.
+                if let Some(divisor) = self.builder.constant(y).filter(|&divisor| divisor > 0) {
+                    if divisor & (divisor - 1) == 0 {
+                        return Ok(if op == Arith::Mod {
+                            self.builder.ins().band_imm_u(x, divisor - 1)
+                        } else {
+                            let bits = self.iconst(i64::from(divisor.trailing_zeros()));
+                            self.builder.ins().sshr(x, bits)
+                        });
+                    }
+                    let remainder = self.builder.ins().srem(x, y);
+                    let sign = self.iconst(63);
+                    let negative = self.builder.ins().sshr(remainder, sign);
+                    return Ok(if op == Arith::Mod {
+                        let moved = self.builder.ins().band(negative, y);
+                        self.builder.ins().iadd(remainder, moved)
+                    } else {
+                        let quotient = self.builder.ins().sdiv(x, y);
+                        self.builder.ins().iadd(quotient, negative)
+                    });
+                }
                 let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, y, 0);
                 self.fail_if(zero, &inst.fail_drops)?;
                 let minus_one = self.builder.ins().icmp_imm_s(IntCC::Equal, y, -1);

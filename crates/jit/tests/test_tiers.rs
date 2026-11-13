@@ -3407,6 +3407,62 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             "function(n: I64) -> I64 { s <- 0i64; for (i in List.range(1, n)) s <- s + i * i; s }",
             &["{ x <- 10i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
         ),
+        // A remainder or quotient by a positive constant floors like any other, for a divisor
+        // that is a power of two and for one that is not, and `Num.min_i64` divides without a
+        // fault. A constant that is zero or negative takes the checked path.
+        (
+            "function(a: I64) -> I64 (a %% 8i64) * 1000000i64 + (a %/% 8i64) * 1000i64 \
+             + (a %% 7i64) * 100i64 + a %/% 7i64",
+            &[
+                "{ x <- 29i64; FUNCTION(x) }",
+                "{ x <- -29i64; FUNCTION(x) }",
+                "{ x <- -8i64; FUNCTION(x) }",
+                "{ x <- -7i64; FUNCTION(x) }",
+                "{ x <- -1i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(a: I64) -> I64 a %% 1i64 + a %/% 1i64",
+            &[
+                "{ x <- -5i64; FUNCTION(x) }",
+                "{ x <- Num.min_i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(a: I64) -> I64 (a %/% 4i64) %% 1000i64 + (a %% 3i64) + (a %/% 3i64) %% 1000i64",
+            &[
+                "{ x <- Num.min_i64; FUNCTION(x) }",
+                "{ x <- Num.max_i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(a: I64) -> I64 (a %% -3i64) * 100i64 + a %/% -3i64",
+            &["{ x <- 7i64; FUNCTION(x) }", "{ x <- -7i64; FUNCTION(x) }"],
+        ),
+        (
+            "function(a: I64) -> I64 a %/% 0i64",
+            &["{ x <- 7i64; FUNCTION(x) }"],
+        ),
+        // A function that calls itself, which is lowered into itself once, recurses as before:
+        // through both calls, past the depth one copy covers, and into an overflow.
+        (
+            "function(n: I64) -> I64 if (n < 2i64) n else FUNCTION(n - 1i64) + FUNCTION(n - 2i64)",
+            &[
+                "{ x <- 0i64; FUNCTION(x) }",
+                "{ x <- 1i64; FUNCTION(x) }",
+                "{ x <- 2i64; FUNCTION(x) }",
+                "{ x <- 20i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(n: I64, total: I64) -> I64 \
+             if (n == 0i64) total else FUNCTION(n - 1i64, total * 3i64 + n)",
+            &[
+                "{ x <- 5i64; y <- 1i64; FUNCTION(x, y) }",
+                "{ x <- 60i64; y <- 1i64; FUNCTION(x, y) }",
+            ],
+        ),
         // List arithmetic keeps the list, never recycles, and fails on a NaN item.
         (
             "function(x: List<F64>) -> F64 List.sum(x * 2 + x / 3 - 1)",
@@ -3613,7 +3669,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             let (reference, compiled, typed) = unsafe {
                 let run_all = |name: &str, mode: Mode| {
                     jit::install_mode(mode);
-                    run(&format!("{name} <- {definition}"));
+                    run(&format!(
+                        "{name} <- {}",
+                        definition.replace("FUNCTION", name)
+                    ));
                     let outcomes: Vec<String> = calls
                         .iter()
                         .map(|call| run(&call.replace("FUNCTION", name)))
