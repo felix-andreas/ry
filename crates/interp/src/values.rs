@@ -249,6 +249,9 @@ symbol_table! {
     nh = "nh",
     r = "r",
     restart_args = "restartArgs",
+    inherits = "inherits",
+    try_invoke_restart = "tryInvokeRestart",
+    w = "w",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.

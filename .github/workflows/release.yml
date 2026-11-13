@@ -1,10 +1,10 @@
 # A release runs when a version tag is pushed (`git tag 0.4.0-beta && git push origin 0.4.0-beta`)
 # or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
 # and smoke-tests every archive without publishing anything. A run started by hand can also limit
-# the release to Linux (`platforms`) and leave out the VS Code extension (`vscode`). The checklist
-# and the one-time Marketplace setup are in docs/src/content/docs/development/releasing.md. Past
-# runner setup, every step runs a `just` recipe or tools/smoke-test.sh, so each one also runs
-# locally.
+# the release to Linux, or to Linux and macOS (`platforms`), and leave out the VS Code extension
+# (`vscode`). The checklist and the one-time Marketplace setup are in
+# docs/src/content/docs/development/releasing.md. Past runner setup, every step runs a `just`
+# recipe or tools/smoke-test.sh, so each one also runs locally.
 name: Release
 
 on:
@@ -22,7 +22,7 @@ on:
       platforms:
         description: "Platforms to build and release (a tag push always builds all)"
         type: choice
-        options: [all, linux]
+        options: [all, unix, linux]
         default: all
       vscode:
         description: "Package and publish the VS Code extension"
@@ -45,9 +45,9 @@ jobs:
       # ubuntu-22.04 is the oldest supported runner, so the Linux archive needs no newer glibc than
       # 2.35. The Windows target is gnullvm because it links the UCRT, as Rtools-built packages do,
       # so ry.exe, R.dll and package DLLs share one C runtime. The `linux` choice of `platforms`
-      # keeps the Linux entry alone.
+      # keeps the Linux entry alone, and `unix` keeps Linux and macOS.
       matrix:
-        include: ${{ fromJSON(inputs.platforms == 'linux' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-gnullvm"}]') }}
+        include: ${{ fromJSON(inputs.platforms == 'linux' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' || inputs.platforms == 'unix' && '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-15","target":"aarch64-apple-darwin"}]' || '[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-gnullvm"}]') }}
     defaults:
       run:
         shell: bash

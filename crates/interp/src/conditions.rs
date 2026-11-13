@@ -8,7 +8,7 @@ use {
     crate::{
         Interp,
         builtins::{BuiltinDef, Call, internal},
-        deparse, eval, interp,
+        bytecode, deparse, eval, interp,
         unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
         values::{
             self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
@@ -548,16 +548,28 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     WARNINGS.set(WARNINGS.get() + 1);
     let call = resolve_call(call);
     let message = message.into();
-    let hook = values::install(".signalSimpleWarning")?;
-    // Without a handler for the warning, `.signalSimpleWarning` only runs the default handler.
-    // Its frames are then observable only when `options(warn = 2)` turns the warning into an
-    // error, whose handlers and traceback see them.
-    if crate::base_fast_paths::fast_paths_enabled()
-        && !handled(&[b"simpleWarning", b"warning", b"condition"])
-        && warn_level() < 2
-    {
-        return default_warning(call, &message);
+    if crate::base_fast_paths::fast_paths_enabled() {
+        match find_handler(&interp().handlers, &WARNING_CLASSES) {
+            // Without a handler for the warning, `.signalSimpleWarning` only runs the default
+            // handler. Its frames are then observable only when `options(warn = 2)` turns the
+            // warning into an error, whose handlers and traceback see them.
+            None if warn_level() < 2 => return default_warning(call, &message),
+            // An exiting handler runs after the unwind to its `tryCatch`, so the frames and the
+            // restart `.signalSimpleWarning` would set up are gone before it sees the condition,
+            // which is `simpleWarning(message, call)`.
+            Some(entry) if !entry.calling => {
+                let condition = make_condition(&message, call, &WARNING_CLASS_NAMES)?;
+                interp().handlers = entry.next.clone();
+                return Err(jump(Jump::Return {
+                    env: entry.target,
+                    value: exiting_result(condition, call, entry.handler)?,
+                }));
+            }
+            Some(entry) if muffled_by_suppress_warnings(&entry)? => return Ok(()),
+            _ => {}
+        }
     }
+    let hook = values::install(".signalSimpleWarning")?;
     if crate::heap()
         .frame_cell(values::base_namespace(), hook)
         .is_some()
@@ -573,6 +585,102 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
         return Ok(());
     }
     default_warning(call, &message)
+}
+
+/// The classes of a simple warning, as bytes to match handler classes and as names to build one.
+const WARNING_CLASSES: [&[u8]; 3] = [b"simpleWarning", b"warning", b"condition"];
+const WARNING_CLASS_NAMES: [&str; 3] = ["simpleWarning", "warning", "condition"];
+
+/// Whether `base::suppressWarnings` muffles a simple warning whose topmost matching handler is
+/// the calling handler `handler`: it is `function(w) if (inherits(w, classes))
+/// tryInvokeRestart("muffleWarning")` as `suppressWarnings` establishes it, and its `classes` name
+/// one of the warning's classes. That handler only tests the class and invokes the
+/// `muffleWarning` restart, so nothing it would run is observable, and the frames of
+/// `.signalSimpleWarning` and `withRestarts` are seen only by handlers that do run. Any other
+/// handler, or a `classes` whose value is still an unevaluated expression, takes the R route.
+unsafe fn muffled_by_suppress_warnings(handler: &Handler) -> R<bool> {
+    let closure = handler.handler;
+    if closure.kind() != SexpType::Closure
+        || !is_stock_muffle(closure.car(), bytecode::closure_body(closure))
+    {
+        return Ok(false);
+    }
+    // The handler is recognised by what its free names resolve to, not by where it was created:
+    // its environment must be a frame directly inside the base namespace that binds none of
+    // `if`, `inherits` and `tryInvokeRestart`, as the frame of `suppressWarnings` does, so the
+    // handler behaves exactly as the stock one. A handler built from the same text in any other
+    // environment takes the R route. The function literal itself cannot identify the handler,
+    // because the start-up image does not keep a closure's body and its compiled code sharing
+    // one object.
+    let env = closure.tag();
+    let names = symbols();
+    let heap = crate::heap();
+    if env.kind() != SexpType::Environment
+        || env.enclosure() != values::base_namespace()
+        || [names.if_, names.inherits, names.try_invoke_restart]
+            .into_iter()
+            .any(|name| heap.frame_cell(env, name).is_some())
+    {
+        return Ok(false);
+    }
+    let Some(cell) = heap.frame_cell(env, names.classes) else {
+        return Ok(false);
+    };
+    let mut classes = cell.cdr();
+    if classes.kind() == SexpType::Promise {
+        if classes.car() != values::unbound() {
+            classes = classes.car();
+        } else if classes.cdr().kind() == SexpType::String {
+            // A literal default such as `"warning"`: forcing it has no effect but its value,
+            // as when the handler forces it.
+            classes = eval::force_promise(classes)?;
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(classes.kind() == SexpType::String
+        && (0..length(classes)).any(|index| {
+            matches!(
+                classes.element(index).bytes(),
+                b"simpleWarning" | b"warning" | b"condition"
+            )
+        }))
+}
+
+/// Whether a handler with these formals and body is `function(w) if (inherits(w, classes))
+/// tryInvokeRestart("muffleWarning")`, the handler base R's `suppressWarnings` establishes.
+unsafe fn is_stock_muffle(formals: Sexp, body: Sexp) -> bool {
+    let symbols = symbols();
+    let is_call = |call: Sexp, function: Sexp, arity: usize| {
+        call.kind() == SexpType::Language && call.car() == function && {
+            let mut argument = call.cdr();
+            let mut count = 0;
+            while argument.kind() == SexpType::Pairlist && argument.tag() == nil() {
+                count += 1;
+                argument = argument.cdr();
+            }
+            argument == nil() && count == arity
+        }
+    };
+    if formals.kind() != SexpType::Pairlist || formals.tag() != symbols.w || formals.cdr() != nil()
+    {
+        return false;
+    }
+    if !is_call(body, symbols.if_, 2) {
+        return false;
+    }
+    let test = body.cdr().car();
+    let action = body.cdr().cdr().car();
+    is_call(test, symbols.inherits, 2)
+        && test.cdr().car() == symbols.w
+        && test.cdr().cdr().car() == symbols.classes
+        && is_call(action, symbols.try_invoke_restart, 1)
+        && {
+            let restart = action.cdr().car();
+            restart.kind() == SexpType::String
+                && length(restart) == 1
+                && restart.element(0).bytes() == b"muffleWarning"
+        }
 }
 
 /// `base::quote(call)`, the form in which GNU R hands a condition's call to the R-level hooks
