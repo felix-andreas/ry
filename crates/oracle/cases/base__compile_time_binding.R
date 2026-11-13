@@ -68,3 +68,53 @@ print(c(add_one(1), add_one(1), add_one(1)))
 attach(list(`+` = minus), name = "uncompiled_plus")
 print(add_one(1))
 detach("uncompiled_plus")
+
+# A small global function compiles at its second call. Compiled under a mask, it keeps calling
+# the mask's `+`, and after the mask goes it looks `+` up again.
+add_two <- function(x) x + 2
+print(add_two(1))
+print(add_two(1))
+attach(list(`+` = minus), name = "small_plus")
+print(add_two(1))
+detach("small_plus")
+under_mask <- function(y) y + 3
+attach(list(`+` = minus), name = "small_early_plus")
+print(c(under_mask(1), under_mask(1)))
+detach("small_early_plus")
+print(c(under_mask(1), under_mask(1)))
+
+# Closures over one body: what one of them bound is not what another sees before it compiles.
+make_counter <- function() function(n) { s <- 0; for (i in seq_len(n)) s <- s + 1; s }
+first <- make_counter()
+second <- make_counter()
+print(c(first(3), first(3)))
+attach(list(`+` = minus), name = "shared_plus")
+print(c(second(3), second(3), second(3), first(3)))
+detach("shared_plus")
+count_same <- function(n) { s <- 0; for (k in seq_len(n)) s <- s + 1; s }
+count_alias <- count_same
+print(count_same(3))
+attach(list(`+` = minus), name = "alias_plus")
+print(c(count_alias(3), count_same(3)))
+detach("alias_plus")
+
+# A global `+` never reaches a package's functions.
+`+` <- minus
+print(stats::setNames(1:2, c("a", "b")))
+print(utils::head(letters, 2))
+print(tools::file_path_sans_ext("report.csv"))
+print(Reduce(function(a, b) base::`+`(a, b), 1:4))
+rm(`+`)
+
+# Closures over one body share compiled code only when they bind the same local names: one whose
+# own frame masks `+` never runs a sibling's code that bound it, in either order.
+make_summer <- function(mask) {
+  if (mask) `+` <- function(a, b) base::`-`(a, b)
+  function(n) { s <- 0; for (i in seq_len(n)) s <- s + 1; s }
+}
+plain <- make_summer(FALSE)
+masked <- make_summer(TRUE)
+print(c(plain(3), plain(3), masked(3), masked(3), plain(3)))
+masked_first <- make_summer(TRUE)
+plain_later <- make_summer(FALSE)
+print(c(masked_first(3), masked_first(3), plain_later(3), plain_later(3)))

@@ -49,9 +49,19 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check. CI runs the same recipes,
-but only when started by hand: the orchestrating agent starts it on main at its hourly check when
-main has new commits, so a push or a pull request gets no CI run of its own.
+behavior. `just gate` runs every test plus clippy and a formatting check. CI runs `just ci`, which
+builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
+flake's `ci` dev shell. That shell pins everything the tests touch (the Rust toolchain, GNU R 4.6.2
+built as the oracle recorded it, GCC 13.3, glibc and the oracle's locales), so this command
+reproduces a CI run on any machine with nix:
+
+```sh
+nix develop .#ci -c just ci
+```
+
+To change what CI runs, edit the `ci` recipe or the shell in `flake.nix`; the workflow file only
+calls them. CI runs only when started by hand: the orchestrating agent starts it on main at its
+hourly check when main has new commits, so a push or a pull request gets no CI run of its own.
 
 ### Blessing expectations
 
@@ -354,7 +364,7 @@ meant to fail. Behavior that needs base R, such as a warning handler watching a 
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. The matrix products are ry's own kernels, so their bits hold
 on every machine; the LAPACK cases hold only on the reference libraries, so on another BLAS (such as
-CI's OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
+OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
 `crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
@@ -373,8 +383,8 @@ cells are not traced, and a minor collection that keeps dead strings in the tabl
 
 Tests that load base R take it from the GNU R installation `R_HOME` names, and the runtime then
 behaves as that version; without `R_HOME` they use ry's own base R (`just base-r`), and the
-scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so CI sets
-`R_HOME` to 4.6.2.
+scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so `just ci`
+sets `R_HOME` to 4.6.2.
 Run them once per supported version, for example `R_HOME=/opt/R/4.6.1/lib/R cargo test -p
 interp`, and the oracle the same way with `ORACLE_R` ([Corpus and oracle](/development/corpus-and-oracle)).
 
@@ -509,7 +519,11 @@ anonymous and image RSS. That change's extra resident pages held code the worklo
 analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
 size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
 grow only by about what the change adds. Resident text is checked on the shipped layout
-(`tools/layout/optimize.sh`) when a release is cut.
+(`tools/layout/optimize.sh`) when a release is cut. `tools/bench/bench.py` prints each program's
+peak in those parts (whole process, anonymous, start image and `libR.so` resident, sampled from
+`/proc/<pid>/smaps` every 20 ms) and the `.text` size of each build's `libR.so`. With
+`--baseline`, it also prints the paired ratio baseline / ry for each program and its geometric mean
+with a 95% interval, so a value above 1 means the build under test is faster.
 
 A change that allocates less can still raise anonymous peak RSS, because fewer collections change which heap pages fill before the next one. Such a rise is exempt only when all three of these hold, and the change's description shows each:
 
@@ -549,17 +563,20 @@ that judge a change therefore stay plain release builds, and the control is the 
 effect. The published suites measure the shipped layout itself: they are recorded on the release
 archive (`bench.py --release`, see [Benchmarks](/benchmarks/#how-it-was-measured)).
 
-Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
-loads only into the runtime build that wrote it, and any other build silently ignores it, so that
-build starts on the slow path and runs the package without its compiled code. A start rewrites a
-stale start-up image and the base packages' images, but nothing rewrites the recommended packages'
-images except `just base-r`, or a package library's except reinstalling the package. Two builds
-that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
-therefore refuses to start when a binary under test would load a code image another build wrote, or
-when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
-`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it. A release archive
-under `--release` extracts its runtime and base R into a cache directory of its own, so it loads
-the images it shipped, and any image in a package library that another build wrote stops the run.
+Two builds can share `target/base-r` in a comparison, because each loads only images its own
+name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
+[the architecture page](/development/architecture#the-start-up-image)). A build's first start
+writes its images into the base R tree, so `tools/bench/bench.py` starts each build once before
+timing anything. A package library gets code images only when a package is installed, so bench.py
+stops when a package in the corpus library or `R_LIBS` has only another build's code image, and
+names the packages to reinstall. `RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was
+written by another build of the runtime` (or why else it skipped an image) on standard error, and
+`ry: image written: ...` when it writes a build's images. `bench.py` sets it on every timed process
+and fails one that prints either, because that process timed a slow start. It refuses a runtime
+that predates the flag. Under `--release`, the archive extracts its runtime and base R into a
+cache directory of its own, so it loads the images it shipped, and bench.py reads its runtime from
+the R home it reports. `two_builds_alternate_starts_without_displacing_each_others_images` in
+`crates/ry/tests/test_perf.rs` pins both halves.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with

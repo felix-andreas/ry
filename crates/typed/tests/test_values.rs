@@ -837,26 +837,63 @@ fn fused_counts_follow_three_valued_logic() {
                     _ => None,
                 })
                 .collect();
-            let last = &lanes[lanes.len() - 1];
-            let expected = if lengths.is_empty()
-                || lengths.iter().any(|&found| found != length)
-                || last.contains(&None)
-            {
-                None
-            } else {
-                Some(last.iter().filter(|&&lane| lane == Some(true)).count() as i64)
-            };
-            let mut out = -1i64;
+            // The last step is counted, and with it up to three steps drawn from all of them.
+            let mut counted_steps = vec![lanes.len() - 1];
+            for _ in 0..rng.below(4) {
+                counted_steps.push(rng.below(lanes.len()));
+            }
+            // A logical list input is sometimes counted as it is.
+            let counted_input = inputs
+                .iter()
+                .position(|input| matches!(input, Input::Logicals(_)))
+                .filter(|_| rng.below(3) == 0);
+            let input_items = counted_input.map(|index| match &inputs[index] {
+                Input::Logicals(items) => items.clone(),
+                _ => unreachable!(),
+            });
+            let missing = counted_steps
+                .iter()
+                .any(|&step| lanes[step].contains(&None))
+                || input_items
+                    .as_ref()
+                    .is_some_and(|items| items.contains(&NA));
+            let expected: Option<Vec<i64>> =
+                if lengths.is_empty() || lengths.iter().any(|&found| found != length) || missing {
+                    None
+                } else {
+                    let trues = |step: &usize| {
+                        lanes[*step]
+                            .iter()
+                            .filter(|&&lane| lane == Some(true))
+                            .count() as i64
+                    };
+                    let of_input = input_items
+                        .iter()
+                        .map(|items| items.iter().filter(|&&item| item == 1).count() as i64);
+                    Some(counted_steps.iter().map(trues).chain(of_input).collect())
+                };
+            let counted: Vec<u32> = counted_steps
+                .iter()
+                .map(|&step| (words.len() + step) as u32)
+                .chain(counted_input.map(|index| index as u32))
+                .collect();
+            let mut out = vec![-1i64; counted.len()];
             let status = ry_count_true(
                 program.as_ptr(),
                 program.len() as u32,
                 words.as_ptr(),
                 words.len() as u32,
                 lists,
-                &mut out,
+                counted.as_ptr(),
+                counted.len() as u32,
+                out.as_mut_ptr(),
             );
             let found = (status == 0).then_some(out);
-            assert_eq!(found, expected, "program {program:x?}, seed {}", rng.seed);
+            assert_eq!(
+                found, expected,
+                "program {program:x?}, counted {counted:?}, seed {}",
+                rng.seed
+            );
             for (index, &word) in words.iter().enumerate() {
                 if lists & (1 << index) != 0 {
                     ry_list_drop(word as *mut List);
@@ -1127,6 +1164,9 @@ fn string_functions_follow_r_and_the_standard_library() {
             ])
         );
         ry_str_drop(accented.lo, accented.hi);
+        check_split_bounds("é,a part long enough for the heap,", ",");
+        check_split_bounds("a part long enough for the heap", "é");
+        check_split_bounds("né,é,née", "é");
         // Separators at every offset of an eight-byte word, alone and in runs, in texts whose
         // length covers the word-at-a-time part and the tail.
         for length in 0..40usize {
@@ -1146,6 +1186,9 @@ fn string_functions_follow_r_and_the_standard_library() {
                 assert_eq!(read(split), Model::Str(expected), "splitting {text:?}");
                 ry_list_drop(split);
                 ry_str_drop(subject.lo, subject.hi);
+                for separator in [",", "x,", ",,", ""] {
+                    check_split_bounds(&text, separator);
+                }
             }
         }
         let back = ry_list_join(pieces, separator.lo, separator.hi);
@@ -1273,6 +1316,47 @@ fn string_functions_follow_r_and_the_standard_library() {
         }
     }
     assert_eq!(live(), before);
+}
+
+/// Checks the offsets `ry_str_split_bounds` gives, and the pieces `ry_str_piece` cuts at them,
+/// against Rust's `split`, for every limit from one piece to one past the last.
+fn check_split_bounds(text: &str, separator: &str) {
+    let model: Vec<&str> = if separator.is_empty() {
+        vec![text]
+    } else {
+        text.split(separator).collect()
+    };
+    // SAFETY: every string passed is live, and `bounds` has room for `limit` pairs.
+    unsafe {
+        let (subject, by) = (str_of(text), str_of(separator));
+        for limit in 1..=model.len() + 1 {
+            let mut bounds = vec![[u64::MAX; 2]; limit];
+            let found = ry_str_split_bounds(
+                subject.lo,
+                subject.hi,
+                by.lo,
+                by.hi,
+                limit as u64,
+                bounds.as_mut_ptr() as *mut u64,
+            ) as usize;
+            assert_eq!(
+                found,
+                limit.min(model.len()),
+                "the pieces of {text:?} by {separator:?}, up to {limit}"
+            );
+            for (&[start, end], expected) in bounds[..found].iter().zip(&model) {
+                let piece = ry_str_piece(subject.lo, subject.hi, start, end);
+                assert_eq!(
+                    &text_of(piece),
+                    expected,
+                    "a piece of {text:?} by {separator:?}"
+                );
+                ry_str_drop(piece.lo, piece.hi);
+            }
+        }
+        ry_str_drop(subject.lo, subject.hi);
+        ry_str_drop(by.lo, by.hi);
+    }
 }
 
 #[test]

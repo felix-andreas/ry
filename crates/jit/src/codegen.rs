@@ -51,6 +51,9 @@ pub(crate) const FLAGS: i32 = 2;
 const REFCOUNT: i32 = 6;
 const ATTRIB: i32 = 8;
 pub(crate) const LENGTH: i32 = 16;
+/// An ALTREP instance's first data slot and its class.
+const CAR: i32 = 16;
+const TAG: i32 = 32;
 pub(crate) const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
 /// ry's `Array<T>`: its own JIT types (`Ty::IntArr` and so on), and it fails every guard for a
@@ -63,6 +66,14 @@ pub(crate) const OBJECT_FLAG: i64 = 1 << 0;
 enum Subscript {
     Vector(usize),
     Matrix(usize, usize),
+}
+
+/// The length an element read checks its position against: an ordinary vector's integer
+/// length, or a compact sequence's double one.
+#[derive(Clone, Copy)]
+enum Length {
+    Integer(Value),
+    Double(Value),
 }
 
 /// Compiles `plan` and returns its entry point, its deoptimization exits and the size of its
@@ -501,7 +512,7 @@ impl<'p> Translator<'p> {
                     self.store_register(dst, value);
                 }
             }
-            Action::SetVar { slot, src } => {
+            Action::SetVar { slot, src, expand } => {
                 let ty = match before.registers[src] {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
@@ -510,6 +521,30 @@ impl<'p> Translator<'p> {
                     self.use_register(src, ty)
                 } else {
                     self.load_register(src)
+                };
+                let (ty, value) = if expand {
+                    let (ty, kind) = if ty == Ty::IntSeq {
+                        (Ty::IntVec, SexpType::Integer)
+                    } else {
+                        (Ty::DblVec, SexpType::Real)
+                    };
+                    let pc = self.plan.insts[position].pc;
+                    let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+                    let kind = self.builder.ins().iconst(I64, kind as i64);
+                    let contents = self
+                        .call(
+                            runtime::jit_sequence_contents as *const () as usize,
+                            &[I64, I64, I64],
+                            Some(I64),
+                            &[self.activation, value, kind],
+                        )
+                        .ok_or(Refusal("a helper without a result"))?;
+                    // The sequence passed its guard, so only an error makes the copy fail.
+                    let copied = self.builder.ins().icmp_imm_s(IntCC::NotEqual, contents, 0);
+                    self.guard(copied, failed);
+                    (ty, contents)
+                } else {
+                    (ty, value)
                 };
                 if ty == Ty::Num {
                     let flag = self.builder.use_var(self.integers[src]);
@@ -931,6 +966,13 @@ impl<'p> Translator<'p> {
                     let boxed = self.box_value(ty, unboxed);
                     self.store_register(src, boxed);
                     (boxed, self.builder.ins().load(I64, flags(), boxed, LENGTH))
+                } else if matches!(ty, Ty::IntSeq | Ty::DblSeq) {
+                    let value = self.load_register(src);
+                    let (count, first, step) = self.sequence_info(value, ty);
+                    let count = self.builder.ins().fcvt_to_sint_sat(I64, count);
+                    self.builder.def_var(self.loop_firsts[index], first);
+                    self.builder.def_var(self.loop_steps[index], step);
+                    (value, count)
                 } else {
                     let value = self.load_register(src);
                     match refine {
@@ -1564,7 +1606,27 @@ impl<'p> Translator<'p> {
     /// registers. A step between them may rebind the variable, but then it also forgets the
     /// variable, which the run-time status check in [`Self::box_for_tier0`] sees.
     fn known_object(&self, position: usize, register: usize) -> Option<Known> {
-        for earlier in (self.block_start..position).rev() {
+        // A syntax-function or dispatch check that always passes ends a block, as `x[i]` ends
+        // one between reading `x` and reading `i`; the block after it is still reached only
+        // from that check, so the search continues into the block before.
+        let mut start = self.block_start;
+        while let Some(block) = self
+            .plan
+            .insts
+            .get(start)
+            .and_then(|inst| self.plan.block_at(inst.pc))
+            && self.plan.continues(block)
+            && matches!(
+                self.plan.actions.get(start.wrapping_sub(1)),
+                Some(Action::FallThrough)
+            )
+            && let Some(previous) = block
+                .checked_sub(1)
+                .and_then(|previous| self.plan.blocks.get(previous))
+        {
+            start = previous.start;
+        }
+        for earlier in (start..position).rev() {
             match *self.plan.actions.get(earlier)? {
                 Action::Constant { dst, value, .. } if dst == register => {
                     return Some(Known::Constant(value));
@@ -1586,6 +1648,7 @@ impl<'p> Translator<'p> {
                 | Action::GetFun { .. }
                 | Action::Step { dst: Some(_), .. }
                 | Action::Srcref(_)
+                | Action::FallThrough
                 | Action::Skip => {}
                 _ => return None,
             }
@@ -2244,7 +2307,14 @@ impl<'p> Translator<'p> {
         match intrinsic {
             Intrinsic::Element => {
                 let vector = self.load_register(args[0]);
-                let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+                let sequence = matches!(types[0], Ty::IntSeq | Ty::DblSeq);
+                let (length, first, step) = if sequence {
+                    let (length, first, step) = self.sequence_info(vector, types[0]);
+                    (Length::Double(length), Some(first), Some(step))
+                } else {
+                    let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+                    (Length::Integer(length), None, None)
+                };
                 let (index, in_range) = match types[1] {
                     Ty::Int => {
                         let index = self.use_register(args[1], Ty::Int);
@@ -2254,10 +2324,19 @@ impl<'p> Translator<'p> {
                             index,
                             1,
                         );
-                        let within =
-                            self.builder
-                                .ins()
-                                .icmp(IntCC::SignedLessThanOrEqual, index, length);
+                        let within = match length {
+                            Length::Integer(length) => {
+                                self.builder
+                                    .ins()
+                                    .icmp(IntCC::SignedLessThanOrEqual, index, length)
+                            }
+                            Length::Double(length) => {
+                                let position = self.builder.ins().fcvt_from_sint(F64, index);
+                                self.builder
+                                    .ins()
+                                    .fcmp(FloatCC::LessThanOrEqual, position, length)
+                            }
+                        };
                         (index, self.builder.ins().band(positive, within))
                     }
                     _ => {
@@ -2267,7 +2346,16 @@ impl<'p> Translator<'p> {
                             self.builder
                                 .ins()
                                 .fcmp(FloatCC::GreaterThanOrEqual, index, one);
-                        let within = self.within_length(index, length, types[0].is_array());
+                        let within = match length {
+                            Length::Integer(length) => {
+                                self.within_length(index, length, types[0].is_array())
+                            }
+                            Length::Double(length) => {
+                                let one = self.builder.ins().f64const(1.0);
+                                let bound = self.builder.ins().fadd(length, one);
+                                self.builder.ins().fcmp(FloatCC::LessThan, index, bound)
+                            }
+                        };
                         let in_range = self.builder.ins().band(positive, within);
                         // Only converted where it is in range, so the conversion cannot trap.
                         let safe = self.builder.ins().select(in_range, index, one);
@@ -2289,6 +2377,19 @@ impl<'p> Translator<'p> {
                 let scaled = self.builder.ins().imul_imm_s(offset, width);
                 let address = self.builder.ins().iadd(vector, scaled);
                 match result {
+                    Ty::Int if let (Some(first), Some(step)) = (first, step) => {
+                        let position = self.builder.ins().fcvt_from_sint(F64, offset);
+                        let distance = self.builder.ins().fmul(position, step);
+                        let number = self.builder.ins().fadd(first, distance);
+                        let value = self.builder.ins().fcvt_to_sint_sat(I32, number);
+                        self.builder.def_var(self.integers[dst], value);
+                    }
+                    Ty::Dbl if let (Some(first), Some(step)) = (first, step) => {
+                        let position = self.builder.ins().fcvt_from_sint(F64, offset);
+                        let distance = self.builder.ins().fmul(position, step);
+                        let value = self.builder.ins().fadd(first, distance);
+                        self.builder.def_var(self.doubles[dst], value);
+                    }
                     // A list element speculated to be a scalar is checked, then unboxed; any
                     // other element hands the read to tier 0.
                     Ty::Int | Ty::Lgl | Ty::Dbl if list => {
@@ -2346,9 +2447,19 @@ impl<'p> Translator<'p> {
             Intrinsic::Length => {
                 let value = if types[0].is_unboxed() {
                     self.builder.ins().iconst(I32, 1)
+                } else if types[0] == Ty::IntSeq {
+                    // A compact integer sequence is never longer than an integer can count.
+                    let vector = self.load_register(args[0]);
+                    let (length, _, _) = self.sequence_info(vector, Ty::IntSeq);
+                    self.builder.ins().fcvt_to_sint_sat(I32, length)
                 } else {
                     let vector = self.load_register(args[0]);
-                    let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+                    let length = if types[0] == Ty::DblSeq {
+                        let length = self.sequence_info(vector, Ty::DblSeq).0;
+                        self.builder.ins().fcvt_to_sint_sat(I64, length)
+                    } else {
+                        self.builder.ins().load(I64, flags(), vector, LENGTH)
+                    };
                     // Longer vectors have a double length; leave those to tier 0.
                     let fits = self.builder.ins().icmp_imm_s(
                         IntCC::SignedLessThanOrEqual,
@@ -2562,6 +2673,21 @@ impl<'p> Translator<'p> {
                     )
                     .ok_or(Refusal("a helper without a result"))?;
                 self.store_register(dst, value);
+            }
+            Intrinsic::Colon => {
+                let from = self.as_double(args[0], types[0]);
+                let to = self.as_double(args[1], types[1]);
+                let sequence = self
+                    .call(
+                        runtime::jit_colon as *const () as usize,
+                        &[I64, F64, F64],
+                        Some(I64),
+                        &[self.activation, from, to],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let made = self.builder.ins().icmp_imm_s(IntCC::NotEqual, sequence, 0);
+                self.hand_off_unless(position, before, made);
+                self.store_register(dst, sequence);
             }
             Intrinsic::Field { layout, index } => {
                 let record = self.load_register(args[0]);
@@ -3360,6 +3486,12 @@ impl<'p> Translator<'p> {
                 self.store_register(dst, value);
             }
         }
+        let (value, copied) = if matches!(ty, Ty::IntVec | Ty::DblVec) {
+            let (value, copied) = self.sequence_contents(value, ty, slot, dst, mismatch)?;
+            (value, Some(copied))
+        } else {
+            (value, None)
+        };
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
             if probed {
@@ -3383,12 +3515,21 @@ impl<'p> Translator<'p> {
                 self.guard(fits, mismatch);
             }
         }
-        if volatile {
-            let unloaded = self.builder.ins().iconst(I32, 0);
-            self.set_status(slot, unloaded);
+        // The slot holds a copy the frame does not bind, so it reads as an outer variable: an
+        // element assignment copies it again and writes the result back, rather than changing
+        // the copy in place where the frame never sees it.
+        let status = if volatile {
+            self.builder.ins().iconst(I32, 0)
         } else {
-            self.set_status(slot, merged_status);
-        }
+            match copied {
+                Some(copied) => {
+                    let outer = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
+                    self.builder.ins().select(copied, outer, merged_status)
+                }
+                None => merged_status,
+            }
+        };
+        self.set_status(slot, status);
         match ty {
             Ty::Int | Ty::Lgl => {
                 let unboxed = self.unbox(value, ty);
@@ -4139,6 +4280,59 @@ impl<'p> Translator<'p> {
         self.builder.ins().select(missing, na, converted)
     }
 
+    /// `value`, or when it is a compact sequence where `ty` expects a plain vector, a plain copy
+    /// of it that the slot and `dst` hold from then on: a formal declared `integer[]` called with
+    /// `1:n` would otherwise fail the guard on every first call. Anything else that does not fit
+    /// jumps to `mismatch`. The second value says whether the slot now holds a copy.
+    fn sequence_contents(
+        &mut self,
+        value: Value,
+        ty: Ty,
+        slot: usize,
+        dst: Option<usize>,
+        mismatch: Label,
+    ) -> Result<(Value, Value), Refusal> {
+        let fits = self.check(value, ty);
+        let join = self.builder.create_block();
+        self.builder.append_block_param(join, I64);
+        self.builder.append_block_param(join, I8);
+        let convert = self.builder.create_block();
+        self.builder.set_cold_block(convert);
+        let kept = self.builder.ins().iconst(I8, 0);
+        self.builder
+            .ins()
+            .brif(fits, join, &[value, kept], convert, &[]);
+        self.builder.switch_to_block(convert);
+        let kind = if ty == Ty::IntVec {
+            SexpType::Integer
+        } else {
+            SexpType::Real
+        };
+        let kind = self.builder.ins().iconst(I64, kind as i64);
+        let contents = self
+            .call(
+                runtime::jit_sequence_contents as *const () as usize,
+                &[I64, I64, I64],
+                Some(I64),
+                &[self.activation, value, kind],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let converted = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(contents, converted, &[], mismatch, &[]);
+        self.builder.switch_to_block(converted);
+        self.store_slot_cell(slot, contents);
+        if let Some(dst) = dst {
+            self.store_register(dst, contents);
+        }
+        let copied = self.builder.ins().iconst(I8, 1);
+        self.builder.ins().jump(join, &[contents, copied]);
+        self.builder.switch_to_block(join);
+        let params = self.builder.block_params(join);
+        Ok((params[0], params[1]))
+    }
+
     /// Whether the object `value` points to has type `ty`.
     fn check(&mut self, value: Value, ty: Ty) -> Value {
         let (kind, scalar) = match ty {
@@ -4173,6 +4367,59 @@ impl<'p> Translator<'p> {
             Ty::DblVec => (SexpType::Real, false),
             Ty::LglVec => (SexpType::Logical, false),
             Ty::List => (SexpType::List, false),
+            Ty::IntSeq | Ty::DblSeq => {
+                // `a:b` gives a plain length-one vector when `a == b`, as in GNU R, so a site
+                // that makes compact sequences also makes those, and both pass: the length-one
+                // vector reads as a sequence of one element with increment zero (see
+                // `sequence_info`). An ALTREP instance's class is its tag, which no ordinary
+                // vector has, so the flag is tested before the tag is read.
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let altrep = self.builder.ins().band_imm_u(bits, ALTREP_FLAG);
+                let altrep = self.builder.ins().icmp_imm_s(IntCC::NotEqual, altrep, 0);
+                let decided = self.builder.create_block();
+                let instance = self.builder.create_block();
+                let scalar = self.builder.create_block();
+                self.builder.append_block_param(decided, I8);
+                self.builder.ins().brif(altrep, instance, &[], scalar, &[]);
+                self.builder.switch_to_block(instance);
+                let class = self.builder.ins().load(I64, flags(), value, TAG);
+                let [integer, double] = interp::interp().compact_sequence_classes;
+                let sequence = if ty == Ty::IntSeq { integer } else { double };
+                let fits =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, class, sequence.as_ptr() as i64);
+                let attributes = self.builder.ins().load(I64, flags(), value, ATTRIB);
+                let plain = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, attributes, self.nil);
+                let fits = self.builder.ins().band(fits, plain);
+                self.builder.ins().jump(decided, &[fits]);
+                self.builder.switch_to_block(scalar);
+                let kind = if ty == Ty::IntSeq {
+                    SexpType::Integer
+                } else {
+                    SexpType::Real
+                };
+                let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
+                let fits = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, actual, kind as i64);
+                let length = self.builder.ins().load(I64, flags(), value, LENGTH);
+                let single = self.builder.ins().icmp_imm_s(IntCC::Equal, length, 1);
+                let attributes = self.builder.ins().load(I64, flags(), value, ATTRIB);
+                let plain = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, attributes, self.nil);
+                let fits = self.builder.ins().band(fits, single);
+                let fits = self.builder.ins().band(fits, plain);
+                self.builder.ins().jump(decided, &[fits]);
+                self.builder.switch_to_block(decided);
+                return self.builder.block_params(decided)[0];
+            }
             Ty::IntArr | Ty::DblArr | Ty::LglArr => {
                 // The Array bit promises no attributes, so the kind and the bits decide it.
                 let kind = match ty {
@@ -4248,6 +4495,51 @@ impl<'p> Translator<'p> {
             .ins()
             .icmp_imm_s(IntCC::Equal, actual, kind as i64);
         self.builder.ins().band(fits, compact)
+    }
+
+    /// Records that `slot` now holds the compact sequence `value` (or the length-one vector its
+    /// guard also passes), with its length, first element and increment, so that reads of the
+    /// slot find them in variables instead of loading them from the info vector each time.
+    /// Every site that gives a slot a sequence type calls this, so the variables change only
+    /// where the slot does, and a loop that only reads the slot reads loop-invariant values.
+    /// The length, first element and increment of the compact sequence `value`, all doubles,
+    /// read from the `c(n, n1, inc)` vector of its first data slot. An ALTREP instance keeps
+    /// that slot where an ordinary vector keeps its length. The length stays a double because
+    /// an element read compares against it on every iteration, and a saturating conversion to
+    /// an integer costs more than the read itself.
+    fn sequence_info(&mut self, value: Value, ty: Ty) -> (Value, Value, Value) {
+        // A compact sequence's state is the double vector `c(n, n1, inc)` in its first data
+        // slot; the plain length-one vector its guard also passes is `(1, x[1], 0)`.
+        let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+        let altrep = self.builder.ins().band_imm_u(bits, ALTREP_FLAG);
+        let altrep = self.builder.ins().icmp_imm_s(IntCC::NotEqual, altrep, 0);
+        let compact = self.builder.create_block();
+        let scalar = self.builder.create_block();
+        let join = self.builder.create_block();
+        for _ in 0..3 {
+            self.builder.append_block_param(join, F64);
+        }
+        self.builder.set_cold_block(scalar);
+        self.builder.ins().brif(altrep, compact, &[], scalar, &[]);
+        self.builder.switch_to_block(compact);
+        let info = self.builder.ins().load(I64, flags(), value, CAR);
+        let count = self.builder.ins().load(F64, flags(), info, DATA);
+        let first = self.builder.ins().load(F64, flags(), info, DATA + 8);
+        let step = self.builder.ins().load(F64, flags(), info, DATA + 16);
+        self.builder.ins().jump(join, &[count, first, step]);
+        self.builder.switch_to_block(scalar);
+        let count = self.builder.ins().f64const(1.0);
+        let first = if ty == Ty::IntSeq {
+            let element = self.builder.ins().load(I32, flags(), value, DATA);
+            self.builder.ins().fcvt_from_sint(F64, element)
+        } else {
+            self.builder.ins().load(F64, flags(), value, DATA)
+        };
+        let step = self.builder.ins().f64const(0.0);
+        self.builder.ins().jump(join, &[count, first, step]);
+        self.builder.switch_to_block(join);
+        let params = self.builder.block_params(join).to_vec();
+        (params[0], params[1], params[2])
     }
 
     /// Whether a double position at least one is within `length`. R truncates the position,

@@ -150,7 +150,9 @@ with the profile. Any profile-mismatch warning, or more than 1% of functions wit
 record, fails the build, because a stale profile optimizes hot code as cold
 (`decisions.md`, "The Linux release build is profile-guided"). The training needs testthat, purrr,
 stringr, lubridate, data.table, xts and zoo in GNU R's library, the instrumented fat-LTO link of
-`ry` takes about 14 GB of memory, and the pipeline takes about 30 minutes on 4 cores plus the
+`ry` takes about 14 GB of memory, which outgrows a GitHub-hosted runner's 16 GB of memory and 4 GB
+of swap (the runner is killed mid-link), so under GitHub Actions the script first adds 16 GB of
+swap at `/mnt/ry-swap`. The pipeline takes about 30 minutes on 4 cores plus the
 base R build. The
 binaries land in `target/x86_64-unknown-linux-gnu/release`, apart from the plain
 `cargo build --release` output in `target/release` that `just bench` and the other bench

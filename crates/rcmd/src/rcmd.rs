@@ -17,6 +17,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::{OsStr, OsString},
     fmt,
     fs::{self, File, TryLockError},
     io,
@@ -41,6 +42,7 @@ mod headers {
 
 pub mod base;
 pub mod front_end;
+pub mod images;
 mod makeconf;
 
 use makeconf::{expand_make, make_assignments};
@@ -196,8 +198,10 @@ pub struct Toolchain {
 impl Default for Toolchain {
     /// The GNU toolchain with the system's reference BLAS and LAPACK, which is what GNU R's
     /// Linux builds and the package binaries of the corpus link against. On macOS it is Apple's
-    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and on
-    /// Windows it is [`Toolchain::rtools`].
+    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and no Fortran
+    /// runtime: CRAN's gfortran and Homebrew's keep `libgfortran` off the linker's default path,
+    /// so a bare `-lgfortran` in `FLIBS` fails every package that links `$(FLIBS)` after LAPACK,
+    /// Fortran code or not (Matrix does). On Windows it is [`Toolchain::rtools`].
     fn default() -> Toolchain {
         if cfg!(windows) {
             return Toolchain::rtools();
@@ -209,7 +213,7 @@ impl Default for Toolchain {
                 fc: "gfortran".into(),
                 blas_libs: "-framework Accelerate".into(),
                 lapack_libs: "-framework Accelerate".into(),
-                flibs: "-lgfortran -lm".into(),
+                flibs: "-lm".into(),
                 cppflags: String::new(),
                 ldflags: String::new(),
                 openmp: String::new(),
@@ -428,7 +432,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
             link(&entry, &target)?;
         }
     }
-    refresh_start_image(sources)?;
+    refresh_start_image(sources.base, sources.rcmd, sources.libr)?;
     for entry in read_directory(&gnu_share)? {
         let name = entry.file_name().unwrap_or_default();
         if name == "make" {
@@ -563,37 +567,61 @@ exec "$cmd" $extra "$@"
     )
 }
 
-/// Rewrites the base tree's start-up image when the runtime `libr` cannot load it: the image
-/// predates a change to its format, or another build of the runtime wrote it. A home links the
-/// base tree's image, so without this every start in the home would quietly take the slow path.
-/// A base without an image, such as a GNU R installation, is left as it is.
-fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
+/// Writes the images of the runtime `libr` into the base tree `base` when the tree holds none
+/// this runtime loads: none of its build, or one of an older format. A home links the base
+/// tree's packages, so without this every start in the home would quietly take the slow path.
+/// Other builds' images are left in place ([`images`]). A base without a manifest, such as a GNU R
+/// installation, has no images and is left as it is.
+///
+/// The process then holds a shared lock on its build's start-up image until it exits
+/// ([`images::hold_start_image`]), so another build's writer does not prune the images this
+/// process is about to load. The lock is taken before the image is checked, and a start that
+/// loses a race with a pruner finds the image gone and writes it again.
+fn refresh_start_image(base: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     type Current = unsafe extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
-    let image = sources.base.join("library/base/R/ry-start.image");
-    if !image.is_file() {
+    if !base.join(base::MANIFEST).is_file() {
         return Ok(());
     }
-    let library = front_end::load_runtime(sources.libr)?;
+    let build = front_end::runtime_identity(libr)?;
+    let library = front_end::load_runtime(libr)?;
     let current = unsafe { library.get::<Current>(b"ry_start_image_current\0") }
         .map(|entry| *entry)
-        .map_err(|error| {
-            Error::Usage(format!(
-                "{} is not ry's runtime: {error}",
-                sources.libr.display()
-            ))
-        });
+        .map_err(|error| Error::Usage(format!("{} is not ry's runtime: {error}", libr.display())));
     // Unloading a Rust library that may have started threads or registered thread-local
     // destructors is unsound, and the process that assembles a home usually runs it next.
     std::mem::forget(library);
     let current = current?;
+    let image = images::start_image(base, &build);
     let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
         .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
-    rewrite_stale_image(
-        &image,
-        sources.base,
-        || unsafe { current(path.as_ptr()) } == 1,
-        || base::write_start_image(sources.base, sources.rcmd, sources.libr, None),
-    )
+    let is_current = || unsafe { current(path.as_ptr()) } == 1;
+    // Each round either finds a current image under the lock or writes one, so only a pruner
+    // that removes the new image before this process locks it forces another round.
+    for _ in 0..3 {
+        if let Some(held) = images::hold_start_image(&image).map_err(io_error(&image))?
+            && is_current()
+        {
+            hold(held);
+            return Ok(());
+        }
+        rewrite_stale_image(&image, base, is_current, || {
+            if image_log() {
+                eprintln!(
+                    "ry: image written: the start-up and code images of build {build} into {}",
+                    base.display()
+                );
+            }
+            base::write_start_image(base, rcmd, libr, None).map(drop)
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether `RY_IMAGE_LOG` asks for a line on standard error about every image a start writes or
+/// cannot use (`interp::image::report_unused`), as `tools/bench/bench.py` does for every process
+/// it times.
+fn image_log() -> bool {
+    std::env::var_os("RY_IMAGE_LOG").is_some_and(|value| !value.is_empty())
 }
 
 /// Runs `write` when `is_current` says the start-up image at `image` is stale. A current image
@@ -613,12 +641,11 @@ fn rewrite_stale_image(
     let lock_path = base.join(".start-image.lock");
     let lock = fs::File::create(&lock_path).map_err(|error| {
         Error::Usage(format!(
-            "the start-up image {} was written by another build of ry, and its base R tree \
-             cannot be written to replace it ({}: {error}); run `just start-image` with write \
-             access to {}",
+            "the base R tree {} has no start-up image of this build of ry ({}), and it cannot \
+             be written to add one ({}: {error}); run `just start-image` with write access to it",
+            base.display(),
             image.display(),
             lock_path.display(),
-            base.display()
         ))
     })?;
     lock.lock().map_err(io_error(&lock_path))?;
@@ -658,6 +685,12 @@ pub fn runtime_home(libr: &Path, base: &Path) -> Result<PathBuf> {
     if is_ry_home(base) {
         if let Some(lock) = lock_home(base)? {
             hold(lock);
+        }
+        // A process the home started, such as a worker, keeps its build's images as its parent
+        // does ([`refresh_start_image`]).
+        let image = images::start_image(base, &front_end::runtime_identity(libr)?);
+        if let Some(held) = images::hold_start_image(&image).map_err(io_error(&image))? {
+            hold(held);
         }
         return Ok(base.to_path_buf());
     }
@@ -719,6 +752,9 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         && let Some(lock) = lock_home(&home)?
     {
         hold(lock);
+        // Another build's images can have pushed this one's out of the base tree since the home
+        // was assembled ([`images::prune`]).
+        refresh_start_image(base, rcmd, libr)?;
         return Ok(home);
     }
     fs::create_dir_all(cache).map_err(io_error(cache))?;
@@ -802,7 +838,8 @@ const LOCK_FILE: &str = ".lock";
 /// The name prefix of a home a pruner moved away to delete.
 const REMOVING: &str = ".removing-";
 
-/// The locks this process holds on the homes it uses, kept open until it exits.
+/// The locks this process holds on the homes and start-up images it uses, kept open until it
+/// exits.
 static HELD_HOMES: Mutex<Vec<File>> = Mutex::new(Vec::new());
 
 fn hold(lock: File) {
@@ -2469,17 +2506,14 @@ fn libs_directory(package: &Path, platform: Platform) -> PathBuf {
     package.join(format!("libs{}", platform.arch()))
 }
 
-fn extension_of(platform: Platform) -> Option<&'static std::ffi::OsStr> {
-    Some(std::ffi::OsStr::new(
-        platform.shlib_ext().trim_start_matches('.'),
-    ))
+fn extension_of(platform: Platform) -> Option<&'static OsStr> {
+    Some(OsStr::new(platform.shlib_ext().trim_start_matches('.')))
 }
 
-/// `directory` put in front of the `PATH` this process runs with.
-fn path_with(directory: &Path) -> Result<String> {
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
+/// `directory` put in front of the search path `inherited`.
+fn path_with(directory: &Path, inherited: &OsStr) -> Result<String> {
     std::env::join_paths(
-        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited)),
+        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(inherited)),
     )
     .map(|joined| joined.to_string_lossy().into_owned())
     .map_err(|error| {
@@ -2510,7 +2544,13 @@ fn build_environment(
     paths: &[PathBuf],
 ) -> Result<BTreeMap<String, String>> {
     let mut environment = BTreeMap::new();
-    environment.insert("PATH".to_owned(), path_with(&home.join("bin"))?);
+    environment.insert(
+        "PATH".to_owned(),
+        path_with(
+            &home.join("bin"),
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )?,
+    );
     environment.insert("R_HOME".to_owned(), shell_path(home));
     environment.insert("R_ARCH".to_owned(), platform.arch().to_owned());
     environment.insert("R_PACKAGE_NAME".to_owned(), name.to_owned());
@@ -2608,6 +2648,24 @@ pub fn shlib(
     );
     let mut command = Command::new("make");
     command.current_dir(directory);
+    // On Windows `R CMD SHLIB` runs in the environment `Rcmd.exe` sets from `etc/Rcmd_environ`,
+    // which puts Rtools ahead of other toolchains on `PATH`. Building base R calls this without
+    // the front end, and another toolchain's `as` rejects the flags Rtools' GCC passes it.
+    let r_home = home.display().to_string().replace('\\', "/");
+    let environment = command_environment(home, |name| {
+        if name == "R_HOME" {
+            Some(r_home.clone())
+        } else {
+            std::env::var(name).ok()
+        }
+    })?;
+    let search_path = environment
+        .iter()
+        .rfind(|(name, _)| name == "PATH")
+        .map(|(_, value)| OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    command.envs(environment);
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
@@ -2654,7 +2712,7 @@ pub fn shlib(
         command.arg(format!("CLINK_CPPFLAGS={}", include_flags.join(" ")));
     }
     command.env("R_HOME", home);
-    command.env("PATH", path_with(&home.join("bin"))?);
+    command.env("PATH", path_with(&home.join("bin"), &search_path)?);
     run_make(&mut command)?;
     Ok(directory.join(output))
 }
@@ -3351,6 +3409,44 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
             Some("E:/tools/bin;C:/bin/")
         );
         fs::remove_dir_all(&home).expect("remove home");
+    }
+
+    /// Building base R runs `shlib` without the front end, so `shlib` itself must search the
+    /// `PATH` that `etc/Rcmd_environ` sets: there the toolchain's `make` comes first.
+    #[cfg(unix)]
+    #[test]
+    fn shlib_runs_make_on_the_path_rcmd_environ_sets() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ry-rcmd-shlib-path-{}", std::process::id()));
+        let (home, tools, source) = (root.join("home"), root.join("tools"), root.join("src"));
+        for directory in [home.join("etc"), tools.clone(), source.clone()] {
+            fs::create_dir_all(&directory).expect("create directory");
+        }
+        write(
+            &home.join("etc/Makeconf"),
+            &makeconf(&home, &Toolchain::default(), Platform::Linux),
+        )
+        .expect("write Makeconf");
+        write(
+            &home.join("etc/Rcmd_environ"),
+            &format!("PATH=\"{}:${{PATH}}\"\n", tools.display()),
+        )
+        .expect("write Rcmd_environ");
+        let make = tools.join("make");
+        write(
+            &make,
+            "#!/bin/sh\nprintf '%s' \"$PATH\" > seen-path\n: > probe.so\n",
+        )
+        .expect("write make");
+        fs::set_permissions(&make, fs::Permissions::from_mode(0o755)).expect("make executable");
+        write(&source.join("probe.c"), "").expect("write source");
+
+        let built = shlib(&home, &source, &[], Some("probe.so"), &[], &[]).expect("shlib");
+        assert_eq!(built, source.join("probe.so"));
+        let seen = fs::read_to_string(source.join("seen-path")).expect("make ran");
+        let expected = format!("{}:{}:", home.join("bin").display(), tools.display());
+        assert!(seen.starts_with(&expected), "make saw PATH={seen}");
+        fs::remove_dir_all(&root).expect("remove root");
     }
 
     #[test]

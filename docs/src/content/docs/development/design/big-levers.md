@@ -287,11 +287,10 @@ decided:
   with an unforced argument takes the interpreter without a message ("Open: the typed core").
   mypyc works this way: a module compiles or the build fails. No JIT can offer that, and ry has the
   checker to do it.
-- **Give typed sums one fixed order in plain doubles.** `List.sum` over `F64` keeps the long-double
-  fold so that native and interpreted typed code agree. They can agree on a faster rule instead:
-  one fixed vectorized summation order that both paths implement. The user directive makes typed
-  ry "independent of R's semantics", and the benchmark runner already accepts a relative 1e-10
-  difference in a typed checksum.
+- **Give typed sums one fixed order in plain doubles.** `List.sum` over `F64` adds its items in
+  order in double precision, in the interpreter and in compiled code (`decisions.md`, "`List.sum`
+  adds doubles in order in double precision"). A fixed vectorized summation order that every path
+  implements would be faster again and is open.
 - **Score against Rust on every step.** The hill climb's fitness function is typed ry over Rust,
   and its log holds no value for it. A run on the current tree gives about 3.7x once three
   mismatched Rust references are corrected, with six of 17 programs within the 2x bar.

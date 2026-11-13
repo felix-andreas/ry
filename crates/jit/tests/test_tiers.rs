@@ -195,6 +195,13 @@ fn seeds_agree_across_tiers() {
             "(n = 3000L)",
             false,
         ),
+        // A block that an inner loop's `break` also enters, after a different sequence was
+        // bound, so its element read must not reuse the sequence checked on the other path.
+        (
+            "x <- 1:n\ns <- 0\nfor (i in 1:n) { for (j in 1:2) { if (i %% 3L == 0L) { x <- n:1; break }; x <- 1:n }; s <- s * 2 + x[i] }\ns",
+            "(n = 30L)",
+            false,
+        ),
         // Subsetting a plain vector, which reaches the element intrinsic.
         (
             "s <- 0\nfor (i in 1:n) s <- s + v[(i %% 2L) + 1L] * v[[1L]]\ns",
@@ -1057,7 +1064,12 @@ fn active_bindings_are_called_at_every_compiled_read() {
         jit::install_mode(Mode::Off);
     });
     for (call, &(before, after, value, _, _)) in calls.iter().enumerate() {
-        assert_eq!(after - before, 51, "call {call} read the binding {} times", after - before);
+        assert_eq!(
+            after - before,
+            51,
+            "call {call} read the binding {} times",
+            after - before
+        );
         assert_eq!(value, (before + 1..=after).sum::<i64>(), "call {call}");
     }
     let compiles: u64 = calls.iter().map(|call| call.3).sum();
@@ -1068,7 +1080,11 @@ fn active_bindings_are_called_at_every_compiled_read() {
         "{deoptimizations} deoptimizations over five calls: {calls:?}"
     );
     for (call, row) in calls.iter().enumerate().skip(1) {
-        assert_eq!((row.3, row.4), (0, 0), "call {call} compiled or deoptimized: {calls:?}");
+        assert_eq!(
+            (row.3, row.4),
+            (0, 0),
+            "call {call} compiled or deoptimized: {calls:?}"
+        );
     }
 }
 
@@ -3098,6 +3114,22 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ x <- \"x\"; FUNCTION(x) }",
             ],
         ),
+        // Tags with string payloads built on different branches of a loop body and matched after
+        // the branches join: no box is built, and each pass reads the payload of the tag it
+        // built, not one an earlier pass left behind.
+        (
+            "function(rows: List<Str>) -> F64 { total <- 0\n for (row in rows) { \
+             found <- if (Str.count_utf8_bytes(row) > 20i64) :Long(row) else \
+             match (Str.to_f64(row)) { :Ok(v) => :Num(v, row)\n :Err(_) => :Bad }\n \
+             total <- total + match (found) { :Long(text) => Num.to_f64(Str.count_utf8_bytes(text))\n \
+             :Num(v, text) => v + Num.to_f64(Str.count_utf8_bytes(text))\n :Bad => -1 } }\n total }",
+            &[
+                "{ x <- List.from_r(c(\"1.5\", \"a string that is longer than twenty bytes\", \"x\", \
+                 \"22\", \"another string that is longer than twenty bytes\", \"nope\", \"3\")); \
+                 FUNCTION(x) }",
+                "{ x <- List.from_r(c(\"x\", \"y\")); FUNCTION(x) }",
+            ],
+        ),
         // A mapped typed closure, its `:Ok` payloads kept, and a dictionary folded and updated.
         (
             "function(rows: List<Str>) -> F64 { parsed <- List.map(rows, tier_parse)\n \
@@ -3142,6 +3174,36 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ k <- 12i64; x <- \"ab\"; FUNCTION(k, x) }",
                 "{ k <- 0i64; x <- \"héllo wörld, long enough\"; FUNCTION(k, x) }",
                 "{ k <- 1i64; x <- \"\"; FUNCTION(k, x) }",
+            ],
+        ),
+        // A split whose pieces are only read at fixed positions builds no list. A read past the
+        // last piece is the error the list raises, a piece is read after the string's variable
+        // changed, and a list that is assigned again on a branch or in a loop reads the split
+        // it then holds.
+        (
+            "function(row: Str) -> Str { parts <- Str.split_on(row, \",\")\n \
+             row <- \"x,y,z\"\n \
+             Str.concat(Str.concat(parts[[3]], \"|\"), parts[[1]]) }",
+            &[
+                "{ x <- \"a,b,c\"; FUNCTION(x) }",
+                "{ x <- \",b,a piece long enough for the heap,d\"; FUNCTION(x) }",
+                "{ x <- \"a,b\"; FUNCTION(x) }",
+                "{ x <- \"\"; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(row: Str, other: Str, swap: Bool) -> Str { \
+             parts <- Str.split_on(row, \"::\")\n \
+             if (swap) parts <- Str.split_on(other, \"\")\n \
+             first <- parts[[1]]\n total <- parts[[2]]\n \
+             for (i in List.range(1, 3)) { total <- Str.concat(total, parts[[1]])\n \
+             parts <- Str.split_on(Str.concat(first, Num.to_str(i)), \"1\") }\n \
+             Str.concat(total, parts[[1]]) }",
+            &[
+                "{ x <- \"k1::v1::w\"; y <- \"whole\"; b <- FALSE; FUNCTION(x, y, b) }",
+                "{ x <- \"a string long enough for the heap::é\"; y <- \"\"; b <- FALSE; FUNCTION(x, y, b) }",
+                "{ x <- \"k1::v1\"; y <- \"whole\"; b <- TRUE; FUNCTION(x, y, b) }",
+                "{ x <- \"k1\"; y <- \"whole\"; b <- FALSE; FUNCTION(x, y, b) }",
             ],
         ),
         // A loop that wraps its own value constructs a shape the `match` above it must already
@@ -3384,6 +3446,62 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             "function(n: I64) -> I64 { s <- 0i64; for (i in List.range(1, n)) s <- s + i * i; s }",
             &["{ x <- 10i64; FUNCTION(x) }", "{ x <- 0i64; FUNCTION(x) }"],
         ),
+        // A remainder or quotient by a positive constant floors like any other, for a divisor
+        // that is a power of two and for one that is not, and `Num.min_i64` divides without a
+        // fault. A constant that is zero or negative takes the checked path.
+        (
+            "function(a: I64) -> I64 (a %% 8i64) * 1000000i64 + (a %/% 8i64) * 1000i64 \
+             + (a %% 7i64) * 100i64 + a %/% 7i64",
+            &[
+                "{ x <- 29i64; FUNCTION(x) }",
+                "{ x <- -29i64; FUNCTION(x) }",
+                "{ x <- -8i64; FUNCTION(x) }",
+                "{ x <- -7i64; FUNCTION(x) }",
+                "{ x <- -1i64; FUNCTION(x) }",
+                "{ x <- 0i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(a: I64) -> I64 a %% 1i64 + a %/% 1i64",
+            &[
+                "{ x <- -5i64; FUNCTION(x) }",
+                "{ x <- Num.min_i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(a: I64) -> I64 (a %/% 4i64) %% 1000i64 + (a %% 3i64) + (a %/% 3i64) %% 1000i64",
+            &[
+                "{ x <- Num.min_i64; FUNCTION(x) }",
+                "{ x <- Num.max_i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(a: I64) -> I64 (a %% -3i64) * 100i64 + a %/% -3i64",
+            &["{ x <- 7i64; FUNCTION(x) }", "{ x <- -7i64; FUNCTION(x) }"],
+        ),
+        (
+            "function(a: I64) -> I64 a %/% 0i64",
+            &["{ x <- 7i64; FUNCTION(x) }"],
+        ),
+        // A function that calls itself, which is lowered into itself once, recurses as before:
+        // through both calls, past the depth one copy covers, and into an overflow.
+        (
+            "function(n: I64) -> I64 if (n < 2i64) n else FUNCTION(n - 1i64) + FUNCTION(n - 2i64)",
+            &[
+                "{ x <- 0i64; FUNCTION(x) }",
+                "{ x <- 1i64; FUNCTION(x) }",
+                "{ x <- 2i64; FUNCTION(x) }",
+                "{ x <- 20i64; FUNCTION(x) }",
+            ],
+        ),
+        (
+            "function(n: I64, total: I64) -> I64 \
+             if (n == 0i64) total else FUNCTION(n - 1i64, total * 3i64 + n)",
+            &[
+                "{ x <- 5i64; y <- 1i64; FUNCTION(x, y) }",
+                "{ x <- 60i64; y <- 1i64; FUNCTION(x, y) }",
+            ],
+        ),
         // List arithmetic keeps the list, never recycles, and fails on a NaN item.
         (
             "function(x: List<F64>) -> F64 List.sum(x * 2 + x / 3 - 1)",
@@ -3391,6 +3509,15 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ v <- [1, 2.5, -3]; FUNCTION(v) }",
                 "{ v <- List.from_r(0[0L]); FUNCTION(v) }",
                 "{ v <- [0, 1]; FUNCTION(v) }",
+            ],
+        ),
+        // The sum adds in order in double precision, in one kernel or after an arithmetic one,
+        // and over more items than a kernel handles at a time.
+        (
+            "function(x: List<F64>) -> F64 List.sum(x) + List.sum(x * 1) - 2",
+            &[
+                "{ v <- [1, 1e-16, 1e-16]; FUNCTION(v) }",
+                "{ v <- List.map(List.range(1, 5000), \\(i) Num.to_f64(i) / 7); FUNCTION(v) }",
             ],
         ),
         (
@@ -3498,6 +3625,33 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 "{ a <- [TRUE, TRUE]; b <- [FALSE, FALSE]; FUNCTION(a, b) }",
             ],
         ),
+        // Counts in a row are computed in one pass over the inputs they share, a list counted
+        // as it is among them.
+        (
+            "function(time: List<I64>, event: List<Bool>, treated: List<Bool>, t: I64) -> I64 { \
+             count <- function(mask: List<Bool>) -> I64 List.count_if(mask, function(b) b); \
+             risk <- time >= t; died <- time == t & event; \
+             n <- count(risk); n1 <- count(risk & treated); d <- count(died); \
+             d1 <- count(died & treated); e <- count(event); \
+             n * 10000i64 + n1 * 1000i64 + d * 100i64 + d1 * 10i64 + e }",
+            &[
+                "{ a <- [1i64, 2i64, 2i64, 3i64, 2i64]; b <- [TRUE, TRUE, FALSE, TRUE, TRUE]; \
+                 c <- [FALSE, TRUE, TRUE, TRUE, FALSE]; d <- 2i64; FUNCTION(a, b, c, d) }",
+                "{ a <- List.map(List.range(1, 1000), \\(i) i %% 7i64); \
+                 b <- List.map(List.range(1, 1000), \\(i) i %% 3i64 != 0i64); \
+                 c <- List.map(List.range(1, 1000), \\(i) i %% 2i64 == 0i64); d <- 3i64; \
+                 FUNCTION(a, b, c, d) }",
+            ],
+        ),
+        // A count that reads an earlier count's result, or an input assigned between the two,
+        // keeps its own pass.
+        (
+            "function(x: List<I64>, t: I64) -> I64 { \
+             n <- List.count_if(x > t, function(b) b); m <- List.count_if(x > n, function(b) b); \
+             t <- t + 1i64; k <- List.count_if(x > t, function(b) b); \
+             n * 100i64 + m * 10i64 + k }",
+            &["{ a <- [1i64, 2i64, 3i64, 4i64, 5i64]; b <- 2i64; FUNCTION(a, b) }"],
+        ),
         // The item's name in the predicate hides an outer local of the same name.
         (
             "function(x: List<F64>, v: F64) -> I64 List.count_if(x, function(v: F64) -> Bool v <= 2)",
@@ -3554,7 +3708,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             let (reference, compiled, typed) = unsafe {
                 let run_all = |name: &str, mode: Mode| {
                     jit::install_mode(mode);
-                    run(&format!("{name} <- {definition}"));
+                    run(&format!(
+                        "{name} <- {}",
+                        definition.replace("FUNCTION", name)
+                    ));
                     let outcomes: Vec<String> = calls
                         .iter()
                         .map(|call| run(&call.replace("FUNCTION", name)))

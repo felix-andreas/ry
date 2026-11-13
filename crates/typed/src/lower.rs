@@ -168,6 +168,11 @@ const MAX_TYPED_INLINE_DEPTH: usize = 4;
 /// The most calls and operators the body of a typed function may hold and still inline into
 /// its callers.
 const MAX_INLINE_CALLS: usize = 48;
+/// The most calls of itself a function may hold and still lower into itself, and the most
+/// copies of its body those calls may add. Each call is another copy to compile, so a function
+/// that recurses from many places, as an evaluator of a tree with several node kinds does,
+/// would multiply its compile time.
+const MAX_SELF_CALLS: usize = 2;
 /// How deeply expressions nest, which bounds the lowering's own recursion.
 const MAX_NESTING: usize = 256;
 
@@ -236,6 +241,7 @@ unsafe fn lower_calling(
         loops: Vec::new(),
         inlined: Vec::new(),
         inlining: SmallVec::new(),
+        self_inlines: 0,
         called,
         refused,
         speculations: Vec::new(),
@@ -362,6 +368,8 @@ struct Lowering<'c> {
     /// The typed functions whose bodies are being lowered into this one, outermost first, so a
     /// function that calls itself through another is called, not inlined without end.
     inlining: SmallVec<[Sexp; 4]>,
+    /// How many times the function has been lowered into itself.
+    self_inlines: usize,
     /// The typed functions that are called, never inlined.
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
@@ -1078,17 +1086,24 @@ impl Lowering<'_> {
             }
             let values = self.call_arguments(&arguments)?;
             // A small function lowers into its caller, where its records need no allocation
-            // and its arguments no call.
+            // and its arguments no call. A function that calls itself from a place or two
+            // lowers into itself at those places, one level deep, so a recursion makes fewer
+            // calls, and into no other caller. The copies are counted as they are made,
+            // because a local function that holds the call is itself lowered at each of its
+            // calls.
             let body = interp::bytecode::closure_body(function);
-            if function != self.closure
-                && function.tag() == self.env
+            let own = function == self.closure;
+            let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
+            if function.tag() == self.env
+                && (!own || self.self_inlines < MAX_SELF_CALLS)
                 && !self.inlining.contains(&function)
                 && !self.called.contains(&function)
                 && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
                 && rvalues::pairlist_items(function.car()).len() == values.len()
                 && !tail_invisible(body)
-                && small_body(body, head, &mut 0)
+                && small_body(body, head, &mut own_calls, &mut 0)
             {
+                self.self_inlines += own as usize;
                 self.inlining.push(function);
                 let value = self.inline(function.car(), body, 0, &values, crate::storage);
                 self.inlining.pop();
@@ -2700,7 +2715,7 @@ impl Lowering<'_> {
                     } => {
                         let total = self
                             .builder
-                            .emit(Type::Dbl, Op::Reduce(Reduce::Sum, Item::Dbl, a));
+                            .emit(Type::Dbl, Op::Reduce(Reduce::ListSum, Item::Dbl, a));
                         self.fail_if_nan(total);
                         Ok(total)
                     }
@@ -3657,13 +3672,7 @@ impl Lowering<'_> {
             && body == name
             && let Some(list) = list
         {
-            return Ok(self.builder.emit(
-                Type::I64,
-                Op::CountTrue {
-                    program: SmallVec::new(),
-                    inputs: SmallVec::from_slice(&[list]),
-                },
-            ));
+            return Ok(self.count_true(list));
         }
         // A predicate that only compares the item with numbers means the same for the whole
         // list as for each item. It is lowered once with its parameter standing for the list,
@@ -3696,13 +3705,7 @@ impl Lowering<'_> {
             let mask = self.expression(body);
             self.scopes.pop();
             let mask = mask?.ok_or(Refusal::new("a predicate that never completes"))?;
-            return Ok(self.builder.emit(
-                Type::I64,
-                Op::CountTrue {
-                    program: SmallVec::new(),
-                    inputs: SmallVec::from_slice(&[mask]),
-                },
-            ));
+            return Ok(self.count_true(mask));
         }
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
@@ -3777,6 +3780,20 @@ impl Lowering<'_> {
         }
         self.next_position(positions);
         Ok(total)
+    }
+
+    /// The count of the true items of `list`, a logical list.
+    fn count_true(&mut self, list: Local) -> Local {
+        let count = self.builder.local(Type::I64);
+        self.builder.push(
+            None,
+            Op::CountTrue {
+                program: SmallVec::new(),
+                inputs: SmallVec::from_slice(&[list]),
+                counts: SmallVec::from_slice(&[(0, count)]),
+            },
+        );
+        count
     }
 
     /// Whether `body`, a predicate of the one parameter `item` over a `List<F64>`, only compares
@@ -4735,7 +4752,14 @@ impl Lowering<'_> {
             ));
         }
         let ty = if i64 { Type::I64 } else { Type::Dbl };
-        let parses = self.builder.emit(Type::Bool, Op::Parses(i64, string));
+        let parses = self.builder.local(Type::Bool);
+        let number = self.builder.emit(
+            ty,
+            Op::Parse {
+                string,
+                parsed: parses,
+            },
+        );
         let (valid, invalid, join) = (
             self.builder.block(),
             self.builder.block(),
@@ -4747,7 +4771,6 @@ impl Lowering<'_> {
             otherwise: invalid,
         });
         self.builder.switch_to(valid);
-        let number = self.builder.emit(ty, Op::Parse(string));
         let ok = self.tag("Ok", &[number])?;
         self.builder.switch_to(invalid);
         let reason = self.tag("InvalidNumStr", &[])?;
@@ -5821,25 +5844,35 @@ unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
     }
 }
 
-/// Whether `expression`, the body of the typed function `name`, is small enough to lower into
-/// a caller: at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which
-/// would leave the caller, or a call of the function itself.
-unsafe fn small_body(expression: Sexp, name: Sexp, calls: &mut usize) -> bool {
+/// Whether `expression`, the body of a typed function, is small enough to lower into a caller:
+/// at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which would
+/// leave the caller, and at most `own_calls` calls of `own`, the function's own name.
+unsafe fn small_body(
+    expression: Sexp,
+    own: Sexp,
+    own_calls: &mut usize,
+    calls: &mut usize,
+) -> bool {
     if expression.kind() != SexpType::Language {
         return true;
     }
     *calls += 1;
     let head = expression.car();
     if *calls > MAX_INLINE_CALLS
-        || head == name
         || head.kind() == SexpType::Symbol && rvalues::symbol_name(head) == "return"
     {
         return false;
     }
-    small_body(head, name, calls)
+    if head == own {
+        if *own_calls == 0 {
+            return false;
+        }
+        *own_calls -= 1;
+    }
+    small_body(head, own, own_calls, calls)
         && rvalues::pairlist_items(expression.cdr())
             .into_iter()
-            .all(|(_, item)| small_body(item, name, calls))
+            .all(|(_, item)| small_body(item, own, own_calls, calls))
 }
 
 /// Whether `expression` calls `return` outside nested function literals.
@@ -6087,7 +6120,8 @@ unsafe fn is_base_function(speculation: &Speculation) -> bool {
 }
 
 /// Walks from `start` to the binding a function lookup of `symbol` finds, as the interpreter
-/// does, but gives up instead of forcing a promise or calling an active binding.
+/// does, but gives up instead of calling an active binding or forcing a promise that may run
+/// arbitrary code.
 pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let mut env = start;
@@ -6101,13 +6135,23 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
             if value.kind() == SexpType::Promise {
                 if value.car() == rvalues::unbound() {
                     // An installed package binds its closures to lazy-load promises, which only
-                    // read the function from the package database, so forcing one is safe. A
-                    // promise of anything else may run arbitrary code. A load that fails leaves
-                    // the call to the interpreter, which raises the error itself.
+                    // read the function from the package database, so forcing one is safe. Any
+                    // other promise but a lazy definition's may run arbitrary code. A load that
+                    // fails leaves the call to the interpreter, which raises the error itself.
                     let reads_database = env == heap.known().base_env
                         || env == heap.known().base_namespace
                         || matches!(interp::serialize::lazy_record_header(value), Ok(Some(_)));
-                    if !reads_database {
+                    // `ry load` binds a definition to a promise that lowers its code and
+                    // evaluates it. Only a function definition and a pure constant of a
+                    // strict file are bound that way, so forcing one early changes nothing a
+                    // program can observe.
+                    let code = value.cdr();
+                    let lazy_definition = code.kind() == SexpType::Language
+                        && rvalues::install("ryLoaderForce")
+                            .ok()
+                            .and_then(|symbol| interp::builtins::internal_function(symbol))
+                            == Some(code.car());
+                    if !reads_database && !lazy_definition {
                         return None;
                     }
                     value = interp::eval::force_promise(value).ok()?;

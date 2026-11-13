@@ -18,6 +18,15 @@ machine's speed hits all engines alike. Each suite first evicts every ry build's
 page cache (evict.py), so peak RSS compares builds from the same page-cache state. A program's time on an engine is the median over rounds,
 and its ratio to GNU R is the median of the per-round ratios, with a 95% bootstrap interval over
 rounds. A suite's geometric mean has a bootstrap interval that resamples each program's rounds.
+With `--baseline`, every program and the suite also get the paired ratio baseline / ry the same
+way, so a value above 1 means the build under test is faster.
+
+Peak RSS comes in parts, because they behave differently (development/testing.md): the process's
+whole peak (`VmHWM`), and the peaks of its anonymous memory outside the start-up image, of the
+image's resident pages and of `libR.so`'s resident pages, all read from `/proc/<pid>` every 20 ms
+while it runs (every engine alike; a process shorter than that has no sample). The run's
+metadata holds the size of each ry build's `libR.so` `.text` section, which is judged in place of
+its resident pages.
 
 A run fails, and writes nothing, when any program fails on any engine or prints a checksum that
 differs from GNU R's (a numeric checksum may differ by a relative 1e-10, the room a different
@@ -41,15 +50,21 @@ The runner unpacks it into a private directory with its own cache directory, whe
 archive's sha256. A nightly archive runs too, but `--write` refuses it. Without `--release`, `--ry`
 names the build under test.
 
-Before anything runs, every ry under test must load only start-up and code images its own runtime
-build wrote, and two binaries must not share a base R tree; otherwise the run stops and names the
-stale files (`refuse_foreign_images`). For a release that means the images it shipped in its base R,
-and no package library may hold an image another build wrote.
-
 Every suite checks before it runs that the corpus library holds each package its programs load, at
 the version lock.tsv pins (for the packages suite, every locked package), and stops with the list of
 missing ones. `--partial` runs anyway: the summary and results.json say the run is partial and name
 the missing packages, and `--write` refuses such a run.
+
+A start-up image and a package's code image load only into the build of ry that wrote them, and a
+build that cannot load them starts the slow way: a start that calls `stats::median` runs 8 times the
+instructions (306 million rather than 37) and peaks 9 MiB higher. Builds that share a base R tree
+each keep their own images there (crates/rcmd/src/images.rs), and a build writes its images the
+first time it starts. Before the first suite, bench.py starts each ry build once, so no timed
+process pays for writing them, and stops when a package in the corpus library or `R_LIBS` has only
+another build's code image, naming the packages to reinstall (`refuse_foreign_images`). Every ry
+process runs with `RY_IMAGE_LOG=1`, and one that reports an unused image or writes images fails, so
+a run never compares a fast start with a slow one. A build whose runtime predates `RY_IMAGE_LOG`
+cannot report one, so bench.py refuses it.
 
 The typed suite needs rustc and no GNU R. Its engines are Rust, the baseline, and ry typed: each
 program's `<name>.typed.R` runs as in the kernels and applications suites, and its Rust twin
@@ -64,15 +79,16 @@ build, for a quick look while changing ry: the output says which build it timed,
 it is a release number.
 
 `--samples FILE` keeps every round's raw samples in FILE as it goes, and a later run with the same
-FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
+FILE and options resumes after the last complete round. A run of several suites keeps each suite's
+in FILE with the suite's name before its extension (`samples.kernels.json`). `--write` needs at least 10 rounds and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
 Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial] [--any-build]
 """
-import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, shlex, shutil, statistics
-import re, subprocess, sys, tarfile, tempfile, threading, time, tomllib
+import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
+import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -101,6 +117,11 @@ RUST_SHORT = 0.0001
 # An interval reaching further than this from its median is too wide to quote.
 WIDE = 0.10
 PROGRAM_TIMEOUT = 300
+# The lines ry prints on standard error under RY_IMAGE_LOG for each start-up or code image it could
+# not use (crates/interp/src/image.rs, `report_unused`), and when it writes a build's images into a
+# base R tree (crates/rcmd/src/rcmd.rs, `refresh_start_image`).
+IMAGE_UNUSED = "ry: image unused: "
+IMAGE_WRITTEN = "ry: image written: "
 STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 # A typed call that first runs in the interpreter to observe an R value's type logs this, then
 # compiles on its next call, so the line is not a refusal.
@@ -132,7 +153,11 @@ def main():
     parser.add_argument("--any-build", action="store_true",
                         help="also time a ry that is not a release build, and say so in the output")
     args = parser.parse_args()
+    # Programs run from their own directories.
+    args.ry = os.path.abspath(args.ry)
+    args.baseline = args.baseline and os.path.abspath(args.baseline)
     suites = SUITES if "all" in args.suites else args.suites
+    args.suites = suites
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
@@ -221,11 +246,12 @@ def engines(args, suite):
     if suite == RUST_SUITE:
         # The typed programs load no package, so neither engine gets a library, and `--jit-off`
         # does not apply: a strict typed program is compiled before it runs.
+        ry_env = dict(base, RY_IMAGE_LOG="1")
         table = [Engine("rust", "Rust", None, base),
-                 Engine("ry_typed", "ry typed", [args.ry, "run", "--runtime", "ry"], base, typed=True)]
+                 Engine("ry_typed", "ry typed", [args.ry, "run", "--runtime", "ry"], ry_env, typed=True)]
         if args.baseline:
             table.append(Engine("baseline_typed", "baseline typed", [args.baseline, "run", "--runtime", "ry"],
-                                base, typed=True))
+                                ry_env, typed=True))
         return table
     library = corpus.corpus / "library"
     if library.is_dir():
@@ -235,19 +261,108 @@ def engines(args, suite):
                                        capture_output=True, text=True, check=True).stdout.strip()
         base.update(R_LIBS=str(library), R_LIBS_USER=str(library), R_LIBS_SITE=gnu_r_library)
     ry = [args.ry, "run", "--runtime", "ry"]
+    ry_env = dict(base, RY_IMAGE_LOG="1")
     table = [Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base),
-             Engine("ry", "ry", ry, base)]
+             Engine("ry", "ry", ry, ry_env)]
     typed = suite in TYPED_SUITES
     if typed:
-        table.append(Engine("ry_typed", "ry typed", ry, base, typed=True))
+        table.append(Engine("ry_typed", "ry typed", ry, ry_env, typed=True))
     if args.jit_off:
-        table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(base, RY_JIT="off")))
+        table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
         baseline = [args.baseline, "run", "--runtime", "ry"]
-        table.append(Engine("baseline", "baseline", baseline, base))
+        baseline_env = dict(base, RY_IMAGE_LOG="1")
+        table.append(Engine("baseline", "baseline", baseline, baseline_env))
         if typed:
-            table.append(Engine("baseline_typed", "baseline typed", baseline, base, typed=True))
+            table.append(Engine("baseline_typed", "baseline typed", baseline, baseline_env, typed=True))
     return table
+
+
+def file_contains(path, needle):
+    """Whether the file holds `needle`, read in 1 MiB pieces, so that scanning a 120 MiB libR does
+    not hold all of it in memory."""
+    tail = b""
+    with open(path, "rb") as file:
+        while piece := file.read(1 << 20):
+            if needle in tail + piece:
+                return True
+            tail = piece[-(len(needle) - 1):]
+    return False
+
+
+def refuse_foreign_images(binaries):
+    """Exits unless every ry build in `binaries` would load only images it wrote itself.
+
+    An image loads only into the build whose identity its file name carries
+    (crates/rcmd/src/images.rs), and any other build starts the slow way or runs the package without
+    its compiled code. Each build starts once first, which writes its images into the base R tree
+    it finds if they are missing; the probe loads a function from stats, so it opens a code image as
+    well as the start-up image, and it must report no unused image. A package library gets code
+    images only when a package is installed, so a package there that has only another build's code
+    image stops the run with the list of packages to reinstall. A release carries its runtime inside
+    itself and extracts it on its first start, so its runtime is read from the R home it reports,
+    whose `.libr` names the runtime library on its first line.
+    """
+    for binary in dict.fromkeys(binaries):
+        with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
+            script = pathlib.Path(work) / "probe.R"
+            script.write_text("invisible(stats::median(c(3, 1, 2)))\ncat(R.home())\n")
+            env = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1")
+            status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], env, cwd=work,
+                                           check_images=False)
+        if status != 0:
+            sys.exit(f"error: {binary} cannot run a two-line R script: {failure_reason(out, err)}")
+        runtime = runtime_of(binary)
+        if runtime is None:
+            home = pathlib.Path(out.strip())
+            try:
+                runtime = pathlib.Path((home / ".libr").read_text().splitlines()[0])
+            except (OSError, IndexError) as error:
+                sys.exit(f"error: {binary} reported the R home {home}, which names no runtime library: {error}")
+        if not file_contains(runtime, b"RY_IMAGE_LOG"):
+            sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot "
+                     "report a start-up or code image it does not use, and its timings may measure a "
+                     "slow start; compare a build that has it")
+        unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
+        if unused:
+            sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would "
+                     "time a slow start:\n" + "\n".join(f"  {line}" for line in unused))
+        identity = runtime_identity(runtime)
+        libraries = [corpus.corpus / "library"]
+        libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
+                      for part in os.environ.get(variable, "").split(os.pathsep) if part]
+        stale = sorted({package.name for library in libraries if library.is_dir()
+                        for package in library.iterdir() if foreign_code_image(package, identity)})
+        if stale:
+            sys.exit(f"error: {binary} (runtime {identity}) would run these packages without their "
+                     "compiled code, because another build of ry installed them; reinstall them with "
+                     "this build: " + ", ".join(stale))
+
+
+def foreign_code_image(package, identity):
+    """Whether the installed `package` has a code image of its lazy-load database, but none of the
+    runtime build `identity`: `R/<name>.<build>.ryc`, or `R/<name>.ryc` from a ry that predates
+    build-keyed names."""
+    code = package / "R"
+    images = list(code.glob(f"{glob_escape(package.name)}.*ryc"))
+    return bool(images) and not (code / f"{package.name}.{identity}.ryc").is_file()
+
+
+def glob_escape(text):
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def runtime_of(binary):
+    """The runtime library the ry build `binary` loads: `RY_LIBR`, or the one beside it; None for a
+    build that carries its runtime inside itself."""
+    if os.environ.get("RY_LIBR"):
+        return pathlib.Path(os.environ["RY_LIBR"])
+    beside = pathlib.Path(binary).resolve().with_name(runtime_library_name())
+    return beside if beside.is_file() else None
+
+
+def runtime_library_name():
+    return {"Darwin": "libR.dylib", "Windows": "R.dll"}.get(platform.system(), "libR.so")
 
 
 def load_suite(suite):
@@ -347,7 +462,7 @@ def run_suite(suite, manifest, missing, args, meta):
     programs = selected(manifest, args)
     runners = {"public": PublicRunner, "packages": PackageRunner, RUST_SUITE: RustRunner}
     runner = runners.get(suite, WorkloadRunner)(suite, args)
-    samples_path = pathlib.Path(args.samples).with_suffix(f".{suite}.json") if args.samples else None
+    samples_path = samples_file(args, suite)
     state = load_samples(samples_path, args, table, programs)
     shuffle = random.Random(f"{args.seed}:{suite}")
     for _ in range(len(state["rounds"])):
@@ -376,6 +491,8 @@ def run_suite(suite, manifest, missing, args, meta):
                 save_samples(samples_path, state)
             state["extra"] += [program["id"] for program in wide]
             save_samples(samples_path, state)
+        if samples_path is not None:
+            print(f"samples in {samples_path}", flush=True)
         results = summarize(suite, manifest, programs, table, state, args, meta, runner)
     finally:
         runner.close()
@@ -436,33 +553,97 @@ def duration(seconds):
 
 # Running one program on one engine.
 
-def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT):
+def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
-    resident set in MiB. `wait4` reports the child's own peak, which covers the whole process from
-    start-up on and any process it waited for."""
+    memory in MiB (`MEMORY_PARTS`, from `sample_memory`). The status is None when the process timed
+    out or, with `check_images`, when ry reported an image it could not use: such a process timed a
+    slow start, so its numbers do not count."""
     with tempfile.TemporaryFile("w+") as stdout, tempfile.TemporaryFile("w+") as stderr:
         started = time.monotonic()
         child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd)
-        expired = threading.Event()
+        expired, finished = threading.Event(), threading.Event()
+        memory = {}
 
         def expire():
             expired.set()
             child.kill()
 
         timer = threading.Timer(timeout, expire)
+        sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory))
         timer.start()
+        sampler.start()
         try:
-            _, status, usage = os.wait4(child.pid, 0)
+            _, status = os.waitpid(child.pid, 0)
         finally:
             timer.cancel()
+            finished.set()
+            sampler.join()
         child.returncode = os.waitstatus_to_exitcode(status)
         seconds = time.monotonic() - started
         stdout.seek(0)
         stderr.seek(0)
         out, err = stdout.read(), stderr.read()
     if expired.is_set():
-        return None, out, f"timed out after {timeout} s", seconds, usage.ru_maxrss / 1024
-    return child.returncode, out, err, seconds, usage.ru_maxrss / 1024
+        return None, out, f"timed out after {timeout} s", seconds, memory
+    unused = [line for line in err.splitlines()
+              if line.startswith((IMAGE_UNUSED, IMAGE_WRITTEN))] if check_images else []
+    if unused:
+        return None, out, f"started without an image it should load ({unused[0]})", seconds, memory
+    return child.returncode, out, err, seconds, memory
+
+
+# The parts of a process's memory a result records, in MiB: the whole peak (`VmHWM`), then the
+# peaks of anonymous memory outside the start-up image, of the image's resident pages and of
+# `libR.so`'s. `wait4`'s `ru_maxrss` cannot give the whole peak: a child forked from this script
+# starts with the script's own resident size as its high-water mark, and keeps it across `exec`.
+MEMORY_PARTS = {"peak": "peak_mib", "anonymous": "anonymous_mib", "image": "image_mib", "libr": "libr_mib"}
+
+
+def sample_memory(pid, finished, peaks):
+    """Records in `peaks` the process's high-water resident size (`VmHWM`, which `exec` resets) and
+    the largest anonymous, start-up image and `libR.so` resident sizes seen in `/proc/<pid>/smaps`,
+    until `finished` is set. The image is mapped privately, so its pages a start writes are
+    anonymous too; they count as the image's. Reading smaps takes about 1 ms for ry and 3 ms for
+    GNU R, which is why it runs every 20 ms rather than more often, and so growth in a process's
+    last 20 ms is missed and a process shorter than that has no sample."""
+    while not finished.wait(0.02):
+        try:
+            with open(f"/proc/{pid}/status") as status:
+                high_water = next(int(line.split()[1]) for line in status if line.startswith("VmHWM:"))
+            with open(f"/proc/{pid}/smaps") as smaps:
+                text = smaps.read()
+        except (OSError, StopIteration):
+            return
+        peaks["peak"] = max(peaks.get("peak", 0.0), high_water / 1024)
+        sizes = {"anonymous": 0, "image": 0, "libr": 0}
+        mapping = ""
+        for line in text.splitlines():
+            if line.startswith("Rss:"):
+                if mapping.endswith(".image"):
+                    sizes["image"] += int(line.split()[1])
+                elif mapping.endswith(runtime_library_name()):
+                    sizes["libr"] += int(line.split()[1])
+            elif line.startswith("Anonymous:"):
+                if not mapping.endswith(".image"):
+                    sizes["anonymous"] += int(line.split()[1])
+            elif not line[:1].isupper():
+                fields = line.split(None, 5)
+                mapping = fields[5] if len(fields) > 5 else ""
+        for part, kib in sizes.items():
+            peaks[part] = max(peaks.get(part, 0.0), kib / 1024)
+
+
+def memory_fields(memory):
+    return {field: round(memory[part], 1) for part, field in MEMORY_PARTS.items() if part in memory}
+
+
+def merge_memory(memories):
+    """The peaks of several processes run one after another, part by part."""
+    merged = {}
+    for memory in memories:
+        for part, mib in memory.items():
+            merged[part] = max(merged.get(part, 0.0), mib)
+    return merged
 
 
 def same_checksum(value, reference):
@@ -512,13 +693,13 @@ class WorkloadRunner:
         script.write_text(harness + "\n" + source.read_text())
         return self.reported(program, *spawn(engine.command + [script.name], engine.env, cwd=folder))
 
-    def reported(self, program, status, out, err, _, peak):
+    def reported(self, program, status, out, err, _, memory):
         """What a finished process's harness line says: the checksum and the median warm time."""
         lines = [line for line in out.splitlines() if line.startswith(program["id"] + " ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         _, checksum, median, _, cold = lines[-1].split()
-        return {"seconds": float(median), "checksum": checksum, "cold": float(cold), "peak_mib": round(peak, 1)}
+        return {"seconds": float(median), "checksum": checksum, "cold": float(cold), **memory_fields(memory)}
 
     def typed_log(self, text, engine):
         """What `RY_TYPED_LOG` reports for one run of a typed source under the harness: the refusal
@@ -613,13 +794,13 @@ class PublicRunner:
         if engine.typed:
             script = self.work / f"{program['id']}.R"
             script.write_text((root / program["typed_source"]).read_text())
-        status, out, err, _, peak = spawn(engine.command + [str(script)], engine.env, cwd=source.parent)
+        status, out, err, _, memory = spawn(engine.command + [str(script)], engine.env, cwd=source.parent)
         stem = source.name.removesuffix(".R")
         lines = [line for line in out.splitlines() if line.startswith(stem + " ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         _, checksum, seconds = lines[-1].split()
-        return {"seconds": float(seconds), "checksum": checksum, "peak_mib": round(peak, 1)}
+        return {"seconds": float(seconds), "checksum": checksum, **memory_fields(memory)}
 
     def typed_refusal(self, program, engine):
         """The refusals `RY_TYPED_LOG` reports for the typed program, or None. Measured once,
@@ -681,34 +862,42 @@ class PackageRunner:
             # R error, which exits with status 1 (`test.data.table()` raises its error summary
             # after running every test). Such a script ran to its end and counts as failed. A
             # signal, a timeout or any other status means the suite did not finish.
-            seconds, peak, passed, failed = 0.0, 0.0, 0, 0
+            seconds, memories, passed, failed = 0.0, [], 0, 0
             for script in sorted(tests.glob("*.R")):
-                status, out, err, elapsed, script_peak = spawn(engine.command + [script.name], env, cwd=tests,
-                                                               timeout=corpus.SUITE_TIMEOUT)
+                status, out, err, elapsed, memory = spawn(engine.command + [script.name], env, cwd=tests,
+                                                          timeout=corpus.SUITE_TIMEOUT)
                 if status not in (0, 1):
                     return {"seconds": None, "reason": f"{script.name}: {failure_reason(out, err)}"}
                 seconds += elapsed
-                peak = max(peak, script_peak)
+                memories.append(memory)
                 passed += status == 0
                 failed += status == 1
             return {"seconds": round(seconds, 3), "checksum": f"{passed} passed, {failed} failed, 0 errors",
-                    "tests": {"passed": passed, "failed": failed, "errors": 0}, "peak_mib": round(peak, 1)}
+                    "tests": {"passed": passed, "failed": failed, "errors": 0},
+                    **memory_fields(merge_memory(memories))}
         driver = self.work / "driver.R"
         driver.write_text(corpus.driver(name, kind, tests))
-        status, out, err, seconds, peak = spawn(engine.command + [str(driver)], env, cwd=tests,
-                                                timeout=corpus.SUITE_TIMEOUT)
+        status, out, err, seconds, memory = spawn(engine.command + [str(driver)], env, cwd=tests,
+                                                  timeout=corpus.SUITE_TIMEOUT)
         lines = [line for line in out.splitlines() if line.startswith("RESULT ")]
         if status != 0 or not lines:
             return {"seconds": None, "reason": failure_reason(out, err)}
         passed, failed, _, errors = (int(value) for value in lines[-1].split()[1:])
         return {"seconds": round(seconds, 3), "checksum": f"{passed} passed, {failed} failed, {errors} errors",
-                "tests": {"passed": passed, "failed": failed, "errors": errors}, "peak_mib": round(peak, 1)}
+                "tests": {"passed": passed, "failed": failed, "errors": errors}, **memory_fields(memory)}
 
     def close(self):
         subprocess.run(["rm", "-rf", str(self.work)], check=True)
 
 
 # Samples.
+
+def samples_file(args, suite):
+    if not args.samples:
+        return None
+    path = pathlib.Path(args.samples)
+    return path if len(args.suites) == 1 else path.with_name(f"{path.stem}.{suite}{path.suffix or '.json'}")
+
 
 def load_samples(path, args, table, programs):
     key = {"rounds": args.rounds, "seed": args.seed, "filter": args.filter, "ry": args.ry,
@@ -792,14 +981,16 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
     rows = []
     baseline, kind, floor = table[0], ratio_kind(suite), short_floor(suite)
     included = {engine.key: [] for engine in table[1:]}
+    keys = {engine.key for engine in table}
+    pairs = [(f"baseline{typed}", f"ry{typed}") for typed in ("", "_typed")
+             if f"baseline{typed}" in keys and f"ry{typed}" in keys]
+    paired_included = {new: [] for _, new in pairs}
     for program in programs:
         name = program["id"]
-        row = {"id": name, "display": program["display"], "seconds": {}, "ratio": {}, "peak_mib": {}, "flags": []}
-        if suite == RUST_SUITE:
-            # A child's peak resident set as `wait4` reports it is never below the runner's own,
-            # because the child starts as a copy of the runner. A Rust program needs less than
-            # that, so its peak cannot be read this way, and the suite stores none.
-            del row["peak_mib"]
+        row = {"id": name, "display": program["display"], "seconds": {}, "ratio": {}, "flags": [],
+               **{field: {} for field in MEMORY_PARTS.values()}}
+        if pairs:
+            row["paired"] = {}
         if suite == "packages":
             row["version"] = program["version"]
             row["runner"] = program["runner"]
@@ -831,8 +1022,10 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                                      "reason": f"checksum {checksums[0]}, {baseline.label} printed {reference}"})
             median = statistics.median(run["seconds"] for run in runs)
             row["seconds"][engine.key] = round(median, 6)
-            if "peak_mib" in row:
-                row["peak_mib"][engine.key] = max(run["peak_mib"] for run in runs)
+            for field in MEMORY_PARTS.values():
+                sizes = [run[field] for run in runs if field in run]
+                if sizes:
+                    row[field][engine.key] = max(sizes)
             if median < floor:
                 row["flags"].append({"kind": "too_short", "engine": engine.key})
         if failures:
@@ -848,6 +1041,14 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
                 row["flags"].append({"kind": "wide_interval", "engine": engine.key})
             if not short:
                 included[engine.key].append(ratios)
+        for old, new in pairs:
+            ratios = paired(state, name, old, new)
+            if not ratios or failures:
+                continue
+            median, low, high = interval(ratios, args.seed)
+            row["paired"][new] = {"median": round(median, 4), "low": round(low, 4), "high": round(high, 4)}
+            if not any(flag["kind"] == "too_short" and flag["engine"] in (old, new) for flag in row["flags"]):
+                paired_included[new].append(ratios)
         typed = next((engine for engine in table if engine.typed), None)
         if typed is not None and "typed_source" in program and not failures:
             reason = runner.typed_refusal(program, typed)
@@ -856,19 +1057,24 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
         if suite == RUST_SUITE and not failures:
             row["compile_seconds"] = runner.compile_seconds(program)
         rows.append(row)
-    geomeans = {}
-    for key, per_program in included.items():
-        if per_program:
-            point, low, high = geomean_interval(per_program, args.seed)
-            geomeans[key] = {"median": round(point, 4), "low": round(low, 4), "high": round(high, 4),
-                             "programs": len(per_program)}
-    return {
+    def geomeans(included):
+        means = {}
+        for key, per_program in included.items():
+            if per_program:
+                point, low, high = geomean_interval(per_program, args.seed)
+                means[key] = {"median": round(point, 4), "low": round(low, 4), "high": round(high, 4),
+                              "programs": len(per_program)}
+        return means
+    results = {
         "schema": SCHEMA, "suite": suite, "name": manifest["name"],
         "meta": dict(meta, too_short_seconds=floor, rounds=args.rounds, extra_rounds=args.extra_rounds, seed=args.seed),
         "engines": {engine.key: engine.label for engine in table},
         "baseline": baseline.key, "ratio_kind": kind,
-        "programs": rows, "geomean": geomeans,
+        "programs": rows, "geomean": geomeans(included),
     }
+    if pairs:
+        results["paired_geomean"] = geomeans(paired_included)
+    return results
 
 
 def ratio_label(results, key):
@@ -879,23 +1085,40 @@ def ratio_label(results, key):
 
 def print_table(results, table):
     keys = [engine.key for engine in table if engine.key in results["engines"]]
-    print("| program | " + " | ".join(results["engines"][key] for key in keys) + " | "
-          + " | ".join(ratio_label(results, key) for key in keys[1:]) + " | flags |")
-    print("| --- |" + " ---: |" * (2 * len(keys) - 1) + " --- |")
+    pairs = [key for key in keys if key in results.get("paired_geomean", {}) or
+             any(key in row.get("paired", {}) for row in results["programs"])]
+    label = results["engines"]
+    print("| program | " + " | ".join(label[key] for key in keys) + " | "
+          + " | ".join(ratio_label(results, key) for key in keys[1:])
+          + "".join(f" | {label['baseline' + key.removeprefix('ry')]} / {label[key]}" for key in pairs)
+          + " | flags |")
+    print("| --- |" + " ---: |" * (2 * len(keys) - 1 + len(pairs)) + " --- |")
     # One unit per table: milliseconds where the suite times programs that finish in a few.
     unit = (lambda seconds: f"{seconds * 1000:.3f} ms") if results["meta"]["too_short_seconds"] < 0.001 else duration
     for row in results["programs"]:
         cells = [unit(row["seconds"][key]) if key in row["seconds"] else "" for key in keys]
-        for key in keys[1:]:
-            ratio = row["ratio"].get(key)
+        for ratio in [row["ratio"].get(key) for key in keys[1:]] + [row.get("paired", {}).get(key) for key in pairs]:
             cells.append(f"{ratio['median']:.2f}x ({ratio['low']:.2f} to {ratio['high']:.2f})" if ratio else "")
         flags = ", ".join(f"{flag['kind']} ({flag['engine']})" for flag in row["flags"])
         if row.get("failures"):
             flags = ", ".join(["FAILED"] + ([flags] if flags else []))
         print(f"| {row['display']} | " + " | ".join(cells) + f" | {flags} |")
+    print("\nPeak memory in MiB: whole process / anonymous / start-up image / libR.so resident\n")
+    print("| program | " + " | ".join(label[key] for key in keys) + " |")
+    print("| --- |" + " ---: |" * len(keys))
+    for row in results["programs"]:
+        cells = [" / ".join(f"{row[field][key]:.1f}" if key in row.get(field, {}) else "-"
+                            for field in MEMORY_PARTS.values()) for key in keys]
+        print(f"| {row['display']} | " + " | ".join(cells) + " |")
     for key, mean in results["geomean"].items():
         print(f"\nGeometric mean of {ratio_label(results, key)} over {mean['programs']} programs: "
               f"{mean['median']:.2f}x (95% interval {mean['low']:.2f} to {mean['high']:.2f})")
+    for key, mean in results.get("paired_geomean", {}).items():
+        print(f"\nGeometric mean of {label['baseline' + key.removeprefix('ry')]} / {label[key]} over "
+              f"{mean['programs']} programs: {mean['median']:.2f}x "
+              f"(95% interval {mean['low']:.2f} to {mean['high']:.2f}; above 1 means {label[key]} is faster)")
+    for build, size in results["meta"].get("libr_text_bytes", {}).items():
+        print(f"\nlibR.so .text of {build}: {size / 1024 / 1024:.2f} MiB ({size} bytes)")
     compiled = [row for row in results["programs"] if row.get("compile_seconds")]
     # Only the engines whose compile time was measured get a column: a `--baseline` build has none.
     timed = [key for key in keys if any(key in row["compile_seconds"] for row in compiled)]
@@ -974,113 +1197,12 @@ def release_tag(version):
     return (match[2] or match[1]), match[2] is not None
 
 
-def refuse_foreign_images(binaries):
-    """Exits when a ry under test would load a start-up or code image another build wrote, or when
-    two of them share one base R tree.
-
-    An image loads only into the runtime build that wrote it, and every other build ignores it, so
-    the packages it covers run without their compiled code and start-up takes the slow path, and a
-    comparison would credit that time to the code under test. Each binary runs once first, because a
-    start rewrites a stale start-up image and the base packages' images, and because a release
-    extracts its runtime and base R on its first start. The recommended packages' images are
-    rewritten only by `just base-r`, and a package library's only by reinstalling the package.
-    """
-    homes = {}
-    for binary in binaries:
-        with tempfile.NamedTemporaryFile("w", suffix=".R") as script:
-            script.write("cat(R.home())\n")
-            script.flush()
-            started = subprocess.run([binary, "run", "--runtime", "ry", script.name],
-                                     capture_output=True, text=True, timeout=600)
-        if started.returncode != 0:
-            sys.exit(f"error: {binary} does not start: {started.stderr.strip()}")
-        identity, home = runtime_identity(binary), base_tree(binary)
-        if identity is None or home is None:
-            identity, home = embedded_runtime(binary, pathlib.Path(started.stdout.strip()))
-        if home in homes:
-            sys.exit(f"error: {homes[home]} and {binary} share the base R tree {home}, so each start "
-                     "of one rewrites the start-up image the other loads; give each build its own "
-                     "copy with `ry-rcmd start-image BASE --libr LIBR` and point RY_BASE_R at it")
-        homes[home] = binary
-        stale = foreign_images(identity, home)
-        if stale:
-            sys.exit(f"error: {binary} (runtime {identity}) would ignore these images, which another "
-                     "build wrote, and run that code without them; run `just base-r` for base R's "
-                     "packages and reinstall any other package with this build:\n"
-                     + "\n".join(f"  {image} ({image_writer(image) or 'unreadable'})" for image in stale))
-
-
-def foreign_images(identity, home):
-    """The start-up and code images that a runtime of `identity` with base R tree `home` would load
-    but did not write: base R's, and those of the corpus library and of `R_LIBS` and `R_LIBS_USER`."""
-    libraries = [home / "library", corpus.corpus / "library"]
-    libraries += [pathlib.Path(part) for variable in ("R_LIBS", "R_LIBS_USER")
-                  for part in os.environ.get(variable, "").split(os.pathsep) if part]
-    images = [home / "library/base/R/ry-start.image"]
-    images += sorted({image for library in libraries if library.is_dir()
-                      for image in library.glob("*/R/*.ryc")})
-    return [image for image in images if image_writer(image) != identity]
-
-
-def runtime_identity(binary):
-    """The identity of the runtime library beside `binary`, which stamps every image it writes, or
-    None for a binary with no `libR` beside it."""
-    directory = pathlib.Path(binary).resolve().parent
-    library = next((directory / name for name in ("libR.so", "libR.dylib", "R.dll")
-                    if (directory / name).is_file()), None)
-    return None if library is None else library_identity(library)
-
-
-def embedded_runtime(binary, home):
-    """The identity and R home of a ry that embeds its runtime, read from the R home it extracted:
-    the home's `.libr` names the runtime library on its first line."""
-    try:
-        library = pathlib.Path((home / ".libr").read_text().splitlines()[0])
-    except (OSError, IndexError) as error:
-        sys.exit(f"error: {binary} reported the R home {home}, which names no runtime library: {error}")
-    return library_identity(library), home.resolve()
-
-
-def library_identity(library):
+def runtime_identity(library):
+    """The identity of the runtime library `library`, which names every image it writes."""
     import ctypes
     function = ctypes.CDLL(str(library), mode=os.RTLD_LOCAL).ry_runtime_id
     function.restype = ctypes.c_char_p
     return function().decode()
-
-
-def base_tree(binary):
-    """The base R tree `rcmd::base::installed` finds for `binary`, or None for none."""
-    if os.environ.get("R_HOME"):
-        return pathlib.Path(os.environ["R_HOME"]).resolve()
-    if os.environ.get("RY_BASE_R"):
-        return pathlib.Path(os.environ["RY_BASE_R"]).resolve()
-    directory = pathlib.Path(binary).resolve().parent
-    candidates = [directory / "base-r", directory / "../lib/ry/base-r"]
-    target = next((ancestor for ancestor in [directory, *directory.parents]
-                   if (ancestor / "CACHEDIR.TAG").is_file()), None)
-    if target is not None and not directory.is_relative_to(target / "tmp"):
-        for ancestor in [directory, *directory.parents]:
-            candidates.append(ancestor / "base-r")
-            if ancestor == target:
-                break
-    return next((candidate.resolve() for candidate in candidates
-                 if (candidate / "library/base/R/base").is_file()), None)
-
-
-def image_writer(path):
-    """The runtime identity a start-up image (`RYSTART`) or code image (`RYCODE`) was written by,
-    read from its header, or None when the file is neither."""
-    try:
-        with open(path, "rb") as file:
-            header = file.read(4096)
-    except OSError:
-        return None
-    # A start-up image puts its header's length before the header, which opens with the identity.
-    offset = {b"RYSTART": 16, b"RYCODE\x00": 8}.get(header[:7])
-    if offset is None or len(header) < offset + 8:
-        return None
-    length = int.from_bytes(header[offset:offset + 8], "little")
-    return header[offset + 8:offset + 8 + length].decode(errors="replace")
 
 
 def metadata(args, release):
@@ -1096,6 +1218,8 @@ def metadata(args, release):
         "date": time.strftime("%Y-%m-%d"),
         "ry_commit": release_commit(release["tag"]) if release else commit(args.ry),
         "release": None if release is None else {key: release[key] for key in ("tag", "archive", "sha256")},
+        "libr_text_bytes": {build: size for build, binary in (("ry", args.ry), ("baseline", args.baseline))
+                            if binary and (runtime := runtime_of(binary)) and (size := text_size(runtime)) is not None},
         "machine": {"cpu": cpu, "cores": os.cpu_count(), "kernel": f"{platform.system()} {platform.release()}"},
         "command": "tools/bench/bench.py " + " ".join(shlex.quote(argument) for argument in sys.argv[1:]),
     }
@@ -1119,6 +1243,16 @@ def release_commit(tag):
     found = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
                            capture_output=True, text=True)
     return found.stdout.strip() or None
+
+
+def text_size(library):
+    """The size in bytes of the `.text` section of the runtime library `library` (`size -A`), or
+    None where `size` is missing."""
+    try:
+        listing = subprocess.run(["size", "-A", str(library)], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return next((int(line.split()[1]) for line in listing.splitlines() if line.startswith(".text ")), None)
 
 
 def commit(ry):

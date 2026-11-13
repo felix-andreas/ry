@@ -1226,14 +1226,14 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             // Matching here replaces the matching the generic call would do, so a call the
             // plan covers costs no more, and its arguments become references, not promises.
             if arguments == call.cdr()
-                && let Some(sources) = direct_sources(function, call)?
+                && let Some((shape, sources)) = direct_sources(function, call)?
             {
                 let references = interp().references_used;
                 closure_args_into::<EVALUATOR_REFERENCES>(arguments, env, &mut args)?;
                 let result = if sources[..] == [MATCH_PER_CALL] {
                     call_matching(call, function, &args, env)
                 } else {
-                    call_with_plan(call, function, &sources, &args, env)
+                    call_with_plan(call, function, shape, &sources, &args, env)
                 };
                 if interp().references_used != references {
                     release_references(references);
@@ -2188,7 +2188,13 @@ pub unsafe fn bind_arguments(
 #[derive(Clone, Copy)]
 pub enum CallFrame {
     Env(Sexp),
-    Slots { header: u32, missing: u64 },
+    /// A slot frame at `header` whose left-out formals are `missing`, of which `promised` have
+    /// a default that is code, not a literal ([`CallShape`]).
+    Slots {
+        header: u32,
+        missing: u64,
+        promised: u64,
+    },
 }
 
 /// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
@@ -2227,6 +2233,7 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
     let missing_value = missing_arg();
     let mut bound: SmallVec<[Sexp; 12]> = SmallVec::new();
     let mut missing = 0u64;
+    let mut promised = 0u64;
     let mut defaults = None;
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
@@ -2246,6 +2253,9 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
                 return Ok(None);
             }
             missing |= 1 << index;
+            if !(default.kind().is_atomic() || default == nil()) {
+                promised |= 1 << index;
+            }
             bound.push(default);
         } else {
             bound.push(actual);
@@ -2267,6 +2277,7 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
     Ok(Some(CallFrame::Slots {
         header: header as u32,
         missing,
+        promised,
     }))
 }
 
@@ -2278,15 +2289,24 @@ pub const DOTS_SOURCE: i32 = -2;
 /// arguments once they are collected.
 pub const MATCH_PER_CALL: i32 = -3;
 
+/// The source of a formal the site leaves out whose default is a literal, which goes in the
+/// slot as it is.
+pub const LITERAL_DEFAULT: i32 = -4;
+
+/// The source of a formal the site leaves out whose default is code, which runs as a promise
+/// over the slots.
+pub const PROMISED_DEFAULT: i32 = -5;
+
 /// The direct-call plan of the call `call` for closures with `function`'s formals and body:
-/// for each formal, the position of the argument that fills its slot, -1 when the site
-/// supplies none, or [`DOTS_SOURCE`] for `...`, followed by the positions of the arguments
+/// for each formal, the position of the argument that fills its slot, [`DOTS_SOURCE`] for
+/// `...`, or when the site supplies none, [`LITERAL_DEFAULT`] or [`PROMISED_DEFAULT`] for a
+/// formal with a default and -1 for one without, followed by the positions of the arguments
 /// `...` collects, in order. A call that passes `...` gets the one entry [`MATCH_PER_CALL`].
 /// `None` when such calls need [`bind_slots`] or a heap frame: the body has no slot table that
 /// names the formals, the call passes `..N`, its arguments do not match, or a formal the site
 /// leaves out has a default whose promise would capture the frame.
-pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i32; 8]>>> {
-    let Some((formal_count, dots_index)) = plannable(function) else {
+pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> {
+    let Some((shape, dots_index)) = plannable(function) else {
         return Ok(None);
     };
     let mut args = Args::new();
@@ -2308,29 +2328,29 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
         cell = cell.cdr();
     }
     if forwards_dots {
-        return Ok(Some(smallvec![MATCH_PER_CALL]));
+        return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
     }
-    plan_sources(function, formal_count, dots_index, &args, call)
+    plan_sources(function, shape, dots_index, &args, call)
 }
 
 /// The plan of a call whose site plans per call ([`MATCH_PER_CALL`]), from `args`, the
 /// arguments it collected with `...` spread out. `None` when they do not match, which the
 /// generic path then reports, or a default does not fit a slot.
-pub unsafe fn matched_sources(
-    function: Sexp,
-    args: &[Arg],
-    call: Sexp,
-) -> R<Option<SmallVec<[i32; 8]>>> {
-    let Some((formal_count, dots_index)) = plannable(function) else {
+pub unsafe fn matched_sources(function: Sexp, args: &[Arg], call: Sexp) -> R<Option<CallPlan>> {
+    let Some((shape, dots_index)) = plannable(function) else {
         return Ok(None);
     };
-    plan_sources(function, formal_count, dots_index, args, call)
+    plan_sources(function, shape, dots_index, args, call)
 }
 
-/// How many formals `function` has and which is `...`, when calls of it can take their
+/// A call's plan: the [`CallShape`] of the closures it is for, and its sources
+/// ([`direct_sources`]).
+pub type CallPlan = (CallShape, SmallVec<[i32; 8]>);
+
+/// The [`CallShape`] of `function` and which formal is `...`, when calls of it can take their
 /// arguments straight into slots: its body is compiled with a slot table whose first names
 /// are its formals.
-unsafe fn plannable(function: Sexp) -> Option<(usize, Option<usize>)> {
+unsafe fn plannable(function: Sexp) -> Option<(CallShape, Option<usize>)> {
     let body = function.cdr();
     if body.kind() != SexpType::Bytecode
         || function == interp().namespace_loader
@@ -2343,30 +2363,41 @@ unsafe fn plannable(function: Sexp) -> Option<(usize, Option<usize>)> {
         return None;
     }
     let names = table.element(1);
-    let mut formal_count = 0;
+    let slots = values::length(names);
+    let registers = values::ints(body.cdr().element(bytecode::REGISTERS))[0];
+    let mut shape = CallShape {
+        formals: 0,
+        slots: u16::try_from(slots).ok()?,
+        registers: u16::try_from(registers).ok()?,
+    };
     let mut dots_index = None;
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
-        if formal_count >= values::length(names) || names.element(formal_count) != formal.tag() {
+        let index = shape.formals as usize;
+        if index >= slots
+            || index >= bytecode::MAX_SLOT_FORMALS
+            || names.element(index) != formal.tag()
+        {
             return None;
         }
         if formal.tag() == symbols().dots {
-            dots_index = Some(formal_count);
+            dots_index = Some(index);
         }
-        formal_count += 1;
+        shape.formals += 1;
         formal = formal.cdr();
     }
-    Some((formal_count, dots_index))
+    Some((shape, dots_index))
 }
 
 /// The sources of [`direct_sources`] for `args` matched to `function`'s formals.
 unsafe fn plan_sources(
     function: Sexp,
-    formal_count: usize,
+    shape: CallShape,
     dots_index: Option<usize>,
     args: &[Arg],
     call: Sexp,
-) -> R<Option<SmallVec<[i32; 8]>>> {
+) -> R<Option<CallPlan>> {
+    let formal_count = shape.formals as usize;
     let formals = function.car();
     let Ok(plan) = match_plan(formals, args, call) else {
         return Ok(None);
@@ -2385,17 +2416,21 @@ unsafe fn plan_sources(
     }
     let mut defaults = None;
     let mut formal = formals;
-    for (index, &source) in sources[..formal_count].iter().enumerate() {
+    for (index, source) in sources[..formal_count].iter_mut().enumerate() {
         let default = formal.car();
-        if source < 0
-            && default != missing_value
-            && !slot_default_fits(function, default, index, &mut defaults)?
-        {
-            return Ok(None);
+        if *source == -1 && default != missing_value {
+            if !slot_default_fits(function, default, index, &mut defaults)? {
+                return Ok(None);
+            }
+            *source = if default.kind().is_atomic() || default == nil() {
+                LITERAL_DEFAULT
+            } else {
+                PROMISED_DEFAULT
+            };
         }
         formal = formal.cdr();
     }
-    Ok(Some(sources))
+    Ok(Some((shape, sources)))
 }
 
 /// Whether a slot frame of `function` can hold the default of the formal at `index` for a call
@@ -2423,7 +2458,7 @@ unsafe fn slot_default_fits(
 /// otherwise.
 pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
     match matched_sources(function, args, call)? {
-        Some(sources) => call_with_plan(call, function, &sources, args, sys_parent),
+        Some((shape, sources)) => call_with_plan(call, function, shape, &sources, args, sys_parent),
         None => crate::scope(|| {
             detach_references(args)?;
             apply_closure_owning(call, function, args, sys_parent, None)
@@ -2431,19 +2466,31 @@ pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent
     }
 }
 
+/// What binding a planned call needs to know about the closures a plan is for, all fixed by
+/// their formals and body ([`plannable`]): so many formals, a slot table of `slots` names (the
+/// formals, then the body's locals), and `registers` registers after the slots. Which formals
+/// take their default is in the plan's sources ([`LITERAL_DEFAULT`], [`PROMISED_DEFAULT`]), so
+/// a plan row stays small.
+#[derive(Clone, Copy, Default)]
+pub struct CallShape {
+    pub formals: u8,
+    pub slots: u16,
+    pub registers: u16,
+}
+
 /// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
-/// `bytecode::CallPlans` keeps per site) matched `args` to its formals already: the arguments go straight into the slots, with no
-/// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
-/// formals and body. What can change between calls (a debugger, a move) sends the call down
-/// the generic path.
+/// `bytecode::CallPlans` keeps per site with the closure's `shape`) matched `args` to its
+/// formals already: the arguments go straight into the slots, with no matching and none of
+/// [`apply_closure`]'s checks, which the plan settled for the closure's formals and body. What
+/// can change between calls (a debugger, a move) sends the call down the generic path.
 pub unsafe fn call_with_plan(
     call: Sexp,
     function: Sexp,
+    shape: CallShape,
     sources: &[i32],
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
-    let constants = function.cdr().cdr();
     let state = interp();
     if state.debugger.is_some()
         || moves::tracking()
@@ -2454,14 +2501,12 @@ pub unsafe fn call_with_plan(
             apply_closure(call, function, args, sys_parent, None)
         });
     }
-    let count = values::length(constants.element(bytecode::SLOTS).element(1));
+    let count = shape.slots as usize;
     let header = state.bytecode.registers.len();
-    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
-    bytecode::reserve_registers(header + 1 + count + register_count)?;
+    bytecode::reserve_registers(header + 1 + count + shape.registers as usize)?;
     let registers = bytecode::register_address(header);
     let missing_value = missing_arg();
-    let formal_count = values::length(function.car());
-    let (sources, dots_sources) = sources.split_at(formal_count.min(sources.len()));
+    let (sources, dots_sources) = sources.split_at((shape.formals as usize).min(sources.len()));
     let mut dots = missing_value;
     for &source in dots_sources.iter().rev() {
         if let Some(arg) = args.get(source as usize) {
@@ -2473,39 +2518,49 @@ pub unsafe fn call_with_plan(
             )?;
         }
     }
-    let mut missing = 0u64;
-    let mut formal = function.car();
+    let (mut missing, mut promised) = (0u64, 0u64);
+    // Only a formal the call leaves out reads its default, so the walk over the formals goes
+    // no further than the last of them.
+    let (mut formal, mut formal_index) = (function.car(), 0);
     for (index, &source) in sources.iter().enumerate() {
-        let default = formal.car();
         let value = match args.get(source as usize) {
             Some(arg) if source >= 0 => arg.value,
             _ if source == DOTS_SOURCE => dots,
-            _ if default != missing_value => {
+            _ if source <= LITERAL_DEFAULT => {
+                while formal_index < index {
+                    formal = formal.cdr();
+                    formal_index += 1;
+                }
                 missing |= 1 << index;
-                default
+                if source == PROMISED_DEFAULT {
+                    promised |= 1 << index;
+                }
+                formal.car()
             }
             _ => missing_value,
         };
         value.increment_refcount();
         *registers.add(1 + index) = value;
-        formal = formal.cdr();
     }
     let unbound = unbound();
     for index in sources.len()..count {
         *registers.add(1 + index) = unbound;
     }
-    run_frame(
+    let entered = enter(
         call,
         function,
-        CallFrame::Slots {
-            header: header as u32,
-            missing,
-        },
         sys_parent,
         args,
-        Entry::Unchecked,
         &[],
-    )
+        header as u32,
+        missing,
+        promised,
+    )?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let result = on_large_stack(|| bytecode::run_slots(function, header, count));
+    leave(entered.depth as usize, result)
 }
 
 /// Runs a call of `function` without running its body: `run` does what the body would, from a
@@ -2737,12 +2792,11 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     // generic path would have bound a promise of the variable, forced by the builtin call, and
     // `substitute` reads the variable from it. Constants bind as themselves either way.
     if frame.inlined
-        && let Some(sources) = direct_sources(frame.function, frame.call)?
+        && let Some((shape, sources)) = direct_sources(frame.function, frame.call)?
     {
         let header = frame.slots as usize;
         let call = frame.call;
-        let formal_count = values::length(frame.function.car());
-        for (slot, &source) in sources.iter().take(formal_count).enumerate() {
+        for (slot, &source) in sources.iter().take(shape.formals as usize).enumerate() {
             if source < 0 {
                 continue;
             }
@@ -3000,7 +3054,12 @@ pub unsafe fn run_frame(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
-    let CallFrame::Slots { header, missing } = frame else {
+    let CallFrame::Slots {
+        header,
+        missing,
+        promised,
+    } = frame
+    else {
         return run_frame_general(call, function, frame, sys_parent, args, entry, method_vars);
     };
     let entered = enter(
@@ -3011,11 +3070,13 @@ pub unsafe fn run_frame(
         method_vars,
         header,
         missing,
+        promised,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
     }
-    let result = on_large_stack(|| bytecode::run_slots(function, entered.header as usize));
+    let slots = bytecode::slot_count(function.cdr());
+    let result = on_large_stack(|| bytecode::run_slots(function, header as usize, slots));
     leave(entered.depth as usize, result)
 }
 
@@ -3047,6 +3108,7 @@ pub unsafe fn enter(
     method_vars: &[(Sexp, Sexp)],
     header: u32,
     missing: u64,
+    promised: u64,
 ) -> R<Entered> {
     let state = interp();
     if activity::enabled()
@@ -3054,7 +3116,11 @@ pub unsafe fn enter(
         || function == state.namespace_loader
         || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP))
     {
-        let frame = CallFrame::Slots { header, missing };
+        let frame = CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        };
         let value = run_frame_general(
             call,
             function,
@@ -3094,7 +3160,11 @@ pub unsafe fn enter(
         missing,
         caller,
     );
-    match sampled.and_then(|()| default_promises(depth - 1, function, header as usize, missing)) {
+    let defaults = sampled.and_then(|()| match promised {
+        0 => Ok(()),
+        _ => default_promises(depth - 1, function, header as usize, promised),
+    });
+    match defaults {
         Ok(()) => {
             let state = interp();
             state.slot_owner = (depth - 1) as u32;
@@ -3172,9 +3242,13 @@ unsafe fn run_frame_general(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
-    let (env, slots, missing) = match frame {
-        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
-        CallFrame::Slots { header, missing } => (nil(), header, missing),
+    let (env, slots, missing, promised) = match frame {
+        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0, 0),
+        CallFrame::Slots {
+            header,
+            missing,
+            promised,
+        } => (nil(), header, missing, promised),
     };
     let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
@@ -3226,7 +3300,7 @@ unsafe fn run_frame_general(
     let signature = match entry {
         // A slot frame's closure is never typed (`bind_slots`).
         _ if slots != crate::NO_SLOTS => {
-            default_promises(depth - 1, function, slots as usize, missing).map(|()| None)
+            default_promises(depth - 1, function, slots as usize, promised).map(|()| None)
         }
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
@@ -3252,7 +3326,8 @@ unsafe fn run_frame_general(
                     let state = interp();
                     let owner = state.slot_owner;
                     state.slot_owner = (depth - 1) as u32;
-                    let result = bytecode::run_slots(function, slots as usize);
+                    let count = bytecode::slot_count(function.cdr());
+                    let result = bytecode::run_slots(function, slots as usize, count);
                     interp().slot_owner = owner;
                     return result;
                 }
@@ -3589,29 +3664,23 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
     }
 }
 
-/// Replaces each left-out formal's default that is not a literal, which the binding put in its
-/// slot as the bare expression, with a promise of its code over the slot frame at `owner`.
-unsafe fn default_promises(owner: usize, function: Sexp, header: usize, missing: u64) -> R<()> {
-    if missing == 0 {
+/// Replaces the default of each formal in `promised`, which the binding
+/// put in its slot as the bare expression, with a promise of its code over the slot frame at
+/// `owner`.
+unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
+    if promised == 0 {
         return Ok(());
     }
-    let mut defaults = nil();
-    let mut formal = function.car();
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let default = formal.car();
-        if missing & (1 << index) != 0 && !(default.kind().is_atomic() || default == nil()) {
-            if defaults == nil() {
-                defaults = bytecode::slot_defaults(function)?;
-            }
-            let promise = slot_promise(owner, defaults.element(index))?;
-            crate::heap().store_slot(
-                &mut *bytecode::register_address(header + 1 + index),
-                promise,
-            );
-        }
-        formal = formal.cdr();
-        index += 1;
+    let defaults = bytecode::slot_defaults(function)?;
+    let mut pending = promised;
+    while pending != 0 {
+        let index = pending.trailing_zeros() as usize;
+        pending &= pending - 1;
+        let promise = slot_promise(owner, defaults.element(index))?;
+        crate::heap().store_slot(
+            &mut *bytecode::register_address(header + 1 + index),
+            promise,
+        );
     }
     Ok(())
 }
@@ -4614,17 +4683,19 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     {
         return Ok(value);
     }
-    // A loop that stays in the tree walker steps through a compact sequence by its first element
-    // and increment, as compiled loops do; expanding `1:n` would allocate all n elements before
-    // the first iteration.
-    let steps = if sequence.is_altrep() {
-        (interp().hooks.compact_sequence_steps)(sequence)
+    // A compact sequence is stepped through by its first element and increment, as compiled
+    // loops do. Other numbers are read one element at a time through `vector_element`, as GNU
+    // R's loop reads them through `INTEGER_ELT` and `REAL_ELT`, so no ALTREP number vector is
+    // expanded before the first iteration.
+    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
+    let sequence = if steps.is_some()
+        || matches!(
+            sequence.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        ) {
+        sequence
     } else {
-        None
-    };
-    let sequence = match steps {
-        Some(_) => sequence,
-        None => values::materialize(sequence)?,
+        values::materialize(sequence)?
     };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
@@ -4636,7 +4707,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
                 call.call,
             ));
         }
-        kind if kind.is_vector() => values::length(sequence),
+        kind if kind.is_vector() => length(sequence),
         SexpType::Record => {
             return Err(crate::records::boundary_error(
                 sequence,
@@ -6310,7 +6381,14 @@ pub unsafe fn complex_assign(
         // A copy-on-write copy is the same value, so an Array stays an Array; the
         // replacement function decides whether the write keeps it one.
         let was_array = base.is_array();
-        base = values::shallow_duplicate(base)?;
+        // As in GNU R, a shared local variable is copied under a wrapper, which defers copying
+        // the data until the replacement writes to it; a replacement that only changes
+        // attributes, or writes nothing, as `x[FALSE] <- 1` does, never copies it.
+        base = if !superassign && local_cell.is_some() && values::maybe_shared(base) {
+            values::shallow_duplicate_attr(base)?
+        } else {
+            values::shallow_duplicate(base)?
+        };
         base.set_array(was_array);
     }
     // GNU R binds `*tmp*` in this frame for the length of the assignment, and in a hashed frame
@@ -6418,7 +6496,14 @@ pub unsafe fn complex_assign(
         Ok(replacement)
     })();
     interp().tmp_values.pop();
-    assign_symbol(inner, replaced?, env, superassign)
+    let mut replaced = replaced?;
+    if !superassign && replaced.is_altrep() {
+        let bound = heap
+            .frame_cell(env, inner)
+            .is_some_and(|cell| cell.cdr() == replaced && !cell.has_gp(gp::ACTIVE_BINDING));
+        replaced = values::unwrap_assigned(replaced, bound);
+    }
+    assign_symbol(inner, replaced, env, superassign)
 }
 
 /// Whether `expression` contains an assignment whose target is `variable` or a part of it. An
