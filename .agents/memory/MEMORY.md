@@ -62,7 +62,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - After each release, append rows to the progress dashboard (`releasing.md`, "The progress dashboard"). Its `cran_popular` dataset is empty ("Open: the CRAN package corpus").
 - The Zed extension is not in Zed's registry, and the `VSCE_PAT` fallback for the VS Code Marketplace stops working on December 1, 2026 (`releasing.md`).
 - CI runs only on manual dispatch (user decision), and the orchestrator starts it on main when main has new commits (`decisions.md`, "CI runs in the flake's dev shell").
-- `.github/pending/test.yml` (the tests that need no GNU R and a 20-second pass of every fuzz target that builds without Polars, on each push to main) and the release workflow's dependency on it wait for the user's `git pull && just accept`. Accepting `test.yml` as staged overrides the user's decision that CI never runs on push, for those tests only; deleting its `push:` block first keeps the decision and still gates releases (`decisions.md`, "A push to main runs the tests that need no GNU R, and a release fails on them").
+- `.github/pending/test.yml` (the tests that need no GNU R and a 60-second pass of every fuzz target that builds without Polars, started by hand or by a release, never on a push) and the release workflow's dependency on it wait for the user's `git pull && just accept` (`decisions.md`, "The tests that need no GNU R run by hand and gate a release, never on push").
 
 ## Long-term
 

@@ -47,9 +47,10 @@ commits.
 
 `.github/pending/` holds two staged files that run nothing until a maintainer accepts them with the
 command below. `test.yml` runs the fixture suites, the tests of the crates that need no R and a
-bounded fuzz pass ([Testing](/development/testing#running-one-case)) on every push to main, so
-accepting it replaces "not on pushes" for those tests. The staged `release.yml` adds a `tests` job
-that calls `test.yml`, and `publish` needs it. A nightly build is not gated on the tests.
+bounded fuzz pass ([Testing](/development/testing#running-one-case)). Like `ci.yml`, it starts only
+by hand, not on pushes or pull requests. The staged `release.yml` adds a `tests` job that calls
+`test.yml`, and `publish` needs it, so a release is the one event that runs these tests without a
+hand start. A nightly build is not gated on the tests.
 
 Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
 under the same name in `.github/pending/`. A maintainer then moves it into place, commits and

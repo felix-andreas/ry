@@ -96,9 +96,17 @@ pub fn check_ide_invariants(source: &str) {
             && cursor_name.is_some()
         {
             let back = crate::references(&db, files, file, target_range.start(), true);
+            // A data.table `..name` read is a use of `name`, so its reference covers the name
+            // and leaves out the dots the cursor may sit on.
+            let dots = TextSize::from(match cursor_name {
+                Some(name) if name.starts_with("..") => 2,
+                _ => 0,
+            });
             assert!(
                 back.iter().any(|occurrence| {
-                    occurrence.file == file && occurrence.range.contains(offset)
+                    occurrence.file == file
+                        && occurrence.range.start() <= offset + dots
+                        && offset < occurrence.range.end()
                 }),
                 "{}: definition led to {target_range:?} but its references do not come back to \
                  the cursor",
@@ -248,7 +256,8 @@ fn name_at(source: &str, offset: TextSize) -> Option<&str> {
 }
 
 /// A range shifted by one byte is in bounds and self-consistent yet destroys code, so each range
-/// must spell the cursor's name. Backticks are normalized: `` `x` `` and `x` name one binding.
+/// must spell the cursor's name. Quotes are normalized: `` `x` `` and `x` name one binding, and
+/// so does the string in `"x" <- 1`.
 fn check_names(
     db: &RootDatabase,
     ranges: impl IntoIterator<Item = (SourceFile, TextRange)>,
@@ -263,17 +272,20 @@ fn check_names(
         let Some(spelled) = text.get(usize::from(range.start())..usize::from(range.end())) else {
             continue;
         };
-        assert_eq!(
-            unquote(spelled),
-            cursor_name,
-            "{what}: range {range:?} covers {spelled:?}, not the name under the cursor"
+        // A rest pattern (`..rest`) lexes as one name and binds the part after the dots.
+        let spelled = unquote(spelled);
+        assert!(
+            spelled == cursor_name || cursor_name.strip_prefix("..") == Some(spelled),
+            "{what}: range {range:?} covers {spelled:?}, not the name under the cursor \
+             ({cursor_name:?})"
         );
     }
 }
 
 fn unquote(name: &str) -> &str {
-    name.strip_prefix('`')
-        .and_then(|rest| rest.strip_suffix('`'))
+    ['`', '"', '\'']
+        .into_iter()
+        .find_map(|quote| name.strip_prefix(quote)?.strip_suffix(quote))
         .unwrap_or(name)
 }
 

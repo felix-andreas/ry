@@ -51,17 +51,19 @@ zero cases would otherwise report a pass.
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
 behavior. `just gate` runs every test plus clippy and a formatting check.
 
-A second workflow, `test.yml`, is staged in `.github/pending/` and runs nothing until a maintainer
-accepts it ([Releasing](/development/releasing#the-workflows)). Once accepted, it starts on every
-push to main, needs no GNU R, and has two jobs:
+Tests run locally, with `just gate` for everything and the two recipes below for the part that
+needs no GNU R. CI runs tests only when a maintainer starts a workflow by hand or tags a release,
+never on a push or a pull request. The workflow for the part without GNU R, `test.yml`, is staged
+in `.github/pending/` and runs nothing until a maintainer accepts it
+([Releasing](/development/releasing#the-workflows)). It has two jobs:
 
 | Job | Recipe | What it runs |
 | --- | --- | --- |
-| `tests` | `just test-push` | Every test of the crates that build without the interpreter, libR and Polars (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `oracle`, `rcmd`, `repl` and `ry-lang`): every fixture suite, the property fuzzers' bounded passes, the simulator and the scenarios. A test that compares with GNU R or runs ry's runtime skips, because the runner has neither |
-| `fuzz` | `just fuzz-all 20 runtime` | Every libFuzzer target that builds without Polars (15 of 17, all but `csv` and `unserialize`) for 20 seconds, stopping at the first failure. A failing input is uploaded with the run |
+| `tests` | `just test-fast` | Every test of the crates that build without the interpreter, libR and Polars (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `oracle`, `rcmd`, `repl` and `ry-lang`): every fixture suite, the property fuzzers' bounded passes, the simulator and the scenarios. A test that compares with GNU R or runs ry's runtime skips, because the runner has neither |
+| `fuzz` | `just fuzz-all 60 runtime` | Every libFuzzer target that builds without Polars (15 of 17, all but `csv` and `unserialize`) for 60 seconds of wall clock each. Every target runs, and the job fails if any finds a failure. A failing input is uploaded with the run |
 
-The staged `release.yml` calls `test.yml`, and its `publish` job needs it, so a release with a
-failing test publishes nothing.
+The staged `release.yml` calls `test.yml`, and its `publish` job needs it, so once both files are
+accepted a release with a failing test publishes nothing.
 
 The full gate is `ci.yml`. It runs `just ci`, which
 builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
@@ -635,13 +637,42 @@ with four build jobs, the compiler is killed while it builds `polars-core`. On s
 A target that links the runtime's heap runs without leak detection. LeakSanitizer does not scan
 mapped memory, which is where the heap keeps its objects, so memory that a live object owns would
 be reported as leaked. The `heap` crate turns the check off for a fuzz build
-(`__lsan_default_options` in `crates/heap/src/space.rs`); the analysis targets keep it.
+(`__lsan_default_options` in `crates/heap/src/space.rs`); the analysis targets keep it, except
+`reload` and `load_index`. The loader parses ahead on a detached thread, and a leak check that runs
+while that thread exits reports the thread's own bookkeeping, so those two targets turn the check
+off themselves.
+
+`interp_unserialize` runs with a ceiling of 16 MB on one allocation
+(`Heap::set_allocation_ceiling`, set by `check_unserialize_input`). A valid stream can name more
+memory than it holds, because a compact sequence is three numbers and reads as a vector of any
+length. Under the ceiling such a stream fails with the error for a vector that does not fit, so
+the target's memory is bounded by the size of its input.
+
+The reader treats its input as hostile, because `unserialize()` and `readRDS()` take any file. It
+refuses a length that the rest of the input cannot hold, a byte-code reference outside its table,
+and an item of the wrong kind in a position that implies one: a symbol's name, a string's element,
+an attribute list or an attribute's name, an environment, the name of a binding, of an argument or
+of a formal argument. Every such stream is pinned in `crates/interp/tests/test_fuzz.rs`, where one
+test asserts that each is refused and that every stream GNU R wrote for libR's conformance cases
+still reads. That test runs under collection stress, since the damage a wrong kind did showed only
+at a later collection.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
-cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` runs every target
-for two minutes each after seeding the corpora. A second argument names the features, so
-`just fuzz-all 20 runtime` leaves out the two Polars targets, and that is what the staged `test.yml`
-runs ([Running one case](#running-one-case)). Without `just`, from `fuzz/`:
+cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` seeds the
+corpora, builds every target and runs each for two minutes. A second argument names the features, so
+`just fuzz-all 60 runtime` leaves out the two Polars targets, and that is what the staged `test.yml`
+runs ([Running one case](#running-one-case)).
+
+The two minutes are wall clock, enforced by `timeout`, and a target that is interrupted at the
+bound has passed. libFuzzer's own `-max_total_time` cannot bound the pass, because it starts
+counting only after the target has replayed its whole corpus, and seven targets are seeded with
+every fixture source in the repository (about 5,300 files). `ide` runs four to seven inputs a
+second, so its replay alone takes about 15 minutes. `fuzz-all` replays the seeds in random order
+(`-prefer_small=0`), so a target that cannot finish its corpus inside the bound reads a different
+sample on each run. For a run that mutates beyond the seeds on a slow target, use `just fuzz-run`
+with a long `-max_total_time`.
+
+Without `just`, from `fuzz/`:
 
 ```sh
 cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources

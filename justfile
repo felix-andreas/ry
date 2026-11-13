@@ -80,11 +80,11 @@ ci:
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
 
-# What a push runs (test.yml, job `tests`): every test of the crates that build without the
-# interpreter, libR and Polars. A test that compares with GNU R or runs ry's runtime skips when
+# The tests that need no GNU R (test.yml, job `tests`): every test of the crates that build
+# without the interpreter, libR and Polars. A test that compares with GNU R or runs ry's runtime skips when
 # there is no `R` on the PATH and no built base R, so the recipe needs neither. `table` and the
 # runtime crates are left to `just battery`: their builds link Polars or the interpreter.
-test-push:
+test-fast:
     cargo test --no-fail-fast -p syntax -p format -p semantics -p ide -p sniff -p loader -p heap -p numeric -p ssa -p rdb -p crash -p oracle -p rcmd -p repl -p ry-lang
 
 clippy:
@@ -124,16 +124,21 @@ fuzz-deep minutes="120" base="1000000" depth="10" *args:
 fuzz-run target="semantics" *args:
     cargo fuzz run {{ target }} {{ args }}
 
-# Every libFuzzer target for `seconds` each, after seeding the corpora. `features` picks the
-# targets by the features of fuzz/Cargo.toml: `just fuzz-all 20 runtime` leaves out the two whose
-# build links Polars. The lockfile is seeded from the workspace's, because a fresh resolution can
-# pick a salsa-macro-rules that does not match the pinned salsa. Stops at the first target that
-# finds a failure.
+# Every libFuzzer target for `seconds` of wall clock each, after seeding the corpora and building
+# the targets. `features` picks the targets by the features of fuzz/Cargo.toml: `just fuzz-all 60
+# runtime` leaves out the two whose build links Polars. The bound is `timeout`, not libFuzzer's
+# `-max_total_time`, because libFuzzer replays a target's whole corpus before its own limit counts
+# and the slowest target needs about 15 minutes for that. A target that is interrupted at the bound
+# has passed. Seeds are replayed in random order (`-prefer_small=0`), so a target that cannot get
+# through its corpus in time reads a different sample on each run. Every target runs, and the
+# recipe fails at the end if any found a failure. The lockfile is seeded from the workspace's,
+# because a fresh resolution can pick a salsa-macro-rules that does not match the pinned salsa.
 fuzz-all seconds="120" features="runtime,polars":
     #!/usr/bin/env bash
     set -euo pipefail
     cp Cargo.lock fuzz/Cargo.lock
     cargo -Zscript scripts/seed-fuzz-corpus.rs
+    cargo fuzz build -O --no-default-features --features "{{ features }}"
     targets=$(cargo metadata --manifest-path fuzz/Cargo.toml --no-deps --format-version 1 | python3 -I -c '
     import json, sys
     enabled = set(sys.argv[1].split(","))
@@ -141,10 +146,22 @@ fuzz-all seconds="120" features="runtime,polars":
         if set(target.get("required-features", [])) <= enabled:
             print(target["name"])
     ' "{{ features }}")
+    failed=""
     for target in $targets; do
         echo "== $target"
-        cargo fuzz run -O --no-default-features --features "{{ features }}" "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096
+        status=0
+        timeout --signal=INT --kill-after=60 {{ seconds }} \
+            cargo fuzz run -O --no-default-features --features "{{ features }}" "$target" -- \
+            -prefer_small=0 -timeout=30 -rss_limit_mb=4096 || status=$?
+        if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            echo "== $target FAILED (exit status $status)"
+            failed="$failed $target"
+        fi
     done
+    if [ -n "$failed" ]; then
+        echo "fuzz targets that found a failure:$failed"
+        exit 1
+    fi
 
 # Phase timings, memory and typing bursts for a workspace.
 stats path=".":

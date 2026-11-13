@@ -1,20 +1,15 @@
-# Every push to main runs what needs no GNU R: the fixture suites and the other tests of the crates
-# that build without the interpreter, libR and Polars, and a bounded libFuzzer pass over every
-# target that builds without Polars. The release workflow calls this file, so a release fails on
-# the same checks. Each job runs one `just` recipe, so each one also runs locally; to change what a
-# job runs, edit its recipe in the justfile. The full gate, which compares ry with GNU R, is
-# ci.yml, and it starts by hand. Without the `push` trigger below, this file runs only inside a
-# release and when started by hand.
+# The tests that need no GNU R: the fixture suites and the other tests of the crates that build
+# without the interpreter, libR and Polars, and a bounded libFuzzer pass over every target that
+# builds without Polars. This file runs when started by hand and inside a release, which calls it,
+# so a release fails on these checks; no push or pull request starts it. Each job runs one `just`
+# recipe, so each one also runs locally; to change what a job runs, edit its recipe in the
+# justfile. The full gate, which compares ry with GNU R, is ci.yml, and it starts by hand too.
 name: Tests
 
 on:
-  push:
-    branches: [main]
   workflow_call:
   workflow_dispatch:
 
-# A push while a run is in flight waits for it and replaces any older waiting push, so main always
-# gets a finished run however often it moves, and one run can cover several pushes.
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -45,8 +40,8 @@ jobs:
           for program in R Rscript; do
             while path=$(command -v "$program"); do sudo rm "$path"; done
           done
-      - name: just test-push
-        run: just test-push
+      - name: just test-fast
+        run: just test-fast
 
   fuzz:
     name: bounded fuzz pass
@@ -67,7 +62,7 @@ jobs:
       # `runtime` leaves out the two targets that link Polars (`csv` and `unserialize`): built
       # with coverage instrumentation, Polars needs more memory than a hosted runner has.
       - name: just fuzz-all
-        run: just fuzz-all 20 runtime
+        run: just fuzz-all 60 runtime
       - name: upload the failing input
         if: failure()
         uses: actions/upload-artifact@v4

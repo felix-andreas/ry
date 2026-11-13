@@ -1864,12 +1864,40 @@ replacing or inserting one statement at a boundary.
   clean, only 89 distinct shapes appear, and 60 steps lex to two tokens because an inserted `"`
   swallows the buffer. Yet `reparse.rs` sits at 96.12% against a grammar-directed stream's 96.44%.
   Reset the buffer every 20 steps or so and skip a near-empty one. Do not rewrite it.
-- **Coverage-guided fuzzing has never run.** `cargo fuzz` is not installed, `fuzz/corpus/` does not
-  exist, no CI job invokes it, and the root `cargo test` resolves to the product crate so
-  `fuzz_deep` never runs either. Meanwhile the `REGRESSIONS` arrays, 21 in `format` and 2 in
-  `semantics`, are documented finds from exactly that mechanism. `fuzz/` does still compile, in 83 s
-  under `cargo +nightly check`. Judging coverage costs one component, because
-  `rustup component add llvm-tools-preview` produced every number in this review.
+- **Coverage-guided fuzzing covers 15 of 17 targets, shallowly on the slow ones.**
+  `just fuzz-all 60 runtime` runs them, locally or in the staged `test.yml` once it is accepted and
+  someone starts it or tags a release. What it leaves open:
+  - `csv` and `unserialize` (libR's reader) run nowhere. Their build instruments Polars, which is
+    killed for memory in a 15 GB container with four build jobs.
+  - `ide` runs four to seven inputs a second, so 60 seconds read about 300 of its 5,300 seeds and
+    never reach mutation. An optimized build without instrumentation replays all of them in 147
+    seconds, so the cost is the instrumented build and not the harness. Seven targets share those
+    seeds (`scripts/seed-fuzz-corpus.rs`), and a smaller seed set would bound the replay.
+  - Leak detection is off for every target that links `heap` (`__lsan_default_options` in
+    `crates/heap/src/space.rs`), because LeakSanitizer does not scan the mapped object space.
+    Registering the space as a root region should restore it (not tried).
+  - `reload` and `load_index` also run without leak detection, and they break the rule that no
+    harness reads the machine or starts a thread it cannot step: `Loader` reads a load index from
+    the user's cache directory when one is there and then parses ahead on a detached thread
+    (`loader::parse_detached`). LeakSanitizer reported that thread's own bookkeeping as leaked
+    when the process exited while it ran (seen once on `reload`; inferred for `load_index`, which
+    shares the path). The fix is a cache directory and a parse-ahead that the harness controls.
+  - `interp`'s reader checks a vector's length against the rest of the input only for a slice
+    (`Reader::expect_elements` in `crates/interp/src/serialize.rs`). Read from a connection, a
+    made-up length is allocated before the read fails (from reading the code, not from a run).
+  - The same reader returns a `CHARSXP`, a byte-code object and a primitive without reading the
+    attributes their flags announce, and ignores an ALTREP object's flag bits. An old stream with
+    attributes on a `CHARSXP` would fall out of step (from reading the code; libR's reader
+    handles it). `crates/rdb` and `crates/libr` have their own readers, which got none of the
+    kind checks.
+  - A compact sequence is materialized when read, so three numbers ask for any amount of memory.
+    `check_unserialize_input` lowers the heap's allocation ceiling for that reason. The product has
+    no total vector limit (GNU R's `mem.maxVSize`), and keeping the sequence compact needs the
+    ALTREP classes that live in `libr`.
+  - Find-references skips a file or item whose text does not contain the name. `may_spell` in
+    `crates/ide/src/ide.rs` covers a backticked name with an escape for a global, and the S4
+    target and the own-package `pkg::name` branch have the same text test without it (not
+    reproduced).
 - **Two arms silently contribute no inputs.** `corpus/` does not exist and nothing in CI or the
   justfile fetches it, so `fuzz_corpus_seeded` in `syntax` and in `format` returns early. That is
   about 1,050 budgeted inputs that never run, behind a skip line `cargo test` hides. It is the same
