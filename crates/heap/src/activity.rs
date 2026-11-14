@@ -100,6 +100,27 @@ impl Activity {
             Activity::Profiler => "profile summary bookkeeping",
         }
     }
+
+    /// A stable snake_case name, for machine-readable output.
+    pub fn key(self) -> &'static str {
+        match self {
+            Activity::Other => "other",
+            Activity::Interpreter => "interpreter",
+            Activity::Evaluator => "evaluator",
+            Activity::CallSetup => "call_setup",
+            Activity::Lookup => "lookup",
+            Activity::Builtin => "builtin",
+            Activity::S3Dispatch => "s3_dispatch",
+            Activity::S4Dispatch => "s4_dispatch",
+            Activity::Native => "native",
+            Activity::Conditions => "conditions",
+            Activity::Introspection => "introspection",
+            Activity::Collector => "collector",
+            Activity::JitCompile => "jit_compile",
+            Activity::Compiled => "compiled",
+            Activity::Profiler => "profiler",
+        }
+    }
 }
 
 /// Event counts the summary reports beside the time split.
@@ -189,6 +210,35 @@ impl Counter {
             Counter::DoCallsInlined => "do.call calls run without its body",
         }
     }
+
+    /// A stable snake_case name, for machine-readable output.
+    pub fn key(self) -> &'static str {
+        match self {
+            Counter::ClosureCalls => "closure_calls",
+            Counter::NativeEntries => "native_entries",
+            Counter::BuiltinCalls => "builtin_calls",
+            Counter::PromisesCreated => "promises_created",
+            Counter::ArgumentReferences => "argument_references",
+            Counter::PromisesForced => "promises_forced",
+            Counter::FormalsMatchedByName => "formals_matched_by_name",
+            Counter::DotsCalls => "dots_calls",
+            Counter::S3Dispatches => "s3_dispatches",
+            Counter::S4Dispatches => "s4_dispatches",
+            Counter::NativeCalls => "native_calls",
+            Counter::ConditionsSignalled => "conditions_signalled",
+            Counter::HandlersEstablished => "handlers_established",
+            Counter::JitCompiles => "jit_compiles",
+            Counter::JitDeoptimizations => "jit_deoptimizations",
+            Counter::JitEntries => "jit_entries",
+            Counter::LookupMisses => "lookup_misses",
+            Counter::FramesReified => "frames_reified",
+            Counter::PackageCalls => "package_calls",
+            Counter::PackageCallsDirect => "package_calls_direct",
+            Counter::PackageCallsObserved => "package_calls_observed",
+            Counter::WrappersInlined => "wrappers_inlined",
+            Counter::DoCallsInlined => "do_calls_inlined",
+        }
+    }
 }
 
 /// The most builtins [`count_builtin`] keeps a count for; ry defines fewer than this.
@@ -197,9 +247,10 @@ pub const BUILTIN_SLOTS: usize = 4096;
 /// The most [`label`]s [`count_package_fallback`] keeps a count for.
 pub const LABEL_SLOTS: usize = 1024;
 
-/// What makes a call leave its fast path, one bit each: [`SUMMARY`] while a profile summary is
-/// collected, [`PROFILE_TICK`] once per `Rprof` sampling interval, and the interpreter's own
-/// observers of calls ([`DEBUGGER`], [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so
+/// What makes a call leave its fast path, one bit each: [`SUMMARY`] while anything needs every
+/// closure call to pass the profiling hooks (a profile summary, benchmark regions, the
+/// boundary-call recorder), [`CAPTURE`] while boundary calls are recorded, [`PROFILE_TICK`] once
+/// per `Rprof` sampling interval, and the interpreter's own observers of calls ([`DEBUGGER`], [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so
 /// a call tests all of them with a single load ([`hooks`]). The byte is atomic because `Rprof`'s
 /// timer thread sets its bit; every other bit is written by the R thread, by whatever changes
 /// the state the bit stands for ([`set_hook`]).
@@ -215,6 +266,12 @@ pub const DEBUGGER: u8 = 4;
 pub const MOVES: u8 = 8;
 /// The [`HOOKS`] bit set while the session refuses to define S4, R6 and reference classes.
 pub const NO_OBJECT_SYSTEMS: u8 = 16;
+/// The [`HOOKS`] bit set while the boundary-call recorder runs. It is set only together with
+/// [`SUMMARY`], so a call's entry tests one bit for both. Code that runs without a call entry
+/// reads it on its own: closures that run natively without a frame, to take their frame path
+/// instead, and the places that evaluate code in an environment (a promise being forced,
+/// `eval`, and the C API's evaluators).
+pub const CAPTURE: u8 = 32;
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =
     [const { AtomicU64::new(0) }; Counter::ALL.len()];
@@ -447,6 +504,7 @@ pub fn push_frame(owner: u32, name: usize, body: usize) -> FrameScope {
 }
 
 /// A scope that publishes nothing, for when no summary is being collected.
+#[inline(always)]
 pub fn no_frame() -> FrameScope {
     FrameScope {
         depth: 0,

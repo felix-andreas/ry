@@ -123,6 +123,14 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
         find_native_symbol: |name| unsafe { crate::dynload::find_symbol(name, "") },
+        serialize: |object| unsafe {
+            crate::serialize::serialize_to_bytes(
+                object,
+                crate::serialize::Format::Xdr,
+                3,
+                interp::values::nil(),
+            )
+        },
     };
     interp::install(&mut runtime.heap, hooks);
     heap::object::install_altrep_elements(heap::object::AltrepElements {
@@ -483,7 +491,10 @@ pub unsafe fn make_condition(unwind: &Unwind) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_eval(expression: Sexp, env: Sexp) -> Sexp {
-    enter(|| eval(expression, env))
+    enter(|| {
+        let _recorded = interp::capture::evaluating(|| env);
+        eval(expression, env)
+    })
 }
 
 /// `R_tryEval` runs in a top-level context of its own: handlers established outside it do not
@@ -496,7 +507,9 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let saved = interp::conditions::set_aside(handlers.clone(), restarts.clone());
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
+        let recorded = interp::capture::evaluating(|| env);
         let result = eval(expression, env);
+        drop(recorded);
         drop(saved);
         let state = interp::interp();
         state.handlers = handlers;
@@ -1452,7 +1465,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return false;
     }
-    if let Err(unwind) = crate::loader_backend::attach() {
+    // Attaching the loader runs R code at top level, which the boundary-call recorder would
+    // otherwise take for the user's.
+    if let Err(unwind) = interp::capture::without_recording(|| crate::loader_backend::attach()) {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return false;
@@ -1677,7 +1692,9 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
-    if let Err(unwind) = crate::loader_backend::attach() {
+    // Attaching the loader runs R code at top level, which the boundary-call recorder would
+    // otherwise take for the user's.
+    if let Err(unwind) = interp::capture::without_recording(|| crate::loader_backend::attach()) {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return 2;
@@ -1724,7 +1741,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     if let Some(startup) = &startup {
         // `run_text` reports an error itself, and a failed startup load still leaves a console
         // the user can fix the package from.
-        interp::session::run_text(startup, "<startup>");
+        interp::capture::without_recording(|| interp::session::run_text(startup, "<startup>"));
     }
     interp::session::run_console(
         // SAFETY: the console reads on the interpreter's thread, at its top level.
@@ -1857,6 +1874,7 @@ pub unsafe extern "C" fn R_ParseEvalString(text: *const c_char, env: Sexp) -> Se
     enter(|| {
         let expression = parse_one(text)?;
         runtime().heap.root(expression);
+        let _recorded = interp::capture::evaluating(|| env);
         eval(expression, env)
     })
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests of bench.py: its release-archive mode (what results.json records about the archive, and
-which images the run accepts) and the typed suite, which scores typed ry against Rust.
+which images the run accepts), the typed suite, which scores typed ry against Rust, and the hot
+suite's runner and its generator, tooling/hot.py.
 
 A fake archive stands in for a release: its `ry` is a shell script that, like the real one,
 extracts a runtime library (a C library built here that exports `ry_runtime_id`) and a base R tree
@@ -11,7 +12,7 @@ this file.
 
 usage: python3 -I tools/bench/test_bench.py
 """
-import argparse, hashlib, importlib.util, io, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
+import argparse, hashlib, importlib.util, io, math, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
 from contextlib import redirect_stdout
 
 here = pathlib.Path(__file__).resolve().parent
@@ -222,6 +223,264 @@ class PublicSuite(unittest.TestCase):
         self.addCleanup(runner.close)
         outcome = runner.run(program, engine)
         self.assertEqual((outcome["seconds"], outcome["checksum"]), (0.5, "1:2"))
+
+
+spec = importlib.util.spec_from_file_location("hot", here / "tooling/hot.py")
+hot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hot)
+
+
+class HotSuite(unittest.TestCase):
+    def setUp(self):
+        self.args = argparse.Namespace(seed=1, rounds=3, extra_rounds=0)
+        self.table = [bench.Engine("gnu_r", "GNU R", None, {}), bench.Engine("ry", "ry", None, {})]
+        self.directory = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-test-"))
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+
+    def program(self, name, weight, **fields):
+        return dict({"id": name, "display": name, "samples": [f"samples/{name}-1.rds"], "iterations": [100],
+                     "rng": [False], "threw": [False], "fresh": [False], "namespaces": [], "gnu_seconds_per_call": 1e-4,
+                     "share": dict(weight), "weight": dict(weight)}, **fields)
+
+    def summarize(self, programs, rounds):
+        """The results of `rounds`, each a map from a program to its batch seconds on GNU R and ry."""
+        state = {"rounds": [{name: {engine.key: {"seconds": seconds, "min": seconds, "checksum": "num:1:0:2:1.00000000000", "calls": 100}
+                                    if seconds else {"seconds": None, "reason": "a call failed: no"}
+                                    for engine, seconds in zip(self.table, pair)}
+                             for name, pair in round_.items()} for round_ in rounds]}
+        return bench.summarize(bench.HOT_SUITE, {"name": "Hot package entries"}, programs, self.table, state,
+                               self.args, {}, None)
+
+    def test_a_suite_that_was_never_generated_says_how_to_generate_it(self):
+        with self.assertRaises(SystemExit) as refusal:
+            bench.load_hot_suite(self.directory)
+        self.assertIn("has not been generated", str(refusal.exception))
+        self.assertIn("just bench-hot-capture", str(refusal.exception))
+
+    def test_a_program_needs_iterations_and_flags_for_every_sample(self):
+        (self.directory / "samples").mkdir()
+        (self.directory / "samples/sd-1.rds").write_bytes(b"")
+        program = self.program("sd", {"finbench": 1.0}, iterations=[1, 2])
+        (self.directory / "suite.toml").write_text(
+            hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
+        with self.assertRaises(SystemExit) as refusal:
+            bench.load_hot_suite(self.directory)
+        self.assertIn("gives sd 1 samples but not as many iterations", str(refusal.exception))
+        program["iterations"] = [1]
+        del program["fresh"]
+        (self.directory / "suite.toml").write_text(
+            hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
+        with self.assertRaises(SystemExit):
+            bench.load_hot_suite(self.directory)
+        program["fresh"] = [True]
+        (self.directory / "suite.toml").write_text(
+            hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
+        self.assertEqual(bench.load_hot_suite(self.directory)["programs"], [program])
+
+    def test_reads_a_harness_line(self):
+        self.assertEqual(bench.parse_hot_line("stats-sd num:1:0:1.5:1.00000000000,error 0.019000 0.020500 2044"),
+                         ("stats-sd", {"checksum": "num:1:0:1.5:1.00000000000,error", "calls": 2044, "seconds": 0.0205, "min": 0.019}))
+        self.assertEqual(bench.parse_hot_line("stats-sd num:1:0:1.5:1.00000000000 NA NA 2044"),
+                         ("stats-sd", {"checksum": "num:1:0:1.5:1.00000000000", "calls": 2044}))
+        self.assertEqual(bench.parse_hot_line("zoo-rollmean failed namespace zoo does not load: gone"),
+                         ("zoo-rollmean", {"seconds": None, "reason": "namespace zoo does not load: gone"}))
+        self.assertIsNone(bench.parse_hot_line("Loading required namespace: data.table"))
+
+    def test_the_program_table_lists_each_samples_flags(self):
+        program = self.program("sd", {}, samples=["samples/sd-1.rds", "samples/sd-2.rds"], iterations=[10, 20],
+                               rng=[True, False], threw=[False, True], fresh=[True, True], namespaces=["stats", "zoo"])
+        self.assertEqual(bench.hot_program_table([program]),
+                         "id\tsamples\titerations\trng\tthrew\tfresh\tnamespaces\n"
+                         "sd\tsamples/sd-1.rds,samples/sd-2.rds\t10,20\t1,0\t0,1\t1,1\tstats,zoo\n")
+
+    def test_a_program_the_harness_printed_no_line_for_fails(self):
+        engine = bench.Engine("ry", "ry", [sys.executable, "-c", "print('sd num:1:0:2:1.00000000000 0.01 0.02 7')"], dict(os.environ))
+        (self.directory / "suite.toml").write_text(hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": []}))
+        runner = bench.HotRunner(bench.HOT_SUITE, self.args, directory=self.directory)
+        self.addCleanup(runner.close)
+        measured = runner.run_batch([self.program("sd", {}), self.program("median", {})], engine)
+        self.assertEqual(measured["sd"], {"checksum": "num:1:0:2:1.00000000000", "calls": 7, "seconds": 0.02, "min": 0.01})
+        self.assertEqual(measured["median"], {"seconds": None, "reason": "the harness printed no line for it"})
+
+    def test_the_predicted_speedup_is_the_weighted_harmonic_mean(self):
+        programs = [self.program("fast", {"finbench": 0.75, "dsbench": 0.5}),
+                    self.program("slow", {"finbench": 0.25, "dsbench": 0.5})]
+        results = self.summarize(programs, [{"fast": (0.020, 0.010), "slow": (0.010, 0.020)}] * 3)
+        # finbench: 1 / (0.75 / 2 + 0.25 / 0.5); dsbench: 1 / (0.5 / 2 + 0.5 / 0.5).
+        self.assertEqual(results["predicted"]["ry"]["finbench"],
+                         {"median": round(1 / 0.875, 4), "low": round(1 / 0.875, 4), "high": round(1 / 0.875, 4),
+                          "weight": 1.0, "programs": 2})
+        self.assertEqual(results["predicted"]["ry"]["dsbench"]["median"], 0.8)
+        self.assertEqual(results["geomean"]["ry"]["median"], 1.0)
+        self.assertEqual(results["programs"][0]["calls"], 100)
+        self.assertEqual(results["programs"][0]["weight"], {"finbench": 0.75, "dsbench": 0.5})
+
+    def test_a_failed_program_leaves_the_prediction_and_its_weight_shows(self):
+        programs = [self.program("fast", {"finbench": 0.75}), self.program("broken", {"finbench": 0.25})]
+        rounds = [{"fast": (0.020, 0.010), "broken": (0.010, None)}] * 3
+        state_rounds = self.summarize(programs, [{"fast": (0.020, 0.010), "broken": (0.010, 0.010)}] * 3)
+        self.assertEqual(state_rounds["predicted"]["ry"]["finbench"]["weight"], 1.0)
+        results = self.summarize(programs, rounds)
+        self.assertEqual(results["predicted"]["ry"]["finbench"]["weight"], 0.75)
+        self.assertEqual(results["predicted"]["ry"]["finbench"]["median"], 2.0)
+
+    def test_compares_a_hot_checksum_sample_by_sample(self):
+        reference = "dbl:3:41x1234:4.243134612345678e+00:6.000000000000000e-01,error"
+        # The sums of the numbers agree to an absolute 1e-10.
+        self.assertTrue(bench.same_checksum("dbl:3:41x1234:4.243134612395678e+00:6.000000000020000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1234:4.243134622345678e+00:6.000000000000000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1234:4.243134612345678e+00:-6.000000000000000e-01,error", reference))
+        # The kind, the length and the hash of everything exact must match.
+        self.assertFalse(bench.same_checksum("int:3:41x1234:4.243134612345678e+00:6.000000000000000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1235:4.243134612345678e+00:6.000000000000000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1234:4.243134612345678e+00:6.000000000000000e-01", reference))
+        # A large sum over many vectors agrees to a relative 1e-13.
+        self.assertTrue(bench.same_checksum("list:9:7x1:1.000000000000050e+04:0.000000000000000e+00",
+                                            "list:9:7x1:1.000000000000000e+04:0.000000000000000e+00"))
+        self.assertTrue(bench.same_checksum("opaque:closure,null", "opaque:closure,null"))
+        self.assertFalse(bench.same_checksum("opaque:closure", "opaque:environment"))
+
+    def test_reads_a_region_profile(self):
+        text = "\n".join([
+            '{"region": "sd", "seconds": 0.1, "samples": 1000, "activities": {"interpreter": 600, "gc": 400}, "counters": {"calls": 7}}',
+            '{"region": "", "seconds": 0.5, "samples": 5000, "activities": {"startup": 5000}, "counters": {}}', ""])
+        self.assertEqual(bench.parse_regions(text), {"sd": {"seconds": 0.1, "samples": 1000,
+                                                            "activities": {"interpreter": 0.6, "gc": 0.4},
+                                                            "counters": {"calls": 7}}})
+
+    def test_weights_a_breakdown_by_each_programs_share_of_ry_time(self):
+        rows = [{"weight": {"finbench": 0.5}, "ratio": {"ry": {"median": 1.0}}, "breakdown": {"activities": {"gc": 1.0}}},
+                {"weight": {"finbench": 0.5}, "ratio": {"ry": {"median": 0.5}}, "breakdown": {"activities": {"interpreter": 1.0}}}]
+        # The second program takes twice the ry time of the first.
+        self.assertEqual(bench.weighted_breakdown(rows),
+                         ("ry time", {"finbench": {"interpreter": round(2 / 3, 4), "gc": round(1 / 3, 4)}}))
+        # Without a speed-up for every program, the GNU R weight alone weighs them.
+        del rows[1]["ratio"]
+        self.assertEqual(bench.weighted_breakdown(rows), ("GNU R time", {"finbench": {"gc": 0.5, "interpreter": 0.5}}))
+
+    def test_reads_a_callgrind_dump_its_region_triggered(self):
+        dump = ("version: 1\ncmd: ry run\ndesc: Trigger: Client Request: stats-sd\nevents: Ir\nsummary: 0\n"
+                "fn=(1) eval\n12 123456\ntotals: 123456\n")
+        self.assertEqual(bench.parse_callgrind_dump(dump), ("stats-sd", 123456))
+        self.assertIsNone(bench.parse_callgrind_dump("desc: Trigger: Program termination\nsummary: 0\ntotals: 99\n"))
+
+    def test_a_function_holds_its_own_instructions_not_its_callees(self):
+        dump = ("positions: line\nevents: Ir\n\n"
+                "ob=(1) /lib/libR.so\nfn=(1) interp::eval::h0123456789abcdef\n0 100\n"
+                "cob=(2) /lib/stats.so\ncfn=(2) C_cov\ncalls=1 0\n0 700\n+3 20\n\n"
+                "ob=(2)\nfn=(2)\n0 700\n\n"
+                "ob=(1)\nfn=(3) 0x00000000004a2b10\n0 5\nfn=(4) 0x00000000004a2c00'2\n0 6\n"
+                "totals: 831\n")
+        self.assertEqual(bench.parse_callgrind_functions(dump),
+                         {("libR.so", "interp::eval"): 120, ("stats.so", "C_cov"): 700, ("libR.so", "(no symbols)"): 11})
+
+    def test_function_shares_follow_the_programs_weights(self):
+        programs = [self.program("a", {"finbench": 0.75}, gnu_seconds_per_call=1e-5),
+                    self.program("b", {"finbench": 0.25}, gnu_seconds_per_call=1e-5)]
+        counts = {"a": {"calls": 10}, "b": {"calls": 10}}
+        by_function = {"a": {("libR.so", "eval"): 600, ("libR.so", "match_arguments"): 400},
+                       "b": {("libR.so", "eval"): 1000}}
+        self.assertEqual(bench.weighted_functions(programs, counts, by_function, 1),
+                         [{"object": "libR.so", "function": "eval", "share": {"finbench": 0.7}}])
+
+    def test_an_instruction_change_is_weighted_by_gnu_r_time(self):
+        programs = [self.program("a", {"finbench": 0.5}, gnu_seconds_per_call=1e-5),
+                    self.program("b", {"finbench": 0.5}, gnu_seconds_per_call=1e-4)]
+        old = {"a": {"per_call": 1000.0}, "b": {"per_call": 10000.0}}
+        new = {"a": {"per_call": 1500.0}, "b": {"per_call": 10000.0}}
+        self.assertEqual(bench.weighted_instructions(programs, old), {"finbench": 100000000})
+        changes = bench.compare_instructions(programs, old, new)
+        self.assertEqual([change["id"] for change in changes], ["a", "b"])
+        self.assertEqual(changes[0]["change"], 50.0)
+        self.assertEqual(changes[0]["effect"], {"finbench": 25.0})
+        self.assertEqual(changes[1]["effect"], {"finbench": 0.0})
+
+
+class HotSelection(unittest.TestCase):
+    def test_names_operators_and_dotted_names(self):
+        self.assertEqual(hot.slug("base", "["), "base-subset")
+        self.assertEqual(hot.slug("data.table", "rbindlist"), "data-table-rbindlist")
+        self.assertEqual(hot.slug("base", "match.arg"), "base-match-arg")
+        self.assertEqual(hot.slug("base", "names<-"), "base-names-assign")
+        programs = [{"package": "base", "name": "a.b"}, {"package": "base", "name": "a_b"}]
+        hot.assign_ids(programs)
+        self.assertEqual([program["id"] for program in programs], ["base-a-b", "base-a-b-2"])
+
+    def test_the_manifest_reads_back_as_written(self):
+        manifest = {"id": "hot", "name": "Hot \"entries\"\n", "session": ["stats", "data.table"],
+                    "selection": {"coverage": 0.9, "samples": 3},
+                    "programs": [{"id": "x", "rng": [True, False], "iterations": [3, 4], "gnu_seconds_per_call": 2e-05,
+                                  "share": {"finbench": 0.5}, "weight": {}}]}
+        self.assertEqual(hot.tomllib.loads(hot.render_toml(manifest)), manifest)
+
+    def test_keys_are_chosen_by_summed_share_until_each_code_base_is_covered(self):
+        def capture(seconds):
+            return {"entries": {key: {"seconds": value, "uncapturable_seconds": 0.0} for key, value in seconds.items()},
+                    "samples": {key: [{}] for key in seconds if key != ("base", "lost")}}
+        captures = {"finbench": capture({("a", "x"): 6.0, ("base", "lost"): 9.0, ("b", "y"): 3.0, ("c", "z"): 1.0}),
+                    "dsbench": capture({("b", "y"): 9.0, ("c", "z"): 1.0})}
+        # A key with no valid sample counts in its code base's time, so finbench never reaches 90%.
+        self.assertEqual(hot.choose_keys(captures, 10, 0.9), [("b", "y"), ("a", "x"), ("c", "z")])
+        self.assertEqual(hot.choose_keys(captures, 1, 0.9), [("b", "y")])
+        self.assertEqual(hot.choose_keys(captures, 10, 0.45), [("b", "y"), ("a", "x")])
+
+    def test_typical_samples_are_near_the_mean_then_small(self):
+        samples = [{"seconds": 1e-3, "compact_bytes": 10, "path": "far"},
+                   {"seconds": 1.02e-5, "compact_bytes": 900, "path": "near-big"},
+                   {"seconds": 0.99e-5, "compact_bytes": 100, "path": "near-small"}]
+        self.assertEqual([sample["path"] for sample in hot.typical_samples(samples, 1e-5, 2)], ["near-small", "near-big"])
+
+    def test_gnu_r_time_scales_the_captured_time_by_the_samples_ratio(self):
+        def capture(seconds, samples):
+            return {"entries": {("p", "f"): {"seconds": seconds, "uncapturable_seconds": 0.0}}, "samples": {("p", "f"): samples}}
+        slow = [{"seconds": 2e-3, "gnu_seconds_per_call": 1e-3}, {"seconds": 6e-3, "gnu_seconds_per_call": 3e-3}]
+        captures = {"finbench": capture(10.0, slow), "dsbench": capture(4.0, [])}
+        # dsbench has no valid sample of its own, so it takes the ratio of every code base's.
+        self.assertEqual(hot.gnu_time(("p", "f"), captures, slow), {"finbench": 5.0, "dsbench": 2.0})
+        # The entry's own time in calls the recorder could not capture counts as well.
+        captures["dsbench"]["entries"][("p", "f")]["uncapturable_seconds"] = 2.0
+        self.assertEqual(hot.gnu_time(("p", "f"), captures, slow), {"finbench": 5.0, "dsbench": 3.0})
+
+    def test_a_weight_is_the_share_of_gnu_r_time(self):
+        programs = [{"id": "a", "gnu_time": {"finbench": 3.0}}, {"id": "b", "gnu_time": {"finbench": 1.0, "dsbench": 2.0}}]
+        hot.weigh_programs(programs, "finbench")
+        hot.weigh_programs(programs, "dsbench")
+        self.assertEqual([program["weight"] for program in programs], [{"finbench": 0.75}, {"finbench": 0.25, "dsbench": 1.0}])
+
+    def test_tracking_compares_each_configuration_with_the_first(self):
+        programs = [{"id": "a", "weight": {"finbench": 0.75}}, {"id": "b", "weight": {"finbench": 0.25}}]
+        measured = {"hot": {"gnu_r": {"a": 1.0, "b": 1.0}, "new": {"a": 0.5, "b": 1.0}, "old": {"a": 1.0, "b": 2.0},
+                            "broken": {"a": 1.0}},
+                    "codebases": {"finbench": {"gnu_r": {"seconds": 100.0}, "new": {"seconds": 50.0, "checksum": "ok"},
+                                               "old": {"seconds": 100.0, "checksum": "ok"},
+                                               "broken": {"seconds": None, "reason": "crashed"}}}}
+        measured["hot"]["partial"] = {"b": 1.0}
+        measured["codebases"]["finbench"]["partial"] = {"seconds": 50.0, "checksum": "ok"}
+        new, old, broken, partial = hot.tracking_rows(measured, programs, ["new", "old", "broken", "partial"], "finbench")
+        self.assertEqual((new["predicted"], new["measured"], new["predicted_change"]), (0.625, 0.5, 0.0))
+        self.assertEqual((old["predicted"], old["measured"]), (1.25, 1.0))
+        self.assertAlmostEqual(old["predicted_change"], math.log(2))
+        self.assertAlmostEqual(old["measured_change"], math.log(2))
+        # A program the configuration did not run leaves both its prediction and the reference
+        # prediction it is compared with: here the reference over a alone is 0.5.
+        self.assertEqual((broken["predicted"], broken["reference"], broken["weight"], broken["measured_change"]),
+                         (1.0, 0.5, 0.75, None))
+        self.assertEqual((partial["predicted"], partial["reference"], partial["weight"], partial["predicted_change"]),
+                         (1.0, 1.0, 0.25, 0.0))
+
+    def test_a_configuration_names_a_binary_and_its_environment(self):
+        self.assertEqual(hot.parse_configuration("nojit=/opt/ry,RY_JIT=off,RY_BASE_R=/base"),
+                         ("nojit", "/opt/ry", {"RY_JIT": "off", "RY_BASE_R": "/base"}))
+        # The harness runs in a directory of its own, so a relative binary is made absolute.
+        self.assertEqual(hot.parse_configuration("head=target/ry")[1], os.path.abspath("target/ry"))
+        with self.assertRaises(SystemExit):
+            hot.parse_configuration("/opt/ry")
+
+    def test_correlation_needs_three_changes(self):
+        self.assertEqual(hot.correlation([(0.1, 0.1), (0.2, 0.2)]), (None, None))
+        r, slope = hot.correlation([(0.1, 0.05), (0.2, 0.1), (-0.2, -0.1)])
+        self.assertAlmostEqual(r, 1.0)
+        self.assertAlmostEqual(slope, 0.5)
 
 
 class BuildProfile(unittest.TestCase):
