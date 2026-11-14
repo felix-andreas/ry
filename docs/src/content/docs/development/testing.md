@@ -1212,10 +1212,10 @@ just bench-mechanisms --ry target/release/ry --filter dispatch
 ```
 | operation | expression | instructions |
 | --- | --- | ---: |
-| dispatch: `UseMethod`, class method | `describe(object)` | 8,290 |
-| dispatch: `UseMethod`, default method | `describe(i)` | 8,933 |
-| dispatch: `UseMethod` then `NextMethod` | `describe(child)` | 15,830 |
-| dispatch: builtin to a method (`length`) | `length(object)` | 5,628 |
+| dispatch: `UseMethod`, class method | `describe(object)` | 6,437 |
+| dispatch: `UseMethod`, default method | `describe(i)` | 7,067 |
+| dispatch: `UseMethod` then `NextMethod` | `describe(child)` | 14,104 |
+| dispatch: builtin to a method (`length`) | `length(object)` | 3,768 |
 ...
 ```
 
