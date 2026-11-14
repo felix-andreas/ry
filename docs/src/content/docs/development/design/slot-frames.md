@@ -3,19 +3,21 @@ title: Slot frames
 description: "Closure calls that keep their variables in the interpreter's register window and create an environment only when something asks for one"
 ---
 
-A closure call today allocates an environment object, one binding cell per formal, and a promise for each argument
-that is not a constant. It releases them all when it returns. On the testthat workload
-(`tools/bench/applications/testthat.R`, images on, JIT at its default), that work is the largest exclusive
-cost under callgrind:
+A closure call that binds a heap frame allocates an environment object, one binding cell per formal, and a
+promise for each argument that is not a constant. It releases them all when it returns. On the testthat workload
+(`tools/bench/applications/testthat.R`, images on, JIT at its default), that work was the largest exclusive
+cost under callgrind before slot frames:
 
 | Sink | Share of 8.03G instructions | Largest functions |
 |---|---|---|
 | Frames and argument matching | 23.8% | `run_closure` 3.8%, `bind_arguments` 3.2%, `define_formals_uncollected` 2.1%, `release_frame` 1.5%, `clear_frame` 1.5% |
 | Binding cells and lookup | 14.3% | `lookup_variable` 2.9%, `lookup_function` 2.5%, `frame_cell` 2.1%, `run_get_var` 1.8% |
 
-That is about 2.2k instructions of frame work per closure call. This page proposes the end shape. A
-call keeps its formals and locals in slots of the register window, and an environment object exists
-only once something needs one.
+That is about 2.2k instructions of frame work per closure call. A slot frame avoids it. The call
+keeps its formals and locals in slots of the register window, takes its arguments as pooled
+references that allocate nothing, and gets an environment object only when something asks for one.
+That environment binds nothing at first: a variable moves into a binding cell only when a lookup
+through the environment asks for that variable.
 
 ## Most frames never need an environment
 
@@ -35,13 +37,14 @@ before it returned. The run had 600,000 calls.
 were dead at return even when a promise had captured them.
 
 A slot frame therefore saves the environment, its cells and their release on 62.5% of calls if a
-promise reifies the frame. It saves them on up to 91% of calls if a promise can point at the slot frame
-and reify it only when the promise outlives the call.
+promise forces the frame into an environment that binds every variable. It saves the cells on up to
+91% of calls if a promise can point at an environment that binds nothing and takes the variables
+only when the promise outlives the call.
 
 ## The shape
 
-The first step is built (`bind_slots` and `reify` in `crates/interp/src/eval.rs`). This section
-describes it, and the open gaps are marked.
+`bind_slots`, `pending_env`, `box_variable` and `lift_frame` in `crates/interp/src/eval.rs` implement
+it.
 
 - **Which calls get a slot frame.** The compiler gives a body a slot table (`SLOTS` in its
   constants) when `local_symbols` succeeds (`collect_bindings` in `crates/interp/src/bytecode.rs`).
@@ -52,27 +55,35 @@ describes it, and the open gaps are marked.
   `.GenericCallEnv`, `.GenericDefEnv`). The same calls with an explicit environment, `local`,
   `with`, `on.exit`, `sys.function` and `do.call` of a named function are accepted, because every
   route by which a callee reaches the frame (`parent.frame`, `sys.frame`, `environment(fn)` of a
-  closure made inside) reifies it on demand. The body also has at most 64 formals and does not
+  closure made inside) gets the frame's environment on demand. The body also has at most 64 formals and does not
   open with one of the fast-path prologues that evaluate code in their frame or define variables
   there (`match.arg`, `Reduce` and rlang's `trace_back`, listed in
   `base_fast_paths::prologue_needs_environment`). The other prologues read their formals from the
   slots and return through the pending environment (`base_fast_paths::ClosureFrame`), so
-  `stopifnot`, `structure`, `setdiff` and the withr helpers keep their slot frames. At the call, `bind_slots` also refuses a closure with tier-1 or baseline machine code
-  (which reads variables through the environment), a closure under the debugger or a type signature,
-  and a call where a missing formal's default is neither a literal, a symbol, nor code compiled
-  with its own slot table. Those calls bind a heap frame as before.
+  `stopifnot`, `structure`, `setdiff` and the withr helpers keep their slot frames. At the call, `bind_slots` also refuses a closure under the debugger, a closure with a type
+  signature, any call made while a caller's collection is moved into a parameter (`moves.rs`), and a call where a missing formal's default
+  is neither a literal, a symbol, nor code compiled with its own slot table. Those calls bind a
+  heap frame.
 - **Defaults.** A missing formal whose default is not a literal starts with the default's
   expression in its slot and its missing bit set. Once the frame is pushed, `default_promises`
-  replaces it with a promise over the slots, compiled once per closure (`bytecode::slot_defaults`,
-  cached in the slot table's third element against the closure's formals and never written to a
-  code image). On return, default promises that were never forced and that nothing else holds do
-  not count as escaping promises (`unforced_defaults`), so they do not force the environment.
-- **S3 methods.** A method called by `UseMethod` or `NextMethod` gets a slot frame too. Its
-  dispatch variables live beside the frame (`Interp::method_vars`, `Frame::method_vars`), and
-  `reify` binds them, so `NextMethod` and `environment()` in the method find them.
-  `NextMethod` from such a method reads them without reifying (`eval::pending_name`), passes
-  the next method promises over the frame's pending environment, and lets the method return in
-  slots when the next method neither forced nor kept them (`MadePromises` in `dispatch.rs`).
+  replaces the expression with an argument reference of the frame to itself (see "Argument
+  references"): a code reference that runs the default's code on the frame's slots, compiled
+  once per closure (`bytecode::slot_defaults`, cached in the slot table's third element against
+  the closure's formals and never written to a code image), or a reference to the variable a
+  default names. The reference comes from the pool and goes back when the frame returns
+  (`Frame.references`, `release_frame_references`), so a default costs the call no promise and no
+  environment.
+- **S3 methods.** A method called by `UseMethod` or `NextMethod` gets a slot frame too, and
+  `UseMethod` from a slot frame (`dispatch::use_method_in_slots`) hands the method the argument
+  references the generic was called with, unchanged. The method's dispatch variables live beside
+  the frame (`Interp::method_vars`, `Frame::method_vars`) and get a binding cell when something
+  reads one by name (`box_variable`) or the environment takes every variable (`lift_frame`).
+  `.GenericCallEnv` is recorded as unbound when the generic's caller is a slot frame without an
+  environment, and reading it asks that caller for its environment (`eval::method_var_value`).
+  `NextMethod` from such a method reads the dispatch variables without moving them
+  (`eval::pending_name`), passes the next method promises over the method's environment, and
+  lets the method return in slots when the next method neither forced nor kept them
+  (`MadePromises` in `dispatch.rs`).
 - **Layout.** The activation reserves `1 + n` registers above its own: a header register, then one
   slot per symbol the table numbers, formals first in order. The header holds the frame's
   environment once it has one, and `R_NilValue` before. A slot holds a value and counts one
@@ -84,17 +95,18 @@ describes it, and the open gaps are marked.
   header is nil, and the environment after. Builtins that only read a frame property take the
   frame's index (`Call::frame_index`) instead of its environment. A fused element-wise pass
   (`fused_pass`) finds a leaf's slot by name (`Machine::slot_of`), because its leaves carry no
-  slot number, and `<<-` starts from the closure's environment, so neither reifies.
-- **Reification.** `reify` builds the environment from the slots exactly as `bind_arguments` and
-  the assignments since would have: formals first with their missing flags, then each bound local.
-  The slots then drop their references, the header and `Frame.env` point at the environment, and
-  from then on the environment is the source of truth. Nothing is copied back.
-- **Frame identity.** `Frame.env` is filled lazily, and `Frame.sys_parent` is nil while the caller
-  is an unreified slot frame, which then is the frame just below (`envir::caller_index`).
-  `frame_env(index)` and `frame_sys_parent(index)` are the only ways to get either as an `SEXP`, and
-  both reify on demand.
-- **Release.** A frame that was never reified drops its slots' references on return instead of
-  `release_frame` and `clear_frame`.
+  slot number, and `<<-` starts from the closure's environment, so neither asks for the frame's
+  environment.
+- **The environment.** A slot frame has no environment object until something asks for one, and
+  the object it then gets binds nothing. "The environment of a slot frame" below gives its states.
+- **Frame identity.** `Frame.env` is nil while the frame's own code runs on its slots,
+  `Frame.pending` holds the environment once it exists, and `Frame.sys_parent` is nil while the
+  caller is a slot frame, which `Frame.caller` then names by position (`envir::caller_index`).
+  `frame_env(index)` and `frame_sys_parent(index)` are the only ways to get either as an `SEXP`,
+  and both make the environment on demand.
+- **Release.** A frame whose environment took no variable drops its slots' references on return
+  instead of `release_frame` and `clear_frame`, and an environment that nothing outside the frame
+  holds is discarded with it (`finish_frame`, `outliving_cause`).
 - **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
   `bytecode.rs`): which argument fills each formal's slot. The site marks itself seen on its first
   call, builds the plan on the second, and from then on `eval::call_with_plan` writes the arguments
@@ -120,70 +132,112 @@ describes it, and the open gaps are marked.
   the defaults are a fact of the formals and body together, which is the plan's key. The site
   reads its row after collecting the arguments, which runs no R code; a generation counter that
   every store and free moves confirms the row is unchanged with one compare.
-- **Forwarding `...`.** A call that passes `...` appends the promises the frame's `...` slot holds,
+- **Forwarding `...`.** A call that passes `...` appends the items the frame's `...` slot holds,
   to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
   argument is a constant or a slotted local), so `f(x, ...)`, `list(...)` and `c(x, ...)` leave the
-  frame without an environment.
+  frame without an environment. A call evaluated in the frame's environment that passes `...` on,
+  such as the element call `FUN(X[[i]], ...)` of `lapply`, `vapply` and `Map`, reads the slot in
+  place (`eval::dots_binding`).
 - **Not built.** Slot access from the JIT's tiers ([the native execution model](/development/design/r-runtime/#the-native-execution-model)).
 
-## Reification triggers
+## The environment of a slot frame
 
-These are the reads that need the environment as an object. Each one reifies the frame first.
+The environment goes through up to three states, and most frames stop before the second.
 
-| Trigger | Where |
-|---|---|
-| A promise made in the frame that the slot-promise path does not cover (see below), default promises, `delayedAssign` | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` when the next method keeps one past its return |
-| A closure created in the frame, past the frame's 16 tracked closures (see below) | `slot_closure` in `eval.rs`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
-| A closure made in the frame that may outlive it | `finish_frame` in `eval.rs` |
-| Reflection that returns the environment | `environment()`, `sys.frame(s)`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
-| A read of the bindings of the pending environment `parent.frame()` handed out, or that environment kept past the frame's return | `eval::resolve_pending_read`, `finish_frame` in `eval.rs` |
-| Code that the compiler did not translate and that runs in the frame | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
-| S3 and S4 dispatch reading the generic's frame | `UseMethod` (`dispatch.rs`), and `NextMethod` only from a function that was not dispatched to (no `.Class` or `.GenericCallEnv` in its frame); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
-| Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
-| The C API | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
-| A promise over the frame still unforced when the frame returns | `run_frame` in `eval.rs` |
-| Subassignment, a replacement call or `x$name` on an object, which may dispatch to a method | `op_sub_assign`, `op_replace`, `op_field` in `bytecode.rs` |
-| A method `UseMethod` dispatches to while the generic has locals to forward (the R < 4.4 behavior) | `do_usemethod` in `dispatch.rs` runs the method in a heap frame, because a slot frame shows the forwarded locals only once it has an environment |
+| State | Flag on the environment | Where a variable is | What the frame's own code reads |
+|---|---|---|---|
+| No environment | (no object) | its slot | slots |
+| Empty | `gp::PENDING_FRAME` | its slot | slots |
+| Partial | `gp::PARTIAL_FRAME` | its slot or a cell, never both | the environment, by name |
+| Complete | none | a cell | the environment, by name |
+
+- **Empty.** `pending_env` allocates one environment that binds nothing, enclosed by the
+  closure's environment. Everything that only names the frame is served by that object: a promise
+  or a closure made in the frame, `parent.frame()`, `sys.function`, a builtin that dispatches, a
+  condition handler, exit code registered from a callee. The heap knows which names the frame may
+  bind (`expect_bindings`: the slot table's names and a method's dispatch variables), so a lookup
+  of any other name passes on to the enclosure without asking the frame.
+- **Partial.** A lookup of a name the frame may bind, for which the environment has no cell, calls
+  the resolver the interpreter installs in the heap (`eval::resolve_pending_access`, from
+  `bindings_for` in `heap.rs`). `box_variable` moves that one variable from its slot into a cell
+  (`box_slots`), and `leave_slots` switches the frame's own code to reading and writing by name:
+  the header register and `Frame.env` hold the environment from then on. Every other variable
+  stays in its slot until a lookup asks for it. A binding made by name (`assign`, `delayedAssign`)
+  makes the same switch without moving anything.
+- **Complete.** `lift_frame` moves every variable still in a slot into a cell, binds a method's
+  dispatch variables, orders the bindings as a heap frame lists them (formals first) and clears
+  the flags, which leaves an ordinary environment. It runs when something reads the bindings as a
+  whole (`bindings` in `heap.rs`: `ls`, `as.list`, `mget`, serialization) and when the frame
+  returns while something that outlives it holds the environment (see "Exit code and returns").
+
+A variable is in its slot or in a cell, never in both, so there is one source of truth for each
+variable in every state and nothing is copied back.
+
+A lookup that reaches the environment has to find the frame it stands for. The environment's
+frame record stores the frame's position on the interpreter's frame stack (`Heap::slot_owner`,
+set by `pending_env` and cleared by `lift_frame`), in the field that counts removed bindings in
+an ordinary environment. The two uses cannot meet, because a slot frame's environment takes every
+variable and stops being one before a binding is removed from it. `eval::pending_owner` checks
+that the frame at that position still names the environment, so a use after the frame returned
+without it is a panic, not a read of another frame.
+
+### What asks for the environment
+
+| What | State it needs | Where |
+|---|---|---|
+| A promise the argument-reference path does not cover (see "Promises over a slot frame"), `delayedAssign` | empty | `slot_promise`, `slot_promises_into` |
+| A closure created in the frame | empty | `slot_closure`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
+| `parent.frame()`, `sys.function`, `sys.frame(s)`, `environment()`, `as.environment(-1)`, `eval`'s numeric `envir` | empty, then whatever the code that receives it reads | `frame_env`, `frame_sys_parent` |
+| Code that the compiler did not translate and that runs in the frame | partial, for the variables it reads | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
+| S3 dispatch from a builtin on an object argument | empty | `bytecode::call_builtin` |
+| S4 dispatch reading the generic's frame | partial | `standardGeneric`, which reads the signature arguments from the generic's frame (`do_standard_generic`), `exec_method` and `callNextMethod` (`methods.rs`) |
+| Condition handlers and restarts that record a frame | empty | `.addCondHands`, `.addRestart` (`conditions.rs`) |
+| The C API | empty, then whatever the native code reads | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
+| Subassignment, a replacement call or `x$name` on an object, which may dispatch to a method | partial, for the variable assigned | `op_sub_assign`, `op_replace`, `op_field` in `bytecode.rs` |
+| A method `UseMethod` dispatches to while the generic has locals to forward (the R < 4.4 behavior) | complete | `do_usemethod` in `dispatch.rs` runs the method in a heap frame |
+| A promise, a closure or the environment itself held past the frame's return | complete | `finish_frame`, `outliving_cause` |
 
 A builtin that receives `call.env` and only reads a frame property (`missing`, `nargs`, `on.exit`,
-`sys.call`, `match.call`) gets the frame reference instead and does not reify.
+`sys.call`, `match.call`) gets the frame reference instead and asks for no environment.
 
-`sys.frame()` called from a callee reifies the caller's frame, not the callee's own, which makes
-`match.arg` (it evaluates the caller's formals through `sys.frame(sys.parent())`) a common trigger
-in package code. `parent.frame()` instead hands out the caller's pending environment
-(`eval::frame_sys_parent_pending`), because most package code only passes that frame on or
-compares it: `do.call(f, args, envir = parent.frame())`, `tryCatch`'s handler frame, and
-`withr::defer(expr, envir = parent.frame())`, which registers exit code on the caller. The caller
-reifies only when code reads or writes its bindings through that environment (counted as
-`parent.frame`, an observing cause), or when the environment outlives the frame (see "Exit code
-and returns" below). Every lookup of a frame by its environment goes through `Frame::owns`, which
-also matches the pending environment, so `on.exit`, `sys.function`, `Recall`, `UseMethod` and the
-`parent.frame` chain find a frame that has handed out its pending environment.
+`sys.frame()` called from a callee asks for the caller's environment, not the callee's own, which
+makes `match.arg` (it evaluates the caller's formals through `sys.frame(sys.parent())`) a common
+reason in package code. `parent.frame()` is served the same way, and most package code only passes
+that frame on or compares it: `do.call(f, args, envir = parent.frame())`, `tryCatch`'s handler
+frame, and `withr::defer(expr, envir = parent.frame())`, which registers exit code on the caller.
+The caller's variables move only when code reads or writes them through that environment. Every
+lookup of a frame by its environment goes through `Frame::owns`, which also matches
+`Frame.pending`, so `on.exit`, `sys.function`, `Recall`, `UseMethod` and the `parent.frame` chain
+find a frame whose own code still runs on its slots.
 
-### Reads that must not reify
+### Reads that move nothing
 
-These are hot in package code and work from the slots and the frame reference alone:
+These are hot in package code and work from the slots and the frame record alone:
 
+- A variable or function lookup that reaches the frame's environment from a closure or a promise
+  made in it. `find_var`, `find_fun` and the byte code's `lookup_variable` and `lookup_function`
+  take a value or a promise from the slot where it sits (`eval::slot_binding`), so a callback
+  reading its defining frame's locals leaves them in their slots.
 - `substitute(x)` and `deparse(substitute(x))`, which read the promise's expression, not its
   environment.
-- `missing(x)`, including on an argument forwarded from the caller, which follows the promise into
-  the caller's frame and reads its slot's missing bit.
+- `missing(x)`, by name through the environment or on an argument forwarded from the caller. It
+  follows the promise or reference into the frame it names and reads the slot and its missing
+  bit (`slot_is_missing`, `reference_is_missing`).
 - `...length()`, `..1` and `...elt(n)`, which read the `...` slot.
 - `nargs()`, `sys.call()`, `match.call()` and `on.exit()`, which read the frame record.
 - `UseMethod(generic)` and `UseMethod(generic, object)`, `.Internal(...)`, `quote(...)`,
   `x <<- value` and `switch(selector, ...)` over the frame's `...`, which `slot_special_call` in
   `bytecode.rs` runs on the slots.
-- `parent.frame()` that is only passed on or compared (see above).
 - `x[i]` and `x[[i]]` whose other arguments are constants, empty or locals, such as `s[[field]]`
   with `field` a formal (`slot_subject_call` in `bytecode.rs`). The subject evaluates first. An
   object subject then looks for its method before anything else runs (GNU R's `DispatchOrEval`
   order), starting from the enclosure, which answers as the frame would because the check refuses
   a frame with a local named like a method of the generic or named `.packageName`. Only a method
-  found reifies the frame, so that the method's promises (a fresh promise of `field` in the frame,
-  so `substitute(i)` in the method returns `field`) have an environment to point at. Without a
-  method, the other arguments evaluate from the slots after the lookup, and a formal that is
-  missing, also deeply through the caller's promise of a missing argument, passes on as an empty
-  argument. An S4 subject and a frame subject of `[` take the environment's path.
+  found asks for the environment, so that the method's promises (a fresh promise of `field` in
+  the frame, so `substitute(i)` in the method returns `field`) have an environment to point at.
+  Without a method, the other arguments evaluate from the slots after the lookup, and a formal
+  that is missing, also deeply through the caller's promise of a missing argument, passes on as an
+  empty argument. An S4 subject and a frame subject of `[` take the environment's path.
 
 ### The C API
 
@@ -191,72 +245,73 @@ These are hot in package code and work from the slots and the frame reference al
 `R_ToplevelContext` point at one opaque zeroed block that reads as "at top level" (`native.c`), and
 `R_sysframe`, `R_sysfunction` and `Rf_sysparent` are not exported. The routes that hand native code a
 frame's environment are `R_GetCurrentEnv` (`eval.rs`, through `current_env`), `PRENV` on a promise,
-and the `rho` argument of `.External` and `.External2`; each reifies first. Every other function that
+and the `rho` argument of `.External` and `.External2`; each makes the environment first. Every other function that
 takes an environment (`Rf_eval`, `R_tryEval`, `Rf_findVar`, `R_findVarLoc`, `R_getVar`,
 `R_existsVarInFrame`, `R_ParentEnv`, `FRAME`, `ENCLOS`) receives an `SEXP` that one of those routes or
-R code already handed out, so it only ever sees a reified environment, and binding cells keep their
-stable addresses for `R_findVarLoc`. `R_GetCurrentSrcref` reads the frame record and does not reify.
+R code already handed out, so every binding it reads or writes goes through `bindings` or `bindings_for` in `heap.rs`, which
+moves the variable into a cell first. A cell keeps its address once it exists, which
+`R_findVarLoc` relies on. `R_GetCurrentSrcref` reads the frame record and asks for no environment.
 
 ### Identity
 
-Reification happens once per frame. The frame record keeps the environment it created, so a second
-`environment()`, `sys.frame()` of the same frame, and the environment a promise or closure captured
-are the identical `SEXP`, and `identical()` and `environmentName()` behave as for a heap frame.
+A frame makes its environment once and keeps it in the frame record, so a second `environment()`,
+`sys.frame()` of the same frame, and the environment a promise or closure captured are the
+identical `SEXP` through every state, and `identical()` and `environmentName()` behave as for a
+heap frame.
 
 ## Promises over a slot frame
 
-The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env` in `eval.rs`,
-`slot_promises_into` in `bytecode.rs`). It covers the 33% of calls that only promises capture.
+Most arguments are argument references (see below) and need no promise. A call from a slot frame
+makes real promises when the callee has no direct-call plan or takes a heap frame (`slot_promise`
+in `eval.rs`, `slot_promises_into` in `bytecode.rs`).
 
-- **Which calls.** A call from an unreified slot frame passes its arguments as promises over the
-  frame when every argument is a constant, the missing marker, a symbol, or code the compiler
-  compiled against the caller's slot table, and `...` passes on what the frame collected. A
-  `..N` symbol, a call that is not compiled, or a compiled promise that reads a local the table does not number falls back to the
-  heap-frame path, which reifies the caller.
-- **The pending environment.** The first such promise allocates an empty environment for the frame
-  (`Frame.pending`), flagged `PENDING_FRAME`, and the promises name it as their environment. If the
-  frame reifies, `reify` fills that environment and clears the flag, so a promise forced later reads
-  the same object every other reader sees.
-- **Forcing.** Forcing a promise over a pending environment finds the owner frame (the frame whose
-  `pending` it is) and reads its slots: a symbol reads its slot and falls back to the enclosure when
-  the slot is unbound, and compiled code runs on the owner's registers with `Interp.slot_owner` set
-  to the owner, so `slot_owner_env` and `Call::frame_index` name the owner and not the frame forcing
-  it.
-- **Return.** `Frame.unforced` counts the frame's promises that have not been forced yet. A frame
-  that returns with any reifies first, so an escaped promise keeps reading the values the slots held
-  at return, as it would from a heap frame.
-- **Frame identity.** A callee whose caller is an unreified slot frame records the caller's index
+- **Which calls.** Every argument is a constant, the missing marker, a symbol, or code the compiler
+  compiled against the caller's slot table, and `...` passes on what the frame collected. A `..N`
+  symbol, a call that is not compiled, or a compiled promise that reads a local the table does not
+  number is evaluated by name in the environment, which moves the variables it reads.
+- **The environment.** The promise names the frame's environment, which the first such promise
+  makes in the empty state.
+- **Forcing.** Forcing a promise over a slot frame's environment finds the owner frame and, while
+  every variable is in its slot, reads the slots (`slot_promise_value`): a symbol reads its slot
+  and falls back to the enclosure when the slot is unbound, and compiled code runs on the owner's
+  registers with `Interp.slot_owner` set to the owner, so `slot_owner_env` and `Call::frame_index`
+  name the owner and not the frame forcing it. Once the environment binds a variable, the promise
+  evaluates in the environment.
+- **Return.** A promise the frame made that is still unforced when the frame returns, and that
+  something outside the frame holds, makes the environment complete (`outliving_cause`), so the
+  escaped promise reads the values the slots held at return, as it would from a heap frame.
+- **Frame identity.** A callee whose caller is a slot frame records the caller's index
   (`Frame.caller`), which `envir::caller_index` and `frame_sys_parent` follow. A promise forced
   further down the stack therefore still reports its own frame's caller.
-- **Readers of a promise's environment** go through `eval::promise_env`, which reifies the owner:
-  `PRENV` in the C API, serialization and the table engine's `eval` expansion. `missing()`
-  through a promise of a name reads the owner's slot instead (`pending_slot_is_missing`), as
-  the binding in the reified environment would answer. Identity checks against a promise's environment compare the pending
-  environment, which is the frame's environment once it reifies.
+- **Readers of a promise's environment** go through `eval::promise_env`: `PRENV` in the C API,
+  serialization and the table engine's `eval` expansion. Identity checks against a promise's
+  environment compare the frame's environment, which is one object through every state.
 
 ## Closures over a slot frame
 
-A `function` expression compiled in an unreified slot frame makes its closure on the frame's
-pending environment (`slot_closure`) instead of reifying, so a `tryCatch` handler or an `lapply`
-callback that never escapes costs no environment.
+A `function` expression compiled in a slot frame makes its closure on the frame's environment
+(`slot_closure`), so a `tryCatch` handler or an `lapply` callback that never escapes costs one
+empty environment and no binding cell.
 
-- **Reads resolve through the heap.** Every binding read or write of an environment goes through
-  `bindings` in `heap.rs`, which checks `PENDING_FRAME` and, when set, calls the resolver the
-  interpreter installs (`eval::resolve_pending_read`). The resolver reifies the live owner frame,
-  with collection inhibited, and the read proceeds on the filled environment. No reader can see
-  the empty pending frame: `CLOENV` followed by `findVarInFrame` in C, `environment(f)` and
-  `get`, lexical lookup from the closure's body, and the analysis passes all reach bindings this
-  way. Readers that use only the environment's identity or its enclosure need no resolution,
-  because reifying keeps the object.
+- **Reads.** The closure's body finds a variable of the defining frame in its slot
+  (`slot_binding`). Any other reader of the environment's bindings goes through `bindings` or
+  `bindings_for` in `heap.rs`, which move what is read into cells: `CLOENV` followed by
+  `findVarInFrame` in C, `environment(f)$x` and `get`. Readers that use only the environment's
+  identity or its enclosure need nothing moved.
 - **Tracking.** `Interp.pending_closures` lists each closure with its owner frame, at most 16 per
-  frame, and `Frame.unforced` counts them with the frame's promises. A 17th closure reifies the
-  frame.
+  frame (`FRAME_CLOSURES`). A closure past the limit is not tracked and keeps the environment as
+  any other holder does. The list is ordered by frame, so a frame's closures are one run found
+  from the end (`pending_closures_of`), and the frames that pop give theirs up from the end
+  (`forget_pending_closures`). A return therefore never searches the list: a frame without an
+  environment has no entry, and `bytecode::return_fast` takes every such return whatever the
+  frames below it hold. A wrapper frame that keeps a handler closure for a whole test would
+  otherwise send every return above it down the general path.
 - **Return.** A closure dies with its frame when its reference count equals the number of the
-  frame's slots that hold it, it is not the frame's result, `R_PreserveObject` does not hold it
-  and no global calling handler is it. A frame that returns with any other closure reifies first
-  (the profile reason "closure outliving the frame"), so the escaped closure sees the values its
-  variables held at return. A frame that returns
-  through an error keeps none of its closures as dead.
+  frame's slots and cells that hold it, it is not the frame's result, `R_PreserveObject` does not
+  hold it and no global calling handler is it. A frame that returns with any other closure makes
+  its environment complete first (the profile reason "closure outliving the frame"), so the
+  escaped closure sees the values its variables held at return. A frame that returns through an
+  error keeps its environment.
 
 ## Exit code and returns
 
@@ -265,16 +320,20 @@ callback that never escapes costs no environment.
   The entry is `expr` compiled as promise code against the frame's slot table, or the expression
   itself when it does not compile.
 - **Running.** `run_on_exit` in `eval.rs` runs a compiled entry on the slots
-  (`run_promise_on_slots`) and evaluates any other entry in the frame's pending environment, so
-  exit code registered through `do.call(on.exit, ..., envir = parent.frame())` reifies the frame
-  only if it reads a binding. `sys.on.exit()` shows the source of a compiled entry.
-- **Return.** A `return()` evaluated in the pending environment targets that environment, which
-  `finish_frame` catches for an unreified frame.
-- **Escape.** A frame that returns while anything but its dying closures and its unforced default
-  promises holds its pending environment reifies first, with the profile reason "environment
-  outliving the frame" (`pending_env_kept`). The check reads the environment's reference count,
-  so an environment that is the result, is held by `R_PreserveObject`, or is stored in a binding,
-  a list or another environment's enclosure is kept.
+  (`run_promise_on_slots`) and evaluates any other entry in the frame's environment, so exit code
+  registered through `do.call(on.exit, ..., envir = parent.frame())` moves only the variables it
+  reads. `sys.on.exit()` shows the source of a compiled entry.
+- **Return.** A `return()` evaluated in the frame's environment targets that environment, which
+  `finish_frame` catches whatever state it is in.
+- **Escape.** `outliving_cause` decides at return whether anything that outlives the frame holds
+  its environment, from the environment's counted references. Every promise and closure over it
+  counts one, as does a binding, a list element or an enclosure that holds it. The holders that
+  die with the frame are known: an unforced promise that only a slot or a cell of the frame holds,
+  and a closure only the frame holds. Any count beyond those keeps the environment, and so do the
+  three holders that are not counted: the value returned, `R_PreserveObject` and a global calling
+  handler. A kept environment becomes complete (the profile reasons "promise or environment
+  outliving the frame" and "closure outliving the frame"); any other is discarded with the frame
+  (`Heap::discard_frame`).
 
 ## Subassignment and replacement in slots
 
@@ -285,23 +344,25 @@ the replacement call `` `[<-`(`*tmp*`, i, value = v) `` that the compiler stores
 instruction, so errors name the same call as the general assignment's. The value changes in place
 only when the slot alone holds it (`slot_owns`: a reference count of one and no expression
 register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` leaves `y` alone.
-An object reifies the frame, because a replacement method may look at it. `x$name` reads on a
-non-object likewise skip the environment.
+An object target goes through `eval::complex_assign` in the frame's environment, because a
+replacement method may look at the frame, and that moves the assigned variable into a cell.
+`x$name` reads on a non-object likewise skip the environment.
 
 ## Argument references
 
-A variable passed to a callee that has a direct-call plan needs neither a promise allocation nor
-the caller's pending environment, because the callee's frame is above the caller's for as long
-as the callee runs. A slot frame passes such a variable as an argument reference to its slot
+A variable passed to a callee that takes its arguments straight into slots needs neither a promise
+allocation nor the caller's environment, because the callee's frame is above the caller's for as
+long as the callee runs. A slot frame passes such a variable as an argument reference to its slot
 (`eval::argument_reference`, from `slot_promises_into`), and a caller that has an environment
 passes a reference to the name in that environment (`eval::env_reference`, from
-`referenced_args_into`), so calls from test code and from reified frames allocate no promise
-either. Compiled argument code is passed the same way, as a code reference (`eval::code_reference`
-from a slot frame, `eval::env_code_reference` from a caller with an environment). The AST evaluator plans its
-calls too: `apply_call` asks `direct_sources` for the callee's plan at each call and binds the
-references it builds with `call_with_plan`, as the bytecode call instruction does. It passes
-constants as references as well, because lazyeval-style native code reads a promise's
-environment and the AST evaluator is what runs uncompiled package code.
+`referenced_args_into`), so calls from test code and from frames with an environment allocate no
+promise either. Compiled argument code is passed the same way, as a code reference
+(`eval::code_reference` from a slot frame, `eval::env_code_reference` from a caller with an
+environment). The AST evaluator plans its calls too: `apply_call` asks `direct_sources` for the
+callee's plan at each call and binds the references it builds with `call_with_plan`, as the
+bytecode call instruction does. It passes constants as references as well, because lazyeval-style
+native code reads a promise's environment and the AST evaluator is what runs uncompiled package
+code.
 
 - **Shape.** A reference is a promise with `gp::ARGUMENT_REFERENCE`: its expression is the
   variable's name. A reference into an environment keeps that environment in its environment
@@ -326,33 +387,37 @@ environment and the AST evaluator is what runs uncompiled package code.
 - **Readers.** `missing()` follows a reference into the caller (`reference_is_missing`) and is
   false for a code reference, `substitute`, `match.call` and `sys.call` read the name or source
   from the expression, and
-  `promise_env` reifies the caller. The package-call counter does not count a reference as a
+  `promise_env` asks the caller for its environment. The package-call counter does not count a reference as a
   promise.
 - **Dots.** A callee with a `...` formal gets a plan too: the formal's source is
   `DOTS_SOURCE`, and the positions of the arguments `...` collects follow the formals' sources,
   so `call_with_plan` builds the `...` list from them. Forwarding `...` from a slot frame passes
   its items unchanged, which hands the same reference to a second frame.
-- **Escape.** Before anything could keep a reference past the call, `materialize_references`
-  turns the callee's references into ordinary promises over the caller (`detach_reference`): a
-  forced one into a forced promise of its name, an unforced one into a promise over the
-  caller's environment or pending environment. The conversion happens in place, and a fresh
-  object takes the reference's place in the pool, so every frame that holds it, through its
-  slots or a forwarded `...`, holds the same promise, which forces once. `reify` runs it, as do
-  S3 and S4 dispatch, which hand the arguments to a method, and `call_with_plan` when a debugger
-  or move tracking sends the call down the generic path. Forwarding `...` to a callee without a
-  plan detaches the references among its items first.
+- **Who may hold one.** A reference is reused once the call it was made for returns, so only a
+  slot of a frame above the caller may hold it. Each path that puts an argument anywhere else
+  turns the reference into the ordinary promise it stands for first (`detach_reference`): a
+  forced one into a forced promise of its name, an unforced one into a promise over the caller's
+  environment. The conversion happens in place, and a fresh object takes the reference's place in
+  the pool, so every frame that holds it, through its slots or a forwarded `...`, holds the same
+  promise, which forces once. The paths are: a callee that binds a heap frame
+  (`run_on_heap_frame`), a variable that moves into a cell (`box_slots`), a native typed entry
+  (`try_native_typed`), a method that is not a closure (`apply_method`), `NextMethod` and S4
+  dispatch (`materialize_references`), and a `...` item forwarded to a callee without a plan.
+- **Dispatch.** An S3 method that runs on slots takes the generic's references as they are
+  (`use_method_in_slots`), because the calling instruction releases them only after the generic's
+  call returns.
 - **Scope.** Every argument to a planned callee becomes a reference except a `..N` symbol and a
-  value that is already a promise, and compiled code passes constants as they are. The
-  element call that `lapply`, `vapply` and `Map` make, `FUN(X[[i]])`, passes its first argument
-  as a reference into the builtin's environment whose value is already the element, so the
-  callee neither allocates a promise nor reifies on it. A call
-  that passes `..N` gets no plan, so its other arguments become promises. When per-call matching
-  of a call that passes `...` fails (an unused argument, a default that is not a literal), the
-  call detaches its references and takes the generic path.
+  value that is already a promise, and compiled code passes constants as they are. A frame's own
+  defaults are references of the frame to itself (see "Defaults" above). The element call that
+  `lapply`, `vapply` and `Map` make, `FUN(X[[i]])`, passes its first argument as a reference into
+  the builtin's environment whose value is already the element, so the callee allocates no
+  promise for it. A call that passes `..N` gets no plan, so its other arguments become promises.
+  When per-call matching of a call that passes `...` fails (an unused argument, a default that is
+  not a literal), the call takes the generic path, which detaches its references.
 
 `crates/oracle/cases/environments__argument_references.R`,
-`environments__code_argument_references.R` and `environments__dots_argument_references.R` pin
-these rules.
+`environments__code_argument_references.R`, `environments__dots_argument_references.R` and
+`dispatch__argument_references_dots_and_missing.R` pin these rules.
 
 ## Builtin wrappers
 
@@ -381,11 +446,11 @@ execute, no promises and no environment.
   so `sys.call`, `sys.calls`, `sys.function`, `conditionCall` and native code that calls back
   into R see the wrapper exactly as they would through the generic path. The builtin gets the
   inner call (`log(x)`, not the `{` around it) as its call.
-- **Reify.** The slots hold values, so a reify of the wrapper's frame (a handler calling
-  `sys.frames()`, say) binds each formal the caller passed a variable to as a forced promise
-  whose code is that variable, as the generic path would have. `substitute(x, frame)` then
-  answers the variable's name, and building those promises costs nothing on calls that never
-  reify.
+- **Environment.** The slots hold values, so a variable of the wrapper's frame that moves into a
+  cell (a handler calling `sys.frames()` and reading it, say) is bound as a forced promise whose
+  code is the variable the caller passed, as the generic path would have bound it.
+  `substitute(x, frame)` then answers the variable's name, and building those promises costs
+  nothing on calls where nothing reads the frame.
 
 `crates/oracle/cases/functions__builtin_wrappers.R` pins these rules with the JIT off, on and
 forced. Measured on a `node_car` loop: 7,751 instructions per call through the generic path,
@@ -393,29 +458,50 @@ forced. Measured on a `node_car` loop: 7,751 instructions per call through the g
 
 ## Checking it
 
-Behind `syntax::testing::enable_invariants()`, reification cross-checks itself: it compares the
-environment built from the slots with what the heap-frame path would have bound for the same call
-(the same symbols, values and missing flags). A scenario in `crates/ry/tests/scenarios/` exercises
-each trigger above and each read that must not reify.
+Behind `syntax::testing::enable_invariants()`, `lift_frame` cross-checks itself (`check_lifted`):
+once the environment has taken every variable, no slot binds one, the frame's own code reads the
+environment, and each of a method's dispatch variables is bound. Six oracle cases pin what R
+code can observe, on every engine including the collector's torture modes:
+`environments__slot_frames_observed.R` (every route that asks for a frame's environment),
+`environments__slot_frames_escaping.R` (promises, closures and environments that outlive their
+frame), `promises__default_arguments_on_slot_frames.R`,
+`promises__by_name_promises_over_slot_frames.R`,
+`dispatch__argument_references_dots_and_missing.R` and
+`dispatch__generic_call_env_from_slot_frames.R`.
 
-## Why frames reify
+The bytecode fuzzer (`interp::testing::check_bytecode_agreement`) runs each generated body in a
+slot frame whose environment is driven into every state, before the body and after it: an
+observer that only names the caller's environment, one that looks a single variable up in it,
+and one that lists its bindings. Each run must agree with the AST evaluator. The user journeys
+are pinned by `crates/ry/tests/scenarios/slot-frames.scenario` and `slot-promises.scenario`.
 
-`--profile-summary` reports, under "Package calls", how many calls into package code ran without
-an environment and why each of the rest has one. `reify` records its cause (`eval::Reify`: the
-builtin that asked, or a named site such as `"function definition"` or `"method dispatch"`) in
-`Frame.reified_by`, and the frame's pop classifies the call:
+## Why a frame has an environment
+
+`--profile-summary` reports, under "Package calls", how many calls into package code skipped the
+generic call protocol and why each of the rest did not. `frame_env` records what asked
+(`eval::Reify`: the builtin, or a named site such as `"function definition"` or
+`"method dispatch"`) in `Frame.reified_by`, and the frame's pop classifies the call:
 
 | Class | Meaning |
 |---|---|
-| direct | the frame never reified and was passed no promise |
-| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `.External2`, `environment outliving the frame`) |
-| `promise argument: variable`, `call`, `other` | the frame stayed unreified but was passed a real promise of that kind |
+| direct | the frame's own code ran on its slots to the end and was passed no promise |
+| a named reason | the frame switched to reading by name for that reason; `eval::OBSERVING_REASONS` marks the reasons where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `.External2`, `promise or environment outliving the frame`) |
+| `promise argument: variable`, `call`, `other` | the frame stayed in its slots but was passed a real promise of that kind |
 | `frame with an environment` | the callee has no slot table and always gets a heap frame |
 
-The section prints the direct share, the direct share of calls that did not observe their
-environment, and the table of classes. A second section, "Slot frames turned into environments",
-counts every reification by its cause, whatever the frame's function, so it also covers base R
-and script closures. The counting runs only while a profile summary is collected.
+A second section, "Slot frames turned into environments", counts every switch to reading by name
+by its reason, whatever the frame's function, so it also covers base R and script closures. The
+events table counts the three state changes separately: slot frames that made an environment,
+frames that switched to reading by name, and frames whose environment took every variable. The
+counting runs only while a profile summary is collected.
+
+## Measured
+
+One run of the finance code base's test suite (53 million closure calls), counted by
+`--profile-summary` with the JIT on. The first column is the design this page replaced, where the
+first promise, closure or reflective read built the whole environment.
+
+MEASURED_TABLE
 
 ## Prior decision
 
@@ -429,3 +515,11 @@ where frame work is about 2.2k instructions per call.
 - Whether the JIT's tier 1 should read slots directly. It already keeps its own slots for the same
   symbols (`crates/jit/src/analysis.rs`) and writes them back to the heap frame. With slot frames,
   tier 1 could share the interpreter's slots, which would remove its write-back.
+- Whether a partial frame's own code should keep running on its slots. Today the first variable
+  that moves into a cell switches all of the frame's code to reading by name, and each variable it
+  then reads moves too. Keeping the code on slots would need every slot instruction, and the JIT's
+  code, to test per variable where it lives.
+- Nested replacement and replacement on an object (`eval::complex_assign`) build a forced promise
+  for the object and one for the value at each level, plus the call and its argument list. GNU R's
+  byte code keeps the call as a constant with `*vtmp*` for the value, which would remove most of
+  them.

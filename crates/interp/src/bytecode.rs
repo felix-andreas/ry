@@ -6530,6 +6530,13 @@ pub unsafe fn slot_count(code: Sexp) -> usize {
     length(code.cdr().element(SLOTS).element(1))
 }
 
+/// The names of the slots of the frame of `function`, whose body is compiled with a slot
+/// table, formals first. The compiler makes the list, so it is read as the plain vector it is.
+#[inline(always)]
+pub unsafe fn frame_slot_names<'a>(function: Sexp) -> &'a [Sexp] {
+    function.cdr().cdr().element(SLOTS).element(1).slice()
+}
+
 /// Runs `code` in the activation whose header register is `header` and whose own registers
 /// start at `base`, after the header and any slots.
 unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Sexp> {
@@ -7979,12 +7986,11 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
         return None;
     }
     let depth = interp.bytecode.resumes.get_unchecked(count - 1).depth as usize;
-    if depth != interp.frames.len()
-        || !interp.pending_closures.is_empty()
-        || crate::annotations::checks_pending()
-    {
+    if depth != interp.frames.len() || crate::annotations::checks_pending() {
         return None;
     }
+    // A frame that made closures over its environment has that environment, so the frames
+    // that return here have none to check.
     let frame = &interp.frames[depth - 1];
     if frame.pending != nil || !frame.on_exit.is_empty() {
         return None;

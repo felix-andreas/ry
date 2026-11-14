@@ -1081,7 +1081,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | A guard on a base function is two bit tests and one load: no binding of the symbol outside base and an attached enclosure chain mean the base binding answers it. Every route that binds a symbol in a frame marks the symbol, and the mark never clears | JSC watchpoints | built | testthat_full over five repetitions, JIT off: 4,145.6M to 4,132.8M instructions (-0.31%), `run_guard` 26.1M to 13.7M; an environment write costs 6 more (934 to 940) | `guard_fast` in `bytecode.rs`; `BOUND_ELSEWHERE`, `DETACHED` and `mark_bound_elsewhere` in `crates/heap/src/env.rs` |
 | Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
 | Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
-| Frames as slot arrays, environment reified on demand | Ř, V8 | built for tier 0; tier-1 bodies keep heap frames | binding cells, environments and frame clearing per call; on the testthat workload (JIT off) 7.736G to 7.652G instructions with the row above | `bind_slots`, `reify` in `eval.rs`; `slot-frames.md` |
+| Frames as slot arrays, with an environment that binds a variable only when a lookup asks for it | Ř, V8 | built | binding cells, promises and environments per call (`slot-frames.md`, "Measured") | `bind_slots`, `pending_env`, `box_variable`, `lift_frame` in `eval.rs`; `slot-frames.md` |
 | Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
 | Cheaper promises: created lazily, held inline in the frame slot, or allocated from a per-call arena | Ř, GNU R | rejected, measured | a closure call on the testthat workload costs about 8,100 instructions with 1.2 promises; allocating a promise is a nursery bump, and promises are 1.4 of the 7.4 objects freed per call. None of the three designs saves more than that allocation, and each changes what `PRCODE`, `PRENV`, `substitute` and `delayedAssign` see | |
 | Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
@@ -1219,7 +1219,7 @@ written, and compiling ahead decides which of these facts are known before the f
 
 | Part | Status | Owner |
 | --- | --- | --- |
-| Slot frames, environments made on demand | built for tier 0 (`slot-frames.md`) | frames |
+| Slot frames, environments made on demand and filled one variable at a time | built (`slot-frames.md`) | frames |
 | A direct calling convention between closures | built from tier 0 to tier 0; machine to machine planned | frames (tier 0), JIT (machine code) |
 | Unboxed length-1 doubles, integers and logicals in compiled code | built inside tier 1 and native functions; across calls planned | JIT |
 | Whole-package compilation at install, with entry guards and deoptimization to tier 0 | measured and removed for untyped closures (`decisions.md`, "No baseline tier, and code images hold bytecode only"); strict typed closures planned | JIT |
@@ -1246,55 +1246,50 @@ planning. A plan exists only when matching cannot depend on the values: the call
 formal, the site passes no `...` or `..N`, and every formal the site leaves out has a literal
 default. Everything else binds through the matcher (`bind_slots`, with its per-body match cache),
 still into a slot frame. Arguments go in as values when they are constants, or variables passed
-to an effect-free callee; otherwise as promises over the caller's slots (`eval::slot_promise`),
-which do not need the caller's environment. A call that passes `...` on appends the promises the
-caller's `...` slot collected.
+to an effect-free callee; otherwise as argument references, which name the caller's slot or the
+argument's compiled code and come from a pool, so they allocate nothing and need no environment.
+A reference becomes a promise object only when something keeps the argument past the call. A call
+that passes `...` on appends the arguments the caller's `...` slot collected.
 
 Between machine code (planned), a call of a sibling closure in a locked namespace is a direct
 machine call to the callee's entry for the argument types at hand, guarded once per call. Pure arguments (`native::pure_value`) are passed evaluated and unboxed; the rest are
 passed as promises over the caller's frame, exactly as tier 0 passes them.
 
-**What makes the environment.** The frame keeps no environment until something hands one out.
-`eval::frame_env`, `eval::frame_sys_parent` and `Call::env` are the only ways to get one, and the
-first use builds it from the slots (`reify`); from then on the environment is the only source of
-truth. The triggers are a closure or formula made in the frame; `parent.frame`, `sys.frame(s)`,
-`sys.function` and `as.environment(-1)` from a callee; S3 and S4 dispatch, which read the generic's
-caller; specials and builtins that receive the environment; replacement calls such as
-`names(x) <- v`; `PRENV` of one of the frame's
-promises, `R_GetCurrentEnv` and the `rho` of `.External2`; a promise of an argument the compiler
-did not compile; `..N`; and the debugger. `missing`, `nargs`, `sys.call`, `substitute(name)`,
-`return` and forwarding `...` read the slots and make nothing.
+**What makes the environment.** A slot frame has no environment object until something names the
+frame: a promise or a closure made in it, `parent.frame()`, `sys.function`, S3 and S4 dispatch, a
+builtin that receives the calling environment, `PRENV`, `R_GetCurrentEnv` or the `rho` of
+`.External2`. `eval::frame_env`, `eval::frame_sys_parent` and `Call::env` are the only ways to get
+one, and what they hand out binds nothing. A variable moves from its slot into a binding cell when
+a lookup through the environment asks for that name, and the frame's own code reads by name from
+then on. Every variable moves only when something lists the bindings or the environment outlives
+the call. `missing`, `nargs`, `sys.call`, `substitute(name)`, `on.exit`, `return` and forwarding
+`...` read the frame record or the slots and make nothing. `slot-frames.md` has the states, the
+triggers and the invariants.
 
 **What stays on heap frames.** A body runs in a heap frame from the start when the compiler
-refuses it a slot table. Some of those refusals are permanent and some only wait for a slot path:
-
-| Body uses | Frame | Why |
-| --- | --- | --- |
-| `assign`, `delayedAssign`, `makeActiveBinding`, `list2env`, `rm`, `attach`, `eval`, `evalq`, `local`, `with`, `within`, `source` | heap | they bind names the compiler cannot number, so the slot table would be wrong |
-| `environment()`, `sys.frame(s)`, `lockBinding` | heap | they hand out the frame itself, so a slot frame would make its environment on entry |
-| `...` formals | slots (built) | the `...` slot holds the collected arguments |
-| a formal with a non-literal default, left out | heap (slot path planned) | the default's promise needs an environment; it can be a promise over the slots instead, compiled with the body's slot table |
-| `sys.function` | heap (slot path planned) | reads `Frame.function`, not the environment |
-| `Recall` | slots | reads `Frame.function` and `Frame.call` of its caller, and hands the recalled frame its caller's pending environment as parent |
-| `on.exit` | heap (slot path planned) | the exit expressions run in the frame; they can run on the slots, making the environment only if they need it |
-| `match.arg` | slots, reified when called | it reads its caller through `sys.function` and `parent.frame`; a slot path reads the formal's default from the closure and its value from the slot |
-| `do.call` | heap (slot path planned) | with a function value and no `envir`, the call needs no frame |
+refuses it a slot table, which it does when the body may bind a name its own text does not show
+or hands its frame to code that may: a bare `environment()`, `sys.frames()`, `attach` or `source`,
+an `eval`, `evalq`, `assign`, `delayedAssign` or `rm` without an explicit environment, an
+assignment to a string target, or a read of an S3 dispatch variable. A call also binds a heap
+frame under the debugger, for a closure with a type signature, and when a missing formal's
+default cannot be compiled with its own slot table. `slot-frames.md`, "The shape", is the full
+list.
 
 **Deoptimization and frame state.** Machine code that leaves for tier 0 continues on the same
 window. Each exit carries a frame-state map: for every live slot and register, whether it is
 already in the window or is a machine value of a known type, plus the tier-0 instruction to resume
 at. Leaving boxes the machine values, writes them into their slots, restores the missing bits and
-jumps into tier 0's loop; it makes no environment, because only a trigger does. A callee can give
-the frame its environment while machine code waits on the call, and then the slots are dead, so
-machine code checks the header after every call that can reify and leaves for tier 0 when it is
-set.
+jumps into tier 0's loop; it makes no environment, because only a trigger does. A callee can make
+the frame read its variables by name while machine code waits on the call, and then the header
+register holds the environment, so machine code checks the header after every call that can do
+that and leaves for tier 0 when it is set.
 
 Tier-1 code runs in slot frames. It reads the header register on every
 variable probe: while it is `NULL`, a variable the slot table numbers loads straight from its slot
 at an index fixed when the code compiles, and a name the table does not number is looked up from
 the closure's environment. Tier 1 keeps its own copies of the variables it loaded and writes a
-changed one back through the frame (`Machine::assign`), into the slot or, once a callee made the
-environment, into its binding, so it needs no exit when the frame reifies under it.
+changed one back through the frame (`Machine::assign`), into the slot or, once the frame reads by
+name, into its binding, so it needs no exit when a callee switches the frame under it.
 
 **Boxing.** A length-1 double, integer or logical without attributes stays in a machine register
 while compiled code uses it, with R's `NA` and overflow rules. It is boxed when it escapes: written

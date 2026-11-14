@@ -423,17 +423,43 @@ pub fn method_vars(state: &Interp, index: usize) -> &[(Sexp, Sexp)] {
         .unwrap_or(&[])
 }
 
+/// Where the closures that the slot frame at `owner` made over its environment sit in
+/// [`Interp::pending_closures`]. The list is ordered by frame, and the frame that asks is
+/// nearly always the innermost one with any, so the search runs from the end.
+pub fn pending_closures_of(closures: &[(u32, Sexp)], owner: usize) -> std::ops::Range<usize> {
+    let end = closures.len()
+        - closures
+            .iter()
+            .rev()
+            .take_while(|&&(frame, _)| frame as usize > owner)
+            .count();
+    let start = end
+        - closures[..end]
+            .iter()
+            .rev()
+            .take_while(|&&(frame, _)| frame as usize == owner)
+            .count();
+    start..end
+}
+
+/// Forgets the closures over the environments of the slot frames at `depth` and above
+/// ([`Interp::pending_closures`]), which are popping.
+#[inline(always)]
+pub fn forget_pending_closures(state: &mut Interp, depth: usize) {
+    while let Some(&(owner, _)) = state.pending_closures.last()
+        && owner as usize >= depth
+    {
+        state.pending_closures.pop();
+    }
+}
+
 /// Keeps the first `depth` frames and drops the rest with their arguments.
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if let Some(frame) = state.frames.get(depth) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if !state.pending_closures.is_empty() {
-        state
-            .pending_closures
-            .retain(|&(owner, _)| (owner as usize) < depth);
-    }
+    forget_pending_closures(state, depth);
     state.frames.truncate(depth);
     // An unwind to top level skips the releases of the calls it leaves, so their argument
     // references go back to the pool here, cleared, or the pool would keep what they held.
@@ -568,9 +594,12 @@ pub struct Interp {
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
     pub frame_closures: Vec<Sexp>,
-    /// The closures slot frames made over their pending environments, each with the index of
-    /// its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without its
-    /// environment checks that none outlives it (`eval::finish_frame`).
+    /// The closures slot frames made over the environments that stand for them, each with the
+    /// index of its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without
+    /// its environment checks that none outlives it (`eval::finish_frame`). The entries are
+    /// ordered by frame, so a frame's own are together ([`pending_closures_of`]) and the frames
+    /// that pop give up theirs from the end ([`forget_pending_closures`]): a return never
+    /// searches the list for the closures of the frames below it.
     pub pending_closures: Vec<(u32, Sexp)>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and

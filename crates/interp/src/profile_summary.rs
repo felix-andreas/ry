@@ -903,22 +903,18 @@ fn report(
     for (count, name) in kinds {
         writeln!(out, "| objects freed: {name} | {count} |")?;
     }
+    let kind_name = |code: usize| {
+        if code == 26 {
+            "binding cell"
+        } else {
+            SexpType::from_code(code as u32).map_or("?", |kind| kind.name())
+        }
+    };
     let allocated = activity::allocation_counts();
     for (code, count) in allocated.iter().enumerate() {
         if *count > 0 {
-            let name = if code == 26 {
-                "binding cell"
-            } else {
-                SexpType::from_code(code as u32).map_or("?", |kind| kind.name())
-            };
-            writeln!(out, "| objects allocated: {name} | {count} |")?;
+            writeln!(out, "| objects allocated: {} | {count} |", kind_name(code))?;
         }
-    }
-    let mut sites = activity::allocation_sites();
-    sites.sort_by(|a, b| b.1.cmp(&a.1));
-    writeln!(out, "\n## Allocation sites (sampled)\n")?;
-    for (site, count) in sites {
-        writeln!(out, "SITE\t{count}\t{site}")?;
     }
     writeln!(out, "| most objects live | {} |", stats.max_live_objects)?;
     writeln!(
@@ -926,5 +922,17 @@ fn report(
         "| most vector memory live (MB) | {:.1} |",
         stats.max_vector_cells as f64 * 8.0 / 1e6
     )?;
+    let mut sites = activity::allocation_sites();
+    if !sites.is_empty() {
+        sites.sort_by(|a, b| b.1.cmp(&a.1));
+        writeln!(out, "\n## Allocation sites (sampled)\n")?;
+        writeln!(out, "| kind | samples | call path, innermost first |")?;
+        writeln!(out, "| --- | ---: | --- |")?;
+        for (site, count) in sites {
+            let (kind, path) = site.split_once('\t').unwrap_or(("", &site));
+            let kind = kind.parse::<usize>().map_or("?", kind_name);
+            writeln!(out, "| {kind} | {count} | `{path}` |")?;
+        }
+    }
     Ok(out)
 }

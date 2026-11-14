@@ -896,10 +896,10 @@ pub(crate) unsafe fn use_method_in_slots(
     };
     // The caller is a slot frame without an environment. Methods are looked up from its
     // enclosure (`lazy_caller` checked that its own slots bind none of the names probed), the
-    // method finds it as its caller by position, and `.GenericCallEnv` holds its pending
-    // environment, which whoever reads the variable makes real.
-    let pending = eval::pending_env(owner)?;
-    let found = generic_method(generic, object, function.tag(), enclosure, pending)?;
+    // method finds it as its caller by position, and `.GenericCallEnv` is recorded as unbound:
+    // whoever reads the variable asks the caller for its environment
+    // (`eval::method_var_value`).
+    let found = generic_method(generic, object, function.tag(), enclosure, unbound())?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
@@ -1248,20 +1248,20 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     // would when no slot is named like a method of the generic or group, and the next method
     // gets the pending environment, so the caller keeps its slots.
     let (call_env, lookup_env) = {
-        let value = read(symbols.dot_generic_call_env)?;
-        if value == unbound() {
-            let env = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
-            (env, env)
-        } else {
-            let mut prefixes: SmallVec<[&[u8]; 2]> = SmallVec::new();
-            prefixes.push(generic_string.bytes());
-            if let Some(group) = group_symbol {
-                prefixes.push(group.car().bytes());
+        let value = match read(symbols.dot_generic_call_env)? {
+            value if value == unbound() => {
+                eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?
             }
-            match pending_enclosure(value, &prefixes) {
-                Some(enclosure) => (value, enclosure),
-                None => (value, value),
-            }
+            value => value,
+        };
+        let mut prefixes: SmallVec<[&[u8]; 2]> = SmallVec::new();
+        prefixes.push(generic_string.bytes());
+        if let Some(group) = group_symbol {
+            prefixes.push(group.car().bytes());
+        }
+        match pending_enclosure(value, &prefixes) {
+            Some(enclosure) => (value, enclosure),
+            None => (value, value),
         }
     };
     let def_env = {

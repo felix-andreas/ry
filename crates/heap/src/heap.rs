@@ -102,8 +102,7 @@ unsafe fn bindings(env: Sexp) -> *mut Frame {
 #[inline(always)]
 unsafe fn bindings_for(env: Sexp, symbol: Sexp) -> *mut Frame {
     let frame = env.frame_ptr();
-    if env.has_gp(gp::SLOT_FRAME) && (*frame).may_bind(symbol) && (*frame).find(symbol).is_none()
-    {
+    if env.has_gp(gp::SLOT_FRAME) && (*frame).may_bind(symbol) && (*frame).find(symbol).is_none() {
         resolve_pending(env, PendingAccess::Symbol(symbol));
     }
     frame
@@ -2386,6 +2385,18 @@ impl Heap {
         (*env.frame_ptr()).cells()
     }
 
+    /// The position on the interpreter's frame stack of the live slot frame `env` stands for,
+    /// or `None` when it stands for none.
+    #[inline(always)]
+    pub unsafe fn slot_owner(&self, env: Sexp) -> Option<usize> {
+        (*env.frame_ptr()).slot_owner()
+    }
+
+    /// Records which live slot frame `env` stands for ([`Heap::slot_owner`]).
+    pub unsafe fn set_slot_owner(&mut self, env: Sexp, owner: Option<usize>) {
+        (*env.frame_ptr()).set_slot_owner(owner);
+    }
+
     /// Tells a slot frame's environment which names its frame may bind, so a lookup of any
     /// other name passes the environment without asking the interpreter.
     pub unsafe fn expect_bindings(&mut self, env: Sexp, symbols: impl Iterator<Item = Sexp>) {
@@ -2859,7 +2870,9 @@ impl Heap {
         if env == self.known.empty_env {
             return Ok(false);
         }
-        let Some(cell) = (*bindings_for(env, symbol)).remove(symbol) else {
+        // A slot frame's environment takes every variable of its frame first: its frame keeps
+        // no count of removed bindings while it stands for a live frame.
+        let Some(cell) = (*bindings(env)).remove(symbol) else {
             return Ok(false);
         };
         self.clear_removed_cell(cell);

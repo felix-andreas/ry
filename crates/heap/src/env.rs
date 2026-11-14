@@ -55,6 +55,10 @@ const REMOVED: Sexp = Sexp::dangling();
 /// with the wrong cell.
 const SHADOWED: u32 = 1 << 31;
 
+/// Marks [`Frame::removed`] as holding the position of a slot frame instead of a count
+/// ([`Frame::slot_owner`]).
+const SLOT_OWNER: u32 = 1 << 31;
+
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
@@ -77,7 +81,12 @@ pub struct Frame {
     /// The top bit is [`SHADOWED`], kept here because a field of its own would push the
     /// environment object out of its size class.
     formals: u32,
-    /// How many slots hold [`REMOVED`].
+    /// How many slots hold [`REMOVED`]. The environment of a live slot frame keeps the
+    /// position of that frame on the interpreter's frame stack here instead, under
+    /// [`SLOT_OWNER`], so a lookup through the environment reaches the frame without searching
+    /// the stack. Such an environment removes nothing: it takes all of its frame's variables
+    /// and gives the position up before a binding is removed. The position shares the field
+    /// because a field of its own would push the environment object out of its size class.
     removed: u32,
     /// One bit per symbol ever bound here, at [`filter_bit`]. Most lookups probe frames that do
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
@@ -385,7 +394,35 @@ impl Frame {
     }
 
     pub fn len(&self) -> usize {
-        self.bindings.len() - self.removed as usize
+        self.bindings.len() - self.removed() as usize
+    }
+
+    fn removed(&self) -> u32 {
+        if self.removed & SLOT_OWNER == 0 {
+            self.removed
+        } else {
+            0
+        }
+    }
+
+    /// The position on the interpreter's frame stack of the live slot frame this environment
+    /// stands for, or `None` for any other environment.
+    #[inline(always)]
+    pub fn slot_owner(&self) -> Option<usize> {
+        (self.removed & SLOT_OWNER != 0).then_some((self.removed & !SLOT_OWNER) as usize)
+    }
+
+    /// Records the slot frame this environment stands for, or with `None` that it stands for
+    /// none any more. The frame must hold no removed slot.
+    pub fn set_slot_owner(&mut self, owner: Option<usize>) {
+        debug_assert_eq!(self.removed(), 0);
+        self.removed = match owner {
+            Some(owner) => {
+                assert!(owner < SLOT_OWNER as usize, "the frame stack is too deep");
+                owner as u32 | SLOT_OWNER
+            }
+            None => 0,
+        };
     }
 
     pub fn is_empty(&self) -> bool {
@@ -486,18 +523,26 @@ impl Frame {
         if self.table.is_some() {
             return;
         }
-        if self.removed > 0 {
+        if self.removed() > 0 {
             self.compact();
         }
-        self.bindings
-            .sort_by_key(|binding| rank(binding.symbol).unwrap_or(u32::MAX));
+        let position = |binding: &Binding| rank(binding.symbol).unwrap_or(u32::MAX);
+        let mut leading = 0;
+        let mut last = 0;
+        let mut ordered = true;
+        for binding in self.bindings.iter() {
+            let next = position(binding);
+            ordered &= next >= last;
+            last = next;
+            leading += u32::from(next < formals);
+        }
+        self.formals = self.formals & SHADOWED | leading;
+        // A frame that bound its variables in one step already lists them this way.
+        if ordered {
+            return;
+        }
+        self.bindings.sort_by_cached_key(position);
         self.bindings.set_scanned(0);
-        let leading = self
-            .bindings
-            .iter()
-            .take_while(|binding| rank(binding.symbol).is_some_and(|rank| rank < formals))
-            .count();
-        self.formals = self.formals & SHADOWED | leading as u32;
         if self.index.is_some() {
             self.index = Some(SlotIndex::of(&self.bindings));
         }
@@ -647,6 +692,10 @@ impl Frame {
                 .iter()
                 .position(|binding| binding.symbol == symbol)?,
         };
+        assert!(
+            self.removed & SLOT_OWNER == 0,
+            "a live slot frame's environment removed a binding"
+        );
         let binding = self.bindings.get_mut(position)?;
         let cell = binding.cell;
         binding.symbol = REMOVED;
@@ -722,7 +771,7 @@ impl Frame {
                 })
                 .collect(),
             formals: self.formals & !SHADOWED,
-            removed: self.removed,
+            removed: self.removed(),
             table: self.table.as_ref().map(|table| TableImage {
                 heads: table.heads.clone(),
                 next: table.next.clone(),
