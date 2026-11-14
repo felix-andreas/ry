@@ -31,6 +31,15 @@
 |   ..$ : chr [1:2] "p" "q"
 |   ..$ : NULL
 |  num [1:2, 1:2] 1 1 2 2
+|  num[1:2, 0 ] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "a" "b"
+|   ..$ : NULL
+|  int[1:2, 0 ] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "x" "y"
+|   ..$ : NULL
+|  num(0) 
 [messages]
 [warnings]
 [errors]

@@ -211,11 +211,13 @@
   #
   # Every numeric vector, at any depth, adds to the last two fields, which bench.py compares to
   # an absolute 1e-10 (and a relative 1e-13, for a sum of many vectors): the logarithm of its
-  # weighted size, and its weighted sum over that size. Both are exact functions of the vector,
-  # so a difference of a relative 1e-10 in any vector shows, while the last-bit differences of two
-  # engines' math libraries do not (`power.t.test` finds its root through `uniroot`, and the two
-  # engines' roots differ by one part in 1e13). Each vector's fields are weighted by its position
-  # among the vectors, in the same way, so moving a number from one vector to another shows too.
+  # weighted size, and a sum under a second set of weights over that size. Both are exact
+  # functions of the vector, so a difference that moves either sum by a relative 1e-10 shows,
+  # while the last-bit differences of two engines' math libraries do not (`power.t.test` finds
+  # its root through `uniroot`, and the two engines' roots differ by one part in 1e13). One wrong
+  # element of a long vector therefore shows only when it is that large a part of the whole.
+  # Each vector's fields are weighted by its position among the vectors, in the same way, so
+  # moving a number from one vector to another shows too.
   checksum <- function(value) {
     if (is.null(value)) return("null")
     if (inherits(value, "hot_error")) return("error")
@@ -280,6 +282,9 @@
   # [1, 2), never repeats, and differs by a good part of 1 between near positions, so swapping
   # two numbers changes the sum unless they are equal.
   phi <- 0.6180339887498949
+  # The balance has weights of its own, from the square root of two: with the size's weights it
+  # would be exactly 1 for every vector without a negative number, and say nothing about it.
+  root <- 0.4142135623730951
 
   fold_number <- function(type, values, numbers) {
     finite <- is.finite(values)
@@ -289,7 +294,8 @@
       numbers$count <- numbers$count + 1
       position <- 1 + (numbers$count * phi) %% 1
       numbers$magnitude <- numbers$magnitude + position * log(size)
-      numbers$balance <- numbers$balance + position * sum(values[finite] * weights[finite]) / size
+      balance <- 1 + (seq_along(values) * root) %% 1
+      numbers$balance <- numbers$balance + position * sum(values[finite] * balance[finite]) / size
     }
     nan <- is.nan(values)
     sprintf("%s:%d:%d:%d:%d:%d:%d", type, length(values), sum(is.na(values) & !nan), sum(nan),

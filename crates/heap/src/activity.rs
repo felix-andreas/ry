@@ -267,8 +267,10 @@ pub const MOVES: u8 = 8;
 /// The [`HOOKS`] bit set while the session refuses to define S4, R6 and reference classes.
 pub const NO_OBJECT_SYSTEMS: u8 = 16;
 /// The [`HOOKS`] bit set while the boundary-call recorder runs. It is set only together with
-/// [`SUMMARY`], so it never adds a test to a call's fast path; closures that run natively
-/// without a frame read it to take their frame path instead.
+/// [`SUMMARY`], so a call's entry tests one bit for both. Code that runs without a call entry
+/// reads it on its own: closures that run natively without a frame, to take their frame path
+/// instead, and the places that evaluate code in an environment (a promise being forced,
+/// `eval`, and the C API's evaluators).
 pub const CAPTURE: u8 = 32;
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =

@@ -4180,10 +4180,11 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             let from = from.unwrap_or(1.0);
             let span = to - from;
             if span == 0.0 {
-                return if all_integer {
-                    values::integer_vector(&[from as i32])
-                } else {
-                    values::real_vector(&[from])
+                // GNU R returns `from` itself for equal endpoints, with its type, names and
+                // class, whatever `by` is.
+                return match present(matched[0]) {
+                    Some(argument) => Ok(argument),
+                    None => values::real_vector(&[from]),
                 };
             }
             if by == 0.0 {

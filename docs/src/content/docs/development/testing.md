@@ -1044,22 +1044,24 @@ the time of a user block it runs, and the calls that block makes are entries of 
 capture of the finance code base reads:
 
 ```
-finbench: 9592 tests, 9592 passing in 143.8 s of test blocks
-  144.3 s on ry: 6% in the code base's own code, 80% in package entries it captured, 13% in entries it could not capture, 1% outside both; 355234 calls into 198 entries
+finbench: 9592 tests, 9592 passing in 152.7 s of test blocks
+  147.5 s on ry: 3% in the code base's own code, 83% in package entries it captured, 13% in entries it could not capture, 1% outside both; 355234 calls into 198 entries
 ```
 
 A call cannot be captured when a replay could not rebuild it: it passes its caller's `...`, an
 argument names a user function or a local closure, the call reads its caller's frame, or the
 recorder failed to inspect it (the reason `uninspectable`, for example when forcing a lazily bound
-package definition throws). The recorder's failure never reaches the program, which carries on.
+package definition throws). The recorder counts its own failure as this reason and the program
+carries on.
 Such a call's time counts for its entry all the same, in the `uncapturable_*` columns.
 
 The samples of an entry are a reservoir of `RY_CAPTURE_SAMPLES` slots drawn uniformly from all of
 its capturable calls. The recorder serializes only the calls the draw selects. A selected call
-whose arguments or result serialize to more than `RY_CAPTURE_MAX_BYTES` empties its slot rather
-than leave the earlier sample there, because keeping it would bias the draw toward small calls,
-and the `oversize` column counts these calls. A slot a later draw refills holds a sample again,
-so `samples` counts the slots holding one at the end.
+whose arguments serialize to more than `RY_CAPTURE_MAX_BYTES` empties its slot rather than leave
+the earlier sample there, because keeping it would bias the draw toward small calls, and the
+`oversize` column counts these calls. A slot a later draw refills holds a sample again, so
+`samples` counts the slots holding one at the end. A result over the limit is dropped and its
+sample is kept, so validation checks that sample only against GNU R's own two replays.
 
 The recorder writes every time as an integer number of nanoseconds, with the unit in the column
 name: `nanoseconds` and `uncapturable_nanoseconds` in `entries.tsv`, `nanoseconds` in
@@ -1072,8 +1074,8 @@ read, a git repository, external pointers, options, a graphics device) or that p
 reports what the suite loses to both:
 
 ```
-finbench: the programs hold 75.2% of the run's time on ry (70.3% in calls the recorder could capture) and 81.0% of the package time
-  lost, with no valid sample: NlcOptim::solnl (2.23%), openxlsx::saveWorkbook (2.16%), R_GlobalEnv::test_that (1.57%), ...
+finbench: the programs hold 79.6% of the run's time on ry (74.4% in calls the recorder could capture) and 82.6% of the package time
+  lost, with no valid sample: NlcOptim::solnl (2.41%), openxlsx::saveWorkbook (2.20%), R_GlobalEnv::test_that (1.61%), ...
 ```
 
 A program's weight comes from a ratio estimate, because the capture measures ry's time and the
@@ -1110,16 +1112,18 @@ so what the switched-off JIT adds to the entry's time cancels in that ratio.
   The hash covers what must match exactly: every type and length, the attributes (all but
   data.table's `.internal.selfref`, at any depth), the text, the logical values, and how many NA,
   NaN, Inf and -Inf each numeric vector holds. Every numeric vector at any depth adds the
-  logarithm of its weighted size and its weighted sum over that size to the last two fields,
-  which must agree to an absolute 1e-10 (or a relative 1e-13), so a root that `uniroot` finds one
-  part in 1e13 away agrees and a change of one part in 1e10 does not. A sample whose result
+  logarithm of its weighted size, and a sum under a second set of weights over that size, to the
+  last two fields, which must agree to an absolute 1e-10 (or a relative 1e-13). A root that
+  `uniroot` finds one part in 1e13 away therefore agrees, and a change that moves a vector's sums
+  by one part in 1e10 does not, so one wrong element of a long vector shows only when it is that
+  large a part of the whole. A sample whose result
   differs on every call under GNU R (a temporary file name, a timestamp) is recorded as `varies`
   and not compared. A result of another type fails even when its values agree. An engine whose
   `seq.int(1, 18, by = 1)` is a double vector, where GNU R's is an integer vector, prints:
 
   ```
-  FAILED hot/base-seq on ry: checksum dbl:18:32x252214378:2.131601681765849e+01:1.618033988749895e+00,...,
-    GNU R printed int:18:33x270404436:2.131601681765849e+01:1.618033988749895e+00,...
+  FAILED hot/base-seq on ry: checksum dbl:18:32x252214378:2.131601681765849e+01:1.626932262278126e+00,...,
+    GNU R printed int:18:33x270404436:2.131601681765849e+01:1.626932262278126e+00,...
   ```
 
 #### Where a program's time goes
@@ -1133,20 +1137,25 @@ program and weighted per code base, the share of ry's time in each activity:
 
 ```
 | program | samples | interpreter | builtin | call_setup | native | evaluator | s3_dispatch | compiled | jit_compile | ...
-| testthat::expect_equal | 440 | 45% | 28% | 17% | 4% | 3% | 2% | 0% | 0% | ...
-| base::mean | 666 | 11% | 23% | 12% | 0% | 6% | 9% | 13% | 26% | ...
-| finbench, weighted by ry time | | 42% | 31% | 12% | 7% | 2% | 4% | 0% | 0% | ...
+| testthat::expect_equal | 429 | 48% | 29% | 12% | 2% | 4% | 2% | 0% | 0% | ...
+| base::mean | 575 | 20% | 19% | 10% | 0% | 9% | 12% | 4% | 25% | ...
+| finbench, weighted by GNU R time | | 41% | 32% | 10% | 8% | 2% | 4% | 0% | 0% | ...
+| dsbench, weighted by GNU R time | | 41% | 27% | 11% | 14% | 3% | 2% | 0% | 1% | ...
+| biobench, weighted by GNU R time | | 37% | 32% | 11% | 9% | 4% | 4% | 0% | 1% | ...
 ```
 
-Each program weighs by its share of the code base's ry time. A run that times nothing
-(`--rounds 0`) has no speed-ups to derive that share from, so it weighs by the GNU R weight and
-the row says `weighted by GNU R time`.
+After timed rounds each program weighs by its share of the code base's ry time. A run that times
+nothing (`--rounds 0`, as here) has no speed-ups to derive that share from, so it weighs by the
+GNU R weight and the row says so.
 
 `interpreter` is the bytecode interpreter, `builtin` base R's builtins, `call_setup` a closure
 call's argument matching, promises and frame, `native` code reached through `.Call`, `.External`
-or `.C`, and `compiled` machine code the JIT produced. A program with a large `interpreter` share gains from the JIT, and one with a
-large `builtin` share gains only from a faster builtin, so the breakdown bounds what an
-optimization of one activity can give.
+or `.C`, `compiled` machine code the JIT produced and `jit_compile` the JIT compiling it. A
+program with a large `interpreter` share gains from the JIT, and one with a large `builtin` share
+gains only from a faster builtin, so the breakdown bounds what an optimization of one activity
+can give. A compilation that falls inside a program's batches counts in full, as it does in the
+instruction counts, which is why a short program such as `base::mean` shows a quarter of its
+samples there.
 
 `--instructions` runs one batch of each program under callgrind, with instrumentation on only
 inside the program's region, and prints each program's instruction count per call. Callgrind
@@ -1218,14 +1227,16 @@ over it.
 | biobench | 0.987 | 0.90 times |
 | all three | 0.976 | 0.85 times |
 
+The three code bases share the configurations, so the last row pools 33 pairs that come from
+eleven changes.
+
 The suite therefore ranks builds the way the code bases do, with three limits.
 
-- **A predicted change is larger than the measured one**, because the programs hold about 78% of
+- **A predicted change is larger than the measured one**, because the programs hold 77 to 80% of
   a run's time on ry and the rest of the run changes less.
 - **The predicted level is pessimistic.** The suite predicted 1.34x, 1.39x and 1.47x for the
-  first configuration where the code bases measured 1.62x, 1.68x and 1.62x. A replay runs one
-  call over and over, which is not how a code base calls it, so compare predictions with each
-  other and not with a code base's time.
+  first configuration where the code bases measured 1.62x, 1.68x and 1.62x. What makes the difference is not
+  established, so compare predictions with each other and not with a code base's time.
 - **Wall time on a shared machine cannot show a small change.** The study ran the same build
   twice, 100 minutes apart, and the second run was 14 to 16% slower on the code bases and 21 to
   27% slower in the suite, because the machine's speed drifted. Within one run, one program's

@@ -528,6 +528,9 @@ pub fn finish() -> R<()> {
 #[cfg(unix)]
 extern "C" fn stop_in_child() {
     activity::set_hook(activity::CAPTURE, false);
+    if !crate::profile_summary::sampling() {
+        activity::set_enabled(false);
+    }
     let state = STATE.try_with(|state| {
         state
             .try_borrow_mut()
@@ -698,7 +701,13 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
         if state.stack.len() <= index {
             return None;
         }
-        for abandoned in state.stack.drain(index + 1..) {
+        let mut abandoned_time = Duration::ZERO;
+        for (position, abandoned) in state.stack.drain(index + 1..).enumerate() {
+            if position == 0 {
+                abandoned_time = stopped
+                    .duration_since(abandoned.started)
+                    .saturating_sub(state.paused.saturating_sub(abandoned.paused));
+            }
             release_deferred(&abandoned.role);
             // A call that never ended is counted nowhere, so it leaves the reservoir as if it
             // had never been seen.
@@ -708,7 +717,10 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
                 stats.seen = stats.seen.saturating_sub(1);
             }
         }
-        let record = state.stack.pop()?;
+        let mut record = state.stack.pop()?;
+        // The abandoned calls' time belongs to no role, so it must not count as this call's
+        // own: left out of it, the time is reported as outside both layers.
+        record.nested += abandoned_time;
         if state.covering.is_some_and(|covering| covering >= index) {
             state.covering = None;
         }

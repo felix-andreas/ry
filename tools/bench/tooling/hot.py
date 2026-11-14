@@ -275,7 +275,9 @@ def build_program(key, captures, count):
     package, name = key
     calls = sum(capture["entries"][key]["calls"] for capture in captures.values() if key in capture["entries"])
     seconds = sum(capture["entries"][key]["seconds"] for capture in captures.values() if key in capture["entries"])
-    candidates = [sample for capture in captures.values() for sample in capture["samples"].get(key, [])]
+    # A sample GNU R ran in no measurable time has no batch size.
+    candidates = [sample for capture in captures.values() for sample in capture["samples"].get(key, [])
+                  if sample["gnu_seconds_per_call"] > 0]
     samples = typical_samples(dedupe(candidates), seconds / calls if calls else 0.0, count)
     iterations = [max(1, round(BATCH_SECONDS / len(samples) / sample["gnu_seconds_per_call"])) for sample in samples]
     gnu = sum(times * sample["gnu_seconds_per_call"] for times, sample in zip(iterations, samples)) / sum(iterations)
@@ -292,7 +294,8 @@ def gnu_time(key, captures, candidates):
     """Per code base, the GNU R seconds the key's calls stand for: the seconds the code base spent
     in it (`package_seconds`) times GNU R's seconds over the capture's seconds for the same sampled calls. The ratio
     comes from the code base's own valid samples, and from every code base's when it has none or
-    theirs took no measurable time."""
+    theirs took no measurable time. It is applied to the time of the calls the recorder could not
+    capture too, which assumes GNU R runs those as much faster or slower as the sampled ones."""
     def ratio(samples):
         captured = sum(sample["seconds"] for sample in samples)
         return sum(sample["gnu_seconds_per_call"] for sample in samples) / captured if captured > 0 else None

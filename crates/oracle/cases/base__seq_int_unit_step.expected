@@ -17,9 +17,17 @@
 |  int [1:18] 19723 19724 19725 19726 19727 19728 19729 19730 19731 19732 ...
 | [1] "wrong sign in 'by' argument"
 | [1] "wrong sign in 'by' argument"
+|  int 1
+|  int 1
+|  int 2
+|  logi TRUE
+|  Named int 1
+|  - attr(*, "names")= chr "a"
+|  num 1
+|  int 1
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| "wrong sign in 'by' argument"
+NULL
+| NULL

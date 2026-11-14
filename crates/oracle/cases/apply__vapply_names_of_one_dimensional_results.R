@@ -13,3 +13,7 @@ str(vapply(1:2, function(v) c(p = v, q = v), numeric(2)))
 str(vapply(1:2, function(v) array(v, 1, list("p")), numeric(1)))
 str(vapply(1:2, function(v) matrix(v, 1, 2, dimnames = list("r", c("p", "q"))), matrix(0, 1, 2)))
 str(vapply(1:2, function(v) matrix(v, 1, 2, dimnames = list("r", c("p", "q"))), numeric(2)))
+# A zero-length input still takes its row names from FUN.VALUE.
+str(vapply(integer(0), function(i) c(a = 1, b = 2), c(a = 0, b = 0)))
+str(vapply(character(0), function(i) table(c("x", "y")), table(c("x", "y"))))
+str(vapply(integer(0), function(i) 1, numeric(1)))

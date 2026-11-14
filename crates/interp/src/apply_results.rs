@@ -170,6 +170,11 @@ impl VapplyResults {
             }
             return Ok(self.result);
         }
+        // Setting dimnames stores a component without elements as NULL, which is what the names
+        // of a zero-length character input are.
+        if names != nil() && length(names) == 0 {
+            names = nil();
+        }
         if names == nil() && self.row_names == nil() {
             return Ok(self.result);
         }
