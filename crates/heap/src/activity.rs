@@ -477,3 +477,78 @@ pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>, bodies: &mut V
         bodies.push(FRAME_BODIES[index].load(Ordering::Relaxed));
     }
 }
+
+
+/// Exact allocation counts by object kind, and the call paths of a sample of them, while a
+/// profile summary is collected with `RY_ALLOC_SITES` set to the sampling period.
+static ALLOCATED: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+static ALLOCATION_PERIOD: AtomicU64 = AtomicU64::new(0);
+static ALLOCATION_SITES: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+pub fn set_allocation_period(period: u64) {
+    ALLOCATION_PERIOD.store(period, Ordering::Relaxed);
+}
+
+#[inline(always)]
+pub fn allocated(kind: u32) {
+    if enabled() {
+        allocated_slow(kind);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn allocated_slow(kind: u32) {
+    let Some(counter) = ALLOCATED.get(kind as usize) else {
+        return;
+    };
+    let count = counter.load(Ordering::Relaxed) + 1;
+    counter.store(count, Ordering::Relaxed);
+    let period = ALLOCATION_PERIOD.load(Ordering::Relaxed);
+    if period == 0 || count % period != 0 {
+        return;
+    }
+    let trace = std::backtrace::Backtrace::force_capture().to_string();
+    let mut frames: Vec<&str> = Vec::new();
+    for line in trace.lines() {
+        let line = line.trim_start();
+        let Some((index, name)) = line.split_once(": ") else {
+            continue;
+        };
+        if index.parse::<u32>().is_err() {
+            continue;
+        }
+        if name.contains("activity::")
+            || name.contains("backtrace")
+            || name.contains("Heap>::alloc")
+            || name.contains("Heap>::init_small")
+            || name.contains("heap::heap::Heap")
+        {
+            continue;
+        }
+        frames.push(name);
+        if frames.len() == 10 {
+            break;
+        }
+    }
+    let key = format!("{kind}\t{}", frames.join(" < "));
+    let mut sites = match ALLOCATION_SITES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match sites.iter_mut().find(|(site, _)| *site == key) {
+        Some((_, count)) => *count += 1,
+        None => sites.push((key, 1)),
+    }
+}
+
+pub fn allocation_counts() -> [u64; 32] {
+    std::array::from_fn(|kind| ALLOCATED[kind].load(Ordering::Relaxed))
+}
+
+pub fn allocation_sites() -> Vec<(String, u64)> {
+    match ALLOCATION_SITES.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}

@@ -184,6 +184,12 @@ pub fn start_from_environment() {
     // working directory (into `tempdir()`, which the session then deletes), so a relative
     // path is fixed against the directory the session started in.
     let path = std::path::absolute(&path).unwrap_or(path);
+    if let Some(period) = std::env::var("RY_ALLOC_SITES")
+        .ok()
+        .and_then(|period| period.parse::<u64>().ok())
+    {
+        activity::set_allocation_period(period);
+    }
     activity::set_enabled(true);
     let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {
@@ -896,6 +902,23 @@ fn report(
     kinds.sort_by(|a, b| b.cmp(a));
     for (count, name) in kinds {
         writeln!(out, "| objects freed: {name} | {count} |")?;
+    }
+    let allocated = activity::allocation_counts();
+    for (code, count) in allocated.iter().enumerate() {
+        if *count > 0 {
+            let name = if code == 26 {
+                "binding cell"
+            } else {
+                SexpType::from_code(code as u32).map_or("?", |kind| kind.name())
+            };
+            writeln!(out, "| objects allocated: {name} | {count} |")?;
+        }
+    }
+    let mut sites = activity::allocation_sites();
+    sites.sort_by(|a, b| b.1.cmp(&a.1));
+    writeln!(out, "\n## Allocation sites (sampled)\n")?;
+    for (site, count) in sites {
+        writeln!(out, "SITE\t{count}\t{site}")?;
     }
     writeln!(out, "| most objects live | {} |", stats.max_live_objects)?;
     writeln!(

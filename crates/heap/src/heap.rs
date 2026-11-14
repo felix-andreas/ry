@@ -3196,6 +3196,7 @@ impl Heap {
         }
         let object = Sexp::from_non_null(memory.cast());
         object.init_header(kind, class as u8, 0, self.known.nil);
+        crate::activity::allocated(kind as u32);
         object
     }
 
