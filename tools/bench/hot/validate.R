@@ -3,10 +3,12 @@
 # (RY_HOT_CAPTURE), in a process whose library path holds the corpus library but not the code
 # bases, so a sample that needs the code base's own namespace fails here.
 #
-# A sample is valid when it replays as it ran (an error when it threw, a value otherwise), gives
-# the same result twice in a row and the value the capture kept, prints at most a couple of
-# lines, opens no connection, creates no file, leaves the global environment, the options and
-# the search path as they were (apart from `.Random.seed`), and takes at most 250 ms a call.
+# A sample is valid when it replays as it ran (an error when it threw, a value otherwise), prints
+# at most a couple of lines, opens no connection, creates no file, leaves the global environment,
+# the options and the search path as they were (apart from `.Random.seed`), and takes at most
+# 250 ms a call. Its result must be the value the capture kept. The exception is a result that
+# differs between two replays in a row (it holds a counter or a generated id): the sample stays
+# valid with the comparison `varies`, and the harness prints `varies` in place of its checksum.
 #
 # It writes <capture>/validated.tsv, one row per sample, and for each valid sample a compact copy
 # of its replay inputs in <capture>/validated/, with the result's checksum (replay.R) in place of
@@ -220,8 +222,12 @@ local({
     if (!first$threw) {
       value <- strip(first$value)
       addresses <- opaque(first$value)
-      if (!identical(value, strip(second$value))) return(invalid("is not deterministic"))
-      if (isTRUE(sample$value_kept)) {
+      # A result that holds a process-wide counter or a generated id differs on every call. The
+      # call is still part of the workload, so it stays, and its result goes unchecked.
+      varies <- !identical(value, strip(second$value))
+      if (varies) {
+        comparison <- "varies"
+      } else if (isTRUE(sample$value_kept)) {
         kept <- strip(sample$value)
         if (identical(value, kept)) {
           comparison <- if (addresses) "opaque" else "identical"
@@ -238,11 +244,12 @@ local({
     prepared <- list(call = sample$call, env = env, seed = if (rng) sample$seed, threw = first$threw, iterations = 1L)
     if (rng && is.null(sample$seed)) return(invalid("draws random numbers without a captured seed"))
     seconds <- calibrate(prepared)
-    checksum <- .hot$checksum(if (first$threw) .hot$failed else first$value)
-    small <- !first$threw && as.numeric(object.size(first$value)) <= kept_value_bytes
+    varies <- comparison == "varies"
+    checksum <- if (varies) "varies" else .hot$checksum(if (first$threw) .hot$failed else first$value)
+    small <- !first$threw && !varies && as.numeric(object.size(first$value)) <= kept_value_bytes
     saveRDS(list(package = sample$package, name = sample$name, call = sample$call, variables = sample$variables,
                  imports = sample$imports, seed = if (rng) sample$seed, threw = first$threw,
-                 value = if (small) first$value, value_kept = small, checksum = checksum),
+                 value = if (small) first$value, value_kept = small, varies = varies, checksum = checksum),
             file.path(out, basename(path)), compress = "xz")
     list(valid = TRUE, reason = "", comparison = comparison, rng = rng, threw = first$threw,
          namespaces = namespaces, seconds = seconds, iterations = max(1L, as.integer(round(batch_seconds / seconds))),

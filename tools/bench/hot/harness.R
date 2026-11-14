@@ -15,7 +15,8 @@
 # For each program it loads the namespaces the program needs, rebuilds each sample's environment
 # once, runs one untimed warm-up batch, collects garbage, and times the batches. It prints
 #   <id> <checksums> <min batch seconds> <median batch seconds> <calls per batch>
-# where the checksums are those of each sample's last result, joined by commas, or
+# where the checksums are those of each sample's last result (`varies` for a sample the
+# validator found to give a different result on every call), joined by commas, or
 #   <id> failed <reason>
 # when a namespace does not load, a sample cannot be read, or a call fails that should not.
 local({
@@ -58,7 +59,7 @@ local({
         lapply(seq_along(files), function(k) {
           sample <- readRDS(file.path(suite, files[[k]]))
           list(call = sample$call, env = .hot$environment_of(sample), seed = if (rng[[k]]) sample$seed,
-               threw = threw[[k]], iterations = iterations[[k]])
+               threw = threw[[k]], iterations = iterations[[k]], varies = isTRUE(sample$varies))
         }),
         error = function(error) {
           failure <<- paste("a sample does not load:", conditionMessage(error))
@@ -97,7 +98,9 @@ local({
       cat(id, " failed ", one_line(failure), "\n", sep = "")
       next
     }
-    checksums <- paste(vapply(results, .hot$checksum, ""), collapse = ",")
+    checksums <- vapply(results, .hot$checksum, "")
+    checksums[vapply(prepared, function(sample) sample$varies, NA)] <- "varies"
+    checksums <- paste(checksums, collapse = ",")
     cat(sprintf("%s %s %.6f %.6f %d\n", id, checksums, min(times), stats::median(times), sum(iterations)))
   }
 })

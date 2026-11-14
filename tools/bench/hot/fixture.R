@@ -7,7 +7,7 @@
 # DIR/<code base>/ gets entries.tsv, samples.tsv, summary.tsv and samples/<n>.rds. The samples
 # cover each case the validator and the harness must handle: a plain numeric call, an inline
 # lambda, an imported name, a call that draws random numbers, a call that throws, one that
-# prints, one that is not deterministic, one that needs a package from the corpus library, an
+# prints, one whose result varies from call to call, one that needs a package from the corpus library, an
 # oversized value the capture did not keep, an environment for a result, an operator, a slow
 # call, a call that writes a file and a call whose kept value disagrees with its replay. A key
 # with uncapturable time and no samples stands for what the recorder cannot replay.
