@@ -181,6 +181,12 @@ variable and stops being one before a binding is removed from it. `eval::pending
 that the frame at that position still names the environment, so a use after the frame returned
 without it is a panic, not a read of another frame.
 
+Code that reads an environment's frame record inline, without the heap's lookup, sees only the
+cells: the symbol filter of an empty or partial environment does not show the variables still in
+slots. Tier 1 reads the enclosing environments of an inlined closure that way, so its
+compile-time probe (`Heap::probe`), the walk it emits (`codegen.rs`) and `jit_enter_frame` test
+`gp::SLOT_FRAME` first and send such an environment to the lookup that asks the frame.
+
 ### What asks for the environment
 
 | What | State it needs | Where |
