@@ -1351,7 +1351,12 @@ def instructions_of(runner, programs, engine, functions=False):
     because callgrind runs a process some fifty times slower. A program's count depends a little
     on the programs its process ran before it (what the collector has to trace, what is compiled),
     so the deal is by position in the suite and not by the number of cores: the same selection
-    of programs counts the same on every machine."""
+    of programs counts the same on every machine.
+
+    Native code runs on one OpenMP thread. Callgrind counts every thread, and the idle workers of
+    a thread pool spin while they wait, for a time that differs from run to run: with data.table's
+    default threads, a `:=` by group counted 80 to 96 million instructions, and 45.8 million on
+    one thread in every run."""
     if shutil.which("valgrind") is None:
         sys.exit("error: --instructions runs ry under callgrind, and valgrind is not on the PATH")
     prefix = runner.work / f"callgrind.{engine.key}"
@@ -1362,7 +1367,7 @@ def instructions_of(runner, programs, engine, functions=False):
         wrapper = ["valgrind", "--tool=callgrind", "--instr-atstart=no", "--smc-check=all-non-file",
                    f"--callgrind-out-file={prefix}.{shard}"]
         return runner.run_batch(programs[shard::INSTRUCTION_SHARDS], engine, mode="instructions", wrapper=wrapper,
-                                timeout=CODEBASE_TIMEOUT, shard=f".{shard}")
+                                env={"OMP_NUM_THREADS": "1"}, timeout=CODEBASE_TIMEOUT, shard=f".{shard}")
 
     measured = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
