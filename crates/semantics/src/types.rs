@@ -1,15 +1,19 @@
 use {
-    crate::{Db, hir::Symbol},
-    hashbrown::HashTable,
+    crate::{
+        Db,
+        hir::Symbol,
+        intern::{CHUNK_LENGTH, Column, FirstChunk, IdTable},
+    },
+    bumpalo::Bump,
     rustc_hash::{FxBuildHasher, FxHashMap},
+    smallvec::SmallVec,
     std::{
-        cell::Cell,
         fmt,
         hash::{BuildHasher, Hash, Hasher},
         iter,
         marker::PhantomData,
         mem,
-        sync::{LazyLock, Mutex},
+        num::NonZeroU32,
     },
     thin_vec::ThinVec,
 };
@@ -82,41 +86,137 @@ impl IntoSymbol for &String {
     }
 }
 
-/// A type, hash-consed process-wide: structurally equal kinds share one immortal allocation,
-/// so equality and hashing compare pointers and `kind` is a plain read. The checker builds
-/// and compares types far more often than anything else, and salsa interning put a table
-/// lookup, a dependency edge and shared atomics on each of those operations. The lifetime is
-/// phantom: no type borrows from a database, which is what lets the table outlive them all.
-#[derive(Clone, Copy)]
+/// A type: a four-byte id into the process-wide type store. Structurally equal kinds share
+/// one id, so equality and hashing compare the id, and `kind` is an index into a column that
+/// never moves or frees an entry. The checker builds and compares types far more often than
+/// anything else, which is why none of those operations consults a database or takes a lock.
+///
+/// The id's low 27 bits are the store index. The bits above say what the type is and what
+/// occurs anywhere in its tree, so asking whether a type is an inference variable, and the
+/// walks that only rewrite one kind, are a bit test that reads no memory. The lifetime is
+/// phantom: no type borrows from a database, which is what lets the store outlive them all.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ty<'db> {
-    entry: &'static TypeEntry,
+    bits: NonZeroU32,
     db: PhantomData<&'db ()>,
 }
 
-/// A hash-consed type with the facts derived from its structure at construction, while its
-/// children's facts are at hand.
-struct TypeEntry {
-    kind: TyKind<'static>,
-    /// Nodes in the type tree, capped at [`TYPE_SIZE_CEILING`].
-    size: u64,
-    /// Which [`TypeEntry::HAS_VAR`]-style kinds occur anywhere in the tree, so the walks that
-    /// only rewrite those kinds return a type without them untouched instead of rebuilding it.
-    contents: u8,
-}
+/// An inference variable occurs in the type.
+const HAS_VAR: u32 = 1 << 31;
+/// A `Named` application occurs in the type, which resolution may expand as an alias.
+const HAS_NAMED: u32 = 1 << 30;
+const HAS_RIGID: u32 = 1 << 29;
+const HAS_UNKNOWN: u32 = 1 << 28;
+/// The type is an inference variable itself, the question unification asks of every type
+/// it touches.
+const IS_VAR: u32 = 1 << 27;
+const CONTENT_BITS: u32 = HAS_VAR | HAS_NAMED | HAS_RIGID | HAS_UNKNOWN;
+const INDEX_BITS: u32 = IS_VAR - 1;
 
-impl TypeEntry {
-    const HAS_VAR: u8 = 1;
-    const HAS_RIGID: u8 = 1 << 1;
-    const HAS_UNKNOWN: u8 = 1 << 2;
-    /// A `Named` application, which resolution may expand as an alias.
-    const HAS_NAMED: u8 = 1 << 3;
-}
+/// The kinds without a payload that needs the store. Their ids are constants, so building
+/// one costs nothing, and they are the store's first entries from the start. Index 0 is
+/// never an id, which keeps an `Option<Ty>` the size of a `Ty`.
+const LEAF_KINDS: [TyKind<'static>; LEAVES] = [
+    TyKind::Any,
+    TyKind::Any,
+    TyKind::Unknown,
+    TyKind::Null,
+    TyKind::OtherTags,
+    TyKind::Scalar(Atomic::Logical),
+    TyKind::Scalar(Atomic::Integer),
+    TyKind::Scalar(Atomic::Double),
+    TyKind::Scalar(Atomic::Complex),
+    TyKind::Scalar(Atomic::Character),
+    TyKind::Scalar(Atomic::Raw),
+    TyKind::Native(NativeScalar::I64),
+    TyKind::Native(NativeScalar::F64),
+    TyKind::Native(NativeScalar::Bool),
+    TyKind::Native(NativeScalar::Str),
+];
+const LEAVES: usize = 15;
+/// The inference variables whose ids are constants too: they fill the rest of the store's
+/// first chunk, right after the leaves. An item numbers its variables from zero and rarely
+/// reaches this many, so making a variable's type and reading the variable back out of it
+/// are arithmetic on the id.
+const CONSTANT_VARS: usize = CHUNK_LENGTH - LEAVES;
+const ANY: u32 = 1;
+const UNKNOWN: u32 = 2 | HAS_UNKNOWN;
+const NULL: u32 = 3;
+const OTHER_TAGS: u32 = 4;
+const FIRST_SCALAR: u32 = 5;
+const FIRST_NATIVE: u32 = 11;
 
 impl<'db> Ty<'db> {
+    pub fn new<D: ?Sized>(_db: &'db D, kind: TyKind<'_>) -> Ty<'db> {
+        let bits = match kind {
+            TyKind::Any => ANY,
+            TyKind::Unknown => UNKNOWN,
+            TyKind::Null => NULL,
+            TyKind::OtherTags => OTHER_TAGS,
+            TyKind::Scalar(atomic) => FIRST_SCALAR + atomic as u32,
+            TyKind::Native(native) => FIRST_NATIVE + native as u32,
+            TyKind::Var(InferenceVar(var)) if (var as usize) < CONSTANT_VARS => {
+                (LEAVES as u32 + var) | HAS_VAR | IS_VAR
+            }
+            _ => return intern_type(kind),
+        };
+        Ty::from_bits(bits)
+    }
+
+    pub fn kind<D: ?Sized>(self, _db: &D) -> &'db TyKind<'db> {
+        // SAFETY: an id is a leaf, which the column holds from the start, or was made by
+        // `insert_type` after it wrote this entry, and reached this thread through the type
+        // table or another synchronized hand-off.
+        unsafe { KINDS.get_unchecked((self.bits.get() & INDEX_BITS) as usize) }
+    }
+
+    /// The variable the type is, if it is one. Read off the id, except for a variable
+    /// numbered past the constant ones.
+    pub fn as_var<D: ?Sized>(self, db: &D) -> Option<InferenceVar> {
+        let bits = self.bits.get();
+        if bits & IS_VAR == 0 {
+            return None;
+        }
+        let index = (bits & INDEX_BITS) as usize;
+        if index < CHUNK_LENGTH {
+            return Some(InferenceVar((index - LEAVES) as u32));
+        }
+        match self.kind(db) {
+            TyKind::Var(var) => Some(*var),
+            _ => None,
+        }
+    }
+
+    pub fn is_var(self) -> bool {
+        self.bits.get() & IS_VAR != 0
+    }
+
     /// Whether resolving through an inference table can change the type: only a variable or
     /// an alias application inside it can.
     pub(crate) fn may_resolve(self) -> bool {
-        self.entry.contents & (TypeEntry::HAS_VAR | TypeEntry::HAS_NAMED) != 0
+        self.bits.get() & (HAS_VAR | HAS_NAMED) != 0
+    }
+
+    /// Every name a `Named` application in the type applies, each once. Empty for a type that
+    /// applies none.
+    pub(crate) fn applied_names(self) -> &'db [Name<'db>] {
+        if self.bits.get() & HAS_NAMED == 0 {
+            return &[];
+        }
+        self.facts().applied_names
+    }
+
+    fn facts(self) -> &'static TypeFacts {
+        // SAFETY: as in `kind`; `insert_type` writes both columns before it makes the id.
+        unsafe { FACTS.get_unchecked((self.bits.get() & INDEX_BITS) as usize) }
+    }
+
+    fn from_bits(bits: u32) -> Ty<'db> {
+        Ty {
+            // The index is never 0: the leaves start at 1 and the store's ids after them.
+            bits: NonZeroU32::new(bits).unwrap_or(NonZeroU32::MIN),
+            db: PhantomData,
+        }
     }
 }
 
@@ -127,36 +227,6 @@ pub struct QueryName<'db> {
     pub name: Name<'db>,
 }
 
-impl<'db> Ty<'db> {
-    pub fn new<D: ?Sized>(_db: &'db D, kind: TyKind<'db>) -> Ty<'db> {
-        // SAFETY: `'db` appears in `TyKind` only through `Ty` and `Name`, whose lifetimes are
-        // phantom, so the value borrows nothing and is valid for any lifetime.
-        let kind: TyKind<'static> = unsafe { mem::transmute(kind) };
-        Ty {
-            entry: intern_type(kind),
-            db: PhantomData,
-        }
-    }
-
-    pub fn kind<D: ?Sized>(self, _db: &D) -> &'db TyKind<'db> {
-        &self.entry.kind
-    }
-}
-
-impl PartialEq for Ty<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.entry, other.entry)
-    }
-}
-
-impl Eq for Ty<'_> {}
-
-impl Hash for Ty<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.entry, state);
-    }
-}
-
 impl Hash for Name<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.symbol.index().hash(state);
@@ -165,7 +235,7 @@ impl Hash for Name<'_> {
 
 impl fmt::Debug for Ty<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.entry.kind, formatter)
+        fmt::Debug::fmt(self.kind(&()), formatter)
     }
 }
 
@@ -175,12 +245,15 @@ impl fmt::Debug for Name<'_> {
     }
 }
 
-// SAFETY: both point into process-wide tables that never free or move an entry, so a value
-// from an older revision stays valid in every later one.
+// SAFETY: both index process-wide tables that never free or move an entry, so a value from
+// an older revision stays valid in every later one.
 unsafe impl salsa::SalsaValue for Ty<'_> {}
 unsafe impl salsa::SalsaValue for Name<'_> {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+/// What a type is, read from the store. A kind with several children borrows them from the
+/// store, so reading a type copies nothing and building one that already exists allocates
+/// nothing: [`Ty::new`] takes the children borrowed from wherever the caller has them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TyKind<'db> {
     /// Compatible with everything, silently.
     Any,
@@ -196,14 +269,14 @@ pub enum TyKind<'db> {
     List(Ty<'db>),
     NamedList(Ty<'db>),
     /// `list{A, B}`.
-    Tuple(Vec<Ty<'db>>),
+    Tuple(&'db [Ty<'db>]),
     /// `list{a: A, b: B}`; fields keep declaration order.
-    Record(Vec<RecordField<'db>>),
+    Record(&'db [RecordField<'db>]),
     /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
-    NativeTuple(Vec<Ty<'db>>),
+    NativeTuple(&'db [Ty<'db>]),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
     /// fields are kept sorted by name and every field is required.
-    NativeRecord(Vec<NativeField<'db>>),
+    NativeRecord(&'db [NativeField<'db>]),
     /// `:Name` or `:Name(...)`. The payload is always a `NativeTuple` (positional) or a
     /// `NativeRecord` (named), so a payload types and compares exactly like that literal.
     Tag(Name<'db>, Option<Ty<'db>>),
@@ -214,11 +287,11 @@ pub enum TyKind<'db> {
     /// a `LazyFrame{...}` plan, a `GroupBy{...}`, or a `data.table{...}` whose columns are known.
     /// `None` is a table whose columns are not known (`DataFrame`), which every column reference
     /// treats as silent.
-    Frame(FrameKind, Option<Vec<RecordField<'db>>>),
-    Function(FunctionType<'db>),
+    Frame(FrameKind, Option<&'db [RecordField<'db>]>),
+    Function(&'db FunctionType<'db>),
     /// Normalized; build only through `union_of`, never directly.
-    Union(Vec<Ty<'db>>),
-    Named(Name<'db>, Vec<Ty<'db>>),
+    Union(&'db [Ty<'db>]),
+    Named(Name<'db>, &'db [Ty<'db>]),
     /// Inference-scoped: resolved through the table, never stored in exported schemes.
     Var(InferenceVar),
     /// A skolem from an explicit `<T>` binder: refuses to bind while its scope is
@@ -431,14 +504,14 @@ impl NumberLiteral {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::SalsaValue)]
 pub struct InferenceVar(pub u32);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct RecordField<'db> {
     pub name: Name<'db>,
     pub ty: Ty<'db>,
     pub optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct NativeField<'db> {
     pub name: Name<'db>,
     pub ty: Ty<'db>,
@@ -446,7 +519,7 @@ pub struct NativeField<'db> {
 
 /// Unlike a record field, carries the default's type: R evaluates the default
 /// when the argument is omitted, so it is what the parameter holds on that path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct Parameter<'db> {
     pub name: Name<'db>,
     pub ty: Ty<'db>,
@@ -465,10 +538,13 @@ impl<'db> Parameter<'db> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+/// A function's signature. The lists borrow, from the store when the signature is read from
+/// a type and from the caller when it is being built, so changing one is a copy of the struct
+/// with that list pointed at the new items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionType<'db> {
-    pub positional: Vec<Ty<'db>>,
-    pub named: Vec<Parameter<'db>>,
+    pub positional: &'db [Ty<'db>],
+    pub named: &'db [Parameter<'db>],
     /// Parameters after `...` match by name only.
     pub variadic: Option<RestParameter<'db>>,
     pub ret: Ty<'db>,
@@ -480,16 +556,16 @@ pub struct FunctionType<'db> {
     pub flag_return: Option<FlagReturn<'db>>,
     /// Formals the body reads only through `substitute()`, so a call's argument there is code
     /// the callee captures rather than a value the caller computes. Inferred only.
-    pub quoted: Vec<Name<'db>>,
+    pub quoted: &'db [Name<'db>],
     /// Optional formals that a forced formal's default reads: `function(x, y = x) y` may be
     /// called as `g(y = 1)` but not as `g()`. Inferred only.
-    pub default_reads: Vec<DefaultRead<'db>>,
+    pub default_reads: &'db [DefaultRead<'db>],
     /// Formals the body tests with `missing()`, so a missing formal the caller forwards there
     /// may stay unread even when the formal has a default. Inferred only.
-    pub missing_tested: Vec<Name<'db>>,
+    pub missing_tested: &'db [Name<'db>],
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
-    pub condition_only: Vec<Name<'db>>,
+    pub condition_only: &'db [Name<'db>],
     /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
     /// call where the caller already showed `predicate` holds of its argument returns the
     /// other members alone. Inferred only.
@@ -502,6 +578,32 @@ pub struct FunctionType<'db> {
     /// call passed rather than formals: another call may pass a different set of names, which
     /// the real callee's defaults or `...` may accept.
     pub from_calls: bool,
+}
+
+impl<'db> FunctionType<'db> {
+    /// A declared signature with these parameters and nothing an inferred body adds.
+    pub fn declared(
+        positional: &'db [Ty<'db>],
+        named: &'db [Parameter<'db>],
+        variadic: Option<RestParameter<'db>>,
+        ret: Ty<'db>,
+    ) -> FunctionType<'db> {
+        FunctionType {
+            positional,
+            named,
+            variadic,
+            ret,
+            inferred: false,
+            flag_return: None,
+            quoted: &[],
+            default_reads: &[],
+            missing_tested: &[],
+            condition_only: &[],
+            null_unless: None,
+            reduces: None,
+            from_calls: false,
+        }
+    }
 }
 
 /// purrr's `reduce(.x, .f, ..., .init)` calling `Reduce(function(x, y) .f(x, y, ...), .x,
@@ -538,7 +640,7 @@ pub struct FlagReturn<'db> {
     pub when_false: Ty<'db>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct RestParameter<'db> {
     pub element: Ty<'db>,
     pub preceding_named: usize,
@@ -681,32 +783,32 @@ impl<'db> TypeScheme<'db> {
 
 /// Named types are not expanded: their representation is a separate declaration.
 pub fn contains_unknown(_db: &dyn Db, ty: Ty<'_>) -> bool {
-    ty.entry.contents & TypeEntry::HAS_UNKNOWN != 0
+    ty.bits.get() & HAS_UNKNOWN != 0
 }
 
-pub fn any(db: &dyn Db) -> Ty<'_> {
-    Ty::new(db, TyKind::Any)
+pub fn any(_db: &dyn Db) -> Ty<'_> {
+    Ty::from_bits(ANY)
 }
 
-pub fn unknown(db: &dyn Db) -> Ty<'_> {
-    Ty::new(db, TyKind::Unknown)
+pub fn unknown(_db: &dyn Db) -> Ty<'_> {
+    Ty::from_bits(UNKNOWN)
 }
 
-pub fn null(db: &dyn Db) -> Ty<'_> {
-    Ty::new(db, TyKind::Null)
+pub fn null(_db: &dyn Db) -> Ty<'_> {
+    Ty::from_bits(NULL)
 }
 
-pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
-    Ty::new(db, TyKind::Scalar(atomic))
+pub fn scalar(_db: &dyn Db, atomic: Atomic) -> Ty<'_> {
+    Ty::from_bits(FIRST_SCALAR + atomic as u32)
 }
 
-pub fn native_scalar(db: &dyn Db, native: NativeScalar) -> Ty<'_> {
-    Ty::new(db, TyKind::Native(native))
+pub fn native_scalar(_db: &dyn Db, native: NativeScalar) -> Ty<'_> {
+    Ty::from_bits(FIRST_NATIVE + native as u32)
 }
 
 /// `List<element>`, ry's list.
 pub fn array<'db>(db: &'db dyn Db, element: Ty<'db>) -> Ty<'db> {
-    Ty::new(db, TyKind::Named(Name::new(db, "List"), vec![element]))
+    Ty::new(db, TyKind::Named(Name::new(db, "List"), &[element]))
 }
 
 /// The item type of the standard library's `List<T>`, and `None` for any other type, including a
@@ -768,31 +870,51 @@ pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 }
 
 /// Sorts by name in byte order, the one order a record's fields are stored and printed in.
-pub fn native_record<'db>(db: &'db dyn Db, mut fields: Vec<NativeField<'db>>) -> Ty<'db> {
+pub fn native_record<'db>(
+    db: &'db dyn Db,
+    fields: impl IntoIterator<Item = NativeField<'db>>,
+) -> Ty<'db> {
+    let mut fields: SmallVec<[NativeField<'db>; 8]> = fields.into_iter().collect();
     fields.sort_by(|left, right| left.name.text(db).cmp(right.name.text(db)));
-    Ty::new(db, TyKind::NativeRecord(fields))
+    Ty::new(db, TyKind::NativeRecord(&fields))
 }
 
 /// The payload's shape: its item count, or its field names. Two tags with one name and one
 /// shape are the same member of a union, and two with one name and different shapes conflict.
-#[derive(PartialEq, Eq)]
-pub enum PayloadShape<'db> {
+#[derive(Clone, Copy)]
+enum PayloadShape<'db> {
     Bare,
     Positional(usize),
-    Named(Vec<Name<'db>>),
+    Named(&'db [NativeField<'db>]),
     /// A payload that is not a native tuple or record, which only a broken annotation makes.
     Other(Ty<'db>),
 }
 
-pub fn payload_shape<'db>(db: &'db dyn Db, payload: Option<Ty<'db>>) -> PayloadShape<'db> {
+impl PartialEq for PayloadShape<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PayloadShape::Bare, PayloadShape::Bare) => true,
+            (PayloadShape::Positional(left), PayloadShape::Positional(right)) => left == right,
+            (PayloadShape::Named(left), PayloadShape::Named(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right.iter())
+                        .all(|(left, right)| left.name == right.name)
+            }
+            (PayloadShape::Other(left), PayloadShape::Other(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+fn payload_shape<'db>(db: &'db dyn Db, payload: Option<Ty<'db>>) -> PayloadShape<'db> {
     let Some(payload) = payload else {
         return PayloadShape::Bare;
     };
     match payload.kind(db) {
         TyKind::NativeTuple(items) => PayloadShape::Positional(items.len()),
-        TyKind::NativeRecord(fields) => {
-            PayloadShape::Named(fields.iter().map(|field| field.name).collect())
-        }
+        TyKind::NativeRecord(fields) => PayloadShape::Named(fields),
         _ => PayloadShape::Other(payload),
     }
 }
@@ -836,11 +958,14 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     }
 }
 
+/// The children a type is built from, kept on the stack for the usual handful.
+pub type TypeList<'db> = SmallVec<[Ty<'db>; 8]>;
+
 pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>) -> Ty<'db> {
-    let mut flat: Vec<Ty<'db>> = Vec::new();
+    let mut flat = TypeList::new();
     let mut saw_null = false;
     let mut saw_other_tags = false;
-    let mut stack: Vec<Ty<'db>> = members.into_iter().collect();
+    let mut stack: TypeList<'db> = members.into_iter().collect();
     stack.reverse();
     while let Some(member) = stack.pop() {
         match member.kind(db) {
@@ -879,12 +1004,12 @@ pub fn union_of<'db>(db: &'db dyn Db, members: impl IntoIterator<Item = Ty<'db>>
         flat.push(null(db));
     }
     if saw_other_tags {
-        flat.push(Ty::new(db, TyKind::OtherTags));
+        flat.push(Ty::from_bits(OTHER_TAGS));
     }
     match flat.len() {
         0 => null(db),
         1 => flat[0],
-        _ => Ty::new(db, TyKind::Union(flat)),
+        _ => Ty::new(db, TyKind::Union(&flat)),
     }
 }
 
@@ -899,41 +1024,43 @@ fn merge_tags<'db>(db: &'db dyn Db, first: Ty<'db>, second: Ty<'db>) -> Ty<'db> 
         return first;
     };
     let payload = match (first_payload.kind(db), second_payload.kind(db)) {
-        (TyKind::NativeTuple(left), TyKind::NativeTuple(right)) => Ty::new(
-            db,
-            TyKind::NativeTuple(
-                left.iter()
-                    .zip(right)
-                    .map(|(&left, &right)| union_of(db, [left, right]))
-                    .collect(),
-            ),
-        ),
-        (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => Ty::new(
-            db,
-            TyKind::NativeRecord(
-                left.iter()
-                    .zip(right)
-                    .map(|(left, right)| NativeField {
-                        name: left.name,
-                        ty: union_of(db, [left.ty, right.ty]),
-                    })
-                    .collect(),
-            ),
-        ),
+        (TyKind::NativeTuple(left), TyKind::NativeTuple(right)) => {
+            let items: TypeList<'db> = left
+                .iter()
+                .zip(right.iter())
+                .map(|(&left, &right)| union_of(db, [left, right]))
+                .collect();
+            Ty::new(db, TyKind::NativeTuple(&items))
+        }
+        (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => {
+            let fields: SmallVec<[NativeField<'db>; 8]> = left
+                .iter()
+                .zip(right.iter())
+                .map(|(left, right)| NativeField {
+                    name: left.name,
+                    ty: union_of(db, [left.ty, right.ty]),
+                })
+                .collect();
+            Ty::new(db, TyKind::NativeRecord(&fields))
+        }
         _ => return first,
     };
     Ty::new(db, TyKind::Tag(*name, Some(payload)))
 }
 
 /// Node count of `ty` as a tree (each path counted separately), saturating at
-/// [`TYPE_SIZE_CEILING`] and stored when the type is built. Hash-consing makes types DAGs, so a
+/// [`TYPE_SIZE_CEILING`] and stored when the type is built. Types share subtrees, so a
 /// self-referential record's tree grows exponentially while its distinct nodes stay few.
 pub fn type_size<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> u64 {
-    ty.entry.size
+    u64::from(stored_size(ty))
 }
 
 /// Far above any type real code produces, far below what a self-referential value reaches.
 pub const TYPE_SIZE_CEILING: u64 = 100_000;
+
+fn stored_size(ty: Ty<'_>) -> u32 {
+    ty.facts().size
+}
 
 /// Rebuild `ty` with `map` applied to each direct child type. Every type rewrite
 /// goes through here so no walk can skip a member such as a parameter default.
@@ -943,15 +1070,15 @@ pub fn map_child_types<'db>(
     ty: Ty<'db>,
     map: &mut impl FnMut(Ty<'db>) -> Ty<'db>,
 ) -> Ty<'db> {
-    if let TyKind::Union(members) = ty.kind(db) {
+    let kind = ty.kind(db);
+    if let TyKind::Union(members) = kind {
         // Members can collapse once mapped, so re-normalize.
         return union_of(db, members.iter().map(|&member| map(member)));
     }
-    // Most maps leave most types alone, so the children are mapped first and the kind is
-    // rebuilt (allocating its child vectors and re-interning) only once one of them changed.
-    // `mapped` stays unallocated until the first change, when it takes the unchanged prefix.
-    let kind = ty.kind(db);
-    let mut mapped: Vec<Ty<'db>> = Vec::new();
+    // Most maps leave most types alone, so the children are mapped first and the type is
+    // rebuilt only once one of them changed. `mapped` stays empty until the first change,
+    // when it takes the unchanged prefix.
+    let mut mapped = TypeList::new();
     let mut unchanged = 0;
     for_each_child(kind, &mut |child| {
         let result = map(child);
@@ -960,9 +1087,6 @@ pub fn map_child_types<'db>(
                 unchanged += 1;
                 return;
             }
-            let mut count = 0;
-            for_each_child(kind, &mut |_| count += 1);
-            mapped.reserve_exact(count);
             let mut prefix = 0;
             for_each_child(kind, &mut |original| {
                 if prefix < unchanged {
@@ -977,25 +1101,31 @@ pub fn map_child_types<'db>(
         return ty;
     }
     let mut children = mapped.into_iter();
-    let rebuilt = mapped_kind(db, ty, &mut |child| children.next().unwrap_or(child));
-    // `for_each_child` and `mapped_kind` must visit the same children in the same order.
+    let rebuilt = rebuilt_type(db, kind, &mut |child| children.next().unwrap_or(child));
+    // `for_each_child` and `rebuilt_type` must visit the same children in the same order.
     debug_assert!(
         children.next().is_none(),
-        "mapped_kind visited fewer children than for_each_child"
+        "rebuilt_type visited fewer children than for_each_child"
     );
-    match rebuilt {
-        Some(kind) => Ty::new(db, kind),
-        None => ty,
-    }
+    rebuilt
 }
 
-/// `ty`'s kind with `map` applied to each child, or `None` for a type without children.
-fn mapped_kind<'db>(
+/// The type of `kind` with `map` applied to each child, in `for_each_child`'s order.
+fn rebuilt_type<'db>(
     db: &'db dyn Db,
-    ty: Ty<'db>,
+    kind: &TyKind<'db>,
     map: &mut impl FnMut(Ty<'db>) -> Ty<'db>,
-) -> Option<TyKind<'db>> {
-    match ty.kind(db) {
+) -> Ty<'db> {
+    let mapped_fields = |fields: &[RecordField<'db>], map: &mut dyn FnMut(Ty<'db>) -> Ty<'db>| {
+        fields
+            .iter()
+            .map(|field| RecordField {
+                ty: map(field.ty),
+                ..*field
+            })
+            .collect::<SmallVec<[RecordField<'db>; 8]>>()
+    };
+    match kind {
         TyKind::Any
         | TyKind::Unknown
         | TyKind::Null
@@ -1003,82 +1133,75 @@ fn mapped_kind<'db>(
         | TyKind::Native(_)
         | TyKind::OtherTags
         | TyKind::Var(_)
-        | TyKind::Rigid(_) => None,
-        TyKind::Vector(inner) => Some(TyKind::Vector(map(*inner))),
-        TyKind::NamedVector(inner) => Some(TyKind::NamedVector(map(*inner))),
-        TyKind::List(inner) => Some(TyKind::List(map(*inner))),
-        TyKind::NamedList(inner) => Some(TyKind::NamedList(map(*inner))),
-        TyKind::Tuple(items) => Some(TyKind::Tuple(items.iter().map(|&item| map(item)).collect())),
-        TyKind::Record(fields) => Some(TyKind::Record(
-            fields
-                .iter()
-                .map(|field| RecordField {
-                    ty: map(field.ty),
-                    ..field.clone()
-                })
-                .collect(),
-        )),
-        TyKind::NativeTuple(items) => Some(TyKind::NativeTuple(
-            items.iter().map(|&item| map(item)).collect(),
-        )),
-        TyKind::NativeRecord(fields) => Some(TyKind::NativeRecord(
-            fields
+        | TyKind::Rigid(_)
+        | TyKind::Frame(_, None)
+        | TyKind::Union(_) => Ty::new(db, *kind),
+        TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(*inner))),
+        TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(map(*inner))),
+        TyKind::List(inner) => Ty::new(db, TyKind::List(map(*inner))),
+        TyKind::NamedList(inner) => Ty::new(db, TyKind::NamedList(map(*inner))),
+        TyKind::Tuple(items) => {
+            let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
+            Ty::new(db, TyKind::Tuple(&items))
+        }
+        TyKind::Record(fields) => Ty::new(db, TyKind::Record(&mapped_fields(fields, map))),
+        TyKind::NativeTuple(items) => {
+            let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
+            Ty::new(db, TyKind::NativeTuple(&items))
+        }
+        TyKind::NativeRecord(fields) => {
+            let fields: SmallVec<[NativeField<'db>; 8]> = fields
                 .iter()
                 .map(|field| NativeField {
                     name: field.name,
                     ty: map(field.ty),
                 })
-                .collect(),
-        )),
-        TyKind::Tag(name, payload) => Some(TyKind::Tag(*name, payload.map(&mut *map))),
-        TyKind::Frame(_, None) => None,
-        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(
-            *kind,
-            Some(
-                columns
-                    .iter()
-                    .map(|column| RecordField {
-                        ty: map(column.ty),
-                        ..column.clone()
-                    })
-                    .collect(),
-            ),
-        )),
-        TyKind::Function(function) => Some(TyKind::Function(FunctionType {
-            positional: function.positional.iter().map(|&ty| map(ty)).collect(),
-            named: function
+                .collect();
+            Ty::new(db, TyKind::NativeRecord(&fields))
+        }
+        TyKind::Tag(name, payload) => Ty::new(db, TyKind::Tag(*name, payload.map(&mut *map))),
+        TyKind::Frame(frame, Some(columns)) => Ty::new(
+            db,
+            TyKind::Frame(*frame, Some(&mapped_fields(columns, map))),
+        ),
+        TyKind::Function(function) => {
+            let positional: TypeList<'db> = function.positional.iter().map(|&ty| map(ty)).collect();
+            let named: SmallVec<[Parameter<'db>; 8]> = function
                 .named
                 .iter()
                 .map(|parameter| Parameter {
                     ty: map(parameter.ty),
                     default: parameter.default.map(&mut *map),
-                    ..parameter.clone()
+                    ..*parameter
                 })
-                .collect(),
-            variadic: function.variadic.as_ref().map(|rest| RestParameter {
+                .collect();
+            let variadic = function.variadic.map(|rest| RestParameter {
                 element: map(rest.element),
-                ..rest.clone()
-            }),
-            ret: map(function.ret),
-            inferred: function.inferred,
-            flag_return: function.flag_return.map(|flag| FlagReturn {
+                ..rest
+            });
+            let ret = map(function.ret);
+            let flag_return = function.flag_return.map(|flag| FlagReturn {
                 when_true: map(flag.when_true),
                 when_false: map(flag.when_false),
                 ..flag
-            }),
-            quoted: function.quoted.clone(),
-            default_reads: function.default_reads.clone(),
-            missing_tested: function.missing_tested.clone(),
-            condition_only: function.condition_only.clone(),
-            null_unless: function.null_unless,
-            reduces: function.reduces,
-            from_calls: function.from_calls,
-        })),
-        TyKind::Union(_) => None,
-        TyKind::Named(name, arguments) => Some(TyKind::Named(
-            *name,
-            arguments.iter().map(|&argument| map(argument)).collect(),
-        )),
+            });
+            Ty::new(
+                db,
+                TyKind::Function(&FunctionType {
+                    positional: &positional,
+                    named: &named,
+                    variadic,
+                    ret,
+                    flag_return,
+                    ..**function
+                }),
+            )
+        }
+        TyKind::Named(name, arguments) => {
+            let arguments: TypeList<'db> =
+                arguments.iter().map(|&argument| map(argument)).collect();
+            Ty::new(db, TyKind::Named(*name, &arguments))
+        }
     }
 }
 
@@ -1134,7 +1257,7 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
 /// Variables index one table, so a type outliving it (an exported scheme, a
 /// value cached across a rollback) must contain none.
 pub fn contains_inference_var<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> bool {
-    ty.entry.contents & TypeEntry::HAS_VAR != 0
+    ty.bits.get() & HAS_VAR != 0
 }
 
 /// Unmapped rigid variables are left intact. A name bound twice takes its last binding.
@@ -1143,16 +1266,16 @@ pub fn substitute_rigid<'db>(
     ty: Ty<'db>,
     substitution: &[(Name<'db>, Ty<'db>)],
 ) -> Ty<'db> {
-    // Interning makes types DAGs, so an unmemoized walk re-walks a shared subtree once per
-    // path, exponential in depth. The tree size bounds that re-walk, and below this size it
-    // costs less than building a memo table.
-    if ty.entry.size <= UNMEMOIZED_SUBSTITUTION_SIZE {
+    // Types share subtrees, so an unmemoized walk re-walks a shared subtree once per path,
+    // exponential in depth. The tree size bounds that re-walk, and below this size it costs
+    // less than building a memo table.
+    if stored_size(ty) <= UNMEMOIZED_SUBSTITUTION_SIZE {
         return substitute_rigid_memo(db, ty, substitution, None);
     }
     substitute_rigid_memo(db, ty, substitution, Some(&mut FxHashMap::default()))
 }
 
-const UNMEMOIZED_SUBSTITUTION_SIZE: u64 = 64;
+const UNMEMOIZED_SUBSTITUTION_SIZE: u32 = 64;
 
 fn substitute_rigid_memo<'db>(
     db: &'db dyn Db,
@@ -1160,7 +1283,7 @@ fn substitute_rigid_memo<'db>(
     substitution: &[(Name<'db>, Ty<'db>)],
     mut memo: Option<&mut FxHashMap<Ty<'db>, Ty<'db>>>,
 ) -> Ty<'db> {
-    if ty.entry.contents & TypeEntry::HAS_RIGID == 0 {
+    if ty.bits.get() & HAS_RIGID == 0 {
         return ty;
     }
     if let Some(&done) = memo.as_deref().and_then(|memo| memo.get(&ty)) {
@@ -1185,93 +1308,195 @@ fn substitute_rigid_memo<'db>(
 /// For values that must survive a table rollback, which reclaims and reuses
 /// variable ids.
 pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
-    if ty.entry.contents & TypeEntry::HAS_VAR == 0 {
+    if ty.bits.get() & HAS_VAR == 0 {
         return ty;
     }
-    if matches!(ty.kind(db), TyKind::Var(_)) {
+    if ty.is_var() {
         return unknown(db);
     }
     map_child_types(db, ty, &mut |child| erase_vars(db, child))
 }
 
-/// The top six bits of a hash pick the shard.
-const TYPE_SHARDS: usize = 64;
-
-/// Every type ever built, sharded by hash so parallel checkers rarely contend. Entries are
-/// leaked, so a `&'static` to one is the type's identity.
-static TYPES: LazyLock<[Mutex<HashTable<&'static TypeEntry>>; TYPE_SHARDS]> =
-    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(HashTable::new())));
-
-/// Slots in each thread's cache of recently interned types.
-const RECENT_TYPES: usize = 1024;
-
-thread_local! {
-    /// A direct-mapped cache in front of the shards. A checker interns the same few types
-    /// (scalars, `Unknown`, the signature it is applying) over and over, and those all hash to
-    /// the same shards, so without it parallel checkers queue on a handful of mutexes.
-    static RECENT: [Cell<Option<&'static TypeEntry>>; RECENT_TYPES] =
-        const { [const { Cell::new(None) }; RECENT_TYPES] };
-}
-
-fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
-    let hash = FxBuildHasher.hash_one(&kind);
-    let slot = (hash as usize) % RECENT_TYPES;
-    let recent = RECENT.with(|recent| recent[slot].get());
-    if let Some(entry) = recent
-        && entry.kind == kind
-    {
-        return entry;
+/// The kind of every type, indexed by the low bits of its id.
+static KINDS: Column<TyKind<'static>, TYPE_CHUNKS> = Column::starting_with(&CONSTANT_KINDS);
+static CONSTANT_KINDS: FirstChunk<TyKind<'static>> = FirstChunk::new({
+    let mut kinds = [TyKind::Any; CHUNK_LENGTH];
+    let mut index = 0;
+    while index < CHUNK_LENGTH {
+        kinds[index] = if index < LEAVES {
+            LEAF_KINDS[index]
+        } else {
+            TyKind::Var(InferenceVar((index - LEAVES) as u32))
+        };
+        index += 1;
     }
-    let interned = intern_type_shared(kind, hash);
-    RECENT.with(|recent| recent[slot].set(Some(interned)));
-    interned
+    kinds
+});
+
+/// What the store derives from a type's structure when it is built, while its children's
+/// facts are at hand. A column of its own, parallel to [`KINDS`], because a check reads a
+/// type's kind far more often than these.
+static FACTS: Column<TypeFacts, TYPE_CHUNKS> = Column::starting_with(&CONSTANT_FACTS);
+static CONSTANT_FACTS: FirstChunk<TypeFacts> = FirstChunk::new(
+    [TypeFacts {
+        size: 1,
+        applied_names: &[],
+    }; CHUNK_LENGTH],
+);
+
+/// The store holds at most 2^24 distinct types. The id has room for more, but each chunk
+/// address costs the binary eight bytes, and a process that built this many types would
+/// have run out of memory for them first.
+const TYPE_CHUNKS: usize = (1 << 24) / CHUNK_LENGTH;
+
+#[derive(Clone, Copy)]
+struct TypeFacts {
+    /// Nodes in the type tree, capped at [`TYPE_SIZE_CEILING`].
+    size: u32,
+    applied_names: &'static [Name<'static>],
 }
 
-fn intern_type_shared(kind: TyKind<'static>, hash: u64) -> &'static TypeEntry {
-    let rehash = |entry: &&'static TypeEntry| FxBuildHasher.hash_one(&entry.kind);
-    // The table picks buckets from the low bits, so the shard comes from the high ones.
-    let shard = &TYPES[(hash >> 58) as usize];
-    // A poisoned shard means another thread died mid-insert; the table still holds only
-    // complete, leaked types, so keep serving it.
-    let mut shard = shard
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match shard.find(hash, |entry| entry.kind == kind) {
-        Some(&interned) => interned,
-        None => {
-            let mut size: u64 = 1;
-            let mut contents = match kind {
-                TyKind::Var(_) => TypeEntry::HAS_VAR,
-                TyKind::Rigid(_) => TypeEntry::HAS_RIGID,
-                TyKind::Unknown => TypeEntry::HAS_UNKNOWN,
-                TyKind::Named(..) => TypeEntry::HAS_NAMED,
-                _ => 0,
-            };
-            for_each_child(&kind, &mut |child| {
-                size = size.saturating_add(child.entry.size).min(TYPE_SIZE_CEILING);
-                contents |= child.entry.contents;
-            });
-            let interned: &'static TypeEntry = Box::leak(Box::new(TypeEntry {
-                kind,
-                size,
-                contents,
-            }));
-            shard.insert_unique(hash, interned, rehash);
-            interned
+/// Kind to id, and behind its lock the arena that holds every stored type's children. The
+/// arena is never reset, which is what makes a slice into it valid for the life of the
+/// process. A type is built once and found ever after, so the lock is taken a few thousand
+/// times in a whole project check.
+static TYPES: IdTable<Option<Bump>> = IdTable::new(None);
+
+fn intern_type<'db>(kind: TyKind<'_>) -> Ty<'db> {
+    let hash = FxBuildHasher.hash_one(kind);
+    let holds = |bits: NonZeroU32| *Ty::<'static>::from_bits(bits.get()).kind(&()) == kind;
+    match TYPES.find(hash, holds) {
+        Some(bits) => Ty::from_bits(bits.get()),
+        None => insert_type(kind, hash),
+    }
+}
+
+#[cold]
+fn insert_type<'db>(kind: TyKind<'_>, hash: u64) -> Ty<'db> {
+    let mut writer = TYPES.write();
+    let holds = |bits: NonZeroU32| *Ty::<'static>::from_bits(bits.get()).kind(&()) == kind;
+    if let Some(bits) = writer.find(hash, holds) {
+        return Ty::from_bits(bits.get());
+    }
+    let index = writer.count() + CHUNK_LENGTH;
+    assert!(
+        index < Column::<TyKind<'static>, TYPE_CHUNKS>::CAPACITY,
+        "the type store is full: it holds at most 2^24 distinct types"
+    );
+    let arena: &Bump = writer.state().get_or_insert_with(Bump::new);
+
+    let mut size: u32 = 1;
+    let mut contents = match kind {
+        TyKind::Var(_) => HAS_VAR | IS_VAR,
+        TyKind::Rigid(_) => HAS_RIGID,
+        TyKind::Named(..) => HAS_NAMED,
+        _ => 0,
+    };
+    let mut applied: SmallVec<[Name<'static>; 8]> = SmallVec::new();
+    if let TyKind::Named(name, _) = kind {
+        applied.push(Name {
+            symbol: name.symbol,
+            db: PhantomData,
+        });
+    }
+    // A type that applies the same names as one of its children shares that child's list.
+    let mut widest: &'static [Name<'static>] = &[];
+    for_each_child(&kind, &mut |child| {
+        size = size
+            .saturating_add(stored_size(child))
+            .min(TYPE_SIZE_CEILING as u32);
+        contents |= child.bits.get() & CONTENT_BITS;
+        let names = Ty::<'static>::from_bits(child.bits.get()).applied_names();
+        for &name in names {
+            if !applied.contains(&name) {
+                applied.push(name);
+            }
         }
+        if names.len() > widest.len() {
+            widest = names;
+        }
+    });
+    let applied_names = if applied.len() == widest.len() {
+        widest
+    } else {
+        let stored: &[Name<'static>] = arena.alloc_slice_copy(&applied);
+        // SAFETY: the arena lives in a static and is never reset, so the slice is immortal.
+        unsafe { mem::transmute::<&[Name<'static>], &'static [Name<'static>]>(stored) }
+    };
+    let stored = stored_kind(arena, kind);
+    // SAFETY: the kind's slices now point into the arena, which is immortal as above, and
+    // the lifetimes of `Ty` and `Name` are phantom.
+    let stored = unsafe { mem::transmute::<TyKind<'_>, TyKind<'static>>(stored) };
+
+    // SAFETY: `writer` is the lock that serializes the store's writers, `index` is the next
+    // one, and no reader learns it before the table publishes it below.
+    unsafe {
+        KINDS.write(index, stored);
+        FACTS.write(
+            index,
+            TypeFacts {
+                size,
+                applied_names,
+            },
+        );
+    }
+    let Some(bits) = NonZeroU32::new(index as u32 | contents) else {
+        unreachable!("a stored type's index starts past the leaves")
+    };
+    writer.insert(hash, bits, |held| {
+        FxBuildHasher.hash_one(*Ty::<'static>::from_bits(held.get()).kind(&()))
+    });
+    Ty::from_bits(bits.get())
+}
+
+/// `kind` with every list it borrows copied into `arena`.
+fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
+    match kind {
+        TyKind::Tuple(items) => TyKind::Tuple(arena.alloc_slice_copy(items)),
+        TyKind::Record(fields) => TyKind::Record(arena.alloc_slice_copy(fields)),
+        TyKind::NativeTuple(items) => TyKind::NativeTuple(arena.alloc_slice_copy(items)),
+        TyKind::NativeRecord(fields) => TyKind::NativeRecord(arena.alloc_slice_copy(fields)),
+        TyKind::Frame(frame, Some(columns)) => {
+            TyKind::Frame(frame, Some(arena.alloc_slice_copy(columns)))
+        }
+        TyKind::Function(function) => TyKind::Function(arena.alloc(FunctionType {
+            positional: arena.alloc_slice_copy(function.positional),
+            named: arena.alloc_slice_copy(function.named),
+            quoted: arena.alloc_slice_copy(function.quoted),
+            default_reads: arena.alloc_slice_copy(function.default_reads),
+            missing_tested: arena.alloc_slice_copy(function.missing_tested),
+            condition_only: arena.alloc_slice_copy(function.condition_only),
+            ..*function
+        })),
+        TyKind::Union(members) => TyKind::Union(arena.alloc_slice_copy(members)),
+        TyKind::Named(name, arguments) => TyKind::Named(name, arena.alloc_slice_copy(arguments)),
+        TyKind::Any
+        | TyKind::Unknown
+        | TyKind::Null
+        | TyKind::Scalar(_)
+        | TyKind::Native(_)
+        | TyKind::Vector(_)
+        | TyKind::NamedVector(_)
+        | TyKind::List(_)
+        | TyKind::NamedList(_)
+        | TyKind::Tag(..)
+        | TyKind::OtherTags
+        | TyKind::Frame(_, None)
+        | TyKind::Var(_)
+        | TyKind::Rigid(_) => kind,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::RootDatabase};
+    use {super::*, crate::RootDatabase, std::thread};
 
     #[test]
     fn size_counts_the_tree_not_the_shared_graph() {
         let db = RootDatabase::default();
         let leaf = scalar(&db, Atomic::Integer);
-        let pair = Ty::new(&db, TyKind::Tuple(vec![leaf, leaf]));
-        let nested = Ty::new(&db, TyKind::Tuple(vec![pair, pair]));
+        let pair = Ty::new(&db, TyKind::Tuple(&[leaf, leaf]));
+        let nested = Ty::new(&db, TyKind::Tuple(&[pair, pair]));
 
         assert_eq!(type_size(&db, leaf), 1);
         assert_eq!(type_size(&db, pair), 3, "one node plus two leaves");
@@ -1287,7 +1512,7 @@ mod tests {
         let db = RootDatabase::default();
         let mut ty = scalar(&db, Atomic::Integer);
         for _ in 0..64 {
-            ty = Ty::new(&db, TyKind::Tuple(vec![ty, ty]));
+            ty = Ty::new(&db, TyKind::Tuple(&[ty, ty]));
         }
         assert_eq!(type_size(&db, ty), TYPE_SIZE_CEILING);
     }
@@ -1296,28 +1521,16 @@ mod tests {
     fn a_parameter_default_is_part_of_the_type() {
         let db = RootDatabase::default();
         let var = Ty::new(&db, TyKind::Var(InferenceVar(7)));
+        let integer = scalar(&db, Atomic::Integer);
+        let named = [Parameter {
+            name: Name::new(&db, "x"),
+            ty: integer,
+            optional: true,
+            default: Some(var),
+        }];
         let signature = Ty::new(
             &db,
-            TyKind::Function(FunctionType {
-                positional: Vec::new(),
-                named: vec![Parameter {
-                    name: Name::new(&db, "x"),
-                    ty: scalar(&db, Atomic::Integer),
-                    optional: true,
-                    default: Some(var),
-                }],
-                variadic: None,
-                ret: scalar(&db, Atomic::Integer),
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+            TyKind::Function(&FunctionType::declared(&[], &named, None, integer)),
         );
 
         assert!(contains_inference_var(&db, signature));
@@ -1332,46 +1545,77 @@ mod tests {
     #[test]
     fn interning_gives_id_equality() {
         let db = RootDatabase::default();
-        let a = scalar(&db, Atomic::Integer);
-        let b = scalar(&db, Atomic::Integer);
-        assert_eq!(a, b);
-        let f1 = Ty::new(
+        let integer = scalar(&db, Atomic::Integer);
+        let double = scalar(&db, Atomic::Double);
+        assert_eq!(integer, scalar(&db, Atomic::Integer));
+        assert_eq!(integer, Ty::new(&db, TyKind::Scalar(Atomic::Integer)));
+        let first = Ty::new(
             &db,
-            TyKind::Function(FunctionType {
-                positional: vec![a],
-                named: Vec::new(),
-                variadic: None,
-                ret: scalar(&db, Atomic::Double),
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+            TyKind::Function(&FunctionType::declared(&[integer], &[], None, double)),
         );
-        let f2 = Ty::new(
+        let positional = vec![integer];
+        let second = Ty::new(
             &db,
-            TyKind::Function(FunctionType {
-                positional: vec![b],
-                named: Vec::new(),
-                variadic: None,
-                ret: scalar(&db, Atomic::Double),
-                inferred: false,
-                flag_return: None,
-                quoted: Vec::new(),
-                default_reads: Vec::new(),
-                missing_tested: Vec::new(),
-                condition_only: Vec::new(),
-                null_unless: None,
-                reduces: None,
-                from_calls: false,
-            }),
+            TyKind::Function(&FunctionType::declared(&positional, &[], None, double)),
         );
-        assert_eq!(f1, f2);
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            Ty::new(
+                &db,
+                TyKind::Function(&FunctionType::declared(&[double], &[], None, double)),
+            )
+        );
+    }
+
+    #[test]
+    fn a_type_knows_what_occurs_in_it() {
+        let db = RootDatabase::default();
+        let integer = scalar(&db, Atomic::Integer);
+        let var = Ty::new(&db, TyKind::Var(InferenceVar(3)));
+        let option = Name::new(&db, "Option");
+        let result = Name::new(&db, "Result");
+        let applied = Ty::new(&db, TyKind::Named(option, &[var]));
+        let nested = Ty::new(
+            &db,
+            TyKind::Named(result, &[applied, Ty::new(&db, TyKind::Vector(applied))]),
+        );
+        let list = Ty::new(&db, TyKind::List(nested));
+
+        assert!(!integer.may_resolve());
+        assert!(integer.applied_names().is_empty());
+        assert!(var.may_resolve() && var.applied_names().is_empty());
+        assert_eq!(applied.applied_names(), &[option]);
+        assert_eq!(nested.applied_names(), &[result, option]);
+        assert_eq!(
+            list.applied_names(),
+            nested.applied_names(),
+            "a type that applies no name of its own lists its children's"
+        );
+        assert!(contains_inference_var(&db, list));
+        assert!(!contains_unknown(&db, list));
+        assert!(contains_unknown(
+            &db,
+            Ty::new(&db, TyKind::Tuple(&[integer, unknown(&db)]))
+        ));
+        let erased = erase_vars(&db, list);
+        assert!(!contains_inference_var(&db, erased) && contains_unknown(&db, erased));
+        assert_eq!(erased.applied_names(), &[result, option]);
+    }
+
+    #[test]
+    fn substitution_replaces_the_last_binding_of_a_name() {
+        let db = RootDatabase::default();
+        let integer = scalar(&db, Atomic::Integer);
+        let double = scalar(&db, Atomic::Double);
+        let name = Name::new(&db, "T");
+        let rigid = Ty::new(&db, TyKind::Rigid(name));
+        let pair = Ty::new(&db, TyKind::Tuple(&[rigid, integer]));
+        assert_eq!(
+            substitute_rigid(&db, pair, &[(name, integer), (name, double)]),
+            Ty::new(&db, TyKind::Tuple(&[double, integer]))
+        );
+        assert_eq!(substitute_rigid(&db, pair, &[]), pair);
     }
 
     #[test]
@@ -1385,7 +1629,7 @@ mod tests {
         let TyKind::Union(members) = outer.kind(&db) else {
             panic!("expected a union")
         };
-        assert_eq!(members, &vec![int, chr, null(&db)]);
+        assert_eq!(*members, &[int, chr, null(&db)]);
 
         assert_eq!(union_of(&db, [int, any(&db)]), any(&db));
         assert_eq!(union_of(&db, [unknown(&db), int]), unknown(&db));
@@ -1396,10 +1640,10 @@ mod tests {
         let TyKind::Union(members) = optional.kind(&db) else {
             panic!("expected a union")
         };
-        assert_eq!(members, &vec![chr, null(&db)]);
+        assert_eq!(*members, &[chr, null(&db)]);
     }
 
-    fn tag<'db>(db: &'db RootDatabase, name: &str, items: Option<Vec<Ty<'db>>>) -> Ty<'db> {
+    fn tag<'db>(db: &'db RootDatabase, name: &str, items: Option<&[Ty<'db>]>) -> Ty<'db> {
         let payload = items.map(|items| Ty::new(db, TyKind::NativeTuple(items)));
         Ty::new(db, TyKind::Tag(Name::new(db, name), payload))
     }
@@ -1412,13 +1656,13 @@ mod tests {
         let merged = union_of(
             &db,
             [
-                tag(&db, "Some", Some(vec![int])),
-                tag(&db, "Some", Some(vec![chr])),
+                tag(&db, "Some", Some(&[int])),
+                tag(&db, "Some", Some(&[chr])),
             ],
         );
         assert_eq!(
             merged,
-            tag(&db, "Some", Some(vec![union_of(&db, [int, chr])])),
+            tag(&db, "Some", Some(&[union_of(&db, [int, chr])])),
             "one member per tag name and shape"
         );
         assert_eq!(conflicting_tags(&db, merged), None);
@@ -1428,13 +1672,13 @@ mod tests {
     fn different_shape_tags_stay_apart_and_conflict() {
         let db = RootDatabase::default();
         let int = scalar(&db, Atomic::Integer);
-        let one = tag(&db, "Some", Some(vec![int]));
-        let two = tag(&db, "Some", Some(vec![int, int]));
+        let one = tag(&db, "Some", Some(&[int]));
+        let two = tag(&db, "Some", Some(&[int, int]));
         let union = union_of(&db, [one, two]);
         let TyKind::Union(members) = union.kind(&db) else {
             panic!("expected a union")
         };
-        assert_eq!(members, &vec![one, two]);
+        assert_eq!(*members, &[one, two]);
         assert_eq!(conflicting_tags(&db, union), Some((one, two)));
     }
 
@@ -1447,7 +1691,80 @@ mod tests {
         let TyKind::Union(members) = union.kind(&db) else {
             panic!("expected a union")
         };
-        assert_eq!(members, &vec![none, null(&db), other]);
+        assert_eq!(*members, &[none, null(&db), other]);
+    }
+
+    /// Threads that build the same types at the same time, each in its own order, must agree
+    /// on every id and read back the kind they stored. The count is far past the table's
+    /// first size, so lookups run while the table is being replaced.
+    #[test]
+    fn threads_interning_the_same_types_agree() {
+        const THREADS: usize = 8;
+        const TYPES: u32 = 20_000;
+        // Variable ids no check reaches, so every one of these types is new to the store.
+        const FIRST_VARIABLE: u32 = 3_000_000_000;
+
+        fn build(step: u32) -> (Ty<'static>, Ty<'static>, Ty<'static>) {
+            let var = Ty::new(&(), TyKind::Var(InferenceVar(FIRST_VARIABLE + step)));
+            let integer = Ty::from_bits(FIRST_SCALAR + Atomic::Integer as u32);
+            let pair = Ty::new(&(), TyKind::Tuple(&[var, integer]));
+            let function = Ty::new(
+                &(),
+                TyKind::Function(&FunctionType::declared(&[pair, var], &[], None, pair)),
+            );
+            (var, pair, function)
+        }
+
+        let per_thread: Vec<Vec<(Ty<'static>, Ty<'static>, Ty<'static>)>> =
+            thread::scope(|scope| {
+                let workers: Vec<_> = (0..THREADS)
+                    .map(|worker| {
+                        scope.spawn(move || {
+                            let mut built = vec![None; TYPES as usize];
+                            // A stride coprime to the count visits every step once, in an
+                            // order that differs per thread.
+                            let stride = [1, 3, 7, 9, 11, 13, 17, 19][worker];
+                            let mut step = worker as u32 * 97 % TYPES;
+                            for _ in 0..TYPES {
+                                built[step as usize] = Some(build(step));
+                                step = (step + stride) % TYPES;
+                            }
+                            built.into_iter().flatten().collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("an interning thread panicked"))
+                    .collect()
+            });
+
+        let first = &per_thread[0];
+        assert_eq!(first.len(), TYPES as usize);
+        for other in &per_thread[1..] {
+            assert_eq!(first, other, "every thread got the same ids");
+        }
+        for (step, &(var, pair, function)) in first.iter().enumerate() {
+            assert_eq!(
+                *var.kind(&()),
+                TyKind::Var(InferenceVar(FIRST_VARIABLE + step as u32))
+            );
+            let TyKind::Tuple(items) = pair.kind(&()) else {
+                panic!("the pair reads back as a tuple")
+            };
+            assert_eq!(items[0], var);
+            let TyKind::Function(signature) = function.kind(&()) else {
+                panic!("the function reads back as a function")
+            };
+            assert_eq!(signature.positional, &[pair, var]);
+            assert_eq!(signature.ret, pair);
+            assert!(contains_inference_var_bits(function));
+            assert_eq!(stored_size(function), 8);
+        }
+    }
+
+    fn contains_inference_var_bits(ty: Ty<'_>) -> bool {
+        ty.bits.get() & HAS_VAR != 0
     }
 
     #[test]

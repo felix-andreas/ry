@@ -48,6 +48,12 @@ pub const DIRECTORY_VARIABLE: &str = "RY_PROFILE_SUMMARY_DIR";
 /// The environment variable that names the file the benchmark regions are written to.
 pub const REGIONS_VARIABLE: &str = "RY_PROFILE_REGIONS";
 
+/// The environment variable that names a file for every sampled call stack with its function
+/// names, for comparing a run function by function against GNU R's `Rprof` output
+/// (`tools/bench/compare_profiles.py`). Unlike the summary, this file names private code, so it is
+/// written only when asked for, and only together with a summary.
+pub const STACKS_VARIABLE: &str = "RY_PROFILE_STACKS";
+
 /// The environment variable that sets the sampling interval in microseconds (default 1000).
 pub const INTERVAL_VARIABLE: &str = "RY_PROFILE_INTERVAL_US";
 
@@ -59,6 +65,8 @@ struct Sampler {
     path: Option<PathBuf>,
     /// The regions file, when regions are measured.
     regions: Option<PathBuf>,
+    /// The stacks file, when stacks are kept.
+    stacks: Option<PathBuf>,
     /// The process that started sampling. A forked child inherits this record but not the
     /// sampling thread, so it writes nothing.
     process: u32,
@@ -81,6 +89,9 @@ struct Samples {
     bodies: FxHashMap<usize, [u64; Activity::ALL.len()]>,
     /// Samples by activity word for each benchmark region, indexed like [`Regions::names`].
     regions: Vec<FxHashMap<u32, u64>>,
+    /// Samples by whole stack (owner and name per frame, outermost first) and activity word,
+    /// kept only when [`STACKS_VARIABLE`] names a file.
+    stacks: Option<FxHashMap<(Vec<(u32, usize)>, u32), u64>>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -115,6 +126,10 @@ impl Samples {
         global: u32,
     ) {
         *self.words.entry(word).or_insert(0) += 1;
+        if let Some(stacks) = &mut self.stacks {
+            let frames = owners.iter().copied().zip(names.iter().copied()).collect();
+            *stacks.entry((frames, word)).or_insert(0) += 1;
+        }
         self.bodies
             .entry(bodies.last().copied().unwrap_or(0))
             .or_insert([0; Activity::ALL.len()])[category(word) as usize] += 1;
@@ -248,12 +263,25 @@ pub fn start_from_environment() {
     // against the directory the session started in.
     let path = path.map(|path| std::path::absolute(&path).unwrap_or(path));
     let regions = regions.map(|path| std::path::absolute(&path).unwrap_or(path));
+    let stacks = std::env::var_os(STACKS_VARIABLE)
+        .filter(|stacks| !stacks.is_empty())
+        .map(|stacks| {
+            // SAFETY: as above, no R code has started a thread yet.
+            unsafe { std::env::remove_var(STACKS_VARIABLE) };
+            let stacks = PathBuf::from(stacks);
+            std::path::absolute(&stacks).unwrap_or(stacks)
+        })
+        .filter(|_| path.is_some());
+    let keep_stacks = stacks.is_some();
     let publishing = path.is_some();
     PUBLISHING.store(publishing, Ordering::Relaxed);
     activity::set_enabled(true);
     let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {
-        let mut samples = Samples::default();
+        let mut samples = Samples {
+            stacks: keep_stacks.then(FxHashMap::default),
+            ..Samples::default()
+        };
         let mut owners = Vec::with_capacity(activity::FRAME_SLOTS);
         let mut names = Vec::with_capacity(activity::FRAME_SLOTS);
         let mut bodies = Vec::with_capacity(activity::FRAME_SLOTS);
@@ -280,6 +308,7 @@ pub fn start_from_environment() {
     *lock(&SAMPLER) = Some(Sampler {
         path,
         regions,
+        stacks,
         process: std::process::id(),
         started: Instant::now(),
         thread,
@@ -428,10 +457,13 @@ unsafe fn publish_frame(call: Sexp, function: Sexp) -> activity::FrameScope {
             }
         }
     };
+    // `pkg::f()`, `obj$f()` and `obj@f()` take the name `f`; GNU R's `Rprof()` writes these as
+    // `pkg::f`, `obj$f` and `obj@f`, and `tools/bench/compare_profiles.py` reduces those to `f` so
+    // the two engines' rows match.
     let mut head = call.car();
     if head.kind() == SexpType::Language
         && head.car().kind() == SexpType::Symbol
-        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::" | "$" | "@")
     {
         head = head.cdr().cdr().car();
     }
@@ -496,7 +528,11 @@ pub fn finish() -> R<()> {
     let ready = lock(&READY_AT).map(|ready| ready.duration_since(sampler.started));
     let text =
         report(&samples, elapsed, ready).map_err(|_| error("cannot format the profile summary"))?;
-    write_file(path, &text, "the profile summary")
+    write_file(path, &text, "the profile summary")?;
+    if let (Some(path), Some(stacks)) = (&sampler.stacks, &samples.stacks) {
+        write_file(path, &stack_lines(stacks), "the profile stacks")?;
+    }
+    Ok(())
 }
 
 fn write_file(path: &Path, text: &str, what: &str) -> R<()> {
@@ -512,6 +548,51 @@ fn write_file(path: &Path, text: &str, what: &str) -> R<()> {
             path.display()
         ))
     })
+}
+
+/// One line per distinct stack and activity: the sample count, the activity (`builtin:NAME` for
+/// a builtin, `native:PACKAGE` for native code), and the frames outermost first as
+/// `owner::function`, separated by `;`. The owner is a namespace, `R_GlobalEnv` or `other`.
+fn stack_lines(stacks: &FxHashMap<(Vec<(u32, usize)>, u32), u64>) -> String {
+    let mut owners: FxHashMap<u32, String> = FxHashMap::default();
+    let mut functions: FxHashMap<usize, String> = FxHashMap::default();
+    let mut lines: Vec<String> = stacks
+        .iter()
+        .map(|((frames, word), count)| {
+            let activity = Activity::from_word(*word);
+            let activity = match activity {
+                Activity::Builtin => format!(
+                    "builtin:{}",
+                    builtin_name((word >> 8) as usize).unwrap_or("?")
+                ),
+                Activity::Native => format!(
+                    "native:{}",
+                    activity::label_name(word >> 8).unwrap_or_else(|| "unknown".to_owned())
+                ),
+                _ => activity.describe().to_owned(),
+            };
+            let frames: Vec<String> = frames
+                .iter()
+                .map(|&(owner, name)| {
+                    let owner = owners.entry(owner).or_insert_with(|| {
+                        activity::label_name(owner).unwrap_or_else(|| "unknown".to_owned())
+                    });
+                    let function = functions.entry(name).or_insert_with(|| {
+                        // SAFETY: a nonzero `name` is the address of a symbol, and symbols are
+                        // never freed.
+                        match unsafe { Sexp::from_raw(name as *mut Header) } {
+                            Some(symbol) => unsafe { values::symbol_name(symbol).into_owned() },
+                            None => "(anonymous)".to_owned(),
+                        }
+                    });
+                    format!("{owner}::{function}")
+                })
+                .collect();
+            format!("{count}\t{activity}\t{}\n", frames.join(";"))
+        })
+        .collect();
+    lines.sort();
+    lines.concat()
 }
 
 /// One JSON object per line for each benchmark region, in the order the regions first started.

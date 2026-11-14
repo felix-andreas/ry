@@ -8,7 +8,7 @@
 
 use {
     crate::{
-        Db, Item, ItemKind, SourceFile, TypingMode, file_typing_mode,
+        Db, Item, ItemKind, SourceFile, TypingMode, file_follows_strict, file_typing_mode,
         hir::Symbol,
         item_naming, item_spans,
         metadata::{
@@ -495,7 +495,7 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
             IndexedItem {
                 key: ItemKey {
                     kind: *item.kind(db),
-                    name: item.name(db).clone(),
+                    name: item.name(db).map(|name| name.as_str().to_owned()),
                     disambiguator: *item.disambiguator(db),
                 },
                 hash: load.hash,
@@ -725,11 +725,7 @@ pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc
 
 /// Whether `file` follows strict mode: its own typing directive, else the package default.
 pub fn file_is_strict(db: &dyn Db, sources: PackageSources, file: SourceFile) -> bool {
-    match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => *sources.strict(db),
-    }
+    file_follows_strict(db, file, || *sources.strict(db))
 }
 
 /// Classifies the top-level statements of a strict `file`, which decides which constants
@@ -763,11 +759,10 @@ fn is_constant_candidate(item: &IndexedItem) -> bool {
 /// R binds as a side effect.
 fn top_level_writes<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<&'db str> {
     let mut names: Vec<&str> = crate::item_top_level_names(db, item)
-        .iter()
-        .map(|name| name.as_str())
+        .map(Symbol::as_str)
         .collect();
     if matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-        && let Some(name) = item.name(db).as_deref()
+        && let Some(name) = item.name(db).map(Symbol::as_str)
         && !names.contains(&name)
     {
         names.push(name);

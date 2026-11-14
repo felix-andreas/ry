@@ -240,7 +240,7 @@ fn main() {
                         for i in 0..OPS / threads {
                             if distinct {
                                 let name = Name::new(&db, format!("t{thread}_{}", i % 4096));
-                                Ty::new(&db, TyKind::Named(name, Vec::new()));
+                                Ty::new(&db, TyKind::Named(name, &[]));
                             } else {
                                 unknown(&db);
                             }

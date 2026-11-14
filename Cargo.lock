@@ -3994,12 +3994,12 @@ dependencies = [
 name = "semantics"
 version = "0.4.5"
 dependencies = [
- "boxcar",
  "bumpalo",
  "hashbrown 0.17.1",
  "rustc-hash",
  "salsa",
  "serde",
+ "smallvec",
  "sniff",
  "stacker",
  "syntax",

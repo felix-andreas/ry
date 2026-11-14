@@ -9,7 +9,6 @@ publish = false
 path = "src/semantics.rs"
 
 [dependencies]
-boxcar.workspace = true
 bumpalo = { version = "3.20", features = ["collections"] }
 hashbrown = { workspace = true, features = ["nightly"] }
 rustc-hash.workspace = true
@@ -18,4 +17,5 @@ serde = { workspace = true, features = ["derive", "rc"] }
 stacker.workspace = true
 sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
+smallvec.workspace = true
 thin-vec.workspace = true

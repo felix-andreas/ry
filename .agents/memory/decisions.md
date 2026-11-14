@@ -1033,9 +1033,11 @@ cycle, where a growing self-referential type rode the iteration cap into a panic
 inference variables leaking through exported schemes into foreign tables. Both are of the class
 that only surfaces in the large, which is exactly what per-stage fuzzing exists to catch early.
 
-# Decision record: deep resolve is memoized per binding epoch and cuts a cycle to `Unknown`
+# Decision record: deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
 
-**Status:** built.
+**Status:** built. The table of finished subtrees lives for one call, as "Decision record: types
+and symbols are four-byte ids into append-only columns" describes. It replaced a table kept across
+calls and cleared by a binding epoch.
 
 `InferenceTable::resolve`, the deep resolver in `crates/semantics/src/infer.rs`, walked the interned
 type structure recursively with only a depth-64 cap as protection. Interned types form a directed
@@ -1046,20 +1048,25 @@ lines this measured 397 million inner resolve steps, and resolve alone cost more
 previous stack's entire pipeline. The depth cap also truncated meaning. Past depth 64 a type silently
 stayed unexpanded, which is a position-dependent semantics that no cache can be layered onto.
 
-Deep resolve is now a memoized walk over the interned graph with explicit cycle detection.
+Deep resolve is a walk over the interned graph with explicit cycle detection that resolves a
+shared subtree once per call.
 
 - **A cycle cuts to `Unknown`.** The walk carries a `visiting` stack of the variables under
   expansion. Re-encountering one means an infinite type, and it resolves to `Unknown`. That matches
   the pin-to-`Unknown` doctrine used everywhere self-reference grows, including the fixpoint cap and
   loop widening. Alias expansion keeps a depth guard as a pure resource backstop, not as a
   semantics.
-- **Only a clean subtree is memoized.** A result caches in `resolve_cache` keyed by the interned
-  type, but only when no cycle was cut beneath it. A node containing a variable currently being
-  expanded resolves differently at top level.
-- **An epoch invalidates the cache.** Every binding mutation and rollback bumps an epoch counter,
-  and the cache self-clears on an epoch mismatch. No entry can serve a stale binding. The common
-  case, which is many resolves between mutations such as rendering a whole item's diagnostics, hits
-  warm.
+- **Only a clean subtree is kept.** A walk that has taken 64 steps keeps the subtrees it
+  finishes from then on, keyed by the interned type, but only those with no cycle cut beneath
+  them. A node containing a variable currently being expanded resolves differently at top level.
+  The steps are counted, not read off the size of the type the call started from, because a
+  variable has size one whatever its binding holds: a chain of variables that each bind a tuple
+  holding the next one twice is a walk of 2^depth steps without the table
+  (`infer::tests::a_subtree_shared_through_variables_resolves_once`). Most calls end within a few
+  steps, where a table costs more than the walk.
+- **Nothing outlives the call.** Bindings change between calls, so a table kept across calls
+  needs an invalidation rule. A type whose id says it holds no variable and applies no alias
+  returns without a walk, which is what most repeated calls ask.
 
 Correctness: silent depth truncation is replaced by the established cycle semantics, so an infinite
 type resolves to `Unknown` at the point of self-reference instead of expanding arbitrarily deep.
@@ -3997,7 +4004,9 @@ first lines R had already read, leaving R mid-command.
 
 ## Types and names are hash-consed outside salsa
 
-**Status:** built.
+**Status:** built, with the storage superseded: a type is an id into columns, not a pointer to an
+entry in a sharded table ("Decision record: types and symbols are four-byte ids into append-only
+columns"). Hash-consing outside salsa and the reasoning for never sweeping stand.
 
 - **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
   through salsa's interner (a shard lock plus an id-to-slot lookup), every `ty.kind(db)` resolved an
@@ -4714,7 +4723,8 @@ check` releases its trees once, and memoized records are compact" below).
   `crates/ry/src/cli.rs`). Tree readers stay memoized queries with small results, so a check
   never walks another file's tree. The type interner (`crates/semantics/src/types.rs`) gained a
   direct-mapped per-thread cache in front of its 64 shard mutexes, which sampling showed
-  contended on hot types.
+  contended on hot types. A lookup that takes no lock replaced both ("Decision record: types and
+  symbols are four-byte ids into append-only columns").
 - **Correctness.** Findings are identical on the three benchmark code bases (2337, 1853, 784).
 - **Simplicity.** The batching driver, `limit_resident_trees` and the eviction-only comments are
   gone.
@@ -8491,8 +8501,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
     the capacity keeps the most recently read trees. Holds alone were rejected: a read of a
     file nobody holds (an item of another file, a rewrite after the check) would parse the
     whole file on every read.
-  - `item_syntax` is a plain window of the stored tree. An edited file's items lower again and
-    backdate on `item_hir` equality.
+  - `item_syntax` is a plain window of the stored tree. "Decision record: an item's syntax has a
+    stamp, so an edit lowers only the items it changed" says which items an edit lowers.
   - `item_links(item)` resolves every name the item's naming lists against the project name
     maps, in parallel arrays (one row per name, one per binding), and holds the item's interface
     edges and whether its file belongs to the project. It is the item's projection of the
@@ -8543,13 +8553,194 @@ Each one trades a narrow class of missed errors for a class of false reports see
   edit settle in 3 ms and a new top-level definition in 5 to 6 ms at the median on both builds.
   A file opened on an idle server settles its diagnostics in 13 ms at the median on both
   builds. The file open at start-up settles in 44 ms at the median (38 to 46) against 38 ms
-  (35 to 52) (`backlog.md`, "Open: the analysis core after the single lookup path").
+  (35 to 52). "Decision record: types and symbols are four-byte ids into append-only columns"
+  has the measurements after the memory and the start-up cost were taken back.
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
   so the re-check stays with the readers of the name. A file's groups list items, not positions
   in the file, so the value stays equal when a statement is added beside a recursive function.
   An item's links read the project's file list for "is my file in the project" and no fold
   over the project's names, so a name a test or script adds re-runs no package item's links.
+
+# Decision record: types and symbols are four-byte ids into append-only columns
+
+**Status:** built, except the per-item store for types that contain inference variables, which
+is rejected below.
+
+- **Previous source of truth.** A `Ty` was a `&'static` pointer to a leaked
+  `TypeEntry { kind, size }`, found through a 64-way sharded `hashbrown` table with a
+  direct-mapped per-thread cache of 1,024 recent entries in front. A kind owned its children in
+  `Vec`s. A `Symbol` was an index into a `boxcar::Vec`, found through a sharded map with a
+  thread-local map in front. `InferenceTable` kept `resolve_cache`, a table of resolved types
+  cleared by a counter that every binding change bumped, and `definition_cache`, a hash map from
+  a type name to its definition.
+- **What was structurally weak.** Four caches stood in front of two interners because a lookup
+  took a shard mutex that the checking threads contended for. A type reference was eight bytes.
+  "Does this type contain a variable" was a walk or a cache probe, and it is asked on every
+  resolve.
+- **Target shape.**
+  - `crates/semantics/src/intern.rs` holds the two halves of an interner. `Column<T, CHUNKS>` is
+    an append-only column in fixed chunks of 4,096 that never move, so a read is a shift, a load
+    and an offset. `IdTable<W>` is an open-addressing table from a hash to an id whose slots
+    change once, from empty to filled, and that grows by replacement, so a lookup takes no lock
+    and writes no shared memory. Storing a new value takes the table's one lock.
+  - A `Ty` is a `NonZeroU32`. The low 27 bits index two parallel columns, the kind and the
+    facts derived at construction (size, and the type names it applies). The upper bits say
+    whether the type is a variable and whether a variable, a named type, a rigid parameter or
+    `Unknown` occurs in it. `TyKind` is `Copy`, with child slices in a bump arena behind the
+    writer lock. The 15 leaf kinds and the first 4,081 inference variables fill the first chunk
+    as constants, so building one is arithmetic.
+  - A `Symbol` is an id into a column of `{ text, hash, first eight bytes, length }`. It hashes
+    as its stored spelling hash and orders by spelling. `Symbol::lookup` finds a spelling
+    without interning it, which is what a probe with text nobody may have spelled needs.
+  - `InferenceTable::resolve` and `substitute_rigid` return on the id's bits when nothing in the
+    type can change. Otherwise each keeps a table of finished subtrees for one call, and only
+    when the work is large: `resolve` once its walk has taken 64 steps, `substitute_rigid` for a
+    type of more than 64 nodes.
+  - `InferenceTable::named_types` holds the definitions of the type names an item has asked
+    about as two parallel inline lists, searched front to back.
+- **Rejected.**
+  - A per-item store for types that contain inference variables. Such types leave the item
+    that made them: `EditorFacts` carries them, 59 fields of `TypeErrorKind` carry them, and a
+    diagnostic renders a variable by name. Moving them out of a per-item store means a copy
+    into the shared store at every one of those exits. On the finance bench 696 of the 2,589
+    distinct types a check builds contain a variable, so the shared store pays little for
+    holding them.
+  - Dropping the definition lookup's memo outright. 91% of 1.08 million lookups on the finance
+    bench repeat a name the item already asked about, and an uncached answer is two salsa
+    fetches and a scan. The memo is sized to what an item asks (a handful of names), not a hash
+    map.
+  - Freeing entries. The reasoning in "Types and names are hash-consed outside salsa" holds.
+    The store holds at most 2^24 types and the symbol store 2^28 spellings, and a full store
+    panics.
+- **Correctness.** `ry check` prints byte-identical output on the finance bench, and every
+  fixture suite passes unchanged. An id is assigned in interning order, which differs between
+  runs of a parallel check, so nothing that reaches output may walk types or symbols in id
+  order: `Symbol` orders by spelling for that reason.
+- **Simplicity.** The per-thread type cache, the thread-local symbol map, `resolve_cache` with
+  its epoch, the `boxcar` dependency and the two sharded tables are gone. One table type and
+  one column type serve both interners.
+- **Performance.** Together with the two records that follow, on the finance bench (4 cores,
+  `ry check --no-cache`, three interleaved rounds of seven runs, medians per round):
+
+  | Build | Wall | CPU | Peak RSS |
+  |---|---|---|---|
+  | Two lookup paths (before "every host resolves names through one path") | 0.81 to 0.91 s | 2.97 to 3.17 s | 239 MB |
+  | One lookup path, pointer types | 0.85 to 0.92 s | 3.09 to 3.28 s | 248 MB |
+  | Ids, stamps and the tables of the next two records | 0.77 to 0.80 s | 2.81 to 2.91 s | 230 MB |
+
+  The machine ran about a fifth slower than for the numbers in the record above, so compare
+  within this table only. Under callgrind a check executes 18.06 billion instructions, against
+  19.07 billion with one lookup path and pointer types.
+  In the editor on the same project (`tools/bench/tooling/lsp_latency.py`, time until
+  diagnostics settle; the start-up open is the median of six interleaved server starts, the
+  others are medians within one run of six rounds):
+
+  | Build | Start-up open | Open at idle | Edit in a body | Edit to a signature | Edit to a definition |
+  |---|---|---|---|---|---|
+  | Two lookup paths | 46.5 ms | 15.9 ms | 5.4 ms | 5.2 ms | 10.7 ms |
+  | One lookup path, pointer types | 47.4 ms | 17.4 ms | 3.4 ms | 3.4 ms | 6.7 ms |
+  | Ids, stamps and the tables of the next two records | 36.4 ms | 15.9 ms | 3.0 ms | 2.7 ms | 5.8 ms |
+- **Incremental.** A type or symbol has no inputs, and its id is stable for the life of the
+  process, so a memo that holds one compares four bytes where it compared a pointer.
+
+# Decision record: an item's syntax has a stamp, so an edit lowers only the items it changed
+
+**Status:** built.
+
+- **Previous source of truth.** `item_syntax` read the item's range from `item_spans` and took
+  that window of the file's tree. Every reader of an item's syntax therefore depended on the
+  file's spans, which change with every edit to the file.
+- **What was structurally weak.** After an edit, every item of the file lowered again, and
+  `item_hir` backdated for the untouched ones. The cut-off was an equality test on the lowered
+  item, paid per item per keystroke. `TreeStore` was one mutex for the process, and two workers
+  that read one file at the same moment both parsed it.
+- **Target shape.**
+  - The store keeps one `SyntaxStamp` (a `u64`) per top-level node of each file. On a reparse,
+    the nodes at the start and at the end of the file whose subtrees equal their counterparts
+    in the previous tree keep their stamps, and every other node takes a fresh one from a
+    store-wide counter. Equal stamps imply equal subtrees, by an exact comparison.
+  - `item_stamp(item)` is a tracked query that returns the stamp. It runs for every item of an
+    edited file and backdates for every item outside the edited region. `item_syntax` records
+    a read of the stamp alone and asks the store for the node that carries it, through a
+    per-file index sorted by stamp. When a bounded store has dropped that tree, it falls back
+    to the item's range in a fresh parse.
+  - `item_annotation_syntax` and `item_name_range` are plain reads of per-file memos
+    (`file_item_annotations`, `item_spans`). `file_item_annotations` holds detached subtrees,
+    which compare by content, so it backdates while no `#:` block changes.
+  - `TreeStore` has 16 shards by file with a lock each. A parse runs outside every lock, and a
+    second reader of a file that is being parsed waits for that tree.
+- **Rejected.**
+  - The stamp as a field of `item_syntax_flags`. Other items read an item's flags (whether a
+    callee is declared pure, whether an item binds only its own name), so they would re-run
+    when that item's body changed.
+  - A content hash as the stamp. Two different subtrees could share one, and a wrong match
+    would keep a stale lowering with no way to notice.
+  - Matching moved nodes anywhere in the file. One edit changes one region, so the prefix and
+    suffix comparison covers it, and it is linear with no table.
+- **Correctness.** Under `enable_invariants()` every stamp read compares the subtree the stamp
+  names with the item's node in the file as it stands. `test_incremental.rs` pins the query
+  counts for an edit inside an item, a new item above the others, a removed item, the second of
+  two equal statements removed, and edits at both ends.
+- **Simplicity.** One more tracked query per item. Its memo boxes and dependency edges take
+  3.3 MB at the heap peak of a check of the finance bench (50,815 items).
+- **Performance.** A cold check does the same work. After an edit to one item of a file,
+  lowering, annotations and naming run for that item alone.
+- **Incremental.** Edits at both ends of a file between two reads change one region that spans
+  the file, so the items between them lower again and `item_hir` backdates. An edit to any `#:`
+  block re-runs `item_annotations` for every item of that file, and each comes out equal and
+  backdates unless its own block changed.
+
+# Decision record: the analysis core's per-item and per-file tables after the type store
+
+**Status:** built.
+
+- **Previous source of truth.** `ItemLinks` was an 80-byte value of five allocations: four
+  boxed slices (the names, where each name's bindings end, the kinds, the items) and the
+  interface edges. Three definitions of "is this file strict" disagreed on the default. `item_links` sorted its
+  edges by `Symbol::index()`. `StubLibrary` was nine maps keyed by `String`. The server's worker
+  kept `attached_by_file`, a hand-written copy of what `file_attached_namespaces` answers. Tag
+  completion and two reference searches walked every file's tree on each request. The checker
+  sized two per-body facts to the whole item.
+- **What was structurally weak.** `item_links` keeps one memo per item for the whole run
+  (50,815 on the finance bench), so every byte of the value's inline size and every separate
+  allocation is paid that many times. Interning order differs between runs of a parallel check, so an order by symbol
+  index is not reproducible. A copy of a query's answer can drift from the query.
+- **Target shape.**
+  - `ItemLinks` is two thin vectors: `words` (a header, the listed names, then one word per
+    binding holding its name's position above its kind) and `items` (the item of each binding,
+    then the interface edges). The memo is two pointers wide and an item without links
+    allocates nothing. The names are searched and never walked for a result. The edges are
+    sorted by file, name spelling, kind and disambiguator, which is the same on every
+    run.
+  - `file_follows_strict` is the one answer to "is this file strict".
+  - `Item.name` is a `Symbol`. `item_tree_positions` is the one map from an item to its
+    position in its file.
+  - Only an item that binds more than its own name keeps a memo of the names it binds
+    (`item_bound_names`). For every other item `item_top_level_names` yields the item's name.
+  - The stub library's collections are `SymbolMap` and `SymbolSet`. A caller that holds a
+    symbol probes without hashing text, and a caller that holds text uses `Symbol::lookup`.
+  - The server derives the attached set from the per-file scans. Before an edit it reads the
+    edited file's scan, as a cancellable read, and recomputes the union only when the scan
+    moved.
+  - `ide::spelled_names` lists the tags a file spells beside its names, so tag completion and
+    the tag and type-name searches open only the files that can match.
+  - A function body keeps its superassignment seeds and its callees as short inline lists.
+- **Correctness.** The scan of the edited file's `library()` calls ran outside the worker's
+  cancellation catch at first. A notification queued behind the edit then cancelled it, and
+  the uncaught cancellation stopped the worker (about one run in ten of the server suite under
+  load, in `burst_of_edits_settles_on_the_final_text`). Every tracked read on the worker
+  outside `Worker::cancellable` has that failure, so the worker's exit message names an
+  escaped cancellation.
+- **Performance.** Part of the measurements in "Decision record: types and symbols are four-byte
+  ids into append-only columns". At the heap peak of a check of the finance bench the
+  `item_links` memos hold 10.5 MB, where 11 MB was measured before: 2.4 MB of memo boxes (48
+  bytes each, down from 112), 4.2 MB in the two vectors, and 3.9 MB of the dependency edges
+  salsa records per memo. `item_links` with what it calls is 4.6% of the check's instructions
+  (824 million), down from 4.8% (922 million). Both are mostly the cost of resolving every
+  listed name in one memo per item, which this layout does not change; the backlog has it.
+- **Incremental.** `item_links` backdates as before: its value lists the item's own names and
+  bindings and nothing that moves with another item.
 
 ## The standard library is the `std` namespace, with an optional prelude
 
@@ -9517,7 +9708,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## A loop-free hot body compiles only when its call rate repays the compile
 
-**Status:** built, except the baseline threshold in the back-edge check, which "No baseline tier, and code images hold bytecode only" supersedes.
+**Status:** built, except the baseline threshold in the back-edge check, which "No baseline tier, and code images hold bytecode only" supersedes. The saving per call (100 per native instruction below) is replaced by the model of "A body compiles only when its native work covers what compiled code costs".
 
 - **Previous shape.** Every body that reached 3000 entries compiled. A loop-free body saves a bounded amount per call, so one that turned hot slowly never repaid its compile: on testthat, `isTRUE` (188 words) compiled for about 11M instructions and then ran about 1400 more times, and JIT on cost 17.6M more than JIT off.
 - **Chosen shape.** At the entry threshold, `compile_in` asks `repays` before planning a loop-free body (`analysis::shape` reads the words once and counts the instructions the plan may run natively). Expected calls are the body's rate over its recording window, 375 calls per however many closure calls the session made meanwhile (`Interp::calls_ever`, stamped into `profile::WINDOW` when the window opens), times a fixed horizon of 2^19 calls. The body compiles when calls times 100 instructions per native instruction reach 2M plus 50k per word. A refusal (`RARE`) is not final: the count restarts and the next attempt measures the rate afresh. A recompile skips the check.
@@ -11208,8 +11399,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Previous shape.** `crates/jit/src/codegen.rs` wrote every deoptimization exit by hand: one cold block per exit that boxed the unboxed registers, flushed the dirty variable slots and stored the loop words with code emitted at that site, then called `jit_deopt`. An exit described one frame only, the compiled function's own, so nothing could describe a callee that had no interpreter frame. That is why tier 1 inlined only callees that provably need no frame (`effects::effect_free_lookups`) and reran the whole call in tier 0 when an inlined body failed.
 - **Chosen shape (built).** A point where execution can leave compiled code is a `FrameState` of the SSA IR (`crates/ssa/src/ssa.rs`): a run of `Source` cells (an SSA variable, or a cell of a stack slot) in one flat `sources` array, and an optional parent, which is the state of the caller at the call the frame was inlined at. The front end only declares states (`Builder::frame_state`) and branches to `Builder::exit_block(state)`. `Builder::emit_exits` writes all exit code once: an exit saves its own cells into one stack buffer at the state's `base`, then jumps to its parent's chain block, which saves the parent's cells below, so the buffer holds the outermost frame first. Every exit ends in one shared block that calls `jit_deopt_exit(activation, buffer, state number)`.
 - **The runtime decodes, the code only saves.** `Compiled.exits[number]` (`crates/jit/src/runtime.rs`, `Exit`) says what each saved cell is: which registers hold an unboxed integer, double or number, which variable slots may be dirty, and which loops are live. `jit_deopt_exit` boxes the registers, flushes each slot whose saved runtime status is dirty, writes the loop words, and hands the frame to tier 0 at the exit's pc. An exit costs a few stores in cold code instead of a call per boxed value, and the hot path carries no exit code at all.
-- **Inlined closure calls run without a frame (built).** At a call whose callee is a known closure, the planner plans the callee's own bytecode as a nested `Plan` (`analysis.rs`, `frame`, `Action::Frame`), and the caller's code runs it in place (`codegen.rs`, `inlined_call`). The caller computes the arguments, calls `jit_enter_frame`, which reserves the callee's register window above the caller's in the register file and returns the call's activation, and translates the callee's instructions with their own SSA variables. Each `Return` of the callee calls `jit_leave_frame` and jumps to one continuation block with the value, unboxed when every return has the same scalar type. While the call stays in compiled code it allocates no environment, no promise and no frame record. `jit_enter_frame` returns null when the call needs its frame from the start, as tier 0's own frame entry decides, or when a calling handler could look at the stack, and the caller then hands the call instruction to tier 0.
-- **An inlined callee runs only what nothing can observe; everything else is an exit, not a refusal.** A callee instruction that could run R code, look at the call or capture its environment (`stop`, `warning`, `substitute`, `missing`, `sys.call`, a superassignment, an operator on an object, a `function` expression) compiles to an exit with the callee's frame state when its type feedback is empty, which means it has not run yet. Tier 0 records feedback at a `function` expression for this reason alone: whether its body constant is compiled says nothing, because a nested body is compiled with its outer function. Such an instruction is never run through a helper in an inlined call, since the helper would look for an interpreter frame the call does not have (`crates/oracle/cases/jit__inlined_frames_closures.R` pins a closure created on a branch that had not run). So a callee with an error path, a warning path or a rarely taken reflective branch is inlined, and the branch gets a real frame the first time it runs. The planner refuses the frame only for what the callee is known to do on every call: such an instruction with feedback, a loop, `...`, an assignment to a formal, a call that itself needs a frame, or a call that does not pass exactly one positional argument per formal. `RY_JIT_LOG=1` prints each refusal with its reason (`jit: no inlined frame for <call>: <why>`).
+- **Inlined closure calls run without a frame (built).** At a call whose callee is a known closure, the planner plans the callee's own bytecode as a nested `Plan` (`analysis.rs`, `frame`, `Action::Frame`), and the caller's code runs it in place (`codegen.rs`, `inlined_call`). The caller computes the arguments, calls `jit_enter_frame`, which reserves the callee's register window above the caller's in the register file and returns the call's activation, and translates the callee's instructions with their own SSA variables. Each `Return` of the callee jumps to one continuation block with the value, unboxed when every return has the same scalar type. While the call stays in compiled code it allocates no environment, no promise and no frame record. `jit_enter_frame` returns null when the call needs its frame from the start, as tier 0's own frame entry decides, or when a calling handler could look at the stack, and the caller then hands the call instruction to tier 0.
+- **An inlined callee runs only what nothing can observe; everything else is an exit, not a refusal.** A callee instruction that could run R code, look at the call or capture its environment (`stop`, `warning`, `substitute`, `missing`, `sys.call`, a superassignment, an operator on an object, a `function` expression) compiles to an exit with the callee's frame state when its type feedback is empty, which means it has not run yet. Tier 0 records feedback at a `function` expression for this reason alone: whether its body constant is compiled says nothing, because a nested body is compiled with its outer function. Such an instruction is never run through a helper in an inlined call, since the helper would look for an interpreter frame the call does not have (`crates/oracle/cases/jit__inlined_frames_closures.R` pins a closure created on a branch that had not run). So a callee with an error path, a warning path or a rarely taken reflective branch is inlined, and the branch gets a real frame the first time it runs. The planner refuses the frame only for what the callee is known to do on every call: such an instruction with feedback, a loop, `...`, a call that itself needs a frame, or a call whose arguments tier 0's own call plan cannot bind without running code (`eval::direct_sources`). `RY_JIT_LOG=1` prints each refusal with its reason (`jit: no inlined frame for <call>: <why>`).
 - **A step in a call without a frame signals nothing (built).** What an inlined callee runs through a tier-0 helper (`jit_step`, `jit_quiet_step`: a builtin call or an element read that runs no R code) can still fail or warn, and a signal is observable: the default error handler prints `Calls:` from the frame stack, and the `error` option's handler, a calling handler and the traceback read `sys.calls()`. So while such a helper runs for a call without a frame, `Interp.signalling` (`interp.rs`, `Signalling`) is `Deferred`. A builtin's error is then returned unsignalled (`eval::builtin_failure`), the exit rebuilds the frames, and `resume_slots` signals it there. A warning that only the default handler takes prints or queues as usual, since that runs no R code and reads no frame. A warning whose signalling runs R code (`.signalSimpleWarning`, taken under `options(warn = 2)`; with a calling handler established the call gets its frame up front) sets `Abandoned` and fails the step with nothing parked, so the exit re-executes the instruction in tier 0 under the rebuilt frames. Running it twice is safe because these instructions write nothing before they warn. `crates/oracle/cases/jit__inlined_frames_error_stack.R` pins the stacks against GNU R.
 - **Laziness without promises.** The caller evaluates an argument before the call only when its expression is effect free, so the order of evaluation is unobservable. What R can still observe is whether a formal is forced, so each inlined frame keeps that in a mask with one bit per formal (`codegen.rs`, `Frame.forced`), which is why a callee with more than 64 formals gets no frame. The callee's own read of a formal sets its bit. When the argument was computed from formals of an inlined caller, the same read sets those formals' bits in the caller's mask (`Action::Frame.forces`), because forcing the argument is what would have read them. The caller's argument code sets no bit: copying a formal into the callee's window is not a read (`Translator.evaluating_arguments`). An exit saves the mask with the frame's cells, and `enter_inlined` binds a formal whose bit is set to a forced promise of its value and every other formal to an unforced promise of the argument expression over the caller's environment, which is what tier 0 binds, so `substitute`, `missing`, a rebinding through `parent.frame()` and a later first read behave as in tier 0. An argument that may have an effect is passed unevaluated: that is allowed when the callee has never read the formal (`analysis.rs`, `has_read`), and a read of it is an exit. In a callee that is itself inlined, an argument that mentions one of the callee's formals under a condition also stays unevaluated, because evaluating it before the call would force a formal that R forces only on one branch. `crates/oracle/cases/jit__inlined_frames_forced_arguments.R` pins the cases against GNU R.
 - **A formal passed on is passed by name (built).** A body that passes one of its own formals to an inlined call before reading it must not force it, because the callee may never read it. Such an argument is `Passing::Variable`: nothing is read at the call, and the callee's load of its formal (`runtime.rs`, `jit_load_passed`) reads the binding in the outermost frame, through every inlined caller that forwarded it, because an inlined frame holds no binding. The load forces a promise only when that runs no R code (`eval::settled_without_code`: a promise already forced, a promise of a constant, or a promise of a bound name, followed for up to 16 links). Any other promise leaves compiled code at the load with `reason::UNFORCED`, and tier 0 forces it under the rebuilt frames. Those exits count against the root body, not the callee, because the callee did nothing unusual: once they are frequent the root's tier state gets `UNFORCED_FORMALS`, and its recompile neither reads an unloaded formal for an inlined call nor passes one on to a callee that reads it. `inlined_frames_keep_passed_formals_lazy` in `test_tiers.rs` pins that these shapes stop leaving compiled code once they settle, and `crates/oracle/cases/jit__inlined_frames_lazy_arguments.R` pins what a promise sees when it is forced under rebuilt frames.
@@ -11222,16 +11413,110 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `retire` discards a root's code once, however many counters reach their limit while it is still running. `inlined_frames_outlast_calling_handlers` in `test_tiers.rs` pins that a handler on one call in twenty costs no frame, and that a root always called under a handler keeps its compiled code, loses its frames and stops leaving compiled code.
 - **Why a frame state and not re-running the call.** Re-running is only sound when nothing observable happened before the failure, which limited inlining to effect-free callees and made each new inlinable construct a proof obligation. With a frame state the callee may have written its variables, forced arguments and allocated, because the interpreter continues in the middle of the body instead of starting over. This is the shape of Ř's PIR framestates, V8 Maglev's eager deopt frames and JSC DFG's OSR exit descriptors (`prior-art.md`).
 - **Not built.**
-  - Entering an inlined call without a helper call. `jit_enter_frame` and `jit_leave_frame` cost two calls per inlined call, where the older effect-free inliner (`Action::Inline`, still tried first) costs none. The end shape reserves the window in compiled code and creates the activation only at an exit, after which `Action::Inline` and `effects::effect_free_lookups` go away.
+  - Entering an inlined call without a helper call. A start costs one call of the leaf `jit_enter_frame` ("An inlined call starts with one leaf helper call" below), where the older effect-free inliner (`Action::Inline`, still tried first) costs none. The end shape tests one word that every change of the watched state bumps, after which `Action::Inline` and `effects::effect_free_lookups` go away.
   - Materializing an inlined frame and staying in compiled code: an exit of an inlined frame finishes the whole root call in tier 0.
   - An inlined frame while a calling handler is established. `jit_enter_frame` declines and the call instruction becomes an exit of the whole root activation, so a root that mostly runs under a handler ends up compiled without frames (`NO_FRAMES`). The end shape runs the call through the direct-call path in compiled code when entry declines, so nothing exits and `NO_FRAMES` goes away. Until then code that mostly runs under `withCallingHandlers` or `suppressWarnings`, which includes every testthat expectation, calls for real.
   - A callee without feedback. Seeding its plan from the argument types at the call would cover the small closures tier 0 runs without an activation.
-  - Callees with a loop, `...`, defaults, named or missing arguments, an assignment to a formal, or a call that needs its own frame, and recursive calls.
+  - Callees with a loop, `...`, a default that is code and is read, or a call that needs its own frame, and recursive calls. Literal defaults, named and omitted arguments and assigned formals are built ("An inlined call starts with one leaf helper call" below).
   - Argument expressions over variables that have no type feedback. A variable read only inside promise code records none, which refuses `inner(x * k)` in a body that never reads `x` itself.
   - Seeding the callee's types from the argument types at the call instead of the callee's own feedback, which would specialize one callee per call site.
   - Resolving a callee's free variable at compile time under a guard instead of `jit_load_free`'s walk per load.
   - R-level value nodes in the SSA IR with value numbering, and scalar replacement of a vector or list that does not escape an inlined call.
 - **Impact.** `codegen.rs` lost about 170 lines of per-exit emission, and all exits share one block. On `just bench applications` against the tree before the change, `orders` runs in 85 ms against 154 ms (1.82x, interval 1.79 to 1.85) and every other program is within its noise (0.97x to 1.03x), so the geometric mean of GNU R's time over ry's moves from 2.83x to 2.96x (2.86x with the JIT off). Only `orders` moves because tier 1 compiles 0 to 4 bodies per program (11 on `functional`), the same as before apart from one more body each in `conditions` and `timeseries`, and only three compiled bodies contain a call that qualifies for a frame. Peak memory is within 2 MiB per program and `libR.so` grows by 63 KB of code. `crates/jit/tests/test_tiers.rs`, the oracle on `ry-jit` and 400 seeds of `oracle fuzz` across `ry-tier0` and `ry-jit` agree with tier 0 and GNU R.
+
+## An inlined call starts with one leaf helper call
+
+**Status:** built. The single-word check under "Not built" is planned.
+
+- **Previous shape.** Each start of an inlined closure call (`codegen.rs`, `inlined_call`) called `jit_enter_frame`, which reserved the callee's register window, wrote the call's activation record, saved the caller's srcref and the call marker, and took a handle mark, all behind a panic guard. Each return called `jit_leave_frame`, which restored them and cleared the window. A free variable of the callee went through `jit_load_free`, a third call. A compiled loop that called a one-line closure 2.5 million times spent more in those helpers than in its own code.
+- **What a start has to do is decided by what can change between two starts.** Nothing about the window, the activation record or the handle mark can: an inlined frame's registers sit at a fixed place above the compiled body's own, so the body reserves and clears the whole extent once per entry, and the frame's record (`runtime.rs`, `Child`) is written at its first start in that entry (`first_start`, cold). Every helper leaves the handle stack as it found it, so the mark written then holds for the whole entry. What can change is the state that decides whether the call needs a real frame: the closure's debug bits, its body and environment, a pending frame on that environment, a calling handler, the debugger, the activity log, move tracking, the object-system switch and the stack depth. `jit_enter_frame` tests exactly those and returns the record, as a leaf function without a panic guard. When one of them says no, the cold `declined` counts the cause and returns null, and the caller hands the call instruction to tier 0.
+- **The srcref is saved by the compiled code.** The start stores the current srcref into the `Child` record and makes the closure's own current, and each return restores it, as two loads and two stores on `Interp.srcref`.
+- **The call marker is set by the helper that needs it.** `sys.call()`, an error's `Calls:` line and a warning's call read `Interp.assignment_call` for a call that has no frame. Only code that runs inside a helper can read it, so `guarded` sets it around the helper's body when the helper's activation is an inlined frame, and restores it after. A deoptimization gets the root activation, so resumed tier-0 code never runs under the marker.
+- **The window is cleared inline.** A return stores `NULL` over the callee's registers and slots with one store per word for up to `CLEARED_INLINE` (16) words, and calls `jit_clear_window` above that. The words must be cleared because the collector scans the whole extent and a stale word would keep an object alive.
+- **A frame's slots are marked unbound when a deoptimization builds the frame.** The calls inlined in one caller share one window (each starts at the same header, with its registers laid out after its own slot count), so a call with fewer slots keeps registers where a call with more slots keeps locals, and its return leaves `NULL` there. Tier 0 reads a slot as bound unless it holds the unbound marker, so `enter_inlined` (`runtime.rs`) fills the slots before it writes the bound ones; filling them at the first start of the call instead showed tier 0 a never-assigned local as `NULL` after a sibling call had returned. Compiled code never reads a slot of a frame that does not exist, so the start writes nothing there. Pinned by the oracle case `jit__inlined_sibling_frames`.
+- **A free variable is found inline.** Compilation walks the callee's enclosing environments once (`heap::Probe`), and the machine code repeats that walk against the frames' own fields: the symbol filter of a frame that lacks the binding, the slot of the frame that has it, or the cell on the symbol for the base and global frames. A moved slot, an active binding, an unforced promise or a pending frame goes to `jit_load_free`.
+- **Frames bind what tier 0 would bind.** The planner binds a call's arguments with tier 0's own call plan (`eval::direct_sources`), so named and omitted arguments and literal defaults get a frame, and the frame a deoptimization builds matches tier 0's. A formal whose default is code hands the call to tier 0 when the callee reads it. An assigned formal is a dirty slot like any local.
+- **An entry of optimized code skips the schedule.** `bytecode::entry_event` asks the tier at every entry of a body that has optimized code and returns as long as the body keeps it, without recomputing `profile::NEXT`, which only changes when the code is discarded.
+- **Not built.** One word that every change of the watched state bumps (a handler pushed or popped, a debug bit, `environment<-`, the debugger, the activity log, `options(expressions=)`) would make the start one compare in compiled code and remove the call. It touches every site that changes that state, and a missed site would be a wrong result, so it waits for a workload where the remaining call matters.
+- **Impact.** One iteration of `spectralnorm_alt_3`'s inner loop, which calls `function(i, j) cache[[i, j]]`, runs about 345 instructions: 294 of compiled code and 52 in `jit_enter_frame`. The program reports about 0.10 to 0.12 s for `execute(250)`, against 0.25 s before, 0.70 s with the JIT off and 1.42 s for GNU R. `RY_JIT_CODE=<directory>` writes each compiled body's machine code to a file named after its address, which lines a per-address profile (callgrind with `--dump-instr=yes`) up with a disassembly.
+
+## A body compiles only when its native work covers what compiled code costs
+
+**Status:** built. The lean entry under "Not built" is planned.
+
+- **Previous shape.** The compile policy ("A loop-free hot body compiles only when its call rate repays the compile") assumed every native instruction saves 100 machine instructions per call and charged nothing for entering compiled code. A hot one-line closure therefore compiled, and then ran slower than in tier 0: with the JIT on, seven of the fifteen application programs were 3 to 7% slower than with it off, and the three benchmark code bases about 3% slower.
+- **Measured.** Closures called 400,000 times from `vapply`, in machine instructions per call (callgrind), compiled against tier 0. Entering compiled code from the dispatch loop goes through `count_entry`, `entry_event`, `jit::enter`, `compiled_for` and `jit::run`, grows the register file and boxes the result, which together cost about 570 instructions more than starting the same body in tier 0.
+
+  | body | native instructions | saved per call when compiled |
+  |---|---|---|
+  | `x^2` | 1 | -325 |
+  | `x * 2 + 1` | 2 | -309 |
+  | `(x * 2 + y) * (x - y)` | 4 | -27 |
+  | seven operations, two locals | 7 | 575 |
+  | twelve operations, three locals | 12 | 1393 |
+
+- **A step costs too.** An instruction compiled code cannot run natively is handed to tier 0 through `jit_step`, which costs about 300 instructions more than tier 0 running it in its own loop (the call out, the frame synchronised before and after it). A body that steps most of its instructions therefore loses in compiled code however hot it is.
+- **Chosen shape.** `analysis.rs`, `Work` counts three kinds of work: native instructions, calls the plan removes or makes direct, and steps. `jit.rs`, `saving` values them at `SAVING_PER_NATIVE` (130), `SAVING_PER_CALL` (1000) and minus `STEP_COST` (300), and `saving_per_call` subtracts `ENTRY_COST` (570), so a step-free body breaks even at five native instructions or one call. `repays` multiplies that saving by the expected calls. `Plan::work` returns the counts three ways (`BodyWork`): for the whole body, for the instructions outside every loop, and for the instructions in loops, where an instruction nested `d` loops deep weighs `LOOP_WEIGHT` (8) to the power `d - 1`. The weight stands for the iterations an inner loop runs per outer iteration, so one stepped instruction in an outer loop does not refuse a native inner loop. The decision after planning, skipped under `RY_JIT=force`:
+
+  | body | refused when | refusal | final |
+  |---|---|---|---|
+  | no loop, hot by entries | `saving_per_call` of the whole body is zero | `SMALL` | yes |
+  | loops | `saving` of the weighted loop work is zero | `STEPPING_LOOP` | yes |
+  | loops, entered at the top | the work outside the loops has steps and its `saving` is zero | `MOSTLY_TIER0` | no: a hot loop still compiles, and only the loop enters compiled code |
+
+  `SMALL` is also decided once before planning, from the instruction counts of `analysis::shape` (`Shape::work`), which spares the plan.
+- **A refused body stops recording.** `bytecode.rs`, `back_edge`: a body whose tier state is negative (refused for good, or off the tiers) sets its back-edge counter to a value that reaches no threshold. Its loops used to reopen the recording window at half the threshold with no compile left to close it, so every variable load and field access in the loop recorded its type for the rest of the run.
+- **A cold body with an empty window is refused once.** `COLD` normally lets a body ask again up to `MAX_COLD_REFUSALS` times, each after planning the body. When the whole feedback vector is still zero after a window, a native prologue finishes every call before any instruction records, so another window cannot differ, and the refusal is final at once.
+- **A refused body keeps its feedback.** `SMALL` is decided after the recording window, unlike `NEVER_NATIVE`, which is decided before it. The body stops recording and counting, and its feedback stays, so a compiled caller still inlines it as a frame. That is where a one-line closure pays: inlined, it costs no entry at all.
+- **The allocator follows the body's size.** A loop-free body of at most `SINGLE_PASS_FROM` (2000) SSA instructions compiles with the backtracking register allocator (`codegen.rs`). Single-pass allocation spilled every value it defined, which made compiled `x^2` 100 instructions long. Above that size, and only for loop-free bodies, single-pass keeps the compile cheap.
+- **Rejected: trimming the entry chain first.** Even an entry of 200 instructions leaves a one-operation body about even with tier 0, so the policy has to refuse it either way. A lean entry (below) lowers `ENTRY_COST` and with it the break-even size; it does not remove the need for the model.
+- **Not built.** An entry from the dispatch loop that jumps to the compiled code without `jit::enter`, `compiled_for` and `jit::run` (the code pointer in the code header, the register window already sized), and a result returned unboxed to a caller that wants a scalar. Recalibrate the constants when either lands. Cheaper steps (a step that does not synchronise the whole frame) would lower `STEP_COST` and let more loops compile.
+- **Pinned by** `a_body_that_could_run_nothing_natively_never_records`, `a_hot_body_that_runs_rarely_waits_to_compile` and `fully_typed_closure_compiles_at_its_first_call` in `crates/jit/tests/test_tiers.rs`. No test pins the constants: they are calibrated on instruction counts of the application programs and the numeric kernels (`array_sum` is the kernel a wrong loop weight refuses).
+- **Impact.** Machine instructions with the JIT on minus with it off, per application program (callgrind, `tools/bench/applications`), before and after:
+
+  | program | before | after |
+  |---|---|---|
+  | `expr_tree` | +261M | +1M |
+  | `team_scores` | +249M | +33M |
+  | `report` | +143M | +12M |
+  | `objects` | +134M | +26M |
+  | `records` | +126M | +21M |
+  | `conditions` | +102M | +71M |
+  | `validation` | +56M | +19M |
+  | `orders` | -4956M | -4956M |
+  | `bond_book` | -3426M | -3426M |
+
+  After the change no program runs more than 0.55% more instructions with the JIT on. Of the kernels, every loop that compiled before still compiles except `vasicek`'s, which steps eleven of its instructions and runs as fast in tier 0.
+
+## A compiled return writes locals back only when something can still read the frame
+
+**Status:** built.
+
+- **Previous shape.** Compiled code keeps assigned locals in SSA variables and marks their frame slots dirty. Every `Return` of the body flushed all dirty slots (`flush_all`): one `jit_flush` call per slot, which boxed an unboxed scalar and stored it through `Machine::assign`. A body with two assigned locals paid about 450 instructions per call for values nothing read again.
+- **Who reads a frame after its body returns.** Tier 0 finishes a frame (`bytecode.rs`, `finish_frame`) only when it has an environment, registered exit code, or a pending environment, which is the name a promise or a closure created over a slot frame holds until the frame is reified. Exit code compiled for slots runs on the slot frame, and a reified environment is filled from the slots, so each of the three reads the slots after the return. Nothing else does: a slot frame without them is dropped with its registers.
+- **Chosen shape.** At the body's own `Return`, `codegen.rs`, `finish_slots` calls the leaf `jit_frame_read_later` (`runtime.rs`) when some slot may be dirty. It answers from the interpreter frame: the slot frame has no environment, the top frame is this body's, and that frame has no environment, pending environment or exit code. When nothing reads the frame, the return skips the write-back and only releases the counted references the dirty boxed values hold. Otherwise it flushes as before. An inlined callee's return was already free of write-backs, because its frame exists only in an exit's frame state.
+- **Why a run-time test and not a compile-time proof.** Whether exit code is registered or the frame was captured depends on what the body's callees did (`do.call(on.exit, ..., envir = parent.frame())`, `sys.function`, `environment()` in a default), which the planner cannot see. The test is four loads against a flush per local.
+- **Pinned by** the oracle case `jit__locals_read_after_return`: exit code that reads a reassigned local, a closure returned before a local is reassigned, a promise an escaping closure holds, exit code a callee registers on the caller's frame, and `environment()` captured in the middle of a body.
+
+## A call compiled code cannot inline enters the callee in tier 0's dispatch loop
+
+**Status:** built.
+
+- **Previous shape.** A closure call that tier 1 neither inlines nor calls directly ran through a tier-0 step (`jit_step`), and the step started a nested dispatch loop for the callee: a native stack frame per call, and no tier-0 fast call path.
+- **Chosen shape.** The step enters the callee the way tier 0's own call does (`bytecode.rs`, `enter_in_place`): the callee runs in the loop the step started, and a `Resume` record on `State::resumes` says where its result goes. `return_fast` leaves a stepped call's record to `resume_caller`, which hands the result back to the compiled code, so a tier-0 callee never runs on into the compiled caller's tier-0 instructions. Compiled code entered in place this way grows the native stack as a closure call does, because a deep recursion through compiled bodies otherwise overflowed it (`recursion__and_recall` on `ry-jit`).
+- **A formal passed on as a subscript is the `Argument` instruction.** `x[i]` and `x[[i, j]]` with a formal as subscript compiled to `DispatchSubject`, which only tier 0 runs, because a missing formal is an empty subscript. `Argument` yields the empty argument for a missing formal and is `GetVar` otherwise. It records `feedback::MISSING` when it sees one, and tier 1 compiles it as a variable load unless that bit is set, with a hand-off to tier 0 when a compiled load meets a missing formal. An accessor such as `function(i, j) cache[[i, j]]` runs natively and inlines.
+- **A local a join needs as an object is forgotten, not written back.** When a control-flow join needed an unboxed local as an object, the local was boxed and its slot marked dirty, and the later write-back replaced the promise a formal was bound to and cleared its missing bit, so `substitute(x)` and `missing(x)` differed from tier 0. The join drops the local from the compiled state, and the next read loads the frame's own object.
+- **Pinned by** the tier tests for stepped calls and the oracle cases `jit__stepped_calls_reach_the_caller` and `jit__inlined_frames_defaults`.
+
+## A native recursive function's depth budget shrinks with the interpreter depth
+
+**Status:** built. Bounding native recursion by the native stack is not built.
+
+- **Previous shape.** A native scalar function (`crates/jit/src/native.rs`) counts a depth budget down per nested call and fails as a whole when it runs out, and tier 0 then reruns the call. The budget was the `expressions` limit minus the interpreter depth (`runtime.rs`, `jit_depth_budget`). When tier 0 reran a failed call, the callee's own recursive call tried the native function again one frame deeper, with almost the whole budget again. Under `options(expressions = 500000)` a recursion past the limit therefore ran the native function about `limit` times to a depth of about `limit` each: quadratic, more than two minutes where tier 0 alone reports the error in 1.6 s.
+- **Chosen shape.** The budget is the smaller of the frames left under the limit and `RETRY_NESTING` (8,000,000) divided by the interpreter depth. A retry started `d` frames deep nests at most `8M / d` native calls, so the retries of one failed recursion sum to a bounded amount of work that grows with the logarithm of the depth instead of its square. At the default limit of 5000 the product of depth and remaining frames never exceeds 6.25M, so the limit is always the smaller bound and nothing changes there.
+- **Rejected: marking the function as failed and never retrying.** A recursion that fails once at depth 400,000 still succeeds natively for every shallower call, and those are the common ones.
+- **Not built.** The native stack does not bound native recursion: a native frame's size is not known to the budget, and only a 128 KiB red zone is guaranteed below the stack check. A raised limit with a deep native recursion relies on the budget alone.
+- **Pinned by** `a_recursion_past_a_raised_depth_limit_fails_as_in_tier_zero` in `crates/jit/tests/test_tiers.rs`.
 
 ## A fatal signal prints one report from the executable, which asks the runtime for the R stack
 

@@ -15,8 +15,8 @@ use {
         file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
-        inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-        item_syntax, item_tree,
+        inline_annotations_enabled, item_check, item_hir, item_naming, item_spans, item_syntax,
+        item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
@@ -25,8 +25,8 @@ use {
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, prelude_enabled, project_type_definitions,
         stubs::{
-            CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
-            namespace_exports, namespace_known, outside_prelude, stubs,
+            CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
+            dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
         },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
@@ -176,7 +176,6 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
-        let _ = item_name_range(db, item);
         let _ = crate::item_syntax_flags(db, item);
     }
 }
@@ -829,7 +828,7 @@ fn classify_non_local_read(
             package.top_level.contains_key(&symbol) || package.conditional.contains_key(&symbol)
         })
     };
-    if crate::package_scheme_exists_in(db, context.library, name, package_binds)
+    if crate::package_scheme_exists_in(db, context.library, symbol, package_binds)
         || test_files.is_some_and(|_| crate::name_layer(db, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
@@ -930,7 +929,12 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     // Only a miss pays for the whole vocabulary, which the suggestion ranks.
     let mut known: BTreeSet<String> = stub_nominals
-        .map(|nominals| nominals.iter().cloned().collect())
+        .map(|nominals| {
+            nominals
+                .iter()
+                .map(|name| name.as_str().to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     if let Some(files) = ProjectFiles::try_get(db) {
         for name in project_type_definitions(db, files).keys() {
@@ -980,7 +984,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
     let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
-    let no_nominals = FxHashSet::default();
+    let no_nominals = SymbolSet::default();
     let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
 
     for annotation in file_annotation_references(db, file) {
@@ -1677,7 +1681,7 @@ fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
     definitions: TypeDefinitions<'db>,
-    stub_nominals: &FxHashSet<String>,
+    stub_nominals: &SymbolSet,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
     let mut current = element;
@@ -1696,7 +1700,7 @@ fn vector_element_atomic<'db>(
                         continue;
                     }
                     Some(_) => false,
-                    None => !stub_nominals.contains(name),
+                    None => !stub_nominals.contains(interned.symbol()),
                 }
             }
             _ => false,
@@ -1728,17 +1732,14 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
 #[salsa::tracked(returns(ref))]
 fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange, usize)> {
     let mut sites = Vec::new();
-    for (index, &item) in item_tree(db, file).iter().enumerate() {
-        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
+    for (index, span) in item_spans(db, file).iter().enumerate() {
+        if !matches!(*span.item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
-        let Some(name) = item.name(db).clone() else {
+        let (Some(name), Some(range)) = (span.item.name(db), span.name_range) else {
             continue;
         };
-        let Some(range) = item_name_range(db, item) else {
-            continue;
-        };
-        sites.push((name, range, index));
+        sites.push((name.as_str().to_owned(), range, index));
     }
     sites
 }
@@ -2328,8 +2329,8 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .schemes
             .keys()
             .chain(library.known_exports.iter())
-            .map(String::as_str)
-            .filter(|candidate| !outside_prelude(db, library, candidate)),
+            .filter(|candidate| !outside_prelude(db, library, candidate))
+            .map(Symbol::as_str),
     )
 }
 
@@ -2554,17 +2555,17 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let item_name = matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-            .then(|| item.name(db).clone())
+            .then(|| item.name(db))
             .flatten();
         let broken = |range: TextRange| {
             error_ranges
                 .iter()
                 .any(|error| error.start() <= range.end() && range.start() <= error.end())
         };
-        if let Some(name) = item_name.clone()
+        if let Some(name) = item_name
             && let Some(module) = item_hir(db, item)
             && let Some(root) = module.root
-            && let Some(name_range) = item_name_range(db, item)
+            && let Some(name_range) = span.name_range
         {
             let root_range = module.range(root);
             let statement_range = root_range + offset;
@@ -3787,7 +3788,7 @@ impl<'db> TypeRenderer<'db> {
 
     fn render_function(&mut self, db: &'db dyn Db, function: &FunctionType<'db>) -> String {
         let mut parameters = Vec::new();
-        for ty in &function.positional {
+        for ty in function.positional.iter() {
             parameters.push(self.render(db, *ty));
         }
         for (index, field) in function.named.iter().enumerate() {
