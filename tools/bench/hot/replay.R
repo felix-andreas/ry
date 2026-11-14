@@ -50,21 +50,50 @@
     last
   }
 
-  # A batch with messages and warnings muffled by handlers established once, so their cost is a
-  # signal, not a printed line. A warning signalled without a muffle restart passes on.
-  run <- function(prepared) {
-    withCallingHandlers(
-      batch(prepared),
-      message = function(condition) {
-        restart <- findRestart("muffleMessage")
-        if (!is.null(restart)) invokeRestart(restart)
-      },
-      warning = function(condition) {
-        restart <- findRestart("muffleWarning")
+  # Puts the process in the session the samples were captured in, as far as a call can tell,
+  # and returns the packages of `namespaces` that did not load. A code base's tests run with the
+  # packages it imports loaded, and loading a package changes what other calls do: it registers
+  # S3 methods (`zoo::rollapply` of an xts series pads with NA once xts is loaded) and solver
+  # plugins (ompr finds a solver only after ROI.plugin.highs is). So a replay loads all of them
+  # before the first call, and a result does not depend on which samples ran earlier. A package
+  # that is not installed is one the code bases ran without too.
+  #
+  # The code bases' runner (crates/oracle/src/bench.R) also sets testthat's third edition once.
+  # An expectation that finds no edition searches for a package DESCRIPTION on every call, which
+  # costs a hundred times the expectation itself. The edition is bound to an environment that is
+  # never released, so it lasts for the session.
+  session <- new.env()
+  enter_session <- function(namespaces) {
+    loads <- vapply(namespaces, function(namespace) {
+      tryCatch({
+        suppressPackageStartupMessages(loadNamespace(namespace))
+        TRUE
+      }, error = function(error) FALSE)
+    }, NA)
+    if (isNamespaceLoaded("testthat")) testthat::local_edition(3L, .env = session)
+    namespaces[!loads]
+  }
+
+  # The handlers the runner establishes around a test: an expectation continues the test through
+  # testthat's restart, and messages and warnings are muffled, so their cost is a signal and not
+  # a printed line. A condition signalled without its restart passes on.
+  handled <- function(expression) {
+    resume <- function(name) {
+      function(condition) {
+        restart <- findRestart(name)
         if (!is.null(restart)) invokeRestart(restart)
       }
+    }
+    withCallingHandlers(
+      expression,
+      expectation = resume("continue_test"),
+      message = resume("muffleMessage"),
+      warning = resume("muffleWarning")
     )
   }
+
+  # A batch under those handlers, established once for all its calls.
+  run <- function(prepared) handled(batch(prepared))
 
   # A checksum every engine computes alike: `<kind>:<fields>`. A number sums in an order the
   # engines may not share, so a `num` or `cpl` checksum ends in a floating sum that bench.py

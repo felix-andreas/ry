@@ -10,6 +10,9 @@
 # differs between two replays in a row (it holds a counter or a generated id): the sample stays
 # valid with the comparison `varies`, and the harness prints `varies` in place of its checksum.
 #
+# Every package the code base imports (<capture>/session.txt) is loaded before the first sample,
+# as the harness loads them, so a sample is judged in the session it will be replayed in.
+#
 # It writes <capture>/validated.tsv, one row per sample, and for each valid sample a compact copy
 # of its replay inputs in <capture>/validated/, with the result's checksum (replay.R) in place of
 # the result unless the result is small. The copy leaves out the capture's timing, so the same
@@ -24,6 +27,8 @@ local({
   allowed_lines <- 2L
   kept_value_bytes <- 4096
 
+  skipped <- .hot$enter_session(readLines(file.path(capture, "session.txt")))
+  if (length(skipped)) cat("the session runs without", paste(skipped, collapse = ", "), "\n")
   samples <- read.delim(file.path(capture, "samples.tsv"), colClasses = "character", quote = "",
                         na.strings = character(), comment.char = "")
   out <- file.path(capture, "validated")
@@ -64,14 +69,19 @@ local({
           }
           if (any(vapply(seen, identical, TRUE, x))) return()
           seen[[length(seen) + 1L]] <<- x
-          for (name in ls(x, all.names = TRUE)) walk_value(get(name, envir = x), depth + 1L)
+          # A call's frame binds `...` and each formal that got no argument to the missing
+          # argument, which cannot be passed on.
+          for (name in setdiff(ls(x, all.names = TRUE), "...")) {
+            if (!identical(get(name, envir = x), quote(expr = ))) walk_value(get(name, envir = x), depth + 1L)
+          }
           x <- parent.env(x)
         }
       } else if (is.function(x) && !is.primitive(x)) {
         walk_call(body(x))
         walk_value(environment(x), depth + 1L)
       } else if (is.list(x)) {
-        for (item in x) walk_value(item, depth + 1L)
+        # A list of formals holds the missing argument for each one without a default.
+        for (k in seq_along(x)) if (!identical(x[[k]], quote(expr = ))) walk_value(x[[k]], depth + 1L)
       }
       for (attribute in attributes(x)) if (is.environment(attribute) || is.function(attribute)) walk_value(attribute, depth + 1L)
     }
@@ -127,14 +137,7 @@ local({
     started <- as.numeric(Sys.time())
     outcome <- tryCatch({
       setTimeLimit(elapsed = give_up, transient = TRUE)
-      value <- withCallingHandlers(
-        eval(sample$call, env),
-        message = function(condition) invokeRestart("muffleMessage"),
-        warning = function(condition) {
-          restart <- findRestart("muffleWarning")
-          if (!is.null(restart)) invokeRestart(restart)
-        }
-      )
+      value <- .hot$handled(eval(sample$call, env))
       setTimeLimit(elapsed = Inf)
       list(value = value, threw = FALSE)
     }, error = function(error) {

@@ -240,7 +240,7 @@ def main():
                  "with `cargo build --release -p ry-lang -p libr`, or pass --any-build for a quick look")
     refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
     manifests = {suite: load_suite(suite) for suite in suites}
-    missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
+    missing = {suite: missing_packages(suite, selected(manifest, args), args.rscript) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
         sys.exit("error: the corpus library lacks packages the suites load; run "
                  "`just bench-packages install`, or pass --partial to run without them:\n"
@@ -335,9 +335,13 @@ def library_environment(rscript, library):
     such library."""
     if not library.is_dir():
         return {}
-    gnu_r_library = subprocess.run([rscript, "--vanilla", "-e", "cat(.Library)"],
-                                   capture_output=True, text=True, check=True).stdout.strip()
-    return {"R_LIBS": str(library), "R_LIBS_USER": str(library), "R_LIBS_SITE": gnu_r_library}
+    return {"R_LIBS": str(library), "R_LIBS_USER": str(library), "R_LIBS_SITE": gnu_r_library(rscript)}
+
+
+def gnu_r_library(rscript):
+    """GNU R's own library, which holds base R's packages and whatever was installed beside them."""
+    return subprocess.run([rscript, "--vanilla", "-e", "cat(.Library)"],
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 def file_contains(path, needle):
@@ -466,6 +470,8 @@ def load_hot_suite(directory):
                  "capture of the benchmark code bases on ry; generate them with tools/bench/tooling/generate.py, "
                  "then run `just bench-hot-capture DIR` on that directory")
     manifest = tomllib.loads(path.read_text())
+    if not isinstance(manifest.get("session"), list):
+        sys.exit(f"error: {path} does not list the packages a replay loads (`session`)")
     for program in manifest["programs"]:
         count = len(program["samples"])
         if not count or any(len(program[key]) != count for key in ("iterations", "rng", "threw")):
@@ -507,14 +513,18 @@ def selected(manifest, args):
             if args.filter in program["id"] or args.filter == program.get("group")]
 
 
-def missing_packages(suite, programs):
+def missing_packages(suite, programs, rscript):
     """The packages the programs load that the corpus library lacks at the locked version, each
     with the reason. A package's test suite may load any locked package, so the packages suite
     needs all of them."""
     if suite == HOT_SUITE:
         # The captured code bases import the dependency closure, which pins no versions of its own.
+        # A package installed beside base R is not installed into the closure again, and both
+        # engines find it there (`library_environment`).
         needed = {name for program in programs for name in program["namespaces"]} - corpus.BASE_PACKAGES
-        return sorted((name for name in needed if not (codebase_library() / name / "DESCRIPTION").is_file()), key=str.lower)
+        libraries = [codebase_library(), pathlib.Path(gnu_r_library(rscript))] if needed else []
+        return sorted((name for name in needed
+                       if not any((library / name / "DESCRIPTION").is_file() for library in libraries)), key=str.lower)
     versions = {name: version for name, version, _ in corpus.locked()}
     if suite == "packages":
         needed = set(versions)
@@ -663,11 +673,11 @@ def duration(seconds):
 
 # Running one program on one engine.
 
-def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
+def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True, sample=True):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
-    memory in MiB (`MEMORY_PARTS`, from `sample_memory`). The status is None when the process timed
-    out or, with `check_images`, when ry reported an image it could not use: such a process timed a
-    slow start, so its numbers do not count."""
+    memory in MiB (`MEMORY_PARTS`, from `sample_memory`; empty without `sample`). The status is
+    None when the process timed out or, with `check_images`, when ry reported an image it could
+    not use: such a process timed a slow start, so its numbers do not count."""
     with tempfile.TemporaryFile("w+") as stdout, tempfile.TemporaryFile("w+") as stderr:
         started = time.monotonic()
         child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd)
@@ -679,15 +689,17 @@ def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
             child.kill()
 
         timer = threading.Timer(timeout, expire)
-        sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory))
+        sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory)) if sample else None
         timer.start()
-        sampler.start()
+        if sampler:
+            sampler.start()
         try:
             _, status = os.waitpid(child.pid, 0)
         finally:
             timer.cancel()
             finished.set()
-            sampler.join()
+            if sampler:
+                sampler.join()
         child.returncode = os.waitstatus_to_exitcode(status)
         seconds = time.monotonic() - started
         stdout.seek(0)
@@ -1104,6 +1116,7 @@ class HotRunner:
         self.script = self.work / "harness.R"
         self.script.write_text((here / HOT_SUITE / "replay.R").read_text() + "\n"
                                + (here / HOT_SUITE / "harness.R").read_text())
+        self.session = ",".join(tomllib.loads((self.directory / "suite.toml").read_text())["session"])
 
     def run(self, program, engine):
         return self.run_batch([program], engine)[program["id"]]
@@ -1115,9 +1128,11 @@ class HotRunner:
         table = self.work / "programs.tsv"
         table.write_text(hot_program_table(programs))
         variables = dict(engine.env, RY_HOT_SUITE=str(self.directory), RY_HOT_PROGRAMS=str(table), RY_HOT_MODE=mode,
-                         **(env or {}))
+                         RY_HOT_SESSION=self.session, **(env or {}))
+        # No memory sampling: the suite reports no peaks, and reading the memory map of a process
+        # with a hundred packages loaded every 20 ms would slow the process it measures.
         status, out, err, _, _ = spawn([*wrapper, *engine.command, self.script.name], variables, cwd=self.work,
-                                       timeout=timeout)
+                                       timeout=timeout, sample=False)
         names = {program["id"] for program in programs}
         reported = {} if status is None else dict(
             found for line in out.splitlines() if (found := parse_hot_line(line)) and found[0] in names)

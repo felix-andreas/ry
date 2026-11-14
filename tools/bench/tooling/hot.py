@@ -9,10 +9,12 @@ bench-hot-capture DIR` runs in order on code bases that tooling/generate.py wrot
   capture   runs each code base's tests on ry (`oracle bench`, as the codebases suite does, with the
             JIT off) while ry's recorder writes, per code base, the time spent in each package
             entry (entries.tsv, summary.tsv) and a few calls of each with their arguments
-            (samples.tsv, samples/<n>.rds), then prints the shares and the top keys.
-  validate  replays every sample under GNU R (hot/validate.R) and keeps those that replay as they
-            ran without side effects, with GNU R's seconds per call and a batch size of about 20 ms
-            (validated.tsv, validated/<n>.rds).
+            (samples.tsv, samples/<n>.rds), then prints the shares and the top keys. It also
+            lists the packages the code base imports (session.txt), which every replay loads.
+  validate  replays every sample under GNU R (hot/validate.R), in a session with those packages
+            loaded, and keeps the samples that replay as they ran without side effects, with GNU
+            R's seconds per call and a batch size of about 20 ms (validated.tsv,
+            validated/<n>.rds).
   select    picks the keys that cover the most of each code base's time, up to `--programs`, and
             the most typical `--samples` valid samples of each, weighs them, and writes
             hot/suite.toml and hot/samples/. It reports what the suite loses: keys with no valid
@@ -81,7 +83,7 @@ def main():
     select.add_argument("--suite", type=pathlib.Path, default=bench.here / bench.HOT_SUITE)
     select.add_argument("--programs", type=int, default=100, help="at most this many programs")
     select.add_argument("--coverage", type=float, default=0.9,
-                        help="stop adding keys once every code base has this share of its captured time")
+                        help="stop adding keys once every code base has this share of its package time")
     select.add_argument("--samples", type=int, default=3, help="samples per program")
     track = steps.add_parser("track", help="compare the suite's predicted changes with the code bases' measured ones")
     track.add_argument("--codebases", required=True, type=pathlib.Path, help="where tooling/generate.py wrote them")
@@ -128,9 +130,25 @@ def run_capture(args):
             if result.get("seconds") is None:
                 sys.exit(f"error: the capture run of {name} failed: {result['reason']}")
             print(f"{name}: {result['checksum']} in {result['seconds']:.1f} s of test blocks")
+            (out / "session.txt").write_text("".join(f"{package}\n" for package in session_packages(directory)))
             print_capture(out)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def session_packages(codebase):
+    """The packages loaded in a session that ran the code base's tests: those its DESCRIPTION
+    depends on or imports, and testthat, which its runner attaches."""
+    fields, name = {}, None
+    for line in (codebase / "DESCRIPTION").read_text().splitlines():
+        if line[:1].isspace():
+            fields[name] += line
+        elif ":" in line:
+            name, _, value = line.partition(":")
+            fields[name] = value
+    listed = ",".join(fields.get(field, "") for field in ("Depends", "Imports")).split(",")
+    names = {entry.split("(")[0].strip() for entry in listed}
+    return sorted((names | {"testthat"}) - {"", "R"}, key=str.lower)
 
 
 def print_capture(directory):
@@ -209,19 +227,27 @@ def load_capture(directory):
             row["path"] = directory / "validated" / pathlib.PurePosixPath(row["file"]).name
             row["compact_bytes"] = row["path"].stat().st_size
             samples.setdefault((row["package"], row["name"]), []).append(row)
-    return {"summary": summary, "entries": entries, "samples": samples}
+    session = (directory / "session.txt").read_text().split()
+    return {"summary": summary, "entries": entries, "samples": samples, "session": session}
+
+
+def package_seconds(entry):
+    """The seconds a code base spent in an entry: the calls the recorder could capture, with
+    everything below them, and the entry's own time in the calls it could not. A program stands for
+    both, because the calls it replays run the same code as the ones the recorder had to pass."""
+    return entry["seconds"] + entry["uncapturable_seconds"]
 
 
 def choose_keys(captures, limit, coverage):
     """The keys to make programs of: those with a valid sample, by the summed share of each code
-    base's captured time they hold, until `limit` keys or until every code base has `coverage` of
-    its captured time in the chosen keys."""
+    base's package time they hold (`package_seconds`), until `limit` keys or until every code base
+    has `coverage` of its package time in the chosen keys."""
     shares = {}
     for codebase, capture in captures.items():
-        covered = sum(entry["seconds"] for entry in capture["entries"].values()) or 1.0
+        covered = sum(package_seconds(entry) for entry in capture["entries"].values()) or 1.0
         for key, entry in capture["entries"].items():
             if capture["samples"].get(key):
-                shares.setdefault(key, {})[codebase] = entry["seconds"] / covered
+                shares.setdefault(key, {})[codebase] = package_seconds(entry) / covered
     ranked = sorted(shares, key=lambda key: (-sum(shares[key].values()), key))
     chosen, reached = [], {codebase: 0.0 for codebase in captures}
     for key in ranked:
@@ -243,7 +269,7 @@ def build_program(key, captures, count):
     samples = typical_samples(dedupe(candidates), seconds / calls if calls else 0.0, count)
     iterations = [max(1, round(BATCH_SECONDS / len(samples) / sample["gnu_seconds_per_call"])) for sample in samples]
     gnu = sum(times * sample["gnu_seconds_per_call"] for times, sample in zip(iterations, samples)) / sum(iterations)
-    share = {codebase: capture["entries"][key]["seconds"] / capture["summary"]["total_seconds"]
+    share = {codebase: package_seconds(capture["entries"][key]) / capture["summary"]["total_seconds"]
              for codebase, capture in captures.items() if key in capture["entries"] and capture["summary"]["total_seconds"]}
     return {"package": package, "name": name, "display": f"{package}::{name}", "chosen": samples,
             "iterations": iterations, "rng": [sample["rng"] for sample in samples],
@@ -253,8 +279,8 @@ def build_program(key, captures, count):
 
 
 def gnu_time(key, captures, candidates):
-    """Per code base, the GNU R seconds the key's captured calls stand for: the key's captured
-    seconds times GNU R's seconds over the capture's seconds for the same sampled calls. The ratio
+    """Per code base, the GNU R seconds the key's calls stand for: the seconds the code base spent
+    in it (`package_seconds`) times GNU R's seconds over the capture's seconds for the same sampled calls. The ratio
     comes from the code base's own valid samples, and from every code base's when it has none or
     theirs took no measurable time."""
     def ratio(samples):
@@ -266,8 +292,8 @@ def gnu_time(key, captures, candidates):
         entry = capture["entries"].get(key)
         own = ratio(capture["samples"].get(key, []))
         factor = own if own is not None else pooled
-        if entry and entry["seconds"] > 0 and factor is not None:
-            found[codebase] = entry["seconds"] * factor
+        if entry and package_seconds(entry) > 0 and factor is not None:
+            found[codebase] = package_seconds(entry) * factor
     return found
 
 
@@ -355,16 +381,22 @@ def write_suite(directory, programs, captures, selection):
             "weight": {codebase: round(value, 6) for codebase, value in program["weight"].items()},
         })
     coverage = {codebase: round(sum(program["share"].get(codebase, 0) for program in programs), 4) for codebase in captures}
+    chosen = {(program["package"], program["name"]) for program in programs}
+    captured = {codebase: round(sum(capture["entries"][key]["seconds"] for key in chosen if key in capture["entries"])
+                                / (capture["summary"]["total_seconds"] or 1.0), 4)
+                for codebase, capture in captures.items()}
     manifest = {
         "id": bench.HOT_SUITE, "name": "Hot package entries",
         "summary": "package calls that dominate the benchmark code bases' time, replayed in a loop",
         "description": ("Each program is one package entry that the three benchmark code bases spend much of their "
                         "time in, with a few of the calls they make to it, captured with their arguments while the "
                         "code bases' tests ran on ry. `tools/bench/hot/harness.R` replays every program's calls in "
-                        "batches of about 20 ms of GNU R time in one process per engine. A program's weight in a "
+                        "batches of about 20 ms of GNU R time in one process per engine, with every package "
+                        "the code bases import loaded (`session`). A program's weight in a "
                         "code base is its share of the code base's GNU R time, and the predicted speed-up of a code "
                         "base is the weighted harmonic mean of its programs' speed-ups.\n"),
-        "selection": dict(selection, coverage_of_run=coverage),
+        "session": sorted({package for capture in captures.values() for package in capture["session"]}, key=str.lower),
+        "selection": dict(selection, coverage_of_run=coverage, captured_of_run=captured),
         "programs": manifest_programs,
     }
     (directory / "suite.toml").write_text(render_toml(manifest))
@@ -376,15 +408,17 @@ def print_selection(programs, captures):
     for codebase, capture in captures.items():
         summary, entries = capture["summary"], capture["entries"]
         total = summary["total_seconds"] or 1.0
-        covered = sum(entry["seconds"] for entry in entries.values())
-        held = sum(entries[key]["seconds"] for key in chosen if key in entries)
-        print(f"\n{codebase}: the programs hold {held / total:.1%} of the run's time on ry and "
-              f"{held / covered if covered else 0:.1%} of the captured package time")
-        lost = sorted((key for key in entries if key not in chosen and entries[key]["seconds"] > 0
-                       and not capture["samples"].get(key)), key=lambda key: (-entries[key]["seconds"], key))
+        covered = sum(map(package_seconds, entries.values()))
+        held = sum(package_seconds(entries[key]) for key in chosen if key in entries)
+        captured = sum(entries[key]["seconds"] for key in chosen if key in entries)
+        print(f"\n{codebase}: the programs hold {held / total:.1%} of the run's time on ry "
+              f"({captured / total:.1%} in calls the recorder could capture) and "
+              f"{held / covered if covered else 0:.1%} of the package time")
+        lost = sorted((key for key in entries if key not in chosen and package_seconds(entries[key]) > 0
+                       and not capture["samples"].get(key)), key=lambda key: (-package_seconds(entries[key]), key))
         if lost:
             print("  lost, with no valid sample: " + ", ".join(
-                f"{package}::{name} ({entries[(package, name)]['seconds'] / total:.2%})" for package, name in lost[:10]))
+                f"{package}::{name} ({package_seconds(entries[(package, name)]) / total:.2%})" for package, name in lost[:10]))
         dominated = sorted((key for key, entry in entries.items() if entry["uncapturable_seconds"] > entry["seconds"]),
                            key=lambda key: (-entries[key]["uncapturable_seconds"], key))
         if dominated:

@@ -3,6 +3,8 @@
 #
 # Environment:
 #   RY_HOT_SUITE     the suite directory, which sample paths are relative to
+#   RY_HOT_SESSION   comma-separated packages the code bases import, all loaded before the first
+#                    program so that every run replays in the same session (replay.R)
 #   RY_HOT_PROGRAMS  the program table bench.py writes: a header, then one tab-separated row per
 #                    program with its id and comma-separated lists of its sample files,
 #                    iterations, rng and threw flags (1 or 0) and namespaces
@@ -13,7 +15,7 @@
 #   RY_HOT_FILTER    a regular expression a program id must match (default: every program)
 #
 # For each program it loads the namespaces the program needs, rebuilds each sample's environment
-# once, runs one untimed warm-up batch, collects garbage, and times the batches. It prints
+# once, runs one untimed warm-up batch, collects the young garbage, and times the batches. It prints
 #   <id> <checksums> <min batch seconds> <median batch seconds> <calls per batch>
 # where the checksums are those of each sample's last result (`varies` for a sample the
 # validator found to give a different result on every call), joined by commas, or
@@ -35,6 +37,8 @@ local({
   items <- function(text) strsplit(text, ",", fixed = TRUE)[[1L]]
   one_line <- function(text) gsub("[[:space:]]+", " ", paste(text, collapse = " "))
 
+  skipped <- .hot$enter_session(items(Sys.getenv("RY_HOT_SESSION")))
+  if (length(skipped)) cat("# session without ", paste(skipped, collapse = ","), "\n", sep = "")
   rows <- strsplit(readLines(table)[-1L], "\t", fixed = TRUE)
   for (row in rows) {
     id <- row[[1L]]
@@ -74,7 +78,8 @@ local({
       sink(nullfile())
       failure <- tryCatch({
         results <- .hot$run(prepared)
-        invisible(gc())
+        # A full collection takes GNU R a third of a second with the session's packages loaded.
+        invisible(gc(full = FALSE))
         region(id)
         inside <- TRUE
         if (mode == "instructions") {

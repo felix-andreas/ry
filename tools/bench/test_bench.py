@@ -261,12 +261,14 @@ class HotSuite(unittest.TestCase):
         (self.directory / "samples").mkdir()
         (self.directory / "samples/sd-1.rds").write_bytes(b"")
         program = self.program("sd", {"finbench": 1.0}, iterations=[1, 2])
-        (self.directory / "suite.toml").write_text(hot.render_toml({"id": "hot", "selection": {}, "programs": [program]}))
+        (self.directory / "suite.toml").write_text(
+            hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
         with self.assertRaises(SystemExit) as refusal:
             bench.load_hot_suite(self.directory)
         self.assertIn("gives sd 1 samples but not as many iterations", str(refusal.exception))
         program["iterations"] = [1]
-        (self.directory / "suite.toml").write_text(hot.render_toml({"id": "hot", "selection": {}, "programs": [program]}))
+        (self.directory / "suite.toml").write_text(
+            hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
         self.assertEqual(bench.load_hot_suite(self.directory)["programs"], [program])
 
     def test_reads_a_harness_line(self):
@@ -287,6 +289,7 @@ class HotSuite(unittest.TestCase):
 
     def test_a_program_the_harness_printed_no_line_for_fails(self):
         engine = bench.Engine("ry", "ry", [sys.executable, "-c", "print('sd num:1:0:2 0.01 0.02 7')"], dict(os.environ))
+        (self.directory / "suite.toml").write_text(hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": []}))
         runner = bench.HotRunner(bench.HOT_SUITE, self.args, directory=self.directory)
         self.addCleanup(runner.close)
         measured = runner.run_batch([self.program("sd", {}), self.program("median", {})], engine)
@@ -366,14 +369,15 @@ class HotSelection(unittest.TestCase):
         self.assertEqual([program["id"] for program in programs], ["base-a-b", "base-a-b-2"])
 
     def test_the_manifest_reads_back_as_written(self):
-        manifest = {"id": "hot", "name": "Hot \"entries\"\n", "selection": {"coverage": 0.9, "samples": 3},
+        manifest = {"id": "hot", "name": "Hot \"entries\"\n", "session": ["stats", "data.table"],
+                    "selection": {"coverage": 0.9, "samples": 3},
                     "programs": [{"id": "x", "rng": [True, False], "iterations": [3, 4], "gnu_seconds_per_call": 2e-05,
                                   "share": {"finbench": 0.5}, "weight": {}}]}
         self.assertEqual(hot.tomllib.loads(hot.render_toml(manifest)), manifest)
 
     def test_keys_are_chosen_by_summed_share_until_each_code_base_is_covered(self):
         def capture(seconds):
-            return {"entries": {key: {"seconds": value} for key, value in seconds.items()},
+            return {"entries": {key: {"seconds": value, "uncapturable_seconds": 0.0} for key, value in seconds.items()},
                     "samples": {key: [{}] for key in seconds if key != ("base", "lost")}}
         captures = {"finbench": capture({("a", "x"): 6.0, ("base", "lost"): 9.0, ("b", "y"): 3.0, ("c", "z"): 1.0}),
                     "dsbench": capture({("b", "y"): 9.0, ("c", "z"): 1.0})}
@@ -390,11 +394,14 @@ class HotSelection(unittest.TestCase):
 
     def test_gnu_r_time_scales_the_captured_time_by_the_samples_ratio(self):
         def capture(seconds, samples):
-            return {"entries": {("p", "f"): {"seconds": seconds}}, "samples": {("p", "f"): samples}}
+            return {"entries": {("p", "f"): {"seconds": seconds, "uncapturable_seconds": 0.0}}, "samples": {("p", "f"): samples}}
         slow = [{"seconds": 2e-3, "gnu_seconds_per_call": 1e-3}, {"seconds": 6e-3, "gnu_seconds_per_call": 3e-3}]
         captures = {"finbench": capture(10.0, slow), "dsbench": capture(4.0, [])}
         # dsbench has no valid sample of its own, so it takes the ratio of every code base's.
         self.assertEqual(hot.gnu_time(("p", "f"), captures, slow), {"finbench": 5.0, "dsbench": 2.0})
+        # The entry's own time in calls the recorder could not capture counts as well.
+        captures["dsbench"]["entries"][("p", "f")]["uncapturable_seconds"] = 2.0
+        self.assertEqual(hot.gnu_time(("p", "f"), captures, slow), {"finbench": 5.0, "dsbench": 3.0})
 
     def test_a_weight_is_the_share_of_gnu_r_time(self):
         programs = [{"id": "a", "gnu_time": {"finbench": 3.0}}, {"id": "b", "gnu_time": {"finbench": 1.0, "dsbench": 2.0}}]
