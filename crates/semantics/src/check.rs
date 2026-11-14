@@ -41,6 +41,7 @@ use {
     bumpalo::{Bump, collections::Vec as BumpVec},
     hashbrown::{HashMap, HashSet},
     rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{
         alloc::{AllocError, Allocator, Layout},
         borrow::Cow,
@@ -858,7 +859,7 @@ fn check_item_in<'db>(
         forward_captured: Bitset::new_in(arena, bindings),
         capture_joins: Column::new_in(arena, bindings),
         capture_repass_needed: false,
-        superassign_seeds: Column::new_in(arena, bindings),
+        superassign_seeds: SmallVec::new(),
         pre_materialized: Column::new_in(arena, bindings),
         no_default_formals: Bitset::new_in(arena, bindings),
         defaulted_formals: Bitset::new_in(arena, bindings),
@@ -1631,7 +1632,7 @@ struct Checker<'db, 'a> {
     /// How many enclosing `[` index a value that may be a data.table of unknown columns.
     unseen_frames: u32,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
-    column_scopes: Vec<ColumnScope<'db, 'a>>,
+    column_scopes: Vec<ColumnScope<'db>>,
     column_misses: Column<'a, ExprId, ColumnMiss>,
     /// Frame queries being inferred. data.table syntax makes naming resolve a whole
     /// bracket quietly, but inside a frame query ry knows the columns, so a quiet read
@@ -1674,8 +1675,9 @@ struct Checker<'db, 'a> {
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
-    /// enclosing type on entry, and whether the body's first write has bound it yet.
-    superassign_seeds: Column<'a, BindingId, (Ty<'db>, bool)>,
+    /// enclosing type on entry, and whether the body's first write has bound it yet. A body
+    /// seeds the few slots it writes with `<<-`, so the list is searched, not indexed.
+    superassign_seeds: SmallVec<[SuperassignSeed<'db>; 2]>,
     /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
     /// that loop passes re-establish after their rollback.
     pre_materialized: Column<'a, BindingId, Ty<'db>>,
@@ -1729,16 +1731,25 @@ enum Callable {
     Yes,
 }
 
+/// The variable an enclosing slot reads on entry to a body that writes it with `<<-`.
+#[derive(Clone, Copy)]
+struct SuperassignSeed<'db> {
+    slot: BindingId,
+    variable: Ty<'db>,
+    /// The body's first write has bound the variable.
+    written: bool,
+}
+
 /// The evaluation frame of one query `f[i, j, by]`.
-struct ColumnScope<'db, 'a> {
+struct ColumnScope<'db> {
     /// `None` when the frame's columns are not known, which makes every bare name silent.
     columns: Option<Vec<RecordField<'db>>>,
     frame: Option<Symbol>,
     /// A binding made inside the bracket (a closure's parameter in `j`) stays lexical.
     bracket: TextRange,
     subset_data: Ty<'db>,
-    /// Called names inside the bracket, which never read a column.
-    callees: Bitset<'a, ExprId>,
+    /// Called names inside the bracket, which never read a column, in ascending order.
+    callees: SmallVec<[ExprId; 8]>,
     /// The two sides of a join, which `j` can also read as `x.col` and `i.col`.
     join: Option<JoinSides<'db>>,
 }
@@ -4398,7 +4409,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if self
             .column_scopes
             .iter()
-            .any(|scope| scope.callees.contains(id))
+            .any(|scope| scope.callees.binary_search(&id).is_ok())
         {
             return match resolved {
                 Some(_) => None,
@@ -4611,16 +4622,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                     // The rest of this body reads the value just written. The scopes that
                     // hold the variable join it with their own writes once the body ends.
                     let written = self.table.resolve(self.db, value_ty);
-                    if let Some((seed, bound)) = self.superassign_seeds.get(slot).copied()
-                        && !bound
+                    if let Some(position) = self
+                        .superassign_seeds
+                        .iter()
+                        .position(|seed| seed.slot == slot && !seed.written)
                     {
+                        let seed = self.superassign_seeds[position].variable;
                         // A read before this first write already used the variable as a
                         // value of some type, so a write of another type breaks that read.
                         let snapshot = self.table.snapshot();
                         match self.table.unify(self.db, seed, written) {
-                            Ok(()) => {
-                                self.superassign_seeds.insert(slot, (seed, true));
-                            }
+                            Ok(()) => self.superassign_seeds[position].written = true,
                             // An accumulator `x <<- c(x, list(item))` reads itself inside the
                             // write, which the occurs check rejects; the seed stays open.
                             Err(UnifyError::Occurs(..)) => self.table.rollback(snapshot),
@@ -10517,10 +10529,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// the first run is fully discarded (environment, unification, diagnostics, `<<-` writes).
     fn infer_body_with_capture_discovery(&mut self, body: ExprId, pending_mark: usize) -> Ty<'db> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
-        let saved_seeds = mem::replace(
-            &mut self.superassign_seeds,
-            Column::new_in(self.arena, self.naming.bindings.len()),
-        );
+        let saved_seeds = mem::take(&mut self.superassign_seeds);
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
         let errors_mark = self.errors.len();
@@ -10544,9 +10553,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             trailing_ty = self.infer(body);
         }
         // A write the body never reached leaves its seed open; it must not generalize.
-        let mut seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
-        for (_, (seed, written)) in seeds.drain() {
-            if !written && self.table.unify(self.db, seed, unknown(self.db)).is_err() {
+        let seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
+        for seed in seeds {
+            if !seed.written && self.table.unify(self.db, seed.variable, unknown(self.db)).is_err()
+            {
                 panic!("an open superassignment seed always unifies with `Unknown`");
             }
         }
@@ -10573,7 +10583,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 continue;
             }
             let seed = self.fresh(Constraint::Unconstrained);
-            self.superassign_seeds.insert(slot, (seed, false));
+            self.superassign_seeds.push(SuperassignSeed {
+                slot,
+                variable: seed,
+                written: false,
+            });
             let entry = union_of(self.db, [existing, seed]);
             self.environment.set(slot, EnvEntry::Mono(entry));
         }
@@ -16145,10 +16159,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         let frame = variable_name(module, target);
         let bracket = module.range(id);
         let subject_columns = frame_columns(db, subject);
-        let mut callees = Bitset::new_in(self.arena, module.expression_count());
+        let mut callees = SmallVec::new();
         for value in arguments.iter().filter_map(|argument| argument.value) {
             collect_callees(module, value, &mut callees);
         }
+        callees.sort_unstable();
         let i_value = i.and_then(|argument| argument.value);
         let mut source_columns = subject_columns.map(<[_]>::to_vec);
         let mut join = None;
@@ -18974,12 +18989,12 @@ fn string_literals(module: &Module, arguments: &[Argument]) -> Option<Vec<String
         .collect()
 }
 
-fn collect_callees(module: &Module, id: ExprId, callees: &mut Bitset<ExprId>) {
+fn collect_callees(module: &Module, id: ExprId, callees: &mut SmallVec<[ExprId; 8]>) {
     let kind = module.kind(id);
     if let ExpressionKind::Call { callee, .. } = kind
         && matches!(module.kind(*callee), ExpressionKind::NameRef(_))
     {
-        callees.insert(*callee);
+        callees.push(*callee);
     }
     module.for_each_child(id, |child| collect_callees(module, child, callees));
 }

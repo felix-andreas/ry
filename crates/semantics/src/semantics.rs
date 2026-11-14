@@ -2083,6 +2083,17 @@ fn interface_edges<'db>(
             push_unique(&mut targets, winner);
         }
     }
+    // The walk above follows the names in the order they were interned, which parallel
+    // workers change from run to run, and so does an item's id. An item's file, spelling,
+    // kind and disambiguator do not, and together they identify it.
+    targets.sort_unstable_by_key(|target| {
+        (
+            target.file(db).as_id().index(),
+            target.name(db),
+            *target.kind(db) as u8,
+            *target.disambiguator(db),
+        )
+    });
     targets
 }
 
@@ -2103,9 +2114,11 @@ pub struct ItemLinks<'db> {
     /// above [`FILE_IN_PROJECT`]. A name is its symbol's index, and the names are sorted. A
     /// binding is the position of its name above its [`LinkKind`], and the bindings are
     /// sorted, so a name's bindings are adjacent and so are the conditional writers of one
-    /// layer.
+    /// layer. Symbols are numbered in the order they were interned, which differs between
+    /// runs, so the names are only ever searched, never walked for a result.
     words: ThinVec<u32>,
-    /// Per binding, the item it names, then [`item_interface_edges`].
+    /// Per binding, the item it names, then [`item_interface_edges`] in an order that is the
+    /// same on every run.
     items: ThinVec<Item<'db>>,
 }
 
