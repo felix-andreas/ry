@@ -3,7 +3,7 @@
 
 The hot suite replays the package calls that dominate the code bases' time on ry: each program is
 one package entry (such as `stats::sd`) with a few captured calls of it, and hot/harness.R runs
-`eval(call, env)` for them in a loop. The suite comes from four steps, which `just
+`eval(call, env)` for them in a loop. The suite comes from three steps, which `just
 bench-hot-capture DIR` runs in order on code bases that tooling/generate.py wrote to DIR:
 
   capture   runs each code base's tests on ry (`oracle bench`, as the codebases suite does, with the
@@ -14,23 +14,23 @@ bench-hot-capture DIR` runs in order on code bases that tooling/generate.py wrot
             ran without side effects, with GNU R's seconds per call and a batch size of about 20 ms
             (validated.tsv, validated/<n>.rds).
   select    picks the keys that cover the most of each code base's time, up to `--programs`, and
-            the most typical `--samples` valid samples of each, and writes hot/suite.toml and
-            hot/samples/. It reports what the suite loses: keys with no valid sample, and keys whose
-            time is mostly calls the recorder could not capture.
-  weigh     times the suite's programs in hot/harness.R on GNU R and, when a ry build is there, on
-            ry with the JIT off, and fixes each program's per-call times and weights from those.
+            the most typical `--samples` valid samples of each, weighs them, and writes
+            hot/suite.toml and hot/samples/. It reports what the suite loses: keys with no valid
+            sample, and keys whose time is mostly calls the recorder could not capture.
 
 A program's weight in a code base is its share of the code base's GNU R time among the suite's
-programs. The capture measures shares of ry's time with the JIT off, so a key's weight is its
-share times GNU R's seconds per call over ry's, normalized over the code base's programs; bench.py
-reads the predicted speed-up of a code base as the weighted harmonic mean of the programs'
-speed-ups. Every step is deterministic for the same capture.
+programs, which bench.py needs to read the predicted speed-up of a code base as the weighted
+harmonic mean of the programs' speed-ups. The capture measures ry's time, with the recorder on and
+the JIT off, so GNU R's time in a key is estimated from the key's samples: the key's captured time
+times GNU R's seconds over the capture's seconds for the same sampled calls (`gnu_time`). The
+recorder samples a key's calls uniformly, and a sampled call ran under the same conditions as every
+other call of the key, so whatever the capture run adds to the key's time cancels in that ratio.
+Every step is deterministic for the same capture.
 
 Usage:
     python3 -I hot.py capture --codebases DIR --out DIR [--ry PATH] [--rscript PATH] [--only NAME,...]
     python3 -I hot.py validate --captures DIR [--rscript PATH]
     python3 -I hot.py select --captures DIR [--suite DIR] [--programs N] [--coverage F] [--samples N]
-    python3 -I hot.py weigh [--suite DIR] [--ry PATH] [--rscript PATH] [--rounds N]
 """
 
 import argparse
@@ -72,15 +72,11 @@ def main():
     select.add_argument("--coverage", type=float, default=0.9,
                         help="stop adding keys once every code base has this share of its captured time")
     select.add_argument("--samples", type=int, default=3, help="samples per program")
-    weigh = steps.add_parser("weigh", help="time the suite's programs and fix its weights")
-    weigh.add_argument("--suite", type=pathlib.Path, default=bench.here / bench.HOT_SUITE)
-    weigh.add_argument("--rounds", type=int, default=5, help="timed batches per program")
-    for step in (capture, validate, weigh):
+    for step in (capture, validate):
         step.add_argument("--rscript", default=os.environ.get("ORACLE_R_RSCRIPT", "Rscript"), help="GNU R's Rscript")
-    for step in (capture, weigh):
-        step.add_argument("--ry", default=str(bench.root / "target/release/ry"), help="the ry build")
+    capture.add_argument("--ry", default=str(bench.root / "target/release/ry"), help="the ry build")
     args = parser.parse_args()
-    {"capture": run_capture, "validate": run_validate, "select": run_select, "weigh": run_weigh}[args.step](args)
+    {"capture": run_capture, "validate": run_validate, "select": run_select}[args.step](args)
 
 
 # Capture.
@@ -219,13 +215,12 @@ def choose_keys(captures, limit, coverage):
 
 def build_program(key, captures, count):
     """A program for one key: its most typical valid samples from every code base, and per code
-    base its share of the run's time on ry."""
+    base its share of the capture run's time and the GNU R time it stands for."""
     package, name = key
     calls = sum(capture["entries"][key]["calls"] for capture in captures.values() if key in capture["entries"])
     seconds = sum(capture["entries"][key]["seconds"] for capture in captures.values() if key in capture["entries"])
-    ry_per_call = seconds / calls if calls else 0.0
     candidates = [sample for capture in captures.values() for sample in capture["samples"].get(key, [])]
-    samples = typical_samples(dedupe(candidates), ry_per_call, count)
+    samples = typical_samples(dedupe(candidates), seconds / calls if calls else 0.0, count)
     iterations = [max(1, round(BATCH_SECONDS / len(samples) / sample["gnu_seconds_per_call"])) for sample in samples]
     gnu = sum(times * sample["gnu_seconds_per_call"] for times, sample in zip(iterations, samples)) / sum(iterations)
     share = {codebase: capture["entries"][key]["seconds"] / capture["summary"]["total_seconds"]
@@ -234,7 +229,26 @@ def build_program(key, captures, count):
             "iterations": iterations, "rng": [sample["rng"] for sample in samples],
             "threw": [sample["threw"] for sample in samples],
             "namespaces": sorted({namespace for sample in samples for namespace in sample["namespaces"]}),
-            "gnu_seconds_per_call": gnu, "ry_seconds_per_call": ry_per_call, "share": share}
+            "gnu_seconds_per_call": gnu, "share": share, "gnu_time": gnu_time(key, captures, candidates)}
+
+
+def gnu_time(key, captures, candidates):
+    """Per code base, the GNU R seconds the key's captured calls stand for: the key's captured
+    seconds times GNU R's seconds over the capture's seconds for the same sampled calls. The ratio
+    comes from the code base's own valid samples, and from every code base's when it has none or
+    theirs took no measurable time."""
+    def ratio(samples):
+        captured = sum(sample["seconds"] for sample in samples)
+        return sum(sample["gnu_seconds_per_call"] for sample in samples) / captured if captured > 0 else None
+    pooled = ratio(candidates)
+    found = {}
+    for codebase, capture in captures.items():
+        entry = capture["entries"].get(key)
+        own = ratio(capture["samples"].get(key, []))
+        factor = own if own is not None else pooled
+        if entry and entry["seconds"] > 0 and factor is not None:
+            found[codebase] = entry["seconds"] * factor
+    return found
 
 
 def dedupe(samples):
@@ -292,16 +306,13 @@ def assign_ids(programs):
 
 
 def weigh_programs(programs, codebase):
-    """Each program's weight in a code base: its share of the code base's ry time times GNU R's
-    seconds per call over ry's, normalized over the programs, so the weights split the GNU R time
-    the programs stand for."""
-    raw = {program["id"]: program["share"][codebase] * program["gnu_seconds_per_call"] / program["ry_seconds_per_call"]
-           for program in programs if program["share"].get(codebase) and program["ry_seconds_per_call"] > 0}
-    total = sum(raw.values())
+    """Each program's weight in a code base: its share of the GNU R time the programs stand for
+    there (`gnu_time`)."""
+    total = sum(program["gnu_time"].get(codebase, 0.0) for program in programs)
     for program in programs:
         program.setdefault("weight", {})
-        if total and program["id"] in raw:
-            program["weight"][codebase] = raw[program["id"]] / total
+        if total and program["gnu_time"].get(codebase):
+            program["weight"][codebase] = program["gnu_time"][codebase] / total
 
 
 def write_suite(directory, programs, captures, selection):
@@ -320,7 +331,6 @@ def write_suite(directory, programs, captures, selection):
             "iterations": program["iterations"], "rng": program["rng"], "threw": program["threw"],
             "namespaces": program["namespaces"],
             "gnu_seconds_per_call": float(f"{program['gnu_seconds_per_call']:.6g}"),
-            "ry_seconds_per_call": float(f"{program['ry_seconds_per_call']:.6g}"),
             "share": {codebase: round(value, 6) for codebase, value in program["share"].items()},
             "weight": {codebase: round(value, 6) for codebase, value in program["weight"].items()},
         })
@@ -334,7 +344,7 @@ def write_suite(directory, programs, captures, selection):
                         "batches of about 20 ms of GNU R time in one process per engine. A program's weight in a "
                         "code base is its share of the code base's GNU R time, and the predicted speed-up of a code "
                         "base is the weighted harmonic mean of its programs' speed-ups.\n"),
-        "selection": dict(selection, weighed_on=["capture"], coverage_of_run=coverage),
+        "selection": dict(selection, coverage_of_run=coverage),
         "programs": manifest_programs,
     }
     (directory / "suite.toml").write_text(render_toml(manifest))
@@ -365,56 +375,9 @@ def print_selection(programs, captures):
 
 def reasons_of(entry):
     """Why the recorder could not capture an entry's calls, by how many calls each reason took."""
-    reasons = [(entry[field], field.replace("_", " ")) for field in ("dots", "local_closure", "user_binding", "oversize")
+    reasons = [(entry[field], field.replace("_", " ")) for field in ("dots", "local_closure", "user_binding", "caller_frame", "oversize")
                if entry[field]]
     return ", ".join(f"{count:.0f} {reason}" for count, reason in sorted(reasons, key=lambda item: -item[0])) or "no reason"
-
-
-# Weighing.
-
-def run_weigh(args):
-    manifest = bench.load_hot_suite(args.suite)
-    programs = manifest["programs"]
-    base = {key: value for key, value in os.environ.items() if key not in ("RY_JIT", "RY_TYPED_LOG")}
-    base.update(LC_ALL="C.UTF-8", RY_BENCH_ROUNDS=str(args.rounds),
-                **bench.library_environment(args.rscript, dependency_library()))
-    engines = [bench.Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base)]
-    if pathlib.Path(args.ry).exists():
-        engines.append(bench.Engine("ry", "ry, JIT off", [os.path.abspath(args.ry), "run", "--runtime", "ry"],
-                                    dict(base, RY_JIT="off")))
-    else:
-        print(f"warning: no ry at {args.ry}, so the ry times per call stay those of the capture run")
-    runner = bench.HotRunner(bench.HOT_SUITE, args, directory=args.suite.resolve())
-    try:
-        measured = {engine.key: runner.run_batch(programs, engine) for engine in engines}
-    finally:
-        runner.close()
-    fields = {"gnu_r": "gnu_seconds_per_call", "ry": "ry_seconds_per_call"}
-    for key, results in measured.items():
-        for program in programs:
-            result = results[program["id"]]
-            if result.get("seconds") is None:
-                sys.exit(f"error: {program['id']} fails on {key}: {result['reason']}")
-            program[fields[key]] = float(f"{result['seconds'] / result['calls']:.6g}")
-    codebases = sorted({codebase for program in programs for codebase in program["share"]})
-    for codebase in codebases:
-        raw = {program["id"]: program["share"][codebase] * program["gnu_seconds_per_call"] / program["ry_seconds_per_call"]
-               for program in programs if program["share"].get(codebase) and program["ry_seconds_per_call"] > 0}
-        total = sum(raw.values())
-        for program in programs:
-            program["weight"].pop(codebase, None)
-            if program["id"] in raw:
-                program["weight"][codebase] = round(raw[program["id"]] / total, 6)
-    manifest["selection"]["weighed_on"] = [key for key in measured] + (["capture"] if "ry" not in measured else [])
-    (args.suite / "suite.toml").write_text(render_toml(manifest))
-    print(f"| program | {' | '.join(f'{engine.label}, per call' for engine in engines)} | "
-          + " | ".join(f"weight, {codebase}" for codebase in codebases) + " |")
-    print("| --- |" + " ---: |" * (len(engines) + len(codebases)))
-    for program in programs:
-        cells = [f"{program[fields[engine.key]] * 1e6:.2f} us" for engine in engines]
-        cells += [f"{program['weight'][codebase]:.2%}" if codebase in program["weight"] else "" for codebase in codebases]
-        print(f"| {program['id']} | " + " | ".join(cells) + " |")
-    print(f"wrote {args.suite / 'suite.toml'}")
 
 
 # Files.
@@ -437,7 +400,7 @@ def capture_directories(captures):
 
 def read_summary(directory):
     summary = {}
-    for line in (directory / "summary.tsv").read_text().splitlines():
+    for line in (directory / "summary.tsv").read_text().splitlines()[1:]:
         if line.strip():
             key, value = line.split("\t")
             summary[key] = float(value)
@@ -445,7 +408,7 @@ def read_summary(directory):
 
 
 NUMBER_FIELDS = {"calls", "seconds", "samples", "uncapturable_calls", "uncapturable_seconds", "dots", "local_closure",
-                 "user_binding", "oversize", "gnu_seconds_per_call", "iterations", "bytes"}
+                 "user_binding", "caller_frame", "oversize", "reentered", "gnu_seconds_per_call", "iterations", "bytes"}
 FLAG_FIELDS = {"valid", "rng", "threw"}
 
 

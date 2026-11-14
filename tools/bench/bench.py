@@ -1163,15 +1163,13 @@ def hot_summary(results, programs, table, state, args):
     """Adds what the hot suite records beside the common fields: each program's calls per batch,
     its share and weight in each code base, and per engine the predicted speed-up of each code base.
 
-    A program's `share` of a code base is the share of the code base's ry time that the capture
-    run (JIT off) measured in calls to its function. Its `weight` is its share of the code base's
-    GNU R time instead, fixed when tooling/hot.py generated the suite: proportional to
-    share * gnu / ry, where gnu and ry are its seconds per call on each engine
-    (`gnu_seconds_per_call`, `ry_seconds_per_call`), and normalized to sum to 1 over a code base's
-    programs. The predicted speed-up of a code base is GNU R's time over ry's for the programs run
-    in the proportions the code base runs them: with each program's paired speed-up r (GNU R / ry),
-    1 / sum(w / r), the weighted harmonic mean, over the programs that have a speed-up, whose
-    summed weight `weight` records. Its interval comes from the bootstrap of the geometric mean,
+    A program's `share` of a code base is the share of the capture run's time (ry with the JIT off
+    and the recorder on) measured in calls to its function. Its `weight` is its share of the code
+    base's GNU R time among the suite's programs, which tooling/hot.py estimates from the capture
+    when it generates the suite. The predicted speed-up of a code base is GNU R's time over ry's
+    for the programs run in the proportions the code base runs them: with each program's paired
+    speed-up r (GNU R / ry), 1 / sum(w / r), the weighted harmonic mean, over the programs that
+    have a speed-up, whose summed weight `weight` records. Its interval comes from the bootstrap of the geometric mean,
     which resamples each program's rounds."""
     rows = {row["id"]: row for row in results["programs"]}
     for program in programs:

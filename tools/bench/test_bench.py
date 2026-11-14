@@ -240,7 +240,7 @@ class HotSuite(unittest.TestCase):
     def program(self, name, weight, **fields):
         return dict({"id": name, "display": name, "samples": [f"samples/{name}-1.rds"], "iterations": [100],
                      "rng": [False], "threw": [False], "namespaces": [], "gnu_seconds_per_call": 1e-4,
-                     "ry_seconds_per_call": 1e-4, "share": dict(weight), "weight": dict(weight)}, **fields)
+                     "share": dict(weight), "weight": dict(weight)}, **fields)
 
     def summarize(self, programs, rounds):
         """The results of `rounds`, each a map from a program to its batch seconds on GNU R and ry."""
@@ -366,7 +366,7 @@ class HotSelection(unittest.TestCase):
         self.assertEqual([program["id"] for program in programs], ["base-a-b", "base-a-b-2"])
 
     def test_the_manifest_reads_back_as_written(self):
-        manifest = {"id": "hot", "name": "Hot \"entries\"\n", "selection": {"coverage": 0.9, "weighed_on": ["gnu_r"]},
+        manifest = {"id": "hot", "name": "Hot \"entries\"\n", "selection": {"coverage": 0.9, "samples": 3},
                     "programs": [{"id": "x", "rng": [True, False], "iterations": [3, 4], "gnu_seconds_per_call": 2e-05,
                                   "share": {"finbench": 0.5}, "weight": {}}]}
         self.assertEqual(hot.tomllib.loads(hot.render_toml(manifest)), manifest)
@@ -388,11 +388,19 @@ class HotSelection(unittest.TestCase):
                    {"seconds": 0.99e-5, "compact_bytes": 100, "path": "near-small"}]
         self.assertEqual([sample["path"] for sample in hot.typical_samples(samples, 1e-5, 2)], ["near-small", "near-big"])
 
+    def test_gnu_r_time_scales_the_captured_time_by_the_samples_ratio(self):
+        def capture(seconds, samples):
+            return {"entries": {("p", "f"): {"seconds": seconds}}, "samples": {("p", "f"): samples}}
+        slow = [{"seconds": 2e-3, "gnu_seconds_per_call": 1e-3}, {"seconds": 6e-3, "gnu_seconds_per_call": 3e-3}]
+        captures = {"finbench": capture(10.0, slow), "dsbench": capture(4.0, [])}
+        # dsbench has no valid sample of its own, so it takes the ratio of every code base's.
+        self.assertEqual(hot.gnu_time(("p", "f"), captures, slow), {"finbench": 5.0, "dsbench": 2.0})
+
     def test_a_weight_is_the_share_of_gnu_r_time(self):
-        programs = [{"id": "a", "share": {"finbench": 0.3}, "gnu_seconds_per_call": 2.0, "ry_seconds_per_call": 1.0},
-                    {"id": "b", "share": {"finbench": 0.4}, "gnu_seconds_per_call": 1.0, "ry_seconds_per_call": 2.0}]
+        programs = [{"id": "a", "gnu_time": {"finbench": 3.0}}, {"id": "b", "gnu_time": {"finbench": 1.0, "dsbench": 2.0}}]
         hot.weigh_programs(programs, "finbench")
-        self.assertEqual([round(program["weight"]["finbench"], 6) for program in programs], [0.75, 0.25])
+        hot.weigh_programs(programs, "dsbench")
+        self.assertEqual([program["weight"] for program in programs], [{"finbench": 0.75}, {"finbench": 0.25, "dsbench": 1.0}])
 
 
 class BuildProfile(unittest.TestCase):

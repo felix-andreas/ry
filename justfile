@@ -187,14 +187,13 @@ bench suite *args:
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
 
 # Generates the hot suite (tools/bench/hot/suite.toml and samples/) from the code bases that tooling/generate.py wrote
-# to DIR: captures their package calls on ry, validates and calibrates the samples under GNU R, selects the programs and
-# weighs them, e.g. `just bench-hot-capture /tmp/codebases`. CAPTURES keeps the raw capture for another selection.
+# to DIR: captures their package calls on ry, validates and calibrates the samples under GNU R, then selects and weighs
+# the programs, e.g. `just bench-hot-capture /tmp/codebases`. CAPTURES keeps the raw capture for another selection.
 bench-hot-capture dir captures="target/hot-captures":
     cargo build --release -p ry-lang -p libr -p rcmd -p oracle
     python3 -I tools/bench/tooling/hot.py capture --codebases {{ dir }} --out {{ captures }}
     python3 -I tools/bench/tooling/hot.py validate --captures {{ captures }}
     python3 -I tools/bench/tooling/hot.py select --captures {{ captures }}
-    python3 -I tools/bench/tooling/hot.py weigh
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench-check *args:

@@ -132,6 +132,6 @@ local({
     summary <- c(total_seconds = user + covered + uncapturable + outside, user_seconds = user, covered_seconds = covered,
                  uncapturable_seconds = uncapturable, outside_seconds = outside,
                  boundary_calls = sum(entries$calls) + sum(entries$uncapturable_calls), keys = nrow(entries))
-    writeLines(sprintf("%s\t%.6f", names(summary), summary), file.path(directory, "summary.tsv"))
+    writeLines(c("key\tvalue", sprintf("%s\t%.6f", names(summary), summary)), file.path(directory, "summary.tsv"))
   }
 })
