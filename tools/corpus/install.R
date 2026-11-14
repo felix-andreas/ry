@@ -87,6 +87,16 @@ for (remote in remotes) {
   }
 }
 
+# The snapshot's binaries were built for an older R. xts 0.14.1's calls `ATTRIB` without a
+# prototype there and truncates the returned pointer to an int, so `x[2:4]` of an xts object aborts
+# on R 4.6 under GNU R and ry alike. The newest source compiles against the running R's headers.
+if ("xts" %in% installed()) {
+  with_warnings(install.packages(
+    "xts", lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
+    type = "source", dependencies = FALSE
+  ))
+}
+
 # Record the outcome per package: every root and remote, with its reason when missing.
 have <- rownames(installed.packages(noCache = TRUE))
 targets <- c(roots, vapply(remotes, `[[`, "", "name"))
