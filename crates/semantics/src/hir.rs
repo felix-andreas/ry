@@ -2,17 +2,19 @@
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
 use {
-    crate::dense::DenseId,
-    rustc_hash::{FxHashMap, FxHasher},
+    crate::{
+        dense::DenseId,
+        intern::{CHUNK_LENGTH, Column, IdTable},
+    },
+    rustc_hash::FxHasher,
     std::{
-        cell::{Cell, RefCell},
+        cell::Cell,
         fmt,
         hash::{Hash, Hasher},
         marker::PhantomData,
         mem::MaybeUninit,
         num::NonZeroU32,
         ops, ptr, slice,
-        sync::{LazyLock, Mutex},
     },
     syntax::{
         ElementRef, NodeRef, NumberType, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenRef,
@@ -90,14 +92,16 @@ pub struct NameSite {
 #[derive(Clone, Copy, salsa::SalsaValue)]
 pub struct Symbol(NonZeroU32);
 
-const SYMBOL_SHARDS: usize = 16;
+/// Spelling to symbol. Lowering interns every identifier it meets, on every analysis thread,
+/// and nearly all of them are spellings the table already holds, which it finds without a lock.
+static SYMBOLS: IdTable<()> = IdTable::new(());
 
-/// Spelling to symbol, sharded by the spelling's hash so parallel lowering rarely contends.
-static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHARDS]> =
-    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(FxHashMap::default())));
+/// Symbol to spelling, indexed by the symbol. Appending never moves an entry, so a read needs
+/// no lock.
+static SYMBOL_TEXT: Column<SymbolEntry, SYMBOL_CHUNKS> = Column::new();
 
-/// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
-static SYMBOL_TEXT: LazyLock<boxcar::Vec<SymbolEntry>> = LazyLock::new(boxcar::Vec::new);
+/// Room for 2^28 distinct spellings.
+const SYMBOL_CHUNKS: usize = (1 << 28) / CHUNK_LENGTH;
 
 /// What a hot loop asks of a symbol without reading its spelling: the spelling's hash for a
 /// map probe, its first bytes for an ordered set's comparison, and its length in characters
@@ -111,56 +115,39 @@ struct SymbolEntry {
     characters: u32,
 }
 
-thread_local! {
-    /// Spellings this thread has interned. Lowering interns every identifier it meets, and
-    /// the shard lock's atomics bounce cache lines between analysis threads, so a repeat
-    /// spelling skips the shared table.
-    static LOCAL_SYMBOL_IDS: RefCell<FxHashMap<&'static str, Symbol>> =
-        RefCell::new(FxHashMap::default());
-}
-
 impl Symbol {
     pub fn new(text: &str) -> Symbol {
-        if let Some(symbol) = LOCAL_SYMBOL_IDS.with_borrow(|local| local.get(text).copied()) {
-            return symbol;
+        let hash = spelling_hash(text);
+        match SYMBOLS.find(hash, |id| Symbol(id).as_str() == text) {
+            Some(id) => Symbol(id),
+            None => Symbol::store(text, hash),
         }
-        let symbol = Symbol::new_shared(text);
-        LOCAL_SYMBOL_IDS.with_borrow_mut(|local| local.insert(symbol.as_str(), symbol));
-        symbol
     }
 
     /// The symbol for `text` if any item has interned it, without interning it: a spelling
     /// nothing has interned cannot key a map of symbols, and a probe must not grow the
     /// process-wide table.
     pub fn lookup(text: &str) -> Option<Symbol> {
-        if let Some(symbol) = LOCAL_SYMBOL_IDS.with_borrow(|local| local.get(text).copied()) {
-            return Some(symbol);
-        }
-        symbol_shard(text)
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(text)
-            .copied()
+        SYMBOLS
+            .find(spelling_hash(text), |id| Symbol(id).as_str() == text)
+            .map(Symbol)
     }
 
-    fn new_shared(text: &str) -> Symbol {
-        let mut hasher = FxHasher::default();
-        text.hash(&mut hasher);
-        let text_hash = hasher.finish();
-        let shard = &SYMBOL_IDS[text_hash as usize % SYMBOL_SHARDS];
-        // A poisoned shard means another thread died mid-insert; the map is still a valid
-        // map of leaked strings, so keep serving it.
-        let mut shard = shard
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(&symbol) = shard.get(text) {
-            return symbol;
+    #[cold]
+    fn store(text: &str, hash: u64) -> Symbol {
+        let mut writer = SYMBOLS.write();
+        if let Some(id) = writer.find(hash, |id| Symbol(id).as_str() == text) {
+            return Symbol(id);
         }
+        let index = writer.count() + 1;
+        let id = u32::try_from(index)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .expect("fewer than 2^32 distinct identifiers");
         let interned: &'static str = Box::leak(text.into());
-        // Pushed under the shard lock, so one spelling can never get two indexes.
-        let index = SYMBOL_TEXT.push(SymbolEntry {
+        let entry = SymbolEntry {
             text: interned,
-            hash: text_hash,
+            hash,
             prefix: {
                 let mut bytes = [0u8; 8];
                 let head = interned.len().min(8);
@@ -168,15 +155,12 @@ impl Symbol {
                 u64::from_be_bytes(bytes)
             },
             characters: u32::try_from(interned.chars().count()).unwrap_or(u32::MAX),
-        });
-        let symbol = Symbol(
-            u32::try_from(index + 1)
-                .ok()
-                .and_then(NonZeroU32::new)
-                .expect("fewer than 2^32 distinct identifiers"),
-        );
-        shard.insert(interned, symbol);
-        symbol
+        };
+        // SAFETY: `writer` is the lock that serializes the writers, `index` is the next one,
+        // and no reader learns it before the table publishes it below.
+        unsafe { SYMBOL_TEXT.write(index, entry) };
+        writer.insert(hash, id, |held| Symbol(held).entry().hash);
+        Symbol(id)
     }
 
     /// The symbol's position in the table: stable for the process, but it depends on the
@@ -195,16 +179,16 @@ impl Symbol {
     }
 
     fn entry(self) -> &'static SymbolEntry {
-        SYMBOL_TEXT
-            .get(self.0.get() as usize - 1)
-            .expect("a symbol indexes the table that minted it")
+        // SAFETY: only `store` makes a symbol, after it wrote this entry, and the symbol
+        // reached this thread through the symbol table or another synchronized hand-off.
+        unsafe { SYMBOL_TEXT.get_unchecked(self.0.get() as usize) }
     }
 }
 
-fn symbol_shard(text: &str) -> &'static Mutex<FxHashMap<&'static str, Symbol>> {
+fn spelling_hash(text: &str) -> u64 {
     let mut hasher = FxHasher::default();
     text.hash(&mut hasher);
-    &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS]
+    hasher.finish()
 }
 
 impl ops::Deref for Symbol {

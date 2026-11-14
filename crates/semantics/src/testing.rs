@@ -348,7 +348,7 @@ impl ProbeDatabase {
             .iter()
             .flat_map(|&file| item_tree(self, file).clone())
             .filter(|&item| executed.contains(&format!("item_check({:?})", item.as_id())))
-            .filter_map(|item| item.name(self).clone())
+            .filter_map(|item| item.name(self).map(|name| name.as_str().to_owned()))
             .collect();
         names.sort();
         names
