@@ -183,7 +183,9 @@ reparse is compared with a parse from scratch.
 ### Parsing, and why it is not where incrementality happens
 
 `parse(file)` is not a query. It returns the file's tree from the host's `TreeStore`
-(`Db::trees`), the one home of syntax trees, which holds at most one tree per file. When the file's
+(`Db::trees`), the one home of syntax trees, which holds at most one tree per file. The store is
+split into 16 shards by file, each behind its own lock, and a parse runs outside every lock. A
+second reader of a file that is being parsed waits for that parse and takes its tree. When the file's
 text differs from the stored tree's, the store works out the edit as the longest common prefix and
 suffix, and `syntax::reparse` reparses only the statements the edit touched and copies the
 untouched top-level runs of the old tree around them. A query that reads a tree records its read of
@@ -217,12 +219,28 @@ result. `test_incremental.rs` pins that a cold check parses each file once on a 
 trees, and that it reports what a store that keeps every tree reports.
 
 `item_syntax` is a plain function that returns the item's window of the stored tree, so an item's
-syntax has no memo of its own to keep the file's tree alive. After an edit, each item of the
-edited file lowers again, and `item_hir` comes out equal for the items the edit did not touch, so
-salsa backdates them and cuts off everything downstream. An item's annotations are a per-item
-tracked projection (`item_annotation_syntax`) that stores detached copies of their subtrees
-(`syntax::SyntaxNode::detached_subtree`), so an annotation never keeps the whole file's tree alive
-either.
+syntax has no memo of its own to keep the file's tree alive. What it records is a read of the
+item's stamp (`item_stamp`), a number that names the syntax of one top-level node. The store keeps
+one stamp per top-level node of each file. When it parses a file again, a node at the start or the
+end of the file whose subtree equals its counterpart in the previous tree keeps its stamp, and
+every other node gets a stamp that no node has carried before. Two nodes with one stamp therefore
+have equal subtrees, by comparison and not by a hash.
+
+After an edit, `item_stamp` runs again for every item of the edited file, which costs a lookup per
+item, and comes out equal for every item outside the edited region. Salsa backdates those, so
+lowering, annotations and naming run again only for the items whose syntax changed, wherever the
+others moved in the file. Two edits at both ends of a file between two reads leave one changed
+region that spans it: the items between them lower again, and `item_hir` comes out equal and cuts
+off everything downstream. A bounded store may have dropped the tree a stamp names. `item_syntax`
+then parses the file again, and its reader depends on the file's text like any other reader of
+the tree. Under `enable_invariants()` every read of a stamp compares the subtree it names with the
+item's node in the file as it stands.
+
+A `#:` block is a sibling of its item in the file's tree, not part of the item's node. One query
+per file (`file_item_annotations`) attaches the blocks to their items and stores detached copies
+of their subtrees (`syntax::SyntaxNode::detached_subtree`), so an annotation never keeps the whole
+file's tree alive either. It runs again after every edit to the file and comes out equal while no
+block changed, because a detached subtree compares by content and not by position.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
@@ -260,15 +278,24 @@ wall time. Several of them are worth knowing:
   memo. So an item check resolves every name its naming lists through one query (`item_links`)
   and reads the answers from that query's arrays. `package_name` and `test_name` take only the
   name and read `ProjectFiles` themselves.
-- `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
-  64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
-  compare and reading the kind is a field load. A direct-mapped per-thread cache sits in front of
-  the shards, because checkers intern the same few types over and over and those land on the same
-  shard mutexes. The entry stores the type's size, which the
-  inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
-  command that exits loses nothing, and the server's table grows only with distinct types, which repeat
-  heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
-  salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- `Ty` and `Name` are not salsa structs. A `Ty` is a four-byte id into one process-wide store
+  (`crates/semantics/src/types.rs`), so equality and hashing compare the id. The store is two
+  parallel append-only columns indexed by the id's low 27 bits: the kind, and the facts derived
+  when the type is built (its size, which the inference-size cap reads without a walk, and the
+  type names it applies). A kind is `Copy`, and its children are slices in an arena that is never
+  reset. The id's upper bits say whether the type is an inference variable, and whether a
+  variable, a named type, a rigid parameter or `Unknown` occurs anywhere in it, so a walk that
+  rewrites only one of those returns on a bit test without reading the store. The leaf kinds and
+  the first 4,081 inference variables have constant ids, so building one is arithmetic. Finding
+  a type that exists probes a table that takes no lock (`crates/semantics/src/intern.rs`), and
+  only storing a new type takes one. A `Name` is a `Symbol`, an id into a store of the same
+  build that also keeps each spelling's hash, first eight bytes and length. Neither store ever
+  frees an entry: a command that exits loses nothing, and the server's stores grow only with
+  distinct types and spellings, which repeat heavily because types are structural. The type
+  store holds at most 2^24 types. A type that contains an inference variable lives in the same
+  store as every other type, because such types leave the item that made them in diagnostics
+  and editor facts. A query keyed by one name takes a `QueryName`, the one salsa-interned
+  wrapper left.
 - The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
   borrows the item's checks and the stub schemes instead of cloning them.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
@@ -483,9 +510,11 @@ those through `duplicate_binding_map`, a copy that is empty in a healthy project
 Names in these maps are interned `Symbol`s whose hash was computed once at interning, so a fold
 hashes four bytes per name and never rereads the spelling.
 
-Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
-over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
-decision log records that design.
+Types are hash-consed, so type equality is an id comparison and nothing is ever deep-cloned. Deep
+resolution cuts any cycle to `Unknown`. It returns at once for a type whose id says it holds no
+variable and applies no alias, walks a type of up to 64 nodes directly, and keeps a table of
+finished subtrees for the length of one call above that size. The decision log records that
+design.
 
 ### The package-load index
 

@@ -542,13 +542,15 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
 
 /// An item keeps the stamp of its syntax while that syntax is unchanged, wherever the item
 /// moves in its file. Its stamp is read again after every edit to the file and comes out
-/// equal, so nothing derived from the item's syntax runs again.
+/// equal, so nothing derived from the item's syntax runs again. The `#:` block of an item is
+/// a sibling of the item, attached by a per-file walk that comes out equal while no block
+/// changes, so the annotated item's annotations stay memoized too.
 #[test]
 fn an_edit_lowers_only_the_items_whose_syntax_changed() {
     let mut db = ProbeDatabase::default();
     let source = |second: &str| {
         format!(
-            "first <- function() 1L\n{second}\nthird <- function(x) x + 1L\nfourth <- 4L\n\
+            "first <- function() 1L\n{second}\n#: @pure\nthird <- function(x) x + 1L\nfourth <- 4L\n\
              fourth <- 4L\n"
         )
     };
@@ -595,7 +597,7 @@ fn an_edit_lowers_only_the_items_whose_syntax_changed() {
 
     db.edit(
         files[0],
-        "first <- function() 1L\nsecond <- function() 20L\nthird <- function(x) x + 1L\n\
+        "first <- function() 1L\nsecond <- function() 20L\n#: @pure\nthird <- function(x) x + 1L\n\
          fourth <- 4L\n",
     );
     settle(&db, &files);
@@ -607,7 +609,7 @@ fn an_edit_lowers_only_the_items_whose_syntax_changed() {
 
     db.edit(
         files[0],
-        "first <- function() 10L\nsecond <- function() 20L\nthird <- function(x) x + 1L\n\
+        "first <- function() 10L\nsecond <- function() 20L\n#: @pure\nthird <- function(x) x + 1L\n\
          fourth <- 40L\n",
     );
     settle(&db, &files);

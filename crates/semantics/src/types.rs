@@ -882,7 +882,7 @@ pub fn native_record<'db>(
 /// The payload's shape: its item count, or its field names. Two tags with one name and one
 /// shape are the same member of a union, and two with one name and different shapes conflict.
 #[derive(Clone, Copy)]
-pub enum PayloadShape<'db> {
+enum PayloadShape<'db> {
     Bare,
     Positional(usize),
     Named(&'db [NativeField<'db>]),
@@ -908,19 +908,7 @@ impl PartialEq for PayloadShape<'_> {
     }
 }
 
-impl<'db> PayloadShape<'db> {
-    /// The field names of a named payload, in the record's order.
-    pub fn names(self) -> impl Iterator<Item = Name<'db>> {
-        match self {
-            PayloadShape::Named(fields) => fields,
-            _ => &[],
-        }
-        .iter()
-        .map(|field| field.name)
-    }
-}
-
-pub fn payload_shape<'db>(db: &'db dyn Db, payload: Option<Ty<'db>>) -> PayloadShape<'db> {
+fn payload_shape<'db>(db: &'db dyn Db, payload: Option<Ty<'db>>) -> PayloadShape<'db> {
     let Some(payload) = payload else {
         return PayloadShape::Bare;
     };
