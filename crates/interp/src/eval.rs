@@ -409,6 +409,19 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     {
         panic!("a promise was forced after its last counted reference was released");
     }
+    // A reference only reads a variable of another frame; forcing the promise it reaches records
+    // the code that runs.
+    let recorded = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        crate::capture::Scope::none()
+    } else {
+        crate::capture::evaluating(|| {
+            if env.has_gp(gp::PENDING_FRAME) {
+                interp().frames[pending_owner(env)].function.tag()
+            } else {
+                env
+            }
+        })
+    };
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
     } else if env.has_gp(gp::PENDING_FRAME) {
@@ -418,6 +431,7 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     } else {
         eval(promise.cdr(), env)
     };
+    drop(recorded);
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
     heap.release_handles(mark);
@@ -5863,11 +5877,13 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         previous_owner: state.slot_owner,
     });
     let depth = state.frames.len();
+    let recorded = crate::capture::evaluating(|| env);
     let result = scope(|| match expression.kind() {
         SexpType::Expression => eval_all(expression, env),
         SexpType::Promise => force_promise(expression),
         _ => eval(expression, env),
     });
+    drop(recorded);
     // `return()` may come from the body or from an `on.exit` expression, which runs in the
     // same frame and so returns from it too.
     let result = catch_return(env, run_on_exit(depth, catch_return(env, result)));
