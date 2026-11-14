@@ -599,6 +599,26 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Collector throughput does not bound package code.** `RY_GC_STRESS=startup` runs in about 7 s in a debug build, and `just gc-torture` passes every oracle case in about ten minutes on four cores. Against GNU R 4.3.3 (profiling build, one thread), data.table's `fwrite` (0.09 s against 0.13 s) and keyed join (0.014 s against 0.039 s) are faster and `fread` is level (0.064 s against 0.060 s), while its group sum (0.057 s against 0.037 s), its order (0.073 s against 0.048 s) and jsonlite's `toJSON` on 20,000 lists (2.23 s against 1.50 s) are slower. Callgrind of `toJSON` puts collection at 1% and allocation at about 8% of self cost, so what remains is interpreter work (S4 dispatch, argument matching, lookups). `oracle bench` prints each runtime's `gc.time()`, and `RY_GC_LOG` records every pause.
 - **Memory guards.** `runtime_peak_memory_stays_near_gnu_r` (`crates/ry/tests/test_perf.rs`, release, `--ignored`) fails past 1.10x GNU R's peak, and `runtime_speed_stays_ahead_of_gnu_r` in the same file holds `vector_arith`, `loop_sum` and `sales` above a speedup floor, because a memory win once cost them half their speed. With large temporaries freed from their reference counts, the subset and data.table loops of the CI report peak about 20% below GNU R's.
 
+## Open: closure calls that leave tier 0's fast call path
+
+Half of the hot suite's closure calls from compiled code miss `call_fast` (`crates/interp/src/bytecode.rs`) and pay two to three times its price. `just bench-mechanisms --filter call:` prices each shape; the census below came from temporary counters in `call_fast`, `op_call_generic` and `eval::reify`, weighted like the suite's instruction totals (events per second of GNU R work, `iterate` build, JIT on).
+
+| Closure `CallGeneric` (297,000 per second) | Share |
+| --- | ---: |
+| takes `call_fast` | 49.0% |
+| caller frame already has an environment, so the site never prepares its plan | 21.0% |
+| callee has a native entry (a base closure with a native prologue); 8.2% are answered there, the rest go on to the generic path | 14.3% |
+| callee is a wrapper (`call_wrapper`) | 7.6% |
+| site stopped planning after `PLAN_MISSES` different callees, or has no plan yet | 6.4% |
+| arguments are matched per call (`MATCH_PER_CALL`) | 4.4% |
+| plan stored but not prepared | 3.9% |
+
+- **A wrapper call costs twice a fast call.** `k1(i)` with body `x + 1L` costs about 2,400 instructions through `call_wrapper` and about 1,050 with the wrapper path off, and `k2(i)` with a default 2,500 against 1,130. Turning the wrapper path off alone moved the suite's weighted instructions by only -0.1% to -0.2%, because wrappers called from a frame that has an environment then take the generic path, which costs more than the wrapper path (lubridate's operators rose about 1%). So the order is: let `call_fast` take calls from a frame with an environment, then delete the wrapper path.
+- **Trivial bodies are not compiled.** A body that is a constant or a symbol runs in the AST evaluator on a heap frame (`worth_compiling`): `function() NULL` costs about 1,420 instructions and `function(x) x` about 2,760, against 1,140 for a compiled body with a branch.
+- **Other shapes, instructions per call:** `...` forwarded 3,400, a closure made and called in the body 5,900, `on.exit` 2,200, `match.arg` 8,400, `stopifnot` 5,000, `parent.frame()` 2,500, `do.call` 12,000, `eval` of a quoted call 10,800, `sapply` over four elements 57,000 against `vapply`'s 20,000, `Map` 34,000.
+- **What gives a slot frame an environment** (67,000 reifications per second at about 2,400 instructions each, and every later call from that frame leaves the fast path): `eval` 14%, a builtin dispatching to an R method 13%, a call of a special 9%, a promise over the frame 7%, a closure outliving the frame 6%, `$` on a field 6%, `vapply` and `lapply` 10%, the generic call's arguments 5%, a promise outliving the frame 5%, subassignment and replacement calls 6%, `parent.frame` 3%, `.External2` 2%. Only `eval`, `parent.frame`, `.External2`, `sys.frame` and a closure or promise that outlives the frame observe the environment; the others are mechanisms a slot frame could serve without one.
+- **The AST evaluator makes about 138,000 calls per second** (`apply_call`) beside the 347,000 `CallGeneric` instructions, for promise code that is not compiled against the frame's slots, run-once bodies and `eval`.
+
 ## Parked: cheaper restart setup in `withRestarts` (branch `perf/restart-setup`)
 
 - **What it does.** The native `withRestarts` prologue (`crates/interp/src/base_fast_paths.rs`) builds restart objects that share one `names` vector and one `"restart"` class vector, both marked not mutable. It looks `makeRestart`, `$.restart` and `$<-.restart` up through pre-installed symbols, makes the default handler and test closures without `eval`, and probes a new binding's frame once instead of twice. With one restart it evaluates `withOneRestart(expr, restarts[[1L]])` directly, skipping `length(restarts) == 0L` and `== 1L`, which the base namespace cannot mask. `is_plain_restart` builds the method scope once for both methods.
