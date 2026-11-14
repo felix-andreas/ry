@@ -8625,13 +8625,22 @@ is rejected below.
 
   | Build | Wall | CPU | Peak RSS |
   |---|---|---|---|
-  | Two lookup paths (before "every host resolves names through one path") | 0.85 to 0.86 s | 3.03 to 3.06 s | 238 MB |
-  | One lookup path, pointer types | 0.86 to 0.91 s | 3.12 to 3.29 s | 247 MB |
-  | Ids, stamps and the tables of the next two records | 0.78 to 0.83 s | 2.84 to 2.92 s | 229 MB |
+  | Two lookup paths (before "every host resolves names through one path") | 0.81 to 0.91 s | 2.97 to 3.17 s | 239 MB |
+  | One lookup path, pointer types | 0.85 to 0.92 s | 3.09 to 3.28 s | 248 MB |
+  | Ids, stamps and the tables of the next two records | 0.77 to 0.80 s | 2.81 to 2.91 s | 230 MB |
 
   The machine ran about a fifth slower than for the numbers in the record above, so compare
-  within this table only. Under callgrind a check executes @@INSTR@@.
-  @@LATENCY@@
+  within this table only. Under callgrind a check executes 18.06 billion instructions, against
+  19.07 billion with one lookup path and pointer types.
+  In the editor on the same project (`tools/bench/tooling/lsp_latency.py`, time until
+  diagnostics settle; the start-up open is the median of six interleaved server starts, the
+  others are medians within one run of six rounds):
+
+  | Build | Start-up open | Open at idle | Edit in a body | Edit to a signature | Edit to a definition |
+  |---|---|---|---|---|---|
+  | Two lookup paths | 46.5 ms | 15.9 ms | 5.4 ms | 5.2 ms | 10.7 ms |
+  | One lookup path, pointer types | 47.4 ms | 17.4 ms | 3.4 ms | 3.4 ms | 6.7 ms |
+  | Ids, stamps and the tables of the next two records | 36.4 ms | 15.9 ms | 3.0 ms | 2.7 ms | 5.8 ms |
 - **Incremental.** A type or symbol has no inputs, and its id is stable for the life of the
   process, so a memo that holds one compares four bytes where it compared a pointer.
 
@@ -8673,27 +8682,29 @@ is rejected below.
   names with the item's node in the file as it stands. `test_incremental.rs` pins the query
   counts for an edit inside an item, a new item above the others, a removed item, the second of
   two equal statements removed, and edits at both ends.
-- **Simplicity.** One more tracked query per item. It costs about 4 MB of memos on the finance
-  bench (50,815 items).
+- **Simplicity.** One more tracked query per item. Its memo boxes and dependency edges take
+  3.3 MB at the heap peak of a check of the finance bench (50,815 items).
 - **Performance.** A cold check does the same work. After an edit to one item of a file,
   lowering, annotations and naming run for that item alone.
 - **Incremental.** Edits at both ends of a file between two reads change one region that spans
   the file, so the items between them lower again and `item_hir` backdates. An edit to any `#:`
-  block re-runs `item_annotations` for the items of that file that carry one.
+  block re-runs `item_annotations` for every item of that file, and each comes out equal and
+  backdates unless its own block changed.
 
 # Decision record: the analysis core's per-item and per-file tables after the type store
 
 **Status:** built.
 
-- **Previous source of truth.** `ItemLinks` held a row of five optional items per listed name.
-  Three definitions of "is this file strict" disagreed on the default. `item_links` sorted its
+- **Previous source of truth.** `ItemLinks` was an 80-byte value of five allocations: four
+  boxed slices (the names, where each name's bindings end, the kinds, the items) and the
+  interface edges. Three definitions of "is this file strict" disagreed on the default. `item_links` sorted its
   edges by `Symbol::index()`. `StubLibrary` was nine maps keyed by `String`. The server's worker
   kept `attached_by_file`, a hand-written copy of what `file_attached_namespaces` answers. Tag
   completion and two reference searches walked every file's tree on each request. The checker
   sized two per-body facts to the whole item.
 - **What was structurally weak.** `item_links` keeps one memo per item for the whole run
-  (50,815 on the finance bench), and most names have one binding or none, so the rows were
-  mostly empty. Interning order differs between runs of a parallel check, so an order by symbol
+  (50,815 on the finance bench), so every byte of the value's inline size and every separate
+  allocation is paid that many times. Interning order differs between runs of a parallel check, so an order by symbol
   index is not reproducible. A copy of a query's answer can drift from the query.
 - **Target shape.**
   - `ItemLinks` is two thin vectors: `words` (a header, the listed names, then one word per
@@ -8722,7 +8733,12 @@ is rejected below.
   outside `Worker::cancellable` has that failure, so the worker's exit message names an
   escaped cancellation.
 - **Performance.** Part of the measurements in "Decision record: types and symbols are four-byte
-  ids into append-only columns".
+  ids into append-only columns". At the heap peak of a check of the finance bench the
+  `item_links` memos hold 10.5 MB, where 11 MB was measured before: 2.4 MB of memo boxes (48
+  bytes each, down from 112), 4.2 MB in the two vectors, and 3.9 MB of the dependency edges
+  salsa records per memo. `item_links` with what it calls is 4.6% of the check's instructions
+  (824 million), down from 4.8% (922 million). Both are mostly the cost of resolving every
+  listed name in one memo per item, which this layout does not change; the backlog has it.
 - **Incremental.** `item_links` backdates as before: its value lists the item's own names and
   bindings and nothing that moves with another item.
 

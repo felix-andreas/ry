@@ -94,7 +94,10 @@ stamp, so an edit lowers only the items it changed" and "Decision record: the an
 per-item and per-file tables after the type store".
 
 - **`item_links` resolves every name an item's naming lists**, where a check that resolved a
-  name on first use would skip the names a body never reaches. @@LINKS@@
+  name on first use would skip the names a body never reaches. On the finance
+  bench `item_links` with what it calls is 4.6% of a check's instructions, and its memos hold
+  10.5 MB at the heap peak, of which 3.9 MB is the dependency edges salsa records and 2.4 MB
+  the memo boxes. A smaller value does not move either: fewer memos or fewer edges would.
 - **A tracked read on the server's worker outside `Worker::cancellable` can stop the worker.**
   A notification queued behind the running job flips the cancellation token, and the next
   query fetch unwinds. One such read was found by an intermittent test failure and fixed.
