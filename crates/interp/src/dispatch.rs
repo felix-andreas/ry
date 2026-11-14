@@ -243,6 +243,9 @@ pub struct MethodCache {
     /// freed and the table keeps its strings alive, so it needs no invalidation.
     names: FxHashMap<(Sexp, Sexp), Sexp>,
     rows: Vec<MethodRow>,
+    /// Dispatch feedback, [`FEEDBACK_WAYS`] entries for each generic that has dispatched, at the
+    /// index its row names ([`MethodRow::feedback`]).
+    feedback: Vec<DispatchEntry>,
     pub s4: crate::methods::S4Cache,
     /// The `.Group` NextMethod defines when there is no group: `""`, shared and not mutable.
     blank_group: Option<Sexp>,
@@ -265,6 +268,7 @@ const WRITTEN_LIMIT: usize = 1 << 16;
 #[derive(Clone, Copy)]
 pub(crate) enum Written {
     Row(u32),
+    Feedback(u32),
     Name((Sexp, Sexp)),
     S4Site(Sexp),
 }
@@ -303,6 +307,65 @@ struct MethodRow {
     stamp: u64,
     /// The binding that lookup found, or `NULL` for none.
     cell: Sexp,
+    /// Where the symbol's dispatch feedback starts in [`MethodCache::feedback`], or
+    /// [`NO_FEEDBACK`] before it dispatched as a generic.
+    feedback: u32,
+    /// For a generic `UseMethod` dispatched: the enclosure its definition was looked up from,
+    /// the binding found, the environment of the closure bound there, and the symbol's lookup
+    /// stamp then. `NULL` until a lookup that crossed no function frame and no other binding of
+    /// the name ([`generic_def_env`]).
+    definition_from: Sexp,
+    definition_cell: Sexp,
+    definition_env: Sexp,
+    definition_stamp: u64,
+}
+
+const NO_FEEDBACK: u32 = u32::MAX;
+
+/// How many class vectors and scopes one generic keeps feedback for. A site that sees more
+/// shapes than this resolves the extra ones by name.
+const FEEDBACK_WAYS: usize = 4;
+
+/// How many candidate names one feedback entry checks: a class method, and a group method, for
+/// each class tried, then the default.
+const ENTRY_NAMES: usize = 8;
+
+/// What one dispatch of a generic resolved, kept so that the next dispatch on the same classes
+/// from the same scope resolves without a lookup ([`resolve_s3`]).
+///
+/// The answer depends on the bindings of the names the lookup tried, the methods table it read,
+/// and the classes. An entry is kept only for a lookup that walked no function frame (the calling
+/// environment is a top environment) and met neither an active binding nor a binding of a tried
+/// name to something other than a function. Every binding it read is then outside function
+/// frames, so adding or removing one moves the name's lookup stamp, which the entry compares for
+/// each name. Assigning a new value to the method's binding moves no stamp, so a hit reads the
+/// binding afresh and needs a function there. The table binding is compared by its raw value
+/// under the stamp of `.__S3MethodsTable__.`.
+#[derive(Clone, Copy)]
+struct DispatchEntry {
+    /// The class vector, compared by identity and then string by string.
+    classes: Sexp,
+    group: Sexp,
+    call_env: Sexp,
+    def_env: Sexp,
+    with_default: bool,
+    /// Set when the method is named `sort.list`, which base's own closure of that name is not.
+    sort_list: bool,
+    names: u8,
+    /// The names tried, in order, and their stamps. The method's own name comes last when one
+    /// was found.
+    name: [Sexp; ENTRY_NAMES],
+    stamp: [u64; ENTRY_NAMES],
+    /// The binding `.__S3MethodsTable__.` of the generic's top environment, or `NULL`, its raw
+    /// value, and the stamp of that name.
+    table_cell: Sexp,
+    table_value: Sexp,
+    table_stamp: u64,
+    /// The method's binding, or `NULL` when no method was found.
+    cell: Sexp,
+    /// The class the method was found for, the class count for the default.
+    index: u32,
+    strings: MethodStrings,
 }
 
 pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Marker<'_>) {
@@ -315,6 +378,11 @@ pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Mar
                 Written::Row(row) => {
                     if let Some(row) = cache.rows.get(row as usize) {
                         mark_row(row, marker);
+                    }
+                }
+                Written::Feedback(entry) => {
+                    if let Some(entry) = cache.feedback.get(entry as usize) {
+                        mark_entry(entry, marker);
                     }
                 }
                 Written::Name(key) => {
@@ -347,10 +415,40 @@ unsafe fn trace_every_entry(cache: &MethodCache, marker: &mut heap::Marker<'_>) 
     for row in &cache.rows {
         mark_row(row, marker);
     }
+    for entry in &cache.feedback {
+        mark_entry(entry, marker);
+    }
 }
 
 unsafe fn mark_row(row: &MethodRow, marker: &mut heap::Marker<'_>) {
-    for object in [row.string, row.top, row.table, row.cell] {
+    for object in [
+        row.string,
+        row.top,
+        row.table,
+        row.cell,
+        row.definition_from,
+        row.definition_cell,
+        row.definition_env,
+    ] {
+        marker.mark(object);
+    }
+}
+
+unsafe fn mark_entry(entry: &DispatchEntry, marker: &mut heap::Marker<'_>) {
+    let strings = &entry.strings;
+    for object in [
+        entry.classes,
+        entry.group,
+        entry.call_env,
+        entry.def_env,
+        entry.table_cell,
+        entry.table_value,
+        entry.cell,
+        strings.generic,
+        strings.group,
+        strings.classes,
+        strings.method,
+    ] {
         marker.mark(object);
     }
 }
@@ -379,6 +477,11 @@ unsafe fn method_row(symbol: Sexp) -> R<usize> {
         table: nil(),
         stamp: 0,
         cell: nil(),
+        feedback: NO_FEEDBACK,
+        definition_from: nil(),
+        definition_cell: nil(),
+        definition_env: nil(),
+        definition_stamp: 0,
     });
     heap.set_method_row(symbol, row as u32);
     cache.note_written(Written::Row(row as u32));
@@ -406,7 +509,9 @@ unsafe fn default_name(generic: Sexp) -> R<Sexp> {
 
 /// The S3 method for `classes` of the generic `generic` (or of its group `group`, when that is
 /// not `NULL`), as dispatch from `call_env` finds it: for each class in turn the generic's
-/// method, then the group's, and with `with_default` finally `generic.default`.
+/// method, then the group's, and with `with_default` finally `generic.default`. The generic's
+/// dispatch feedback answers a dispatch it has seen ([`DispatchEntry`]); any other is resolved by
+/// name and, when its answer can be checked by stamps, becomes feedback.
 unsafe fn resolve_s3(
     generic: Sexp,
     group: Sexp,
@@ -415,7 +520,133 @@ unsafe fn resolve_s3(
     call_env: Sexp,
     def_env: Sexp,
 ) -> R<Option<S3Method>> {
+    let row = method_row(generic)?;
+    let key = FeedbackKey {
+        group,
+        with_default,
+        classes,
+        call_env,
+        def_env,
+    };
+    if let Some(method) = feedback_method(row, &key)? {
+        if syntax::testing::invariants_enabled() {
+            let resolved = resolve_by_name(generic, &key, None)?;
+            assert!(
+                resolved.map(|method| (method.function, method.strings.name))
+                    == method.map(|method| (method.function, method.strings.name)),
+                "the dispatch feedback of `{}` names a method that resolving by name does not find",
+                symbol_name(generic)
+            );
+        }
+        return Ok(method);
+    }
+    resolve_by_name(generic, &key, Some(row))
+}
+
+/// What a dispatch resolves for, besides the generic.
+#[derive(Clone, Copy)]
+struct FeedbackKey {
+    group: Sexp,
+    with_default: bool,
+    classes: Sexp,
+    call_env: Sexp,
+    def_env: Sexp,
+}
+
+impl FeedbackKey {
+    unsafe fn matches(&self, entry: &DispatchEntry) -> bool {
+        entry.call_env == self.call_env
+            && entry.def_env == self.def_env
+            && entry.group == self.group
+            && entry.with_default == self.with_default
+            && same_classes(entry.classes, self.classes)
+    }
+}
+
+/// The method the dispatch feedback of the generic whose row is `row` holds for `key`: `None`
+/// when it holds none or no longer holds, and `Some(None)` when it holds that there is no method.
+unsafe fn feedback_method(row: usize, key: &FeedbackKey) -> R<Option<Option<S3Method>>> {
+    let cache = &interp().method_cache;
+    let start = cache.rows[row].feedback;
+    if start == NO_FEEDBACK {
+        return Ok(None);
+    }
+    let start = start as usize;
+    let Some(entries) = cache.feedback.get(start..start + FEEDBACK_WAYS) else {
+        return Ok(None);
+    };
+    let Some(entry) = entries.iter().find(|entry| key.matches(entry)) else {
+        return Ok(None);
+    };
+    let heap = crate::heap();
+    if heap.lookup_stamp(symbols().dot_s3_methods_table) != entry.table_stamp
+        || (entry.table_cell != nil() && entry.table_cell.cdr() != entry.table_value)
+    {
+        return Ok(None);
+    }
+    let names = entry.names as usize;
+    if (0..names).any(|index| heap.lookup_stamp(entry.name[index]) != entry.stamp[index]) {
+        return Ok(None);
+    }
+    let cell = entry.cell;
+    if cell == nil() {
+        return Ok(Some(None));
+    }
+    if cell.has_gp(gp::ACTIVE_BINDING) {
+        return Ok(None);
+    }
+    let value = cell.cdr();
+    let function = if value.kind() == SexpType::Promise {
+        value.car()
+    } else {
+        value
+    };
+    if !values::is_function(function)
+        || (entry.sort_list
+            && function.kind() == SexpType::Closure
+            && function.tag() == values::base_namespace())
+    {
+        return Ok(None);
+    }
+    let mut strings = entry.strings;
+    if entry.index == 0 {
+        key.classes.mark_not_mutable();
+        strings.classes = key.classes;
+    }
+    Ok(Some(Some(S3Method { function, strings })))
+}
+
+/// Whether two class vectors hold the same classes. Class names are interned strings, so equal
+/// names are one object.
+unsafe fn same_classes(stored: Sexp, classes: Sexp) -> bool {
+    if stored == classes {
+        return true;
+    }
+    let count = length(classes);
+    classes.kind() == SexpType::String
+        && stored.kind() == SexpType::String
+        && length(stored) == count
+        && (0..count).all(|index| stored.element(index) == classes.element(index))
+}
+
+/// [`resolve_s3`] by looking up each candidate name. With the generic's `row`, an answer that
+/// stamps can check becomes the generic's feedback for `key`.
+unsafe fn resolve_by_name(
+    generic: Sexp,
+    key: &FeedbackKey,
+    row: Option<usize>,
+) -> R<Option<S3Method>> {
+    let FeedbackKey {
+        group,
+        with_default,
+        classes,
+        call_env,
+        def_env,
+    } = *key;
+    let heap = crate::heap();
+    let table_stamp = heap.lookup_stamp(symbols().dot_s3_methods_table);
     let mut scope = method_scope(call_env, def_env)?;
+    let mut tried: SmallVec<[(Sexp, u64); ENTRY_NAMES]> = SmallVec::new();
     let count = length(classes);
     let mut found = None;
     'classes: for index in 0..count {
@@ -425,6 +656,7 @@ unsafe fn resolve_s3(
                 continue;
             }
             let name = method_name(prefix, class)?;
+            tried.push((name, heap.lookup_stamp(name)));
             if let Some(function) = lookup_in_scope(name, &mut scope)? {
                 // base's `sort.list` is a function, not the `sort` method for class "list",
                 // and GNU R's dispatch passes over it.
@@ -432,6 +664,7 @@ unsafe fn resolve_s3(
                     && function.tag() == values::base_namespace()
                     && name.car().bytes() == b"sort.list"
                 {
+                    scope.exact = false;
                     continue;
                 }
                 found = Some((function, name, index));
@@ -441,11 +674,31 @@ unsafe fn resolve_s3(
     }
     if found.is_none() && with_default {
         let name = default_name(generic)?;
+        tried.push((name, heap.lookup_stamp(name)));
         if let Some(function) = lookup_in_scope(name, &mut scope)? {
             found = Some((function, name, count));
         }
     }
+    // Forcing a lazily loaded method can run code that defines bindings, and feedback stamped
+    // before that would claim a validity it never had.
+    let record = row.filter(|_| {
+        scope.exact
+            && tried.len() <= ENTRY_NAMES
+            && heap.lookup_stamp(symbols().dot_s3_methods_table) == table_stamp
+            && tried
+                .iter()
+                .all(|&(name, stamp)| heap.lookup_stamp(name) == stamp)
+            && is_top_env(call_env)
+    });
     let Some((function, name, index)) = found else {
+        if let Some(row) = record {
+            let found = Resolved {
+                cell: nil(),
+                index: count,
+                strings: None,
+            };
+            record_feedback(row, key, &scope, table_stamp, &tried, found);
+        }
         return Ok(None);
     };
     // The strings live in their symbols' rows, so the one allocation that is not kept anywhere
@@ -479,7 +732,97 @@ unsafe fn resolve_s3(
         classes,
         method,
     };
+    if let Some(row) = record
+        && scope.found_cell != nil()
+    {
+        if index != 0 {
+            classes.mark_not_mutable();
+        }
+        let found = Resolved {
+            cell: scope.found_cell,
+            index,
+            strings: Some(strings),
+        };
+        record_feedback(row, key, &scope, table_stamp, &tried, found);
+    }
     Ok(Some(S3Method { function, strings }))
+}
+
+/// What [`resolve_by_name`] found: the method's binding (`NULL` for none), the index of the
+/// class it was found for, and its dispatch strings.
+struct Resolved {
+    cell: Sexp,
+    index: usize,
+    strings: Option<MethodStrings>,
+}
+
+/// Makes `found`, what [`resolve_by_name`] resolved for `key`, the first feedback entry of the
+/// generic whose row is `row`, in place of the entry it had for `key` or else of its oldest.
+unsafe fn record_feedback(
+    row: usize,
+    key: &FeedbackKey,
+    scope: &MethodScope,
+    table_stamp: u64,
+    tried: &[(Sexp, u64)],
+    found: Resolved,
+) {
+    let blank = nil();
+    let mut name = [blank; ENTRY_NAMES];
+    let mut stamp = [0; ENTRY_NAMES];
+    for (position, &(tried_name, tried_stamp)) in tried.iter().enumerate() {
+        name[position] = tried_name;
+        stamp[position] = tried_stamp;
+    }
+    let strings = found.strings.unwrap_or(MethodStrings {
+        name: blank,
+        generic: blank,
+        group: blank,
+        classes: blank,
+        method: blank,
+    });
+    let entry = DispatchEntry {
+        classes: key.classes,
+        group: key.group,
+        call_env: key.call_env,
+        def_env: key.def_env,
+        with_default: key.with_default,
+        sort_list: strings.name != blank && strings.name.car().bytes() == b"sort.list",
+        names: tried.len() as u8,
+        name,
+        stamp,
+        table_cell: scope.table_cell,
+        table_value: if scope.table_cell == blank {
+            blank
+        } else {
+            scope.table_cell.cdr()
+        },
+        table_stamp,
+        cell: found.cell,
+        index: found.index as u32,
+        strings,
+    };
+    let cache = &mut interp().method_cache;
+    let start = cache.rows[row].feedback;
+    let (start, shifted) = if start == NO_FEEDBACK {
+        let start = cache.feedback.len();
+        cache
+            .feedback
+            .extend(std::iter::repeat_n(entry, FEEDBACK_WAYS));
+        cache.rows[row].feedback = start as u32;
+        (start, FEEDBACK_WAYS - 1)
+    } else {
+        let start = start as usize;
+        let shifted = cache.feedback[start..start + FEEDBACK_WAYS]
+            .iter()
+            .position(|stored| key.matches(stored))
+            .unwrap_or(FEEDBACK_WAYS - 1);
+        cache.feedback.copy_within(start..start + shifted, start + 1);
+        cache.feedback[start] = entry;
+        (start, shifted)
+    };
+    for written in start..=start + shifted {
+        cache.note_written(Written::Feedback(written as u32));
+    }
 }
 
 /// The method an S3 lookup found, with the values of the dispatch variables that depend on the
@@ -517,7 +860,14 @@ struct MethodScope {
     /// lacks [`gp::DETACHED`]).
     attached: bool,
     table: Option<Sexp>,
+    /// The binding of `.__S3MethodsTable__.` in the generic's top environment, or `NULL`.
+    table_cell: Sexp,
     walk: Option<ScopeWalk>,
+    /// Whether every lookup so far read only what lookup stamps track: no frame below the top
+    /// environment, no active binding, no name bound to something other than a function.
+    exact: bool,
+    /// The binding of the method the last lookup found, or `NULL`.
+    found_cell: Sexp,
 }
 
 /// The chain from the calling environment to its top environment `top`.
@@ -537,7 +887,8 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
     } else {
         top_env(def_env)
     };
-    let table = match crate::heap().frame_cell(def_top, symbols().dot_s3_methods_table) {
+    let table_cell = crate::heap().frame_cell(def_top, symbols().dot_s3_methods_table);
+    let table = match table_cell {
         Some(cell) => {
             let value = eval::cell_value(cell)?;
             // Base is lazy-loaded, so the binding usually holds the forced promise of the table.
@@ -553,7 +904,10 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
         call_env,
         attached: !call_env.has_gp(gp::DETACHED),
         table: (table.kind() == SexpType::Environment).then_some(table),
+        table_cell: table_cell.unwrap_or(nil()),
         walk: None,
+        exact: table_cell.is_none_or(|cell| !cell.has_gp(gp::ACTIVE_BINDING)),
+        found_cell: nil(),
     })
 }
 
@@ -591,7 +945,7 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
 /// otherwise through the name's row for the part from the top environment on.
 unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>> {
     if scope.attached && !name.has_gp(gp::BOUND_ELSEWHERE) {
-        let found = base_method(name, scope.table)?;
+        let found = base_method(name, scope)?;
         if syntax::testing::invariants_enabled() {
             let walk = scope_walk(scope.call_env);
             let walked = walked_method(name, &walk, scope.table)?;
@@ -605,6 +959,9 @@ unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>
         return Ok(found);
     }
     let walk = scope.walk.get_or_insert_with(|| scope_walk(scope.call_env));
+    if !walk.frames.is_empty() {
+        scope.exact = false;
+    }
     for &env in &walk.frames {
         if let Some(function) = function_in_frame(name, env)? {
             return Ok(Some(function));
@@ -625,11 +982,13 @@ unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>
         && row.top == top
         && row.table == table
     {
-        if row.cell == nil() {
+        let cell = row.cell;
+        if cell == nil() {
             return Ok(None);
         }
-        let value = value_of(eval::cell_value(row.cell)?)?;
+        let value = value_of(eval::cell_value(cell)?)?;
         if values::is_function(value) {
+            scope.found_cell = cell;
             return Ok(Some(value));
         }
     }
@@ -647,26 +1006,32 @@ unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>
         entry.cell = found.map_or(nil(), |(cell, _)| cell);
         cache.note_written(Written::Row(row as u32));
     }
-    Ok(found.map(|(_, function)| function))
+    scope.exact &= cacheable;
+    Ok(found.map(|(cell, function)| {
+        scope.found_cell = cell;
+        function
+    }))
 }
 
 /// The method `name` for a name no attached frame outside the base frames binds: a detached
 /// methods table's binding, which marks nothing, else the base binding.
-unsafe fn base_method(name: Sexp, table: Option<Sexp>) -> R<Option<Sexp>> {
+unsafe fn base_method(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>> {
     let mut cacheable = true;
-    if let Some(table) = table
-        && table.has_gp(gp::DETACHED)
-        && let Some((_, function)) = method_cell_in_frame(name, table, &mut cacheable)?
-    {
-        return Ok(Some(function));
-    }
-    match crate::heap().frame_cell(values::base_env(), name) {
-        Some(cell) => {
-            let value = value_of(eval::cell_value(cell)?)?;
-            Ok(values::is_function(value).then_some(value))
+    let found = match scope.table {
+        Some(table) if table.has_gp(gp::DETACHED) => {
+            method_cell_in_frame(name, table, &mut cacheable)?
         }
-        None => Ok(None),
-    }
+        _ => None,
+    };
+    let found = match found {
+        Some(found) => Some(found),
+        None => method_cell_in_frame(name, values::base_env(), &mut cacheable)?,
+    };
+    scope.exact &= cacheable;
+    Ok(found.map(|(cell, function)| {
+        scope.found_cell = cell;
+        function
+    }))
 }
 
 /// The method `name` found by walking the whole scope, without the rows: what
@@ -1086,10 +1451,7 @@ unsafe fn generic_method(
     call_env: Sexp,
 ) -> R<Found> {
     let generic_symbol = values::install_charsxp(generic.element(0))?;
-    let def_env = match lookup_generic_definition(generic_symbol, enclosure, lookup)? {
-        Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
-        _ => values::base_namespace(),
-    };
+    let def_env = generic_def_env(generic_symbol, enclosure, lookup)?;
     if let Some(mut found) = find_s3_method(generic_symbol, object, lookup, def_env)? {
         if call_env != lookup {
             for (symbol, value) in found.vars.iter_mut() {
@@ -1113,6 +1475,85 @@ unsafe fn generic_method(
     Err(error(format!(
         "no applicable method for '{generic_name}' applied to an object of class {shown}"
     )))
+}
+
+/// The environment of the generic `symbol`'s definition as seen from the generic's frame, whose
+/// enclosure is `enclosure`, or base's namespace when that is no closure. The generic's row keeps
+/// the answer of a lookup that crossed only frames outside functions, none of which bound the
+/// name to anything but the definition, so the name's lookup stamp moves when the answer could:
+/// a hit then only checks that the binding still holds a closure of that environment.
+unsafe fn generic_def_env(symbol: Sexp, enclosure: Sexp, caller: Sexp) -> R<Sexp> {
+    let row = method_row(symbol)?;
+    let heap = crate::heap();
+    let stamp = heap.lookup_stamp(symbol);
+    let stored = &interp().method_cache.rows[row];
+    if stored.definition_from == enclosure && stored.definition_stamp == stamp {
+        let cell = stored.definition_cell;
+        let value = cell.cdr();
+        let value = if value.kind() == SexpType::Promise {
+            value.car()
+        } else {
+            value
+        };
+        if !cell.has_gp(gp::ACTIVE_BINDING)
+            && value.kind() == SexpType::Closure
+            && value.tag() == stored.definition_env
+        {
+            let def_env = stored.definition_env;
+            if syntax::testing::invariants_enabled() {
+                let looked_up = match lookup_generic_definition(symbol, enclosure, caller)? {
+                    Some(definition) if definition.kind() == SexpType::Closure => {
+                        definition.tag()
+                    }
+                    _ => values::base_namespace(),
+                };
+                assert!(
+                    looked_up == def_env,
+                    "the generic `{}` keeps a definition its lookup no longer finds",
+                    symbol_name(symbol)
+                );
+            }
+            return Ok(def_env);
+        }
+    }
+    let def_env = match lookup_generic_definition(symbol, enclosure, caller)? {
+        Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
+        _ => values::base_namespace(),
+    };
+    if heap.lookup_stamp(symbol) == stamp
+        && let Some(cell) = outside_definition(symbol, enclosure)?
+    {
+        let value = value_of(eval::cell_value(cell)?)?;
+        if value.kind() == SexpType::Closure && value.tag() == def_env {
+            let cache = &mut interp().method_cache;
+            let stored = &mut cache.rows[row];
+            stored.definition_from = enclosure;
+            stored.definition_cell = cell;
+            stored.definition_env = def_env;
+            stored.definition_stamp = stamp;
+            cache.note_written(Written::Row(row as u32));
+        }
+    }
+    Ok(def_env)
+}
+
+/// The binding of `symbol` that a lookup from `env` finds when every frame on the way is
+/// outside a function and the first binding holds a function: what [`generic_def_env`] keeps.
+unsafe fn outside_definition(symbol: Sexp, mut env: Sexp) -> R<Option<Sexp>> {
+    while env != values::empty_env() {
+        if env.has_gp(gp::FUNCTION_FRAME) {
+            return Ok(None);
+        }
+        if let Some(cell) = crate::heap().frame_cell(env, symbol) {
+            if cell.has_gp(gp::ACTIVE_BINDING) {
+                return Ok(None);
+            }
+            let value = value_of(eval::cell_value(cell)?)?;
+            return Ok(values::is_function(value).then_some(cell));
+        }
+        env = env.enclosure();
+    }
+    Ok(None)
 }
 
 /// The generic function named `name` as seen from the generic's frame, whose enclosure is
