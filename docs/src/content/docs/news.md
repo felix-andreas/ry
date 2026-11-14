@@ -3,7 +3,46 @@ title: News
 description: Release announcements and project news
 ---
 
-## Unreleased
+## ry 0.4.5
+
+*Released in November 2026.*
+
+Version 0.4.5 builds for Windows, prints a report when a process crashes, adds `ry run --aot`, and
+makes calls faster at both tiers of the interpreter. Every figure below was reported by the change
+that introduced it; none was re-measured for these notes.
+
+### Highlights
+
+- **Windows builds.** Fixes for the Windows archive: lock files open for writing so Windows can lock
+  them, package `inst` directories install by concatenation, directory listings use slashes, package
+  DLLs link Rtools' gettext, the embedded base R's files keep their modification times, base R's code
+  images run without a stray argument, and file errors carry the operating system's wording. The
+  archive is best effort ([Releasing](/development/releasing)).
+- **Calls run in the dispatch loop.** A call to a compiled closure continues in the loop the caller
+  is already running, instead of entering through Rust recursion. A framed call costs 1,172
+  instructions over an empty loop, where it cost 1,880. Validation's instruction count falls 1.5% and
+  the expression tree program's 10.4%.
+- **Tier 1 compiles closure calls with effects.** Every exit from compiled code names a frame
+  state, and deoptimization rebuilds the interpreter frames, those of inlined callees included, so
+  a closure call runs without a frame, an environment or promises. On the applications suite, the
+  orders program runs in 85 ms against 154 ms, and the geometric mean of GNU R's time
+  over ry's moves from 2.83x to 2.96x.
+- **`ry run --aot`** compiles a script's typed functions before it starts.
+- **A crash leaves a report**, and **`ry test --jobs`** runs tests in parallel.
+- **A faster DataFrame `:=`.** `x[id4 == step, v1 := v1 + 1L]` in a loop takes 0.111 s from R at
+  1e7 rows against data.table's 0.356 s, and 0.987 s at 1e8 rows against 3.079 s.
+- **Typed ports of all 54 public benchmark programs** run natively and print GNU R's checksum.
+
+### Smaller changes
+
+- The interpreter is split into an engine crate, a numeric crate and four leaf crates (`stats`,
+  `graphics`, `frames`, `services`), so the checker binary builds without the interpreter: 44.3 MB
+  down to 30.5 MB on the iterate profile.
+- Answering a constructed name in the checker reads the package layer instead of folding over every
+  file, which keeps an edit from re-reading the whole project.
+- `just bench codebases` times the three 300,000-line code bases per test block against GNU R.
+- The nix shell builds GNU R with the setup hook it needs, and its cache is rebuilt only when the
+  inputs change.
 
 ### `ry run --aot` compiles typed code before the script starts
 
