@@ -4202,6 +4202,11 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             if !quotient.is_finite() || quotient > 4_503_599_627_370_496.0 {
                 return Err(call.error("'by' argument is much too small"));
             }
+            // A unit step is `from:to` in GNU R, so whole endpoints in integer range give an
+            // integer vector whatever the types of the arguments.
+            if by.abs() == 1.0 {
+                return colon(from, to);
+            }
             let steps = (quotient + 1e-10).floor() as usize;
             if all_integer {
                 let values: Vec<i32> = (0..=steps)
