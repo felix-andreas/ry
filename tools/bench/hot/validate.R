@@ -45,7 +45,8 @@ local({
       if (is.call(x)) {
         head <- x[[1L]]
         if (is.symbol(head) && as.character(head) %in% c("::", ":::")) found <<- c(found, as.character(x[[2L]]))
-        for (part in as.list(x)) walk_call(part)
+        # An empty argument, as in `x[i, ]`, is the missing argument, which cannot be passed on.
+        for (k in seq_along(x)) if (!identical(x[[k]], quote(expr = ))) walk_call(x[[k]])
       } else if (is.function(x) && !is.primitive(x)) {
         walk_call(body(x))
       }
@@ -116,7 +117,8 @@ local({
     output <- file(output_path, open = "w")
     messages <- file(messages_path, open = "w")
     state <- global_state()
-    connections <- rownames(showConnections(all = TRUE))
+    # Not showConnections(), which collects garbage on every call.
+    connections <- getAllConnections()
     files <- c(dir(tempdir(), recursive = TRUE, all.files = TRUE), dir(scratch, recursive = TRUE, all.files = TRUE))
     sink(output)
     sink(messages, type = "message")
@@ -144,8 +146,8 @@ local({
     close(output)
     close(messages)
     outcome$printed <- c(readLines(output_path, warn = FALSE), readLines(messages_path, warn = FALSE))
-    opened <- setdiff(rownames(showConnections(all = TRUE)), connections)
-    for (number in opened) try(close(getConnection(as.integer(number))), silent = TRUE)
+    opened <- setdiff(getAllConnections(), connections)
+    for (number in opened) try(close(getConnection(number)), silent = TRUE)
     outcome$connections <- length(opened)
     after <- c(dir(tempdir(), recursive = TRUE, all.files = TRUE), dir(scratch, recursive = TRUE, all.files = TRUE))
     created <- setdiff(after, files)
