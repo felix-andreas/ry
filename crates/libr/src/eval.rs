@@ -491,7 +491,10 @@ pub unsafe fn make_condition(unwind: &Unwind) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_eval(expression: Sexp, env: Sexp) -> Sexp {
-    enter(|| eval(expression, env))
+    enter(|| {
+        let _recorded = interp::capture::evaluating(|| env);
+        eval(expression, env)
+    })
 }
 
 /// `R_tryEval` runs in a top-level context of its own: handlers established outside it do not
@@ -504,7 +507,9 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let saved = interp::conditions::set_aside(handlers.clone(), restarts.clone());
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
+        let recorded = interp::capture::evaluating(|| env);
         let result = eval(expression, env);
+        drop(recorded);
         drop(saved);
         let state = interp::interp();
         state.handlers = handlers;
@@ -1869,6 +1874,7 @@ pub unsafe extern "C" fn R_ParseEvalString(text: *const c_char, env: Sexp) -> Se
     enter(|| {
         let expression = parse_one(text)?;
         runtime().heap.root(expression);
+        let _recorded = interp::capture::evaluating(|| env);
         eval(expression, env)
     })
 }

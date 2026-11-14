@@ -1,0 +1,62 @@
+# Code that runs in a user environment is user code however package code enters it, by forcing
+# a promise or by evaluating an expression there. A block of user code a package wrapper runs is
+# user code, so the package calls in it are boundary calls of their own and their time is not
+# the wrapper's. Below a capturable call nothing changes: the call covers its own arguments.
+
+requires ry-runtime
+
+file workload.R
+| handler <- function(e) "handled"
+| helper <- function() invisible(NULL)
+| big <- rev(seq_len(2e6))
+| r1 <- tryCatch({
+|   s <- sort(big)
+|   s[[1]]
+| }, error = handler)
+| r2 <- local({
+|   helper()
+|   o <- order(big)
+|   o[[1]]
+| })
+| r3 <- nchar(toupper("abc"))
+| r4 <- tryCatch({
+|   rev(1:3)
+|   stop("inside")
+| }, error = handler)
+| r5 <- mean(c(1, 3))
+| cat("results:", r1, r2, r3, r4, r5, "\n")
+
+run ry run workload.R
+expect exit 0
+expect stdout "results: 1 2000000 3 handled 2"
+
+env RY_CAPTURE_PACKAGE R_GlobalEnv
+env RY_CAPTURE_DIR capture
+env RY_CAPTURE_MAX_BYTES 100000000
+run ry run workload.R
+expect exit 0
+expect stdout "results: 1 2000000 3 handled 2"
+
+unset RY_CAPTURE_PACKAGE
+unset RY_CAPTURE_DIR
+unset RY_CAPTURE_MAX_BYTES
+file check.R
+| entries <- read.delim("capture/entries.tsv", stringsAsFactors = FALSE)
+| entry <- function(name) entries[entries$name == name, ]
+| samples <- read.delim("capture/samples.tsv", stringsAsFactors = FALSE)
+| sampled <- function(name) sum(samples$name == name)
+| stopifnot(
+|   entry("tryCatch")$uncapturable_calls == 2, entry("tryCatch")$user_binding == 2,
+|   entry("sort")$calls == 1, sampled("sort") == 1,
+|   entry("tryCatch")$uncapturable_seconds < entry("sort")$seconds,
+|   entry("local")$uncapturable_calls == 1, entry("local")$user_binding == 1,
+|   entry("order")$calls == 1, sampled("order") == 1,
+|   entry("local")$uncapturable_seconds < entry("order")$seconds,
+|   entry("nchar")$calls == 1, entry("nchar")$reentered == 0, sampled("nchar") == 1,
+|   nrow(entry("toupper")) == 0,
+|   entry("rev")$calls == 2, entry("mean")$calls == 1
+| )
+| cat("checked\n")
+run ry run check.R
+expect exit 0
+expect stdout "checked"

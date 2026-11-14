@@ -2,10 +2,15 @@
 //! calls into package code and keeps a few of those calls, with their inputs, to replay later.
 //!
 //! The user's code is named by its top-level environments: namespace names and `R_GlobalEnv`.
-//! Every closure call passes through [`enter`], which keeps a stack of layer records. A user
-//! closure called from outside user code pushes a user record, and a package closure called from
-//! user code pushes a package record: that call is a boundary call, keyed by the callee's owner
-//! and the name its call used. Calls inside one layer push nothing.
+//! Code that runs in an environment whose top-level environment is the user's is user code,
+//! however it is entered. Every closure call passes through [`enter`], which keeps a stack of
+//! layer records. A user closure called from outside user code pushes a user record, and a
+//! package closure called from user code pushes a package record: that call is a boundary call,
+//! keyed by the callee's owner and the name its call used. Calls inside one layer push nothing.
+//! Code entered another way, by forcing a promise or by evaluating an expression in a given
+//! environment, passes through [`evaluating`], which pushes a user record the same way, so the
+//! user block a package wrapper runs (`withr::with_tempdir({ ... })`) is user code and the
+//! package calls it makes are boundary calls of their own.
 //!
 //! A boundary call is capturable when `eval(call, env)` in a fresh process without the user's
 //! code would redo it, which [`inspect`] decides from the names the call mentions. A capturable
@@ -361,16 +366,7 @@ pub unsafe fn enter(
     if SUSPENDED.get() {
         return Ok(Scope::none());
     }
-    let top = dispatch::top_env(function.tag());
-    let known = STATE.with_borrow(|state| {
-        state
-            .as_ref()
-            .and_then(|state| state.owners.get(&(top.as_ptr() as usize)).cloned())
-    });
-    let (owner, user) = match known {
-        Some(owner) => owner,
-        None => owner_of(top),
-    };
+    let (owner, user) = owner(dispatch::top_env(function.tag()));
     enum Step {
         Nothing,
         User,
@@ -520,6 +516,46 @@ unsafe fn boundary(
         });
     }
     Ok(scope)
+}
+
+/// Records that R code runs in the environment `env` gives, entered other than by a closure call:
+/// a promise forced, or an expression evaluated in an explicit environment (`eval`, `Rf_eval`).
+/// When the code is user code running below an uncovered package call, it pushes a user record
+/// until the scope drops, as a user closure called back from package code does. Below a
+/// capturable call it pushes nothing and does not count as re-entering user code, because a
+/// replay of that call evaluates its own arguments. Package code entered from user code this way
+/// has no call to key a boundary call by, so it pushes nothing either.
+#[inline(always)]
+pub unsafe fn evaluating(env: impl FnOnce() -> Sexp) -> Scope {
+    if activity::hooks() & activity::CAPTURE == 0 {
+        return Scope::none();
+    }
+    evaluating_recorded(env)
+}
+
+#[inline(never)]
+unsafe fn evaluating_recorded(env: impl FnOnce() -> Sexp) -> Scope {
+    if SUSPENDED.get() {
+        return Scope::none();
+    }
+    let below_package = STATE.with_borrow(|state| {
+        state.as_ref().is_some_and(|state| {
+            state.started.is_some()
+                && state.covering.is_none()
+                && state
+                    .stack
+                    .last()
+                    .is_none_or(|record| record.layer == Layer::Package)
+        })
+    });
+    if !below_package {
+        return Scope::none();
+    }
+    let env = env();
+    if env.kind() != SexpType::Environment || !owner(dispatch::top_env(env)).1 {
+        return Scope::none();
+    }
+    push(Layer::User, |_| Role::User)
 }
 
 /// Pushes a record whose role `role` decides, starting its clock now.
@@ -731,6 +767,20 @@ impl Drop for Suspend {
 }
 
 /// The owner label of the top-level environment `top`, and whether it is user code.
+unsafe fn owner(top: Sexp) -> (Rc<str>, bool) {
+    let known = STATE.with_borrow(|state| {
+        state
+            .as_ref()
+            .and_then(|state| state.owners.get(&(top.as_ptr() as usize)).cloned())
+    });
+    match known {
+        Some(owner) => owner,
+        None => owner_of(top),
+    }
+}
+
+/// [`owner`] for a top-level environment not seen before, which it remembers when the
+/// environment lives for the whole session.
 unsafe fn owner_of(top: Sexp) -> (Rc<str>, bool) {
     let (name, stable) = if top == global_env() {
         (GLOBAL_LABEL.to_owned(), true)
