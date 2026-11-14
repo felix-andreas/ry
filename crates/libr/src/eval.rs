@@ -1452,7 +1452,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return false;
     }
-    if let Err(unwind) = crate::loader_backend::attach() {
+    // Attaching the loader runs R code at top level, which the boundary-call recorder would
+    // otherwise take for the user's.
+    if let Err(unwind) = interp::capture::without_recording(|| crate::loader_backend::attach()) {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return false;
@@ -1677,7 +1679,9 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
-    if let Err(unwind) = crate::loader_backend::attach() {
+    // Attaching the loader runs R code at top level, which the boundary-call recorder would
+    // otherwise take for the user's.
+    if let Err(unwind) = interp::capture::without_recording(|| crate::loader_backend::attach()) {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return 2;
@@ -1724,7 +1728,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     if let Some(startup) = &startup {
         // `run_text` reports an error itself, and a failed startup load still leaves a console
         // the user can fix the package from.
-        interp::session::run_text(startup, "<startup>");
+        interp::capture::without_recording(|| interp::session::run_text(startup, "<startup>"));
     }
     interp::session::run_console(
         // SAFETY: the console reads on the interpreter's thread, at its top level.

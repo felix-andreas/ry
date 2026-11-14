@@ -52,6 +52,8 @@ pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
+mod callgrind;
+pub mod capture;
 pub mod code_image;
 pub mod coerce;
 pub mod combine;
