@@ -1808,6 +1808,9 @@ def ratio_label(results, key):
 
 
 def print_table(results, table):
+    # A run of zero rounds (the hot suite's passes on their own) timed nothing to tabulate.
+    if not any(row["seconds"] or row.get("failures") for row in results["programs"]):
+        return
     keys = [engine.key for engine in table if engine.key in results["engines"]]
     pairs = [key for key in keys if key in results.get("paired_geomean", {}) or
              any(key in row.get("paired", {}) for row in results["programs"])]

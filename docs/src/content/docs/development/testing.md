@@ -1114,7 +1114,8 @@ so what the switched-off JIT adds to the entry's time cancels in that ratio.
   which must agree to an absolute 1e-10 (or a relative 1e-13), so a root that `uniroot` finds one
   part in 1e13 away agrees and a change of one part in 1e10 does not. A sample whose result
   differs on every call under GNU R (a temporary file name, a timestamp) is recorded as `varies`
-  and not compared. A result of another type fails even when its values agree:
+  and not compared. A result of another type fails even when its values agree. An engine whose
+  `seq.int(1, 18, by = 1)` is a double vector, where GNU R's is an integer vector, prints:
 
   ```
   FAILED hot/base-seq on ry: checksum dbl:18:32x252214378:2.131601681765849e+01:1.618033988749895e+00,...,
@@ -1150,19 +1151,96 @@ optimization of one activity can give.
 `--instructions` runs one batch of each program under callgrind, with instrumentation on only
 inside the program's region, and prints each program's instruction count per call. Callgrind
 writes a dump each time a region ends, and the dumps of one region are summed.
-`--save-instructions FILE` keeps the counts, and a later run with `--baseline-instructions FILE`
-prints each program's change and its effect on each code base's weighted total. The counts are
-deterministic, so they show a change of 1% that wall time on a shared machine hides. The pass takes
-several minutes for the whole suite; `--filter` limits it to the programs under work.
 
-#### How much to trust a time
+```
+| program | calls | ry, batch | per call |
+| testthat::expect_equal | 20 | 45,452,106 | 2,272,605 |
+| openxlsx::write.xlsx | 3 | 85,865,843 | 28,621,948 |
+...
+Weighted, finbench, ry: 3,292,951,540 instructions per second of GNU R work
+Weighted, dsbench, ry: 2,572,317,861 instructions per second of GNU R work
+Weighted, biobench, ry: 2,613,663,739 instructions per second of GNU R work
+```
 
-On a shared cloud VM, one program's median batch time varies by about 13% between identical runs
-on either engine, because the machine's effective speed drifts within a run. The sum over the
-suite is stable to about 2%, and so are the predicted speed-ups, which is why they carry the
-decision and a single program's ratio does not. For one program, compare instruction counts. By
-default the runner adds ten rounds when any program's interval is wider than 10% either way, which
-on such a machine is every time, so pass `--extra-rounds 0` for a quick look.
+The weighted total of a code base is the number to compare between two builds. It is the
+instructions ry spends per second of GNU R time in that code base's programs: each program's
+instructions per call, over GNU R's seconds per call, weighted like the predicted speed-up.
+
+The pass deals the programs over four harness processes that run side by side, and the whole suite
+takes about 80 s. The split is by position in the suite and not by the machine's core count, so a
+program shares its process with the same programs on every machine. Each process runs on one
+OpenMP thread, because callgrind counts the instructions idle worker threads spend spinning, which
+vary from run to run: a grouped data.table assignment counted 80 to 96 million instructions on
+four threads and 45.8 million on one.
+
+Three options build on the counts:
+
+- `--save-instructions FILE` keeps them, and a later run with `--baseline-instructions FILE`
+  prints each program's change and its effect on each code base's weighted total, largest effect
+  first.
+- `--jit-off` counts ry with `RY_JIT=off` as well and prints the same comparison between the two,
+  which shows what the JIT costs or saves each program.
+- `--functions N` adds the N functions of the runtime and of the packages' compiled code that
+  hold the most of each code base's weighted instructions. It needs a build with symbols
+  (`cargo build --profile profiling`, passed with `--ry PATH --any-build`).
+
+#### How well the suite predicts the code bases
+
+`just bench-hot-track DIR NAME=RY[,VARIABLE=VALUE...]...` measures it. It times the suite and the
+code bases' tests on several ry configurations (other builds, or one build with a feature off) and
+compares the change the suite predicts with the change the code bases show, each against the
+first configuration:
+
+```sh
+just bench-hot-track .bench/codebases head=target/release/ry nojit=target/release/ry,RY_JIT=off r043=/tmp/ry-0.4.3/ry
+```
+
+```
+dsbench (time over GNU R's; change against head; ...)
+| configuration | predicted | measured | predicted change | measured change | weight | tests |
+| head | 0.717 | 0.596 | +0.0% | +0.0% | 100% | 9416 tests, 9416 passing |
+| nojit | 0.693 | 0.553 | -3.3% | -7.2% | 100% | 9416 tests, 9416 passing |
+| r043 | 1.180 | 0.945 | +64.7% | +58.4% | 100% | 9416 tests, 9416 passing |
+...
+dsbench: r = 0.986 between the predicted and the measured log changes of 11 configurations; a predicted change shows up 0.85 times in the measurement
+```
+
+A study of twelve configurations gave these correlations. The configurations were the build the
+suite was generated on, that build with the JIT off, with the builtin fast paths off and with
+native methods off, the same build a second time, the build before the recorder, and six releases
+back to 0.4.0-beta, whose predicted times range from 13% under the first configuration's to 124%
+over it.
+
+| Code base | r | A predicted change shows up |
+| --- | ---: | ---: |
+| finbench | 0.987 | 0.78 times |
+| dsbench | 0.986 | 0.85 times |
+| biobench | 0.987 | 0.90 times |
+| all three | 0.976 | 0.85 times |
+
+The suite therefore ranks builds the way the code bases do, with three limits.
+
+- **A predicted change is larger than the measured one**, because the programs hold about 78% of
+  a run's time on ry and the rest of the run changes less.
+- **The predicted level is pessimistic.** The suite predicted 1.34x, 1.39x and 1.47x for the
+  first configuration where the code bases measured 1.62x, 1.68x and 1.62x. A replay runs one
+  call over and over, which is not how a code base calls it, so compare predictions with each
+  other and not with a code base's time.
+- **Wall time on a shared machine cannot show a small change.** The study ran the same build
+  twice, 100 minutes apart, and the second run was 14 to 16% slower on the code bases and 21 to
+  27% slower in the suite, because the machine's speed drifted. Within one run, one program's
+  median batch time varies by about 20% between identical runs on either engine. Time two builds
+  in the same rounds (`--baseline PATH`) and read the predicted speed-ups, not a single program's
+  ratio. For a change under about 10%, compare instruction counts.
+
+#### How much to trust an instruction count
+
+Two instruction passes over the same build agree to 0.01% on each code base's weighted total
+(finbench 3,294,004,993 and 3,293,995,120). The median program differs by 0.013% and the worst,
+`brio::write_lines`, by 0.41%, so a change of 1% in one program is visible.
+
+By default the runner adds ten rounds when any program's interval is wider than 10% either way,
+which on a shared machine is every time, so pass `--extra-rounds 0` for a quick look.
 
 ### Comparing two builds on testthat
 

@@ -485,8 +485,14 @@ def run_track(args):
             runner.close()
         for engine in pending:
             # A program that failed in any round has no time: its median would mix fewer runs.
-            measured["hot"][engine.key] = {name: statistics.median(times) for name, times in rounds[engine.key].items()
-                                           if len(times) == args.rounds}
+            times = {name: statistics.median(times) for name, times in rounds[engine.key].items()
+                     if len(times) == args.rounds}
+            # A configuration that ran no program (a build that does not start) is not recorded,
+            # so the next run measures it again once it is fixed.
+            if times:
+                measured["hot"][engine.key] = times
+            else:
+                print(f"{engine.label} ran no program of the suite; it stays unmeasured", flush=True)
         save()
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="ry-hot-track-"))
@@ -499,7 +505,8 @@ def run_track(args):
             found = measured["codebases"].setdefault(codebase, {})
             runs = [("gnu_r", configurations[0][1], {})] + configurations
             for name, binary, env in runs:
-                if name in found:
+                # A failed run is kept for the table but measured again on the next call.
+                if found.get(name, {}).get("seconds") is not None:
                     continue
                 engine = bench.Engine("gnu_r" if name == "gnu_r" else "ry", name, None, codebase_base)
                 result = bench.run_codebase(oracle, os.path.abspath(binary), directory, engine,
