@@ -23,7 +23,7 @@ use {
         check::Empty,
         hir::{ExpressionKind, Symbol},
         naming::RefClassKey,
-        sorted::SortedSet,
+        sorted::{SortedMap, SortedSet},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
@@ -595,8 +595,8 @@ pub fn is_ry_syntax(kind: SyntaxKind) -> bool {
 /// only; derived per-item values must use `item_syntax` to keep cutting off.
 pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
     let file = *item.file(db);
-    let index = *item_span_positions(db, file).get(&item)?;
-    let range = item_spans(db, file).get(index)?.range;
+    let index = *item_tree_positions(db, file).get(&item.as_id())?;
+    let range = item_spans(db, file).get(index as usize)?.range;
     let parse = parse(db, file);
     // Descend by range: a linear child walk per item is quadratic in statements.
     parse
@@ -606,21 +606,14 @@ pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
         .filter(|node| node.text_range() == range)
 }
 
+/// Where each item stands in its file's [`item_tree`], which is also its place in
+/// [`item_spans`], keyed by the item's id. It reads the tree, so an edit inside a body
+/// leaves it standing.
 #[salsa::tracked(returns(ref))]
-fn item_tree_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item<'db>, usize> {
-    item_tree(db, file)
-        .iter()
-        .enumerate()
-        .map(|(index, &item)| (item, index))
-        .collect()
-}
-
-#[salsa::tracked(returns(ref))]
-fn item_span_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item<'db>, usize> {
-    item_spans(db, file)
-        .iter()
-        .enumerate()
-        .map(|(index, span)| (span.item, index))
+fn item_tree_positions(db: &dyn Db, file: SourceFile) -> SortedMap<salsa::Id, u32> {
+    (0_u32..)
+        .zip(item_tree(db, file))
+        .map(|(index, item)| (item.as_id(), index))
         .collect()
 }
 
@@ -1129,15 +1122,22 @@ pub fn inline_annotations_enabled(db: &dyn Db) -> bool {
     AnalysisSettings::try_get(db).is_none_or(|settings| *settings.inline_annotations(db))
 }
 
-/// A file's `# typing:` directive wins over `[check] strict`. Unset settings count as strict,
-/// so a host that installs none still sees every origin [`diagnostics::strict_diagnostics`]
-/// reports.
-pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
+/// Whether `file` is strict. Its `# typing:` directive decides, and a file without one takes
+/// `default`, which is where the readers differ: the analysis takes `[check] strict`, and a
+/// package load takes the package's setting.
+pub fn file_follows_strict(db: &dyn Db, file: SourceFile, default: impl FnOnce() -> bool) -> bool {
     match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => AnalysisSettings::try_get(db).is_none_or(|settings| *settings.strict(db)),
+        Some(mode) => *mode == TypingMode::Strict,
+        None => default(),
     }
+}
+
+/// [`file_follows_strict`] under `[check] strict`. Unset settings count as strict, so a host
+/// that installs none still sees every origin [`diagnostics::strict_diagnostics`] reports.
+pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
+    file_follows_strict(db, file, || {
+        AnalysisSettings::try_get(db).is_none_or(|settings| *settings.strict(db))
+    })
 }
 
 /// Whether a literal bound outside any function in `file` is a ry value: the file is strict,
@@ -1146,10 +1146,9 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
 pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     // Unlike `file_is_strict`, a host with no settings does not count as strict here, because
     // this changes types rather than only reporting origins.
-    let strict = match file_typing_mode(db, file) {
-        Some(mode) => *mode == TypingMode::Strict,
-        None => AnalysisSettings::try_get(db).is_some_and(|settings| *settings.strict(db)),
-    };
+    let strict = file_follows_strict(db, file, || {
+        AnalysisSettings::try_get(db).is_some_and(|settings| *settings.strict(db))
+    });
     if strict {
         return true;
     }
@@ -1957,7 +1956,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
 /// item's [`item_links`], which a body edit that only shifts ranges backdates, so the walks
 /// that find cyclic groups do not re-run for it.
 pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> &'db [Item<'db>] {
-    &item_links(db, item).edges
+    item_links(db, item).edges()
 }
 
 fn interface_edges<'db>(
@@ -1965,7 +1964,8 @@ fn interface_edges<'db>(
     item: Item<'db>,
     naming: &naming::ItemNaming,
     links: &ItemLinks<'db>,
-) -> ThinVec<Item<'db>> {
+    names: &[Symbol],
+) -> Vec<Item<'db>> {
     let package = *item.file(db).kind(db) == DocumentKind::Package;
     // How the item reads each listed name, as bits at the name's position in its links: through
     // its file's frame first (immediately or deferred), straight from the layers
@@ -1976,7 +1976,7 @@ fn interface_edges<'db>(
     const SIDE: u8 = 8;
     let through_frame = |deferred: bool| if deferred { DEFERRED } else { IMMEDIATE };
     let past_file = if package { 0 } else { LAYERS };
-    let mut reads = vec![0_u8; links.names.len()];
+    let mut reads = vec![0_u8; names.len()];
     let mut mark = |name: Symbol, how: u8| {
         if let Some(read) = links
             .position(name)
@@ -2027,7 +2027,7 @@ fn interface_edges<'db>(
         mark(name, SIDE);
     }
     let mut targets: Vec<Item<'db>> = Vec::new();
-    for (position, (&name, &how)) in links.names.iter().zip(&reads).enumerate() {
+    for (position, (&name, &how)) in names.iter().zip(&reads).enumerate() {
         if how == 0 {
             continue;
         }
@@ -2080,7 +2080,7 @@ fn interface_edges<'db>(
             push_unique(&mut targets, winner);
         }
     }
-    ThinVec::from(targets)
+    targets
 }
 
 /// Where the project binds each name an item's naming lists, outside the item's own scopes:
@@ -2090,27 +2090,29 @@ fn interface_edges<'db>(
 /// anywhere re-runs it, and it backdates unless one of the item's own names moved, so the
 /// item's check and edges depend on exactly the names the item reads.
 ///
-/// The layout is one row per name and one per binding, in parallel arrays. Every item keeps
+/// The layout is one word per name and one word and one item per binding. Every item keeps
 /// its links for the whole run, most names have one binding or none, and a row of five
-/// optional items per name would cost four times the memory.
+/// optional items per name would cost four times the memory. Two thin vectors hold it all, so
+/// the memo is two pointers wide and an item without links allocates nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct ItemLinks<'db> {
-    /// The listed names, sorted by symbol index.
-    names: Box<[Symbol]>,
-    /// Per name, where its run of bindings ends.
-    ends: Box<[u32]>,
-    /// Per binding, what it is to the reader. A name's run is sorted by kind, so the
-    /// conditional writers of one layer are adjacent.
-    kinds: Box<[LinkKind]>,
-    items: Box<[Item<'db>]>,
-    /// [`item_interface_edges`].
-    edges: ThinVec<Item<'db>>,
-    /// Whether the item's file is one of the project's, so that the package layer holds every
-    /// top-level name a package file binds, and the helper layer every one a helper file binds.
-    file_in_project: bool,
+    /// A header, the listed names, then the bindings. The header is the number of names
+    /// above [`FILE_IN_PROJECT`]. A name is its symbol's index, and the names are sorted. A
+    /// binding is the position of its name above its [`LinkKind`], and the bindings are
+    /// sorted, so a name's bindings are adjacent and so are the conditional writers of one
+    /// layer.
+    words: ThinVec<u32>,
+    /// Per binding, the item it names, then [`item_interface_edges`].
+    items: ThinVec<Item<'db>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+/// The header bit that says the item's file is one of the project's, so that the package
+/// layer holds every top-level name a package file binds, and the helper layer every one a
+/// helper file binds.
+const FILE_IN_PROJECT: u32 = 1;
+const LINK_KIND_BITS: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkKind {
     /// The binder in the item's file an immediate read sees ([`FrameBinders::binder`]).
     Immediate,
@@ -2174,12 +2176,22 @@ fn item_links<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLinks<'db> {
             conditional_slot_items(db, files),
         )
     });
-    let mut ends: Vec<u32> = Vec::with_capacity(names.len());
-    let mut kinds: Vec<LinkKind> = Vec::new();
-    let mut items: Vec<Item<'db>> = Vec::new();
-    for &name in &names {
+    let Ok(name_count) = u32::try_from(names.len()) else {
+        panic!("item_links: an item lists more than u32::MAX names");
+    };
+    assert!(
+        name_count < 1 << (u32::BITS - LINK_KIND_BITS),
+        "item_links: an item lists more names than a binding can address"
+    );
+    let file_in_project = project
+        .is_some_and(|files| bit(project_file_set(db, files), file.as_id().index() as usize));
+    let mut words: Vec<u32> = Vec::with_capacity(1 + 2 * names.len());
+    words.push(name_count << 1 | if file_in_project { FILE_IN_PROJECT } else { 0 });
+    words.extend(names.iter().map(|name| name.index()));
+    let mut items: Vec<Item<'db>> = Vec::with_capacity(names.len());
+    for (position, &name) in (0_u32..).zip(&names) {
         let mut link = |kind: LinkKind, item: Item<'db>| {
-            kinds.push(kind);
+            words.push(position << LINK_KIND_BITS | kind as u32);
             items.push(item);
         };
         if let Some(binder) = frame.binder(name, false) {
@@ -2217,61 +2229,89 @@ fn item_links<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLinks<'db> {
                 }
             }
         }
-        let Ok(end) = u32::try_from(items.len()) else {
-            panic!("item_links: an item links more than u32::MAX bindings");
-        };
-        ends.push(end);
     }
     let mut links = ItemLinks {
-        names: names.into_boxed_slice(),
-        ends: ends.into_boxed_slice(),
-        kinds: kinds.into_boxed_slice(),
-        items: items.into_boxed_slice(),
-        edges: ThinVec::new(),
-        file_in_project: project
-            .is_some_and(|files| bit(project_file_set(db, files), file.as_id().index() as usize)),
+        words: ThinVec::from(words),
+        items: ThinVec::from(items),
     };
-    links.edges = interface_edges(db, item, naming, &links);
+    let edges = interface_edges(db, item, naming, &links, &names);
+    // The edges go behind the bindings in a vector sized for both: growing it in place would
+    // round the allocation up to the next doubling.
+    let mut items = ThinVec::with_capacity(links.items.len() + edges.len());
+    items.extend(links.items.iter().copied().chain(edges));
+    links.items = items;
     links
 }
 
 impl<'db> ItemLinks<'db> {
+    fn name_count(&self) -> usize {
+        self.words
+            .first()
+            .map_or(0, |&header| (header >> 1) as usize)
+    }
+
+    fn file_in_project(&self) -> bool {
+        self.words
+            .first()
+            .is_some_and(|&header| header & FILE_IN_PROJECT != 0)
+    }
+
+    /// The bindings' words, which follow the header and the names.
+    fn binding_words(&self) -> &[u32] {
+        self.words.get(1 + self.name_count()..).unwrap_or_default()
+    }
+
+    fn edges(&self) -> &[Item<'db>] {
+        self.items
+            .get(self.binding_words().len()..)
+            .unwrap_or_default()
+    }
+
     fn position(&self, name: Symbol) -> Option<usize> {
-        self.names
-            .binary_search_by_key(&name.index(), |listed| listed.index())
+        self.words
+            .get(1..1 + self.name_count())?
+            .binary_search(&name.index())
             .ok()
     }
 
     /// What a read of the name at `position` sees, immediately or deferred.
     fn bindings(&self, position: usize, deferred: bool) -> NameBindings<'_, 'db> {
-        let start = position
-            .checked_sub(1)
-            .and_then(|previous| self.ends.get(previous))
-            .map_or(0, |&end| end as usize);
-        let end = self.ends.get(position).map_or(start, |&end| end as usize);
-        let kinds = self.kinds.get(start..end).unwrap_or_default();
-        let items = self.items.get(start..end).unwrap_or_default();
-        let writers = |kind: LinkKind| {
-            let first = kinds.partition_point(|&other| (other as u8) < kind as u8);
-            let count = kinds[first..].partition_point(|&other| other == kind);
-            items.get(first..first + count).unwrap_or_default()
-        };
-        let one = |kind: LinkKind| writers(kind).first().copied();
-        NameBindings {
-            frame: one(match deferred {
-                true => LinkKind::Deferred,
-                false => LinkKind::Immediate,
-            }),
-            sourced: one(LinkKind::Sourced),
-            test: NameLayer {
-                winner: one(LinkKind::TestWinner),
-                conditional_writers: writers(LinkKind::TestWriter),
-            },
-            package: NameLayer {
-                winner: one(LinkKind::PackageWinner),
-                conditional_writers: writers(LinkKind::PackageWriter),
-            },
+        let words = self.binding_words();
+        let of_name = |word: u32| (word >> LINK_KIND_BITS) as usize;
+        let mut bindings = NameBindings::default();
+        let mut index = words.partition_point(|&word| of_name(word) < position);
+        while let Some(&word) = words.get(index)
+            && of_name(word) == position
+        {
+            // The writers of one layer share a word, so a run of equal words is one list.
+            let run = words[index..]
+                .iter()
+                .take_while(|&&other| other == word)
+                .count();
+            let items = self.items.get(index..index + run).unwrap_or_default();
+            let first = items.first().copied();
+            match word & ((1 << LINK_KIND_BITS) - 1) {
+                kind if kind == LinkKind::Immediate as u32 => {
+                    if !deferred {
+                        bindings.frame = first;
+                    }
+                }
+                kind if kind == LinkKind::Deferred as u32 => {
+                    if deferred {
+                        bindings.frame = first;
+                    }
+                }
+                kind if kind == LinkKind::Sourced as u32 => bindings.sourced = first,
+                kind if kind == LinkKind::TestWinner as u32 => bindings.test.winner = first,
+                kind if kind == LinkKind::TestWriter as u32 => {
+                    bindings.test.conditional_writers = items;
+                }
+                kind if kind == LinkKind::PackageWinner as u32 => bindings.package.winner = first,
+                _ => bindings.package.conditional_writers = items,
+            }
+            index += run;
         }
+        bindings
     }
 }
 
@@ -3097,9 +3137,8 @@ impl<'db> FrameBinders<'db> {
                 DocumentKind::Test | DocumentKind::TestHelper
             ),
             position: item_tree_positions(db, file)
-                .get(&item)
-                .copied()
-                .unwrap_or_else(|| item_tree(db, file).len()),
+                .get(&item.as_id())
+                .map_or_else(|| item_tree(db, file).len(), |&position| position as usize),
         }
     }
 
@@ -3188,7 +3227,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         // the package layer, so a name that layer does not bind has no binder in the file.
         // The helper files' layer holds a helper file's names the same way. A test file or a
         // script has no layer over its own names and asks.
-        let unbound = self.links.file_in_project
+        let unbound = self.links.file_in_project()
             && match self.kind {
                 DocumentKind::Package => !package.binds(),
                 DocumentKind::TestHelper => !test.binds(),
@@ -3333,7 +3372,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         if let Some(slot) = slot {
             let mut schemes = self.schemes.borrow_mut();
             if schemes.is_empty() {
-                schemes.resize(2 * self.links.names.len(), None);
+                schemes.resize(2 * self.links.name_count(), None);
             }
             if let Some(resolved) = schemes.get_mut(slot) {
                 *resolved = Some(scheme.clone());
@@ -3487,8 +3526,8 @@ fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashS
 #[salsa::tracked(returns(copy))]
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let file = *item.file(db);
-    let index = *item_span_positions(db, file).get(&item)?;
-    item_spans(db, file).get(index)?.name_range
+    let index = *item_tree_positions(db, file).get(&item.as_id())?;
+    item_spans(db, file).get(index as usize)?.name_range
 }
 
 /// The single reading of a statement's shape for both item identity and name range.

@@ -8,7 +8,7 @@
 
 use {
     crate::{
-        Db, Item, ItemKind, SourceFile, TypingMode, file_typing_mode,
+        Db, Item, ItemKind, SourceFile, TypingMode, file_follows_strict, file_typing_mode,
         hir::Symbol,
         item_naming, item_spans,
         metadata::{
@@ -725,11 +725,7 @@ pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc
 
 /// Whether `file` follows strict mode: its own typing directive, else the package default.
 pub fn file_is_strict(db: &dyn Db, sources: PackageSources, file: SourceFile) -> bool {
-    match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => *sources.strict(db),
-    }
+    file_follows_strict(db, file, || *sources.strict(db))
 }
 
 /// Classifies the top-level statements of a strict `file`, which decides which constants
