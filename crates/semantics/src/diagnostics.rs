@@ -15,7 +15,7 @@ use {
         file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
-        inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
+        inline_annotations_enabled, item_check, item_hir, item_naming, item_spans,
         item_syntax, item_tree,
         lints::LintConfig,
         metadata::{
@@ -176,7 +176,6 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
-        let _ = item_name_range(db, item);
         let _ = crate::item_syntax_flags(db, item);
     }
 }
@@ -1733,17 +1732,14 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
 #[salsa::tracked(returns(ref))]
 fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange, usize)> {
     let mut sites = Vec::new();
-    for (index, &item) in item_tree(db, file).iter().enumerate() {
-        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
+    for (index, span) in item_spans(db, file).iter().enumerate() {
+        if !matches!(*span.item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
-        let Some(name) = item.name(db).clone() else {
+        let (Some(name), Some(range)) = (span.item.name(db), span.name_range) else {
             continue;
         };
-        let Some(range) = item_name_range(db, item) else {
-            continue;
-        };
-        sites.push((name, range, index));
+        sites.push((name.as_str().to_owned(), range, index));
     }
     sites
 }
@@ -2569,7 +2565,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         if let Some(name) = item_name.clone()
             && let Some(module) = item_hir(db, item)
             && let Some(root) = module.root
-            && let Some(name_range) = item_name_range(db, item)
+            && let Some(name_range) = span.name_range
         {
             let root_range = module.range(root);
             let statement_range = root_range + offset;

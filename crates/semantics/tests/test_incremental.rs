@@ -578,11 +578,11 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     // Each file's group walk verifies the links it reaches, so validations of `item_links`
     // follow the items a check demands. What must not happen is any item recomputing them.
     assert_eq!(
-        db.executions_since(&["item_links", "item_top_level_names"]),
+        db.executions_since(&["item_links", "item_bound_names"]),
         [0, 0],
-        "the edited item's top-level names read only its memoized own-name flag, which backdates; \
-         its naming backdates too, so nothing recomputes links or the edges they hold, and none \
-         of the five items in the untouched files reruns either"
+        "the edited item binds only its own name, which its memoized syntax flags say and which \
+         backdate; its naming backdates too, so nothing recomputes links or the edges they hold, \
+         and none of the five items in the untouched files reruns either"
     );
 }
 

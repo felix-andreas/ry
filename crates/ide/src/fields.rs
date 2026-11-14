@@ -555,7 +555,7 @@ fn file_fields(db: &dyn Db, file: SourceFile) -> FileFields {
             })
         {
             forwarders.push(Forwarder {
-                name: name.clone(),
+                name: name.as_str().to_owned(),
                 formals: hir[parameters]
                     .iter()
                     .map(|parameter| parameter.name.to_string())

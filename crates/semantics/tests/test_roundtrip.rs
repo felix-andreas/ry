@@ -121,7 +121,7 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
         if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
             continue;
         }
-        let (Some(name), Some(check)) = (item.name(db).clone(), item_check(db, item)) else {
+        let (Some(name), Some(check)) = (item.name(db), item_check(db, item)) else {
             continue;
         };
         let Some(scheme) = &check.scheme else {
@@ -134,7 +134,7 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
             continue;
         }
         let mut renderer = TypeRenderer::default();
-        schemes.push((name, renderer.render_scheme(db, scheme), line_start));
+        schemes.push((name.as_str().to_owned(), renderer.render_scheme(db, scheme), line_start));
     }
     schemes
 }

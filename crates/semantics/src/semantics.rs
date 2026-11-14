@@ -321,8 +321,8 @@ fn derived_edit(old: &str, new: &str) -> (TextRange, TextSize) {
 pub struct Item<'db> {
     pub file: SourceFile,
     pub kind: ItemKind,
-    #[returns(ref)]
-    pub name: Option<String>,
+    #[returns(copy)]
+    pub name: Option<Symbol>,
     pub parent: Option<Item<'db>>,
     pub disambiguator: u32,
 }
@@ -363,7 +363,7 @@ pub struct ItemSpan<'db> {
 pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> {
     let parse = parse(db, file);
     let root = parse.syntax_node();
-    let mut counts: FxHashMap<(ItemKind, Option<String>), u32> = FxHashMap::default();
+    let mut counts: FxHashMap<(ItemKind, Option<Symbol>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
     for node in root.children() {
         if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
@@ -372,13 +372,13 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
         let (kind, name, name_range) = match top_level_definition(&node) {
             Some(definition) => (
                 definition.kind,
-                Some(definition.name),
+                Some(Symbol::new(&definition.name)),
                 Some(definition.name_range),
             ),
             None => (ItemKind::Statement, None, None),
         };
         let disambiguator = {
-            let counter = counts.entry((kind, name.clone())).or_insert(0);
+            let counter = counts.entry((kind, name)).or_insert(0);
             let current = *counter;
             *counter += 1;
             current
@@ -852,9 +852,9 @@ pub fn package_scheme_exists_in(
 }
 
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
-/// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
-/// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone))]
+/// `item_syntax`. It reads one file-wide walk, which an edit to the file repeats. A query
+/// that reads an item's own syntax runs again after such an edit anyway, so a memo per item
+/// here would cut nothing off.
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
@@ -957,7 +957,7 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
     {
         return None;
     }
-    let passed = match item.name(db).as_deref()? {
+    let passed = match item.name(db)?.as_str() {
         ".onLoad" | ".onAttach" => 2,
         ".onUnload" | ".onDetach" | ".Last.lib" => 1,
         _ => return None,
@@ -1623,9 +1623,7 @@ pub fn file_conditional_writers<'db>(
 fn item_side_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Symbol> {
     let own_name = item.name(db);
     item_top_level_names(db, item)
-        .iter()
-        .copied()
-        .filter(|name| own_name.as_deref() != Some(name.as_str()))
+        .filter(|name| own_name != Some(*name))
         .collect()
 }
 
@@ -1831,7 +1829,7 @@ pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(Symbol, 
     item_tree(db, file)
         .iter()
         .filter(|item| matches!(*item.kind(db), ItemKind::Function | ItemKind::Value))
-        .filter_map(|&item| Some((Symbol::new(item.name(db).as_deref()?), item)))
+        .filter_map(|&item| Some((item.name(db)?, item)))
         .collect()
 }
 
@@ -1872,10 +1870,10 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
 pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
-        if let Some(name) = item.name(db).clone()
+        if let Some(name) = item.name(db)
             && *reads_use_method(db, item)
         {
-            generics.insert(name);
+            generics.insert(name.as_str().to_owned());
         }
     }
     generics
@@ -1908,7 +1906,7 @@ enum Source<'a, 'db> {
 }
 
 fn binder_source<'a, 'db>(db: &'db dyn Db, binder: Item<'db>, name: &str) -> Source<'a, 'db> {
-    match binder.name(db).as_deref() == Some(name) {
+    match binder.name(db).is_some_and(|own| own.as_str() == name) {
         true => Source::Definition(binder),
         false => Source::Statement(binder),
     }
@@ -1926,16 +1924,20 @@ fn layer_source<'a, 'db>(
     }
 }
 
+/// The names an item binds at top level, each once and in no promised order. Most items bind
+/// only their own name, which the item carries, so only the others keep a set.
+pub fn item_top_level_names<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> impl Iterator<Item = Symbol> + 'db {
+    let own_only = item_binds_only_own_name(db, item);
+    let own = own_only.then(|| item.name(db)).flatten();
+    let bound = (!own_only).then(|| item_bound_names(db, item));
+    own.into_iter().chain(bound.into_iter().flatten().copied())
+}
+
 #[salsa::tracked(returns(ref))]
-pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<Symbol> {
-    if item_binds_only_own_name(db, item) {
-        return item
-            .name(db)
-            .as_deref()
-            .map(Symbol::new)
-            .into_iter()
-            .collect();
-    }
+fn item_bound_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<Symbol> {
     let Some(naming) = item_naming(db, item) else {
         return SortedSet::default();
     };
@@ -2748,8 +2750,7 @@ fn unknown_group_exports<'db>(
                 .iter()
                 .map(|&item| {
                     let top_level_bindings = item_top_level_names(db, item)
-                        .iter()
-                        .map(|&name| (name, unknown.clone()))
+                        .map(|name| (name, unknown.clone()))
                         .collect();
                     let exports = MemberExports {
                         scheme: unknown.clone(),
@@ -2884,12 +2885,12 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
                 && types::contains_unknown(db, exports.scheme.body)
                 && let Some(module) = item_hir(db, item)
                 && let Some(root) = module.root
-                && let Some(name) = item.name(db).clone()
+                && let Some(name) = item.name(db)
             {
                 check.strict_origins.push(check::StrictOrigin {
                     expression: root,
                     range: module.range(root),
-                    kind: check::StrictOriginKind::RecursiveUnknown(name),
+                    kind: check::StrictOriginKind::RecursiveUnknown(name.as_str().to_owned()),
                 });
             }
         }
@@ -3119,11 +3120,11 @@ fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32,
     let mut binders = Vec::new();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
         let index = u32::try_from(index).expect("a file holds fewer than u32::MAX items");
-        let own_name = item.name(db).as_deref().map(Symbol::new);
+        let own_name = item.name(db);
         if let Some(name) = own_name {
             binders.push((name, index, item));
         }
-        for &name in item_top_level_names(db, item) {
+        for name in item_top_level_names(db, item) {
             if own_name != Some(name) {
                 binders.push((name, index, item));
             }
@@ -3549,9 +3550,8 @@ fn arithmetic_classes_among(names: impl Iterator<Item = Symbol>) -> stubs::Symbo
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
-/// `setGeneric` name string, recorded by [`item_spans`]. Memoized so that a check reading
-/// it from another file depends on this one range, not on every span of that file.
-#[salsa::tracked(returns(copy))]
+/// `setGeneric` name string, recorded by [`item_spans`]. A query that reads it depends on
+/// every span of the item's file, so only the file's own queries and editor requests do.
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let file = *item.file(db);
     let index = *item_tree_positions(db, file).get(&item.as_id())?;
@@ -3707,7 +3707,7 @@ mod tests {
     use {super::*, salsa::Setter as _};
 
     fn function_item<'db>(db: &'db RootDatabase, file: SourceFile, name: &str) -> Item<'db> {
-        Item::new(db, file, ItemKind::Function, Some(name.to_owned()), None, 0)
+        Item::new(db, file, ItemKind::Function, Some(Symbol::new(name)), None, 0)
     }
 
     #[test]

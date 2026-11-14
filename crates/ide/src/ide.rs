@@ -1165,8 +1165,8 @@ fn hierarchy_item(db: &dyn Db, item: Item<'_>) -> Option<CallHierarchyItem> {
     Some(CallHierarchyItem {
         name: item
             .name(db)
-            .clone()
-            .unwrap_or_else(|| "(top level)".to_owned()),
+            .map_or("(top level)", Symbol::as_str)
+            .to_owned(),
         detail: if is_function {
             function_detail(&node)
         } else {
@@ -3239,7 +3239,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
                 }
             };
         symbols.push(DocumentSymbol {
-            name: name.clone(),
+            name: name.as_str().to_owned(),
             kind,
             detail,
             range,
@@ -5094,7 +5094,7 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
         };
         if let Some(name) = item.name(db) {
             names.push(GlobalName {
-                name: name.clone(),
+                name: name.as_str().to_owned(),
                 is_function,
                 item: Some(item),
             });
