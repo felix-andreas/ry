@@ -75,9 +75,10 @@ pub fn check_unserialize_input(bytes: &[u8]) -> bool {
 /// Generates a program over `a` and `b` and checks that the tier-0 bytecode agrees with the AST
 /// evaluator on it: the program's value evaluated directly must equal its value as a closure body
 /// on each of the first three calls, the second and later of which run compiled bytecode. The
-/// compiled body runs in a slot frame, so it also runs once more with the frame given its
-/// environment before the body and once after it, with invariants on, so each reification is
-/// checked against the bindings the heap-frame path would have made.
+/// compiled body runs in a slot frame, so it runs again with the frame's environment in each of
+/// its states, reached before the body and after it: made but binding nothing, holding the one
+/// variable a lookup asked for, and holding every variable. Invariants are on, so the frame is
+/// checked whenever its environment takes every variable.
 pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     syntax::testing::enable_invariants();
     let body = program(entropy);
@@ -611,23 +612,31 @@ unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
         );
         let direct = run(&format!("local_value <- {{ {body} }}\nlocal_value"));
         run(&format!("f <- function(a, b) {{ {body} }}"));
-        // `caller()` hands out its caller's environment, which makes a slot frame reify.
+        // Each observer asks more of its caller's environment: `named` only makes it, `read`
+        // looks one variable up in it, which moves that variable out of its slot, and `listed`
+        // reads its bindings as a whole, which moves them all.
         run("parent <- function(n) .Internal(parent.frame(n))");
-        run("caller <- function() parent(1L)");
-        run(&format!("before <- function(a, b) {{ caller(); {body} }}"));
-        run(&format!(
-            "after <- function(a, b) {{ result <- {{ {body} }}; caller(); result }}"
-        ));
+        run("named <- function() parent(1L)");
+        run("read <- function() .Internal(exists(\"b\", parent(1L), \"any\", FALSE))");
+        run("listed <- function() .Internal(ls(parent(1L), TRUE, TRUE))");
         let mut compiled: Vec<String> = (0..3)
             .map(|_| {
                 run(&reset);
                 run(&format!("f({a}, {b})"))
             })
             .collect();
-        for function in ["before", "after"] {
-            for _ in 0..2 {
-                run(&reset);
-                compiled.push(run(&format!("{function}({a}, {b})")));
+        for observer in ["named", "read", "listed"] {
+            run(&format!(
+                "before <- function(a, b) {{ {observer}(); {body} }}"
+            ));
+            run(&format!(
+                "after <- function(a, b) {{ result <- {{ {body} }}; {observer}(); result }}"
+            ));
+            for function in ["before", "after"] {
+                for _ in 0..2 {
+                    run(&reset);
+                    compiled.push(run(&format!("{function}({a}, {b})")));
+                }
             }
         }
         (direct, compiled)
@@ -1572,8 +1581,6 @@ pub fn check_frame_stack(entropy: &mut impl Entropy) {
             missing: 0,
             caller: 0,
             pending: nil,
-            unforced: 0,
-            pending_shared: false,
             inlined: false,
             reified_by: crate::NOT_REIFIED,
             args: id,
@@ -1585,6 +1592,7 @@ pub fn check_frame_stack(entropy: &mut impl Entropy) {
             closures: 0,
             handle_mark: 0,
             previous_owner: 0,
+            references: 0,
         };
         let mut stack = FrameStack::new();
         // Each live frame's id and whether it holds the shared handler entry.

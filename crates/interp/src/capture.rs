@@ -1282,12 +1282,11 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
         let mut scope = env;
         let mut found = None;
         while scope != top && scope != values::empty_env() {
-            let frame = eval::resolved_env(scope)?;
-            if let Some(cell) = heap.frame_cell(frame, symbol) {
+            if let Some(cell) = heap.frame_cell(scope, symbol) {
                 found = Some((cell, Place::Local));
                 break;
             }
-            scope = frame.enclosure();
+            scope = scope.enclosure();
         }
         // `*tmp*` is no binding: a complex assignment keeps the value it stands for aside.
         if found.is_none() && symbol == values::symbols().tmp {
@@ -1462,7 +1461,7 @@ unsafe fn is_user_top(top: Sexp) -> bool {
 /// The environment a call's arguments are evaluated in.
 unsafe fn caller_env(sys_parent: Sexp) -> R<Sexp> {
     if sys_parent != nil() {
-        return eval::resolved_env(sys_parent);
+        return Ok(sys_parent);
     }
     let owner = interp().slot_owner;
     if owner == crate::NO_SLOTS {

@@ -275,6 +275,12 @@ pub fn start_from_environment() {
     let keep_stacks = stacks.is_some();
     let publishing = path.is_some();
     PUBLISHING.store(publishing, Ordering::Relaxed);
+    if let Some(period) = std::env::var("RY_ALLOC_SITES")
+        .ok()
+        .and_then(|period| period.parse::<u64>().ok())
+    {
+        activity::set_allocation_period(period);
+    }
     activity::set_enabled(true);
     let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {
@@ -1232,11 +1238,36 @@ fn report(
     for (count, name) in kinds {
         writeln!(out, "| objects freed: {name} | {count} |")?;
     }
+    let kind_name = |code: usize| {
+        if code == 26 {
+            "binding cell"
+        } else {
+            SexpType::from_code(code as u32).map_or("?", |kind| kind.name())
+        }
+    };
+    let allocated = activity::allocation_counts();
+    for (code, count) in allocated.iter().enumerate() {
+        if *count > 0 {
+            writeln!(out, "| objects allocated: {} | {count} |", kind_name(code))?;
+        }
+    }
     writeln!(out, "| most objects live | {} |", stats.max_live_objects)?;
     writeln!(
         out,
         "| most vector memory live (MB) | {:.1} |",
         stats.max_vector_cells as f64 * 8.0 / 1e6
     )?;
+    let mut sites = activity::allocation_sites();
+    if !sites.is_empty() {
+        sites.sort_by_key(|site| std::cmp::Reverse(site.1));
+        writeln!(out, "\n## Allocation sites (sampled)\n")?;
+        writeln!(out, "| kind | samples | call path, innermost first |")?;
+        writeln!(out, "| --- | ---: | --- |")?;
+        for (site, count) in sites {
+            let (kind, path) = site.split_once('\t').unwrap_or(("", &site));
+            let kind = kind.parse::<usize>().map_or("?", kind_name);
+            writeln!(out, "| {kind} | {count} | `{path}` |")?;
+        }
+    }
     Ok(out)
 }
