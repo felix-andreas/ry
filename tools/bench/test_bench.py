@@ -12,7 +12,7 @@ this file.
 
 usage: python3 -I tools/bench/test_bench.py
 """
-import argparse, hashlib, importlib.util, io, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
+import argparse, hashlib, importlib.util, io, math, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
 from contextlib import redirect_stdout
 
 here = pathlib.Path(__file__).resolve().parent
@@ -401,6 +401,33 @@ class HotSelection(unittest.TestCase):
         hot.weigh_programs(programs, "finbench")
         hot.weigh_programs(programs, "dsbench")
         self.assertEqual([program["weight"] for program in programs], [{"finbench": 0.75}, {"finbench": 0.25, "dsbench": 1.0}])
+
+    def test_tracking_compares_each_configuration_with_the_first(self):
+        programs = [{"id": "a", "weight": {"finbench": 0.75}}, {"id": "b", "weight": {"finbench": 0.25}}]
+        measured = {"hot": {"gnu_r": {"a": 1.0, "b": 1.0}, "new": {"a": 0.5, "b": 1.0}, "old": {"a": 1.0, "b": 2.0},
+                            "broken": {"a": 1.0}},
+                    "codebases": {"finbench": {"gnu_r": {"seconds": 100.0}, "new": {"seconds": 50.0, "checksum": "ok"},
+                                               "old": {"seconds": 100.0, "checksum": "ok"},
+                                               "broken": {"seconds": None, "reason": "crashed"}}}}
+        new, old, broken = hot.tracking_rows(measured, programs, ["new", "old", "broken"], "finbench")
+        self.assertEqual((new["predicted"], new["measured"], new["predicted_change"]), (0.625, 0.5, 0.0))
+        self.assertEqual((old["predicted"], old["measured"]), (1.25, 1.0))
+        self.assertAlmostEqual(old["predicted_change"], math.log(2))
+        self.assertAlmostEqual(old["measured_change"], math.log(2))
+        # A program the configuration did not run leaves the prediction to the others' weight.
+        self.assertEqual((broken["predicted"], broken["weight"], broken["measured_change"]), (1.0, 0.75, None))
+
+    def test_a_configuration_names_a_binary_and_its_environment(self):
+        self.assertEqual(hot.parse_configuration("nojit=/opt/ry,RY_JIT=off,RY_BASE_R=/base"),
+                         ("nojit", "/opt/ry", {"RY_JIT": "off", "RY_BASE_R": "/base"}))
+        with self.assertRaises(SystemExit):
+            hot.parse_configuration("/opt/ry")
+
+    def test_correlation_needs_three_changes(self):
+        self.assertEqual(hot.correlation([(0.1, 0.1), (0.2, 0.2)]), (None, None))
+        r, slope = hot.correlation([(0.1, 0.05), (0.2, 0.1), (-0.2, -0.1)])
+        self.assertAlmostEqual(r, 1.0)
+        self.assertAlmostEqual(slope, 0.5)
 
 
 class BuildProfile(unittest.TestCase):

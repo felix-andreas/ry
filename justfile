@@ -195,6 +195,13 @@ bench-hot-capture dir captures="target/hot-captures":
     python3 -I tools/bench/tooling/hot.py validate --captures {{ captures }}
     python3 -I tools/bench/tooling/hot.py select --captures {{ captures }}
 
+# Checks that the hot suite predicts the code bases in DIR: times both on each ry configuration (`NAME=RY[,VARIABLE=VALUE...]`,
+# the first being the reference) and on GNU R, and prints the predicted against the measured change with their correlation, e.g.
+# `just bench-hot-track /tmp/codebases head=target/release/ry nojit=target/release/ry,RY_JIT=off old=/tmp/ry-0.4.3/ry`.
+bench-hot-track dir +configurations:
+    cargo build --release -p oracle
+    python3 -I tools/bench/tooling/hot.py track --codebases {{ dir }} --out target/hot-track.json {{ configurations }}
+
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench-check *args:
     cargo build --release -p ry-lang

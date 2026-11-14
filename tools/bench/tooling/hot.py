@@ -27,10 +27,20 @@ recorder samples a key's calls uniformly, and a sampled call ran under the same 
 other call of the key, so whatever the capture run adds to the key's time cancels in that ratio.
 Every step is deterministic for the same capture.
 
+A fourth step checks that the suite predicts the code bases:
+
+  track     times the suite and the code bases' tests on several ry configurations (other builds,
+            or one build with other settings) and on GNU R, and reports per code base how the
+            suite's predicted change of each configuration against the first compares with the
+            measured change, with their correlation. The suite is representative when a change it
+            shows is the change the code bases see.
+
 Usage:
     python3 -I hot.py capture --codebases DIR --out DIR [--ry PATH] [--rscript PATH] [--only NAME,...]
     python3 -I hot.py validate --captures DIR [--rscript PATH]
     python3 -I hot.py select --captures DIR [--suite DIR] [--programs N] [--coverage F] [--samples N]
+    python3 -I hot.py track --codebases DIR --out FILE.json [--rounds N] [--only NAME,...] [--rscript PATH]
+                            NAME=RY[,VARIABLE=VALUE...] ...
 """
 
 import argparse
@@ -41,6 +51,7 @@ import math
 import os
 import pathlib
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -72,11 +83,20 @@ def main():
     select.add_argument("--coverage", type=float, default=0.9,
                         help="stop adding keys once every code base has this share of its captured time")
     select.add_argument("--samples", type=int, default=3, help="samples per program")
-    for step in (capture, validate):
+    track = steps.add_parser("track", help="compare the suite's predicted changes with the code bases' measured ones")
+    track.add_argument("--codebases", required=True, type=pathlib.Path, help="where tooling/generate.py wrote them")
+    track.add_argument("--out", required=True, type=pathlib.Path,
+                       help="the measurements, as JSON; one already in the file is not taken again")
+    track.add_argument("--suite", type=pathlib.Path, default=bench.here / bench.HOT_SUITE)
+    track.add_argument("--rounds", type=int, default=5, help="runs of the suite per configuration")
+    track.add_argument("--only", default="", help="comma-separated code bases (default: all three)")
+    track.add_argument("configurations", nargs="+", metavar="NAME=RY[,VARIABLE=VALUE...]",
+                       help="a ry binary and the environment it runs with; the first is the reference")
+    for step in (capture, validate, track):
         step.add_argument("--rscript", default=os.environ.get("ORACLE_R_RSCRIPT", "Rscript"), help="GNU R's Rscript")
     capture.add_argument("--ry", default=str(bench.root / "target/release/ry"), help="the ry build")
     args = parser.parse_args()
-    {"capture": run_capture, "validate": run_validate, "select": run_select}[args.step](args)
+    {"capture": run_capture, "validate": run_validate, "select": run_select, "track": run_track}[args.step](args)
 
 
 # Capture.
@@ -378,6 +398,168 @@ def reasons_of(entry):
     reasons = [(entry[field], field.replace("_", " ")) for field in ("dots", "local_closure", "user_binding", "caller_frame", "oversize")
                if entry[field]]
     return ", ".join(f"{count:.0f} {reason}" for count, reason in sorted(reasons, key=lambda item: -item[0])) or "no reason"
+
+
+# Tracking.
+
+def run_track(args):
+    """Measures the suite and the code bases on every configuration, then prints the comparison.
+    The measurements accumulate in `--out`, so a run that stopped continues where it was."""
+    oracle = bench.root / "target/release/oracle"
+    if not oracle.exists():
+        sys.exit("error: the code bases run through the oracle; build it with `cargo build --release -p oracle`")
+    configurations = [parse_configuration(text) for text in args.configurations]
+    names = [name for name in args.only.split(",") if name] or list(CODEBASES)
+    manifest = bench.load_hot_suite(args.suite)
+    programs = manifest["programs"]
+    base = {key: value for key, value in os.environ.items() if not key.startswith("RY_")}
+    base.update(LC_ALL="C.UTF-8", **bench.library_environment(args.rscript, dependency_library()))
+    measured = json.loads(args.out.read_text()) if args.out.exists() else {}
+    measured.setdefault("hot", {})
+    measured.setdefault("codebases", {})
+
+    def save():
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(measured, indent=1) + "\n")
+
+    engines = [bench.Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base)]
+    engines += [bench.Engine(name, name, [binary, "run", "--runtime", "ry"], dict(base, **env))
+                for name, binary, env in configurations]
+    pending = [engine for engine in engines if engine.key not in measured["hot"]]
+    if pending:
+        runner = bench.HotRunner(bench.HOT_SUITE, args, directory=args.suite)
+        try:
+            rounds = {engine.key: {program["id"]: [] for program in programs} for engine in pending}
+            for round_ in range(args.rounds):
+                for engine in pending:
+                    for name, result in runner.run_batch(programs, engine).items():
+                        if result.get("seconds") is not None:
+                            rounds[engine.key][name].append(result["seconds"])
+                    print(f"suite round {round_ + 1} of {args.rounds} on {engine.label}", flush=True)
+        finally:
+            runner.close()
+        for engine in pending:
+            # A program that failed in any round has no time: its median would mix fewer runs.
+            measured["hot"][engine.key] = {name: statistics.median(times) for name, times in rounds[engine.key].items()
+                                           if len(times) == args.rounds}
+        save()
+
+    work = pathlib.Path(tempfile.mkdtemp(prefix="ry-hot-track-"))
+    codebase_base = dict(base, **bench.codebase_environment(args.rscript))
+    try:
+        for codebase in names:
+            directory = (args.codebases / codebase).resolve()
+            if not directory.is_dir():
+                sys.exit(f"error: no code base {directory}; write the code bases with tooling/generate.py")
+            found = measured["codebases"].setdefault(codebase, {})
+            runs = [("gnu_r", configurations[0][1], {})] + configurations
+            for name, binary, env in runs:
+                if name in found:
+                    continue
+                engine = bench.Engine("gnu_r" if name == "gnu_r" else "ry", name, None, codebase_base)
+                result = bench.run_codebase(oracle, os.path.abspath(binary), directory, engine,
+                                            dict(codebase_base, **env), work / f"{codebase}-{name}.json")
+                result.pop("blocks", None)
+                found[name] = result
+                print(f"{codebase} on {name}: {result.get('checksum', result.get('reason'))}, "
+                      f"{result['seconds']} s of test blocks", flush=True)
+                save()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    print_tracking(measured, programs, [name for name, _, _ in configurations], names)
+
+
+def parse_configuration(text):
+    """`NAME=RY[,VARIABLE=VALUE...]` as the name, the binary and its environment."""
+    name, separator, rest = text.partition("=")
+    binary, *pairs = rest.split(",")
+    if not separator or not name or name == "gnu_r" or not binary or any("=" not in pair for pair in pairs):
+        sys.exit(f"error: a configuration is NAME=RY[,VARIABLE=VALUE...], and `{text}` is not")
+    return name, binary, dict(pair.split("=", 1) for pair in pairs)
+
+
+def predicted_ratio(times, baseline, programs, codebase):
+    """ry's time over GNU R's for the suite's programs in the proportions `codebase` runs them:
+    the mean of each program's ratio weighted by its share of the code base's GNU R time, over the
+    programs both engines ran. Also the summed weight of those programs."""
+    weight = cost = 0.0
+    for program in programs:
+        share = program["weight"].get(codebase, 0.0)
+        engine, reference = times.get(program["id"]), baseline.get(program["id"])
+        if share and engine and reference:
+            weight += share
+            cost += share * engine / reference
+    return (cost / weight if weight else None), weight
+
+
+def tracking_rows(measured, programs, configurations, codebase):
+    """Per configuration: the predicted and the measured ratio of ry's time to GNU R's for
+    `codebase`, and each one's change against the first configuration as a difference of logs."""
+    runs = measured["codebases"].get(codebase, {})
+    gnu_r = (runs.get("gnu_r") or {}).get("seconds")
+    rows = []
+    for name in configurations:
+        predicted, weight = predicted_ratio(measured["hot"].get(name, {}), measured["hot"].get("gnu_r", {}),
+                                            programs, codebase)
+        seconds = (runs.get(name) or {}).get("seconds")
+        rows.append({"name": name, "predicted": predicted, "weight": weight,
+                     "measured": seconds / gnu_r if seconds and gnu_r else None,
+                     "checksum": (runs.get(name) or {}).get("checksum", "failed")})
+    reference = rows[0]
+    for row in rows:
+        complete = all(found[key] for found in (row, reference) for key in ("predicted", "measured"))
+        row["predicted_change"] = math.log(row["predicted"] / reference["predicted"]) if complete else None
+        row["measured_change"] = math.log(row["measured"] / reference["measured"]) if complete else None
+    return rows
+
+
+def correlation(pairs):
+    """Pearson's r of the pairs, and the slope of the least-squares line through the origin: how
+    much of a predicted change shows up in the measurement. None with fewer than three pairs."""
+    if len(pairs) < 3:
+        return None, None
+    mean_x = sum(x for x, _ in pairs) / len(pairs)
+    mean_y = sum(y for _, y in pairs) / len(pairs)
+    spread_x = sum((x - mean_x) ** 2 for x, _ in pairs)
+    spread_y = sum((y - mean_y) ** 2 for _, y in pairs)
+    squares = sum(x * x for x, _ in pairs)
+    if not spread_x or not spread_y:
+        return None, None
+    r = sum((x - mean_x) * (y - mean_y) for x, y in pairs) / math.sqrt(spread_x * spread_y)
+    return r, sum(x * y for x, y in pairs) / squares
+
+
+def print_tracking(measured, programs, configurations, codebases):
+    pooled = []
+    for codebase in codebases:
+        rows = tracking_rows(measured, programs, configurations, codebase)
+        print(f"\n{codebase} (time over GNU R's; change against {configurations[0]})")
+        print("| configuration | predicted | measured | predicted change | measured change | tests |")
+        print("| --- | ---: | ---: | ---: | ---: | --- |")
+        for row in rows:
+            def ratio(value):
+                return "n/a" if value is None else f"{value:.3f}"
+
+            def change(value):
+                return "n/a" if value is None else f"{math.expm1(value):+.1%}"
+            print(f"| {row['name']} | {ratio(row['predicted'])} | {ratio(row['measured'])} | "
+                  f"{change(row['predicted_change'])} | {change(row['measured_change'])} | {row['checksum']} |")
+        pairs = [(row["predicted_change"], row["measured_change"]) for row in rows[1:]
+                 if row["predicted_change"] is not None]
+        pooled += pairs
+        print_correlation(codebase, pairs)
+    if len(codebases) > 1:
+        print()
+        print_correlation("all code bases", pooled)
+
+
+def print_correlation(label, pairs):
+    r, slope = correlation(pairs)
+    if r is None:
+        print(f"{label}: too few configurations for a correlation ({len(pairs)} changes)")
+    else:
+        print(f"{label}: r = {r:.3f} between the predicted and the measured log changes of {len(pairs)} "
+              f"configurations; a predicted change shows up {slope:.2f} times in the measurement")
 
 
 # Files.
