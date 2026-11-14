@@ -550,6 +550,119 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// S3 dispatch finds the method a full walk of the scope finds while the method names are bound,
+/// rebound and unbound by every route a program has: in the global frame, a function frame, an
+/// argument, a child environment, a methods table attached to base or detached from it, base
+/// itself, a delayed or active binding, and a frame bound while detached and attached later.
+/// Each case uses a fresh generic, so every name starts bound nowhere and its lookups take the
+/// path that reads only the base binding until something binds it. With invariants on, that
+/// path checks each answer against the full walk, so a disagreement fails the case; the log of
+/// statements is part of the failure.
+pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CASES: AtomicUsize = AtomicUsize::new(0);
+    syntax::testing::enable_invariants();
+    let generic = format!("lkgen{}", CASES.fetch_add(1, Ordering::Relaxed));
+    let classes = ["lka", "lkb"];
+    let values = [
+        "function(x, ...) \"one\"",
+        "function(x, ...) c(\"two\", NextMethod())",
+        "function(x, ...) .Generic",
+        "17",
+    ];
+    let targets = [
+        "globalenv()",
+        "lk_e",
+        "lk_table",
+        "baseenv()",
+        ".Internal(environment(lk_caller))",
+    ];
+    let setup = format!(
+        "{{ {generic} <- function(x, ...) UseMethod(\"{generic}\")
+           {generic}.default <- function(x, ...) \"default\"
+           lk_obj <- 1
+           class(lk_obj) <- c(\"lka\", \"lkb\")
+           lk_table <- .Internal(new.env(TRUE, baseenv(), 29L))
+           .__S3MethodsTable__. <- lk_table
+           lk_e <- .Internal(new.env(TRUE, globalenv(), 29L))
+           lk_caller <- function() {generic}(lk_obj)
+           lk_nested <- function() {{ inner <- function() {generic}(lk_obj); inner() }}
+           lk_binder <- function(v) {{ {generic}.lka <- v; {generic}(lk_obj) }}
+           lk_argument <- function({generic}.lkb) {generic}(lk_obj)
+           NULL }}"
+    );
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            assert_ne!(run(&setup), "error", "the setup fails: {setup}");
+            let mut log = vec![setup.clone()];
+            for _ in 0..24 {
+                let name = format!("{generic}.{}", classes[entropy.below(classes.len())]);
+                let value = values[entropy.below(values.len())];
+                let target = targets[entropy.below(targets.len())];
+                let statement = match entropy.below(16) {
+                    0 => format!("{generic}(lk_obj)"),
+                    1 => "lk_caller()".to_owned(),
+                    2 => "lk_nested()".to_owned(),
+                    3 => format!(".Internal(eval(quote({generic}(lk_obj)), lk_e, NULL))"),
+                    4 => format!("lk_binder({value})"),
+                    5 => format!("lk_argument({value})"),
+                    6 => format!("{name} <- {value}"),
+                    7 => format!(".Internal(assign(\"{name}\", {value}, {target}, FALSE))"),
+                    8 => format!(".Internal(remove(\"{name}\", {target}, FALSE))"),
+                    9 => format!(
+                        ".Internal(delayedAssign(\"{name}\", {value}, globalenv(), {target}))"
+                    ),
+                    10 => format!(
+                        ".Internal(makeActiveBinding(quote({name}), function() {value}, {target}))"
+                    ),
+                    11 => format!(
+                        "lk_d <- .Internal(new.env(TRUE, emptyenv(), 29L)); \
+                         .Internal(assign(\"{name}\", {value}, lk_d, FALSE)); \
+                         .Internal(`parent.env<-`(lk_d, globalenv())); \
+                         environment(lk_caller) <- lk_d"
+                    ),
+                    12 => "lk_table <- .Internal(new.env(TRUE, emptyenv(), 29L)); \
+                           .__S3MethodsTable__. <- lk_table"
+                        .to_owned(),
+                    13 => "lk_table <- .Internal(new.env(TRUE, baseenv(), 29L)); \
+                           .__S3MethodsTable__. <- lk_table"
+                        .to_owned(),
+                    14 => "environment(lk_caller) <- lk_e".to_owned(),
+                    _ => format!(
+                        "length(lk_obj); length.{} <- function(x) 7L; length(lk_obj)",
+                        classes[entropy.below(classes.len())]
+                    ),
+                };
+                log.push(statement.clone());
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&statement)));
+                if let Err(payload) = outcome {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| {
+                            payload
+                                .downcast_ref::<&str>()
+                                .map(|text| (*text).to_owned())
+                        })
+                        .unwrap_or_default();
+                    panic!("{message}\nafter:\n{}", log.join("\n"));
+                }
+            }
+            run(&format!(
+                "{{ .Internal(remove(c(\"{generic}\", \"{generic}.default\", \"{generic}.lka\", \
+                 \"{generic}.lkb\", \"lk_obj\", \"lk_table\", \".__S3MethodsTable__.\", \"lk_e\", \
+                 \"lk_d\", \"lk_caller\", \"lk_nested\", \"lk_binder\", \"lk_argument\", \
+                 \"length.lka\", \"length.lkb\"), globalenv(), FALSE)) }}"
+            ));
+            run(&format!(
+                "{{ .Internal(remove(c(\"{generic}.lka\", \"{generic}.lkb\"), baseenv(), FALSE)) }}"
+            ));
+        }
+    });
+}
+
 fn fused_expression(entropy: &mut impl Entropy, depth: usize) -> String {
     if depth == 0 || entropy.below(4) == 0 {
         let leaves = ["a", "b", "a", "b", "2", "1L", "0.5", "NA", "TRUE"];
