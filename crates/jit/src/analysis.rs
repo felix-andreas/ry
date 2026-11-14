@@ -106,6 +106,11 @@ pub enum Ty {
     /// A closure made by a `function` expression of this body, in this activation's
     /// environment: its formals and its body as source.
     Closure(Sexp, Sexp),
+    /// Any boxed value, which a function lookup found and which is probably a closure with
+    /// the formals and the code of this one, in whatever environment. Nothing may rely on
+    /// that: a call inlines this closure's body and checks the value when it starts
+    /// ([`Action::Frame`]), and everything else reads the type as [`Ty::Boxed`].
+    Callee(Sexp),
     /// A plain (attribute-free) record, tuple or tag of exactly this interned layout. Only native
     /// functions hold one, as a pointer to the object.
     Rec(u32),
@@ -128,7 +133,10 @@ impl Ty {
 
     /// Whether every value of this type is a plain object, which no builtin dispatches on.
     pub fn is_plain(self) -> bool {
-        !matches!(self, Ty::Boxed | Ty::Bottom | Ty::Closure(..))
+        !matches!(
+            self,
+            Ty::Boxed | Ty::Bottom | Ty::Closure(..) | Ty::Callee(_)
+        )
     }
 
     pub fn is_numeric_scalar(self) -> bool {
@@ -579,6 +587,21 @@ pub enum Effect {
     Opaque,
 }
 
+/// Where an inlined call whose callee is known only by its code finds the closure to run
+/// ([`Action::Frame`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Loaded {
+    /// The register a function lookup left the closure in.
+    pub register: usize,
+    /// How many enclosures out from the calling frame's enclosure the closure's environment
+    /// is.
+    pub levels: u8,
+}
+
+/// How far out from a frame's enclosure the environment of a closure it calls may be for the
+/// call to be inlined by the callee's code ([`Loaded::levels`]).
+pub const MAX_CALLEE_LEVELS: u8 = 8;
+
 /// Whether a [`Action::Step`] first offers its instruction to tier 0's fast handler for it
 /// (`bytecode::fast_step`), which runs an element read or store without the step's write-back,
 /// validation and reload when its shape applies.
@@ -870,6 +893,14 @@ pub enum Action<'a> {
         dst: usize,
         function: Sexp,
     },
+    /// A function lookup done at run time from the frame's enclosure, for a name the frame
+    /// does not bind whose binding is not the same for every enclosure the code runs for:
+    /// compiled code walks the enclosing function frames as the lookup goes now and takes the
+    /// closure it finds, and tier 0 runs the lookup when it goes any other way.
+    GetFunFree {
+        dst: usize,
+        symbol: Sexp,
+    },
     /// A function lookup that finds a closure in a slot, loading the slot first when `load`.
     GetFunSlot {
         dst: usize,
@@ -967,10 +998,17 @@ pub enum Action<'a> {
     /// the callee's first read of its formal `i` forces: the argument is that formal, or an
     /// expression that always reads it. Only a body that is itself inlined records them,
     /// because its formals are bound to no promise that could record the force itself.
+    ///
+    /// With `loaded`, `function` is only an example of the callee: the call runs whatever
+    /// closure the register holds, when that closure has `function`'s formals and code and
+    /// its environment is the one `levels` enclosures out from the calling frame's
+    /// enclosure. The callee's plan then stands for every such closure, and the code keeps
+    /// neither `function` nor its environment.
     Frame {
         steps: &'a [(Action<'a>, StateId)],
         callee: &'a Plan<'a>,
         function: Sexp,
+        loaded: Option<Loaded>,
         call: Sexp,
         args: &'a [Passing],
         positions: &'a [i32],
@@ -1937,7 +1975,7 @@ struct Builder<'a> {
     /// The plan of each closure asked to be inlined with a frame of its own and the type of
     /// its value, or `None` for one that cannot be, so each body is planned once however many
     /// calls of it the body makes.
-    callees: Map<'a, Sexp, Result<(&'a Plan<'a>, Ty), &'static str>>,
+    callees: Map<'a, (Sexp, bool), Result<(&'a Plan<'a>, Ty), &'static str>>,
     /// The closure's formals in order, the variables that may hold a promise nothing has
     /// forced.
     formals: SmallVec<[Sexp; 8]>,
@@ -2512,6 +2550,30 @@ impl<'a> Builder<'a> {
                             function,
                         }
                     }
+                    // A body that several enclosures share cannot name the function a
+                    // short-lived frame binds, but the lookup usually goes the same way from
+                    // each of them.
+                    _ if self.shared && !self.global && !self.bound_locally(symbol) => {
+                        match resolve_function(symbol, self.enclosure) {
+                            Some(found) => {
+                                state.registers[operand(0)] = match self.levels_to(found.function)
+                                {
+                                    Some(_) => Ty::Callee(found.function),
+                                    None => Ty::Boxed,
+                                };
+                                Action::GetFunFree {
+                                    dst: operand(0),
+                                    symbol,
+                                }
+                            }
+                            None => self.opaque_step(
+                                state,
+                                Some((operand(0), Ty::Boxed)),
+                                &[],
+                                Effect::Opaque,
+                            ),
+                        }
+                    }
                     _ => {
                         self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
                     }
@@ -2746,16 +2808,7 @@ impl<'a> Builder<'a> {
                             Some(function.tag()),
                             operand(0),
                         )
-                        .or_else(|| match self.frame(state, call, function, operand(0)) {
-                            Ok(action) => Some(action),
-                            Err(why) => {
-                                if crate::logging() {
-                                    let call = interp::deparse::deparse_one_line(call);
-                                    eprintln!("jit: no inlined frame for {call}: {why}");
-                                }
-                                None
-                            }
-                        })
+                        .or_else(|| self.frame_or_log(state, call, function, operand(0), None))
                         .or_else(|| {
                             self.direct_call(
                                 state,
@@ -2764,6 +2817,16 @@ impl<'a> Builder<'a> {
                                 (operand(0), self.call_result_at(inst.pc, function)),
                             )
                         }),
+                    Ty::Callee(function) => {
+                        let loaded = self.levels_to(function).map(|levels| Loaded {
+                            register: operand(1),
+                            levels,
+                        });
+                        match loaded {
+                            Some(_) => self.frame_or_log(state, call, function, operand(0), loaded),
+                            None => None,
+                        }
+                    }
                     _ => None,
                 };
                 match inlined {
@@ -3690,6 +3753,7 @@ impl<'a> Builder<'a> {
         call: Sexp,
         function: Sexp,
         dst: usize,
+        loaded: Option<Loaded>,
     ) -> Result<Action<'a>, &'static str> {
         if self.no_frames {
             return Err("the body's calls kept being unable to start without their frames");
@@ -3708,7 +3772,10 @@ impl<'a> Builder<'a> {
         {
             return Err("a call that passes or collects `...`");
         }
-        let (callee, result) = self.callee(function)?;
+        let (callee, result) = self.callee(function, loaded.is_some())?;
+        if loaded.is_some() {
+            self.adopt(callee, function.tag())?;
+        }
         let mut lowering = Lowering {
             state: state.clone(),
             steps: List::new_in(self.arena),
@@ -3839,6 +3906,7 @@ impl<'a> Builder<'a> {
             steps: lowering.steps.leak(),
             callee,
             function,
+            loaded,
             call,
             args: args.leak(),
             positions: self.arena.0.alloc_slice_copy(&positions),
@@ -3847,18 +3915,91 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// [`Self::frame`], logging why the call gets no inlined frame.
+    unsafe fn frame_or_log(
+        &mut self,
+        state: &mut State<'a>,
+        call: Sexp,
+        function: Sexp,
+        dst: usize,
+        loaded: Option<Loaded>,
+    ) -> Option<Action<'a>> {
+        match self.frame(state, call, function, dst, loaded) {
+            Ok(action) => Some(action),
+            Err(why) => {
+                if crate::logging() {
+                    let call = interp::deparse::deparse_one_line(call);
+                    eprintln!("jit: no inlined frame for {call}: {why}");
+                }
+                None
+            }
+        }
+    }
+
+    /// How many enclosures out from this frame's enclosure the environment of the closure
+    /// `function` is, when a call may be inlined by the closure's code ([`Loaded`]).
+    unsafe fn levels_to(&self, function: Sexp) -> Option<u8> {
+        if function.kind() != SexpType::Closure || function.cdr().kind() != SexpType::Bytecode {
+            return None;
+        }
+        let empty = interp::heap().known().empty_env;
+        let mut env = self.enclosure;
+        for levels in 0..=MAX_CALLEE_LEVELS {
+            if env == function.tag() {
+                return Some(levels);
+            }
+            if env == empty {
+                return None;
+            }
+            env = env.enclosure();
+        }
+        None
+    }
+
+    /// Makes the function lookups the inlined `callee` starts from `enclosure`, its example
+    /// closure's environment, lookups of this frame, when they find the same bindings from
+    /// this frame's enclosure. The environment of the closure a call runs is some enclosure
+    /// of this frame's ([`Loaded::levels`]), so its lookups pass through the end of this
+    /// frame's own, and proving this frame's proves them for whichever closure runs.
+    unsafe fn adopt(&mut self, callee: &Plan<'a>, enclosure: Sexp) -> Result<(), &'static str> {
+        for speculation in callee.speculations.iter() {
+            if speculation.env != enclosure {
+                continue;
+            }
+            let same = resolve_function(speculation.symbol, self.enclosure).is_some_and(|found| {
+                found.cell == speculation.cell && found.function == speculation.function
+            });
+            if !same || self.bound_locally(speculation.symbol) {
+                return Err("the callee looks a function up differently than its caller");
+            }
+            if self.speculate(speculation.symbol) != Some(speculation.function) {
+                return Err("the callee looks up a function its caller cannot speculate on");
+            }
+        }
+        Ok(())
+    }
+
     /// The plan of `function`'s body as an inlined frame and the type of its value, or why a
-    /// call of it needs its frame.
-    unsafe fn callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
-        if let Some(&found) = self.callees.get(&function) {
+    /// call of it needs its frame. `loaded` plans the body for every closure of its code
+    /// ([`Loaded`]), which no environment's lifetime limits.
+    unsafe fn callee(
+        &mut self,
+        function: Sexp,
+        loaded: bool,
+    ) -> Result<(&'a Plan<'a>, Ty), &'static str> {
+        if let Some(&found) = self.callees.get(&(function, loaded)) {
             return found;
         }
-        let found = self.plan_callee(function);
-        self.callees.insert(function, found);
+        let found = self.plan_callee(function, loaded);
+        self.callees.insert((function, loaded), found);
         found
     }
 
-    unsafe fn plan_callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
+    unsafe fn plan_callee(
+        &mut self,
+        function: Sexp,
+        loaded: bool,
+    ) -> Result<(&'a Plan<'a>, Ty), &'static str> {
         let (formals, code, enclosure) = (function.car(), function.cdr(), function.tag());
         if self.depth >= MAX_INLINE_DEPTH {
             return Err("the call is nested too deep");
@@ -3875,7 +4016,9 @@ impl<'a> Builder<'a> {
         }
         // An environment that is still pending belongs to a running slot frame, which a real
         // call of the closure would give its environment.
-        if enclosure.has_gp(gp::PENDING_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
+        if enclosure.has_gp(gp::PENDING_FRAME)
+            || (self.shared && !loaded && !crate::long_lived(enclosure))
+        {
             return Err("the callee's environment may not outlive the code");
         }
         let constants = code.cdr();
@@ -4015,7 +4158,7 @@ impl<'a> Builder<'a> {
         // A value that is a closure the plan knows is still an object to the caller.
         let result = match result {
             Ty::Bottom => return Err("the callee never returns"),
-            Ty::Fun(_) | Ty::Closure(..) | Ty::Num => Ty::Boxed,
+            Ty::Fun(_) | Ty::Closure(..) | Ty::Callee(_) | Ty::Num => Ty::Boxed,
             ty => ty,
         };
         let plan: &'a Plan<'a> = self.arena.0.alloc(plan);
