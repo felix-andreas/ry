@@ -1062,9 +1062,9 @@ pub fn package_scheme_exists_in(
 }
 
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
-/// `item_syntax`. It reads one file-wide walk, which an edit to the file repeats. A query
-/// that reads an item's own syntax runs again after such an edit anyway, so a memo per item
-/// here would cut nothing off.
+/// `item_syntax`. One walk per file attaches them all. An edit to the file repeats the walk,
+/// and it comes out equal while no `#:` block changed, so a reader of an item's annotations
+/// runs again only when some block of its file did.
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)

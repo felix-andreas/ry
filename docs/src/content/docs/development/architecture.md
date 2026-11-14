@@ -244,7 +244,7 @@ block changed, because a detached subtree compares by content and not by positio
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
-agreement candidates in `diagnostics.rs`, `item_name_range`, `item_syntax_flags` (whether
+agreement candidates in `diagnostics.rs`, `item_syntax_flags` (whether
 an item binds only its own name, and whether it is declared pure), and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
@@ -512,9 +512,9 @@ hashes four bytes per name and never rereads the spelling.
 
 Types are hash-consed, so type equality is an id comparison and nothing is ever deep-cloned. Deep
 resolution cuts any cycle to `Unknown`. It returns at once for a type whose id says it holds no
-variable and applies no alias, walks a type of up to 64 nodes directly, and keeps a table of
-finished subtrees for the length of one call above that size. The decision log records that
-design.
+variable and applies no alias. A walk that has taken 64 steps starts a table of the subtrees it
+finishes, which lives for that one call, so a subtree shared through variables or aliases
+resolves once. The decision log records that design.
 
 ### The package-load index
 

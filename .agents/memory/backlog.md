@@ -86,43 +86,30 @@ crates", has the shape and the measurements behind this list.
 - **`libr` has 24 test binaries, each linked against the whole runtime**, and no fast linker is
   configured. Both show in `cargo test-release`, not in the edit loop measured above.
 
-## Open: the analysis core after the single lookup path
+## Open: the analysis core after the type store
 
-`decisions.md`, "Decision record: every host resolves names through one path, and trees live in
-the host's store", has the shape and the measurements behind this list.
+`decisions.md` has the shape and the measurements behind this list, in "Decision record: types
+and symbols are four-byte ids into append-only columns", "Decision record: an item's syntax has a
+stamp, so an edit lowers only the items it changed" and "Decision record: the analysis core's
+per-item and per-file tables after the type store".
 
-- **The type store.** `Ty` is a pointer to an immortal hash-consed entry whose kinds hold `Vec`s.
-  The target is a `u32` id into a struct-of-arrays store with a per-item store for types that
-  contain inference variables. Three caches exist only because of the current shape and go with
-  it: the per-thread recent-entry cache in front of the interner's shards (`types.rs`), and
-  `InferenceTable`'s `resolve_cache` and `definition_cache` (`infer.rs`).
-- **A whole-project check costs about 1.5% more CPU and 11 MB more than with the two paths**
-  (2.61 s against 2.57 s and 248 MB against 237 MB on the finance bench; wall time is equal
-  within run-to-run noise). `item_links` keeps one memo per item, 50,815 on that project, and
-  resolves every name the item's naming lists, where the command's old path resolved a name
-  when the check asked for it and kept no memo. Under callgrind `item_links` is 4.8% of a
-  check's instructions, a quarter of it the lazily built `file_binders`.
-- **The file open at start-up settles about 6 ms later than with the two paths** (44 ms against
-  38 ms at the median of six runs on the finance bench, `tools/bench/tooling/lsp_latency.py`).
-  Not profiled. The opened file's check is not the cause: it runs the same 313 per-item
-  queries on both builds and fewer per-name ones (`crates/ry/examples/cold_open_probe.rs`).
-- **Every item of an edited file lowers again before `item_hir` backdates**, because no memo
-  holds the item's syntax. It does not show in request latency after an edit. Lowering only
-  the items whose window of the tree changed needs the splice to report which top-level runs
-  it copied.
-- **"Is this file strict" has three definitions** (`semantics.rs` twice, `load_index.rs` once)
-  that disagree on the default. One function should answer it.
-- **`item_links` sorts its names and edges by `Symbol::index()`**, which is interning order, and
-  parallel workers intern in a different order on every run. Every reader is order-insensitive
-  today. Sort by the name's text, or by first use in the item, before a reader depends on the
-  order.
-- **Two per-body facts in `check.rs` are sized to the whole item**: the `superassign_seeds`
-  column and the `callees` bitset are allocated at the item's binding count for every function
-  body or bracket query that asks. Size them to the body, or collect once per item.
-- **`TreeStore` is one process-wide mutex**, taken by every `parse` and `item_node`, and two
-  workers that miss the same file both parse it. Shard the store by file id and let the second
-  worker wait for the first one's tree. Not measured as a cost on the finance bench at four
-  cores.
+- **`item_links` resolves every name an item's naming lists**, where a check that resolved a
+  name on first use would skip the names a body never reaches. @@LINKS@@
+- **A tracked read on the server's worker outside `Worker::cancellable` can stop the worker.**
+  A notification queued behind the running job flips the cancellation token, and the next
+  query fetch unwinds. One such read was found by an intermittent test failure and fixed.
+  Nothing structural prevents the next one: audit the worker's reads in `server.rs`, or make
+  the database handle the worker holds outside `cancellable` unable to run a query.
+- **An edit to one `#:` block re-runs `item_annotations` for every item of the file**, because
+  each reads the per-file `file_item_annotations` map, which changes as a whole. Each comes out
+  equal and backdates. A per-item stamp for the block, like the item's own, would cut it
+  before lowering.
+- **Edits at both ends of a file between two reads re-stamp every item between them**, so they
+  lower again and backdate on `item_hir` equality. The store compares a prefix and a suffix
+  with the previous tree and nothing else.
+- **The type store and the symbol store never free an entry**, and the type store panics at
+  2^24 types. A server session measured so far saturates far below that. Revisit if a workload
+  shows growth.
 
 ## Open: one switch for every fast path
 

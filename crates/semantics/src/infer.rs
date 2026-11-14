@@ -11,7 +11,7 @@ use {
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar, Ty,
             TyKind, array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
-            map_child_types, native_scalar, scalar, substitute_rigid, type_size, union_of, unknown,
+            map_child_types, native_scalar, scalar, substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -81,8 +81,16 @@ struct NamedTypes<'db> {
     definitions: SmallVec<[Option<&'db NamedDefinition<'db>>; 8]>,
 }
 
-/// The variables and aliases one resolution is inside of, innermost last.
-type ResolutionStack = SmallVec<[InferenceVar; 16]>;
+/// The state of one call of [`InferenceTable::resolve`].
+#[derive(Default)]
+struct Resolution<'db> {
+    /// The variables and aliases the walk is inside of, innermost last.
+    visiting: SmallVec<[InferenceVar; 16]>,
+    steps: u32,
+    /// The subtrees finished since the walk passed [`UNMEMOIZED_RESOLUTION_STEPS`], each
+    /// with its resolution.
+    done: FxHashMap<Ty<'db>, Ty<'db>>,
+}
 
 thread_local! {
     /// Per thread, because a counter every checking thread bumps on each step costs more
@@ -99,10 +107,13 @@ pub fn resolve_calls() -> u64 {
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
 
-/// Types share subtrees, so a resolution that keeps no table of the subtrees it has done
-/// walks a shared one once per path, exponential in depth. The tree size bounds that walk,
-/// and up to this size it costs less than the table.
-const UNMEMOIZED_RESOLUTION_SIZE: u64 = 64;
+/// Types and bindings share subtrees, so a resolution that keeps no table of the subtrees it
+/// has finished walks a shared one once per path, exponential in depth. Most resolutions end
+/// within a few steps, where the table costs more than the walk, so a resolution starts
+/// keeping one only when it has taken this many steps. The steps are counted rather than
+/// read off the type's size, because a variable's binding and an alias's expansion are
+/// outside the type the walk started from.
+const UNMEMOIZED_RESOLUTION_STEPS: u32 = 64;
 
 /// The name of the type an overload probe substitutes for an unchecked argument. Only `Any`
 /// and an unconstrained type variable accept it, and no source annotation can spell it.
@@ -249,12 +260,7 @@ impl<'db> InferenceTable<'db> {
         if !self.resolves(db, ty) {
             return ty;
         }
-        let mut visiting = ResolutionStack::new();
-        if type_size(db, ty) <= UNMEMOIZED_RESOLUTION_SIZE {
-            return self.resolve_rec(db, ty, &mut visiting, None).0;
-        }
-        self.resolve_rec(db, ty, &mut visiting, Some(&mut FxHashMap::default()))
-            .0
+        self.resolve_rec(db, ty, &mut Resolution::default()).0
     }
 
     /// Whether resolving can change `ty`: it holds a variable, or applies a name that is an
@@ -270,41 +276,42 @@ impl<'db> InferenceTable<'db> {
     }
 
     /// The bool is whether the subtree is clean (no cycle cut beneath it): only clean results
-    /// are the same wherever the subtree occurs, so only those enter `done`, the subtrees
-    /// this resolution has finished.
+    /// are the same wherever the subtree occurs, so only those enter `done`.
     fn resolve_rec(
         &self,
         db: &'db dyn Db,
         ty: Ty<'db>,
-        visiting: &mut ResolutionStack,
-        mut done: Option<&mut FxHashMap<Ty<'db>, Ty<'db>>>,
+        resolution: &mut Resolution<'db>,
     ) -> (Ty<'db>, bool) {
         RESOLVE_CALLS.set(RESOLVE_CALLS.get() + 1);
+        resolution.steps = resolution.steps.saturating_add(1);
         if let Some(var) = ty.as_var(db) {
             let root = self.find(var);
             let shallow = self.shallow_resolve(db, ty);
             if shallow.is_var() {
                 return (shallow, true);
             }
-            if visiting.contains(&root) {
+            if resolution.visiting.contains(&root) {
                 return (unknown(db), false);
             }
-            visiting.push(root);
-            let resolved = self.resolve_rec(db, shallow, visiting, done);
-            visiting.pop();
+            resolution.visiting.push(root);
+            let resolved = self.resolve_rec(db, shallow, resolution);
+            resolution.visiting.pop();
             return resolved;
         }
 
         if !self.resolves(db, ty) {
             return (ty, true);
         }
-        if let Some(&finished) = done.as_deref().and_then(|done| done.get(&ty)) {
+        if !resolution.done.is_empty()
+            && let Some(&finished) = resolution.done.get(&ty)
+        {
             return (finished, true);
         }
 
         let mut clean = true;
         let resolved = map_child_types(db, ty, &mut |child| {
-            let (child, child_clean) = self.resolve_rec(db, child, visiting, done.as_deref_mut());
+            let (child, child_clean) = self.resolve_rec(db, child, resolution);
             clean &= child_clean;
             child
         });
@@ -318,21 +325,20 @@ impl<'db> InferenceTable<'db> {
             _ => None,
         };
         let (resolved, clean) = match alias {
-            Some((definition, arguments)) if visiting.len() < ALIAS_EXPANSION_LIMIT => {
+            Some((definition, arguments)) if resolution.visiting.len() < ALIAS_EXPANSION_LIMIT => {
                 let expanded = apply_definition(db, definition, arguments);
                 // Sentinel slot: alias depth counts against the variable cycle stack.
-                visiting.push(InferenceVar(u32::MAX));
-                let (expanded, expanded_clean) =
-                    self.resolve_rec(db, expanded, visiting, done.as_deref_mut());
-                visiting.pop();
+                resolution.visiting.push(InferenceVar(u32::MAX));
+                let (expanded, expanded_clean) = self.resolve_rec(db, expanded, resolution);
+                resolution.visiting.pop();
                 (expanded, clean && expanded_clean)
             }
             // Left as written past the bound, which other positions must not reuse.
             Some(_) => (resolved, false),
             None => (resolved, clean),
         };
-        if clean && let Some(done) = done {
-            done.insert(ty, resolved);
+        if clean && resolution.steps > UNMEMOIZED_RESOLUTION_STEPS {
+            resolution.done.insert(ty, resolved);
         }
         (resolved, clean)
     }
@@ -2003,6 +2009,32 @@ mod tests {
         let int = scalar(&db, Atomic::Integer);
         table.unify(&db, var, int).expect("binds");
         assert_eq!(table.resolve(&db, var), int);
+    }
+
+    #[test]
+    fn a_subtree_shared_through_variables_resolves_once() {
+        let db = RootDatabase::default();
+        let mut table = InferenceTable::default();
+        let depth = 48;
+        let variables: Vec<Ty<'_>> = (0..=depth)
+            .map(|_| table.fresh_ty(&db, Constraint::Unconstrained))
+            .collect();
+        for pair in variables.windows(2) {
+            let twice = Ty::new(&db, TyKind::Tuple(&[pair[1], pair[1]]));
+            table.unify(&db, pair[0], twice).expect("binds");
+        }
+        let int = scalar(&db, Atomic::Integer);
+        table.unify(&db, variables[depth], int).expect("binds");
+
+        let before = resolve_calls();
+        let resolved = table.resolve(&db, variables[0]);
+        let steps = resolve_calls() - before;
+
+        let expected =
+            (0..depth).fold(int, |inner, _| Ty::new(&db, TyKind::Tuple(&[inner, inner])));
+        assert_eq!(resolved, expected);
+        // A walk that resolves each shared tuple once per path takes 2^48 steps.
+        assert!(steps < 1_000, "{steps} steps");
     }
 
     #[test]
