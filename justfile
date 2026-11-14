@@ -172,9 +172,9 @@ perf:
     cargo test -p semantics --profile iterate --test test_perf -- --ignored --nocapture
     cargo test -p ry-lang --profile iterate --test test_perf -- --ignored --nocapture
 
-# Times one published benchmark suite (public, packages, kernels, applications, codebases, typed, or all). The first five
-# run on GNU R, ry and, where a program has a typed version, ry typed in strict mode; `typed` runs every typed
-# program against its Rust twin and needs rustc, not GNU R. Rounds are paired and shuffled, with a checksum
+# Times one published benchmark suite (public, packages, kernels, applications, codebases, hot, typed, or all). All but
+# `typed` run on GNU R, ry and, where a program has a typed version, ry typed in strict mode; `typed` runs every typed
+# program against its Rust twin and needs rustc, not GNU R. `hot` exists once `just bench-hot-capture` generated it. Rounds are paired and shuffled, with a checksum
 # gate against the suite's baseline, e.g. `just bench kernels --rounds 3 --filter fib` on target/release,
 # `just bench typed --ry target/iterate/ry --any-build` for a look at another build, or
 # `just bench all --release ry-x86_64-unknown-linux-gnu.tar.gz --write` on a tagged release archive (10+ rounds,
@@ -185,6 +185,16 @@ bench suite *args:
     # A release archive or a named binary brings its own build; anything else measures target/release.
     case " {{ args }} " in *" --release "*|*" --ry "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
+
+# Generates the hot suite (tools/bench/hot/suite.toml and samples/) from the code bases that tooling/generate.py wrote
+# to DIR: captures their package calls on ry, validates and calibrates the samples under GNU R, selects the programs and
+# weighs them, e.g. `just bench-hot-capture /tmp/codebases`. CAPTURES keeps the raw capture for another selection.
+bench-hot-capture dir captures="target/hot-captures":
+    cargo build --release -p ry-lang -p libr -p rcmd -p oracle
+    python3 -I tools/bench/tooling/hot.py capture --codebases {{ dir }} --out {{ captures }}
+    python3 -I tools/bench/tooling/hot.py validate --captures {{ captures }}
+    python3 -I tools/bench/tooling/hot.py select --captures {{ captures }}
+    python3 -I tools/bench/tooling/hot.py weigh
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench-check *args:
