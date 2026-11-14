@@ -6667,7 +6667,16 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     };
     let profile = values::ints_mut(constants.element(PROFILE));
     let optimized = constants.element(TIER1) != nil();
-    if !optimized {
+    if optimized {
+        // A body with optimized code asks at every entry, and goes on asking for as long as
+        // it has the code, so only an entry that lost the code reschedules.
+        let entered = (tier.enter)(machine);
+        if constants.element(TIER1) != nil() {
+            return entered;
+        }
+        return reschedule(tier, constants, entered);
+    }
+    {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
             let worth = (tier.worth_recording)(machine);
             values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
@@ -6677,15 +6686,19 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     }
     // Most bodies never compile, and asking the tier about every call of every body cost more
     // than the compiled code saved on a test suite.
-    let entered = if optimized
-        || ((entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0)
-    {
-        (tier.enter)(machine)
-    } else {
-        None
-    };
-    // The tier may have compiled, refused, or moved the counters, so the schedule is derived
-    // from what they hold now.
+    let entered =
+        if (entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
+            (tier.enter)(machine)
+        } else {
+            None
+        };
+    reschedule(tier, constants, entered)
+}
+
+/// Sets the entry at which the tiers next look at the body with `constants`, after the tier
+/// may have compiled, refused, or moved the counters: the schedule is derived from what they
+/// hold now. Passes `entered` through.
+unsafe fn reschedule(tier: &Tier, constants: Sexp, entered: Option<TierExit>) -> Option<TierExit> {
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES];
     let state = profile[profile::TIER_STATE];

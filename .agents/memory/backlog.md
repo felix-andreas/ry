@@ -201,9 +201,10 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
     of the callee's formals under a condition stays a promise, which costs the frame when the
     inner callee reads it (`analysis.rs`, `Lowering.conditional`). Tracking which formals are
     already forced at the call would allow it.
-  - Enter an inlined frame without the two helper calls (`jit_enter_frame`, `jit_leave_frame`),
+  - Start an inlined frame without the one remaining helper call (`jit_enter_frame`, a leaf of
+    about 50 instructions; `decisions.md`, "An inlined call starts with one leaf helper call"),
     then delete `Action::Inline` and `effects::effect_free_lookups`, which exist only because
-    the frame path costs those calls.
+    the frame path costs that call.
   - Plan a callee that has no type feedback from the argument types at the call. Tier 0 runs
     small closures without an activation and records no feedback for them, so the smallest
     callees get a frame only through `Action::Inline`.

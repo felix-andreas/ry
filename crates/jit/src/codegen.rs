@@ -127,6 +127,16 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Generated, Refusal> {
         module.finalize()?;
         Ok((module.address(id), size))
     })?;
+    // A profiler that counts per address (callgrind with `--dump-instr=yes`) names compiled
+    // code only by address, so this writes each body's machine code to a file named after its
+    // address, which a disassembler then lines up with the counts.
+    if let Some(directory) = std::env::var_os("RY_JIT_CODE") {
+        let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, size as usize) };
+        let path = std::path::Path::new(&directory).join(format!("{address:x}.bin"));
+        if let Err(error) = std::fs::write(&path, bytes) {
+            eprintln!("jit: cannot write {}: {error}", path.display());
+        }
+    }
     // SAFETY: the function was built with exactly this signature.
     let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address as *const u8) };
     Ok(Generated {
@@ -1900,6 +1910,18 @@ impl<'p> Translator<'p> {
             .builder
             .ins()
             .load(I64, flags(), activation, offset::REGISTERS);
+        // The closure's srcref is current while the call runs, as tier 0's entry makes it,
+        // and an exit that gives the call its frame reads the caller's from the activation.
+        let at = interp_layout::SRCREF as i32 - interp_layout::VISIBLE as i32;
+        let srcref = self.builder.ins().load(I64, flags(), self.visible, at);
+        self.builder
+            .ins()
+            .store(flags(), srcref, activation, offset::CHILD_SRCREF);
+        let srcref =
+            self.builder
+                .ins()
+                .load(I64, flags(), activation, offset::CHILD_FUNCTION_SRCREF);
+        self.builder.ins().store(flags(), srcref, self.visible, at);
         let continuation = self.builder.create_block();
         let result = self.builder.append_block_param(
             continuation,
@@ -2023,12 +2045,37 @@ impl<'p> Translator<'p> {
                 self.decrement_if(held, dirty);
             }
         }
-        self.call(
-            runtime::jit_leave_frame as *const () as usize,
-            &[I64],
-            None,
-            &[self.frame.activation],
-        );
+        let activation = self.frame.activation;
+        let at = interp_layout::SRCREF as i32 - interp_layout::VISIBLE as i32;
+        let srcref = self
+            .builder
+            .ins()
+            .load(I64, flags(), activation, offset::CHILD_SRCREF);
+        self.builder.ins().store(flags(), srcref, self.visible, at);
+        // The window holds `NULL` again for the call's next start, and so that a collection
+        // frees what the call left in it.
+        let words = self
+            .layouts
+            .get(self.frame.index as usize)
+            .map_or(usize::MAX, |layout| layout.registers + layout.slots.len());
+        if words <= runtime::CLEARED_INLINE {
+            let nil = self
+                .builder
+                .ins()
+                .iconst(I64, interp::heap().known().nil.as_ptr() as i64);
+            for word in 0..words {
+                self.builder
+                    .ins()
+                    .store(flags(), nil, self.frame.window, (word * 8) as i32);
+            }
+        } else {
+            self.call(
+                runtime::jit_clear_window as *const () as usize,
+                &[I64],
+                None,
+                &[activation],
+            );
+        }
         self.builder.ins().jump(continuation, &[value]);
     }
 

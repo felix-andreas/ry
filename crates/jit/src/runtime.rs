@@ -95,9 +95,10 @@ pub struct Child {
     pub activation: Activation,
     pub machine: Machine<'static>,
     inlined: *const Inlined,
-    /// The closure's own srcref, which is current while the call runs.
+    /// The closure's own srcref, which compiled code makes current when the call starts.
     function_srcref: Sexp,
-    assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The caller's srcref, which compiled code saves here when the call starts and makes
+    /// current again when it ends.
     srcref: Sexp,
 }
 
@@ -111,6 +112,9 @@ pub mod offset {
     pub const HEADER: i32 = 32;
     pub const HINTS: i32 = 40;
     pub const ENCLOSURE: i32 = 48;
+    pub const CHILD_FUNCTION_SRCREF: i32 =
+        std::mem::offset_of!(super::Child, function_srcref) as i32;
+    pub const CHILD_SRCREF: i32 = std::mem::offset_of!(super::Child, srcref) as i32;
 }
 
 const _: () = assert!(std::mem::offset_of!(Activation, header) == offset::HEADER as usize);
@@ -610,6 +614,12 @@ unsafe fn layout<'a>(activation: &Activation) -> &'a Layout {
 }
 
 /// Runs `body`, parking a panic in the activation and returning `fallback` instead.
+///
+/// An inlined call that runs without a frame is the current call of the warnings and errors
+/// `body` raises, as a builtin called without a frame is: the interpreter's call marker names
+/// it for as long as `body` runs. Compiled code itself raises nothing, so the marker is set
+/// here and not when the call starts, which a hot loop does far more often than it calls a
+/// helper that could raise.
 unsafe fn guarded<T>(
     activation: *mut Activation,
     fallback: T,
@@ -620,7 +630,23 @@ unsafe fn guarded<T>(
     if unsafe { (*parked).panic.is_some() } {
         return fallback;
     }
-    match catch_unwind(AssertUnwindSafe(|| body(&mut *activation))) {
+    let Some(inlined) = (unsafe { &layout(activation).inlined }) else {
+        return match catch_unwind(AssertUnwindSafe(|| body(&mut *activation))) {
+            Ok(value) => value,
+            Err(payload) => {
+                unsafe { (*parked).panic = Some(payload) };
+                fallback
+            }
+        };
+    };
+    let state = interp::interp();
+    let caller =
+        state
+            .assignment_call
+            .replace((values::unbound(), inlined.call, state.frames.len()));
+    let result = catch_unwind(AssertUnwindSafe(|| body(&mut *activation)));
+    interp::interp().assignment_call = caller;
+    match result {
         Ok(value) => value,
         Err(payload) => {
             unsafe { (*parked).panic = Some(payload) };
@@ -1399,7 +1425,6 @@ unsafe fn materialize(
             .map_or(0, Layout::top);
         bytecode::release_registers((*root).root_top + window);
         let srcref = state.srcref;
-        state.assignment_call = (*child_of(outermost)).assignment_call;
         // A speculation on the callee's own feedback failed, so the recompile needs the type
         // that broke it. The callee may not be recording, so it records while this call
         // finishes in tier 0, which runs the instruction that saw the value.
@@ -1679,8 +1704,8 @@ unsafe fn count_declined_frame(compiled: &Compiled) {
 }
 
 /// Starts the inlined call of frame `frame`, made from `parent`, without a frame of its own,
-/// and returns the call's activation. Until [`jit_leave_frame`] or a deoptimization, the call
-/// is visible to R code only as the current call of warnings, so compiled code hands every
+/// and returns the call's activation. Until the call ends or deoptimizes, it is visible to R
+/// code only as the current call of warnings ([`guarded`]), so compiled code hands every
 /// instruction that could run R code to tier 0, which gives the call its frame first.
 ///
 /// Returns null when the call needs its frame from the start, as tier 0's own frame entry
@@ -1688,25 +1713,24 @@ unsafe fn count_declined_frame(compiled: &Compiled) {
 /// call instruction to tier 0.
 ///
 /// A hot loop runs this once per iteration for each call it inlines, so the path that starts
-/// the call only tests what can change between two starts and saves what the call replaces.
+/// the call only tests what can change between two starts and writes nothing but the entry
+/// count: compiled code saves the caller's srcref itself, and the call's handle mark is the
+/// one its first start took, because every helper leaves the handle stack as it found it.
 /// It cannot panic, which is why it runs outside [`guarded`].
 pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) -> *mut Activation {
     unsafe {
         let child = (*parent).children.add(frame as usize - 1);
-        if (*child).activation.compiled.is_null()
-            && !guarded(parent, false, |parent| prepare(parent, frame))
-        {
-            return std::ptr::null_mut();
+        if (*child).activation.compiled.is_null() {
+            return first_start(parent, frame);
         }
         let inlined = &*(*child).inlined;
         let state = interp::interp();
         let function = inlined.function;
         inlined.entries.set(inlined.entries.get().saturating_add(1));
-        let depth = state.frames.len();
         // The frames an exit would push all fit under the depth limit, so pushing them
         // cannot fail there.
         let compiled: &Compiled = &*(*child).activation.compiled;
-        let frames = compiled.frames.len();
+        let depth = state.frames.len() + compiled.frames.len();
         // The activation was written for the environment the closure had at the first start,
         // which `environment<-` can replace between two starts.
         let enclosure = function.tag();
@@ -1721,28 +1745,53 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
             || state.debugger.is_some()
             || moves::tracking()
             || calling_handler_established()
-            || depth + frames > state.max_depth as usize
+            || depth > state.max_depth as usize
         {
-            return guarded(parent, std::ptr::null_mut(), |parent| {
-                if needs_frame {
-                    count_handoff(compiled, inlined);
-                } else if (*parent.parked).pending.is_none() {
-                    count_declined_frame(compiled);
-                }
-                std::ptr::null_mut()
-            });
+            return declined(parent, child, needs_frame);
         }
-        (*child).machine.mark = heap().handle_mark();
-        // Warnings and errors raised while the call has no frame name it as their call
-        // through this marker, as they do for a builtin called without one.
-        (*child).assignment_call =
-            state
-                .assignment_call
-                .replace((values::unbound(), inlined.call, depth));
-        (*child).srcref = std::mem::replace(&mut state.srcref, (*child).function_srcref);
+        debug_assert!((*child).machine.mark == heap().handle_mark());
         &raw mut (*child).activation
     }
 }
+
+/// [`jit_enter_frame`] for a call's first start in an entry of the compiled body, which
+/// writes the call's activation. Out of line, so that the other starts need no stack frame.
+#[cold]
+#[inline(never)]
+unsafe fn first_start(parent: *mut Activation, frame: i64) -> *mut Activation {
+    unsafe {
+        if !guarded(parent, false, |parent| prepare(parent, frame)) {
+            return std::ptr::null_mut();
+        }
+        jit_enter_frame(parent, frame)
+    }
+}
+
+/// Counts a start [`jit_enter_frame`] declined, against the callee when it `needs_frame` and
+/// against the compiled body otherwise, and answers null.
+#[cold]
+#[inline(never)]
+unsafe fn declined(
+    parent: *mut Activation,
+    child: *mut Child,
+    needs_frame: bool,
+) -> *mut Activation {
+    unsafe {
+        guarded(parent, std::ptr::null_mut(), |parent| {
+            let compiled: &Compiled = &*(*child).activation.compiled;
+            if needs_frame {
+                count_handoff(compiled, &*(*child).inlined);
+            } else if (*parent.parked).pending.is_none() {
+                count_declined_frame(compiled);
+            }
+            std::ptr::null_mut()
+        })
+    }
+}
+
+/// The most words of an inlined call's window that compiled code clears with one store each
+/// when the call ends, instead of calling [`jit_clear_window`].
+pub const CLEARED_INLINE: usize = 16;
 
 /// Writes the activation of the inlined call of frame `frame` for this entry of the compiled
 /// body, before the call's first start in it. `false` when the call never runs without its
@@ -1798,7 +1847,6 @@ unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
             },
             inlined,
             function_srcref: values::get_attr(function, values::symbols().srcref),
-            assignment_call: None,
             srcref: values::nil(),
         });
         (*child).activation.machine = (&raw mut (*child).machine).cast();
@@ -1806,16 +1854,14 @@ unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
     }
 }
 
-/// Ends the inlined call `activation` ran without a frame: the caller's call and srcref are
-/// current again, and the call's registers and slot root cells hold `NULL` again, so that a
-/// collection frees what the call left in them, as it does for a frame tier 0 returned from.
-/// Nothing was bound in the frame's slots, so there is nothing to release.
-pub unsafe extern "C" fn jit_leave_frame(activation: *mut Activation) {
+/// Clears the window of the inlined call `activation` ran without a frame, for a window too
+/// large for compiled code to clear inline ([`CLEARED_INLINE`]): the call's registers and slot
+/// root cells hold `NULL` again, so that a collection frees what the call left in them, as it
+/// does for a frame tier 0 returned from. Nothing was bound in the frame's slots, so there is
+/// nothing to release.
+pub unsafe extern "C" fn jit_clear_window(activation: *mut Activation) {
     unsafe {
         let child = &*activation.cast::<Child>();
-        let state = interp::interp();
-        state.assignment_call = child.assignment_call;
-        state.srcref = child.srcref;
         let layout = &*child.activation.layout;
         std::slice::from_raw_parts_mut(
             child.activation.registers,
