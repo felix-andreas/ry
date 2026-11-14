@@ -189,6 +189,10 @@ pub struct Frame {
     pub handle_mark: u32,
     /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
     pub previous_owner: u32,
+    /// [`Interp::references_used`] when the frame was pushed: the argument references a slot
+    /// frame makes for its own defaults sit from here up, and go back to the pool when the
+    /// frame returns.
+    pub references: u32,
 }
 
 impl Frame {

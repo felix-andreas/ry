@@ -7895,6 +7895,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         reified_by: crate::NOT_REIFIED,
         handle_mark: (*heap).handle_mark() as u32,
         previous_owner: caller,
+        references: interp.references_used,
     };
     interp.frames.push_with(|| frame);
     interp.srcref = if function.attrib() == nil {
@@ -11882,7 +11883,8 @@ unsafe fn fused_pass(
                 let (cell, local) = match local_cell {
                     Some(cell) => (cell, true),
                     None => match outside_function_frames(constant, enclosure, hint) {
-                        Err(cell) => (cell, false),
+                        Err(FrameBinding::Cell(cell)) => (cell, false),
+                        Err(FrameBinding::Slot(_)) => return Ok(None),
                         Ok(enclosure) => match cached_cell(constant, enclosure, cache, slot) {
                             Some(cell) => (cell, false),
                             None => return Ok(None),
@@ -13157,11 +13159,22 @@ unsafe fn lookup_variable(
 ) -> R<Sexp> {
     let heap = crate::heap();
     let hint = &mut *cache.hints.add(slot);
-    if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
+    // The frame's own code reads by name once its environment binds something, and a variable
+    // still in its slot is read there, where it stays.
+    let local = if env.has_gp(gp::SLOT_FRAME)
+        && let Some(value) = eval::slot_binding(env, symbol, true)
+    {
+        Some(value)
+    } else if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
         let value = cell.cdr();
         if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
             return holding(held, || eval::eval_symbol(symbol, env));
         }
+        Some(value)
+    } else {
+        None
+    };
+    if let Some(value) = local {
         if value.kind() == SexpType::Promise {
             // An argument: force it here rather than repeat the frame search `eval_symbol` does.
             if value.car() != unbound() {
@@ -13230,7 +13243,18 @@ unsafe fn lookup_outside(
     let env = start;
     let enclosure = match outside_function_frames(symbol, start, hint) {
         Ok(enclosure) => enclosure,
-        Err(cell) => {
+        Err(FrameBinding::Slot(value)) => {
+            if value.kind() != SexpType::Promise {
+                return Ok(value);
+            }
+            if value.car() != unbound() {
+                return Ok(value.car());
+            }
+            return holding(held, || {
+                eval::eval_symbol_reporting(symbol, env, || lexical.call())
+            });
+        }
+        Err(FrameBinding::Cell(cell)) => {
             let value = cell.cdr();
             if value.kind() == SexpType::Promise && value.car() != unbound() {
                 return Ok(value.car());
@@ -13307,7 +13331,9 @@ unsafe fn lookup_function(
 ) -> R<Sexp> {
     let heap = crate::heap();
     let hint = &mut *cache.hints.add(slot);
-    if heap.frame_cell_hinted(env, symbol, hint).is_some() {
+    if (env.has_gp(gp::SLOT_FRAME) && eval::slot_binding(env, symbol, true).is_some())
+        || heap.frame_cell_hinted(env, symbol, hint).is_some()
+    {
         return eval::find_called_fun(symbol, env, call);
     }
     let Ok(enclosure) = outside_function_frames(symbol, env.enclosure(), hint) else {
@@ -13383,8 +13409,18 @@ unsafe fn lookup_enclosing_function(
     }
 }
 
-/// The first environment from `env` outward that is not a function frame, or the cell of the
-/// function frame before it that binds `symbol`. A function frame gains and loses bindings
+/// Where a function frame binds a symbol ([`outside_function_frames`]).
+enum FrameBinding {
+    Cell(Sexp),
+    /// The content of the variable's slot in a live slot frame, a value or a promise
+    /// ([`eval::slot_binding`]).
+    Slot(Sexp),
+}
+
+/// The first environment from `env` outward that is not a function frame, or the binding of the
+/// function frame before it that binds `symbol`: its cell, or its slot when the frame is a live
+/// slot frame that still keeps the variable there, so a closure reading its enclosing frame's
+/// variable leaves that frame on its slots. A function frame gains and loses bindings
 /// without moving the symbol's lookup epoch, so the lookup cache cannot cover it and it is
 /// probed on every lookup; for a frame that does not bind the symbol, which is the usual case,
 /// the frame's symbol filter answers with one load. A closure created inside a call, such as
@@ -13392,7 +13428,11 @@ unsafe fn lookup_enclosing_function(
 /// from the first environment that is not a function frame is what lets its lookups of base
 /// functions hit the cache at all.
 #[inline(always)]
-unsafe fn outside_function_frames(symbol: Sexp, env: Sexp, hint: &mut u32) -> Result<Sexp, Sexp> {
+unsafe fn outside_function_frames(
+    symbol: Sexp,
+    env: Sexp,
+    hint: &mut u32,
+) -> Result<Sexp, FrameBinding> {
     if !env.has_gp(gp::FUNCTION_FRAME) {
         return Ok(env);
     }
@@ -13400,11 +13440,20 @@ unsafe fn outside_function_frames(symbol: Sexp, env: Sexp, hint: &mut u32) -> Re
 }
 
 #[inline(never)]
-unsafe fn walk_function_frames(symbol: Sexp, mut env: Sexp, hint: &mut u32) -> Result<Sexp, Sexp> {
+unsafe fn walk_function_frames(
+    symbol: Sexp,
+    mut env: Sexp,
+    hint: &mut u32,
+) -> Result<Sexp, FrameBinding> {
     let heap = crate::heap();
     while env.has_gp(gp::FUNCTION_FRAME) {
+        if env.has_gp(gp::SLOT_FRAME)
+            && let Some(value) = eval::slot_binding(env, symbol, true)
+        {
+            return Err(FrameBinding::Slot(value));
+        }
         if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
-            return Err(cell);
+            return Err(FrameBinding::Cell(cell));
         }
         env = env.enclosure();
     }

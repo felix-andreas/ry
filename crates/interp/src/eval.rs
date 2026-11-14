@@ -98,7 +98,7 @@ pub unsafe fn eval_symbol_reporting(
     let value = if symbol == missing_arg() {
         symbol
     } else {
-        find_var(symbol, env)?
+        find_variable(symbol, env, true)?
     };
     if value == unbound() {
         return Err(error_in(
@@ -212,12 +212,64 @@ pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
 /// `findVar`: the value bound to `symbol` from `env` outward, or `R_UnboundValue`. Promises are
 /// returned unforced.
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
+    find_variable(symbol, env, false)
+}
+
+/// [`find_var`], reading a slot frame's variable from its slot where it sits
+/// ([`slot_binding`]) instead of moving it into a cell. `forcing` says the caller forces a
+/// promise it gets at once and keeps only the value, which is what lets it see an argument
+/// reference.
+unsafe fn find_variable(symbol: Sexp, mut env: Sexp, forcing: bool) -> R<Sexp> {
     let _activity = activity::enter(Activity::Lookup, 0);
-    match find_cell(symbol, env) {
-        Some(cell) => cell_value(cell),
-        None if symbol == symbols().tmp => Ok(tmp_value(env)),
-        None => Ok(unbound()),
+    let heap = crate::heap();
+    let known = heap.known();
+    while env != known.empty_env {
+        if env == known.global_env {
+            if let Some((cell, _)) = heap.global_cell(symbol) {
+                return cell_value(cell);
+            }
+            break;
+        }
+        if env.has_gp(gp::SLOT_FRAME)
+            && let Some(value) = slot_binding(env, symbol, forcing)
+        {
+            return Ok(value);
+        }
+        if let Some(cell) = heap.frame_cell(env, symbol) {
+            return cell_value(cell);
+        }
+        env = env.enclosure();
     }
+    Ok(if symbol == symbols().tmp {
+        tmp_value(env)
+    } else {
+        unbound()
+    })
+}
+
+/// What a read by name of `symbol` finds in the live slot frame that `env` stands for, when the
+/// variable sits in its slot as something a reader can take from there: a value or a promise.
+/// The read moves nothing, so the frame keeps running on its slots. `None` sends the reader on
+/// to the environment's cells: the frame keeps no slot of that name, the slot is unbound (the
+/// variable may have moved into a cell, or the frame does not bind it yet), or it holds the
+/// empty argument or `...`, which are read together with their binding. An argument reference
+/// is reused once the call it was made for returns, so only a reader that forces it at once
+/// and keeps the value alone (`forcing`) sees one.
+pub unsafe fn slot_binding(env: Sexp, symbol: Sexp, forcing: bool) -> Option<Sexp> {
+    if !crate::heap().may_bind(env, symbol) {
+        return None;
+    }
+    let frame = &interp().frames[pending_owner(env)];
+    // An inlined wrapper's slot holds the value where a cell would hold the forced promise of
+    // the caller's variable ([`box_slots`]), which a reader of the binding itself expects.
+    if frame.inlined && !forcing {
+        return None;
+    }
+    let value = slot_content(frame.function, frame.slots as usize, symbol)?;
+    if value == missing_arg() || value.kind() == SexpType::Dots {
+        return None;
+    }
+    (forcing || !is_reference(value)).then_some(value)
 }
 
 /// The `*tmp*` a complex assignment running in `env` or an environment it encloses stands for,
@@ -271,6 +323,17 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
                 }
             }
             heap.frame_cell(env, symbol)
+        } else if env.has_gp(gp::SLOT_FRAME)
+            && let Some(mut value) = slot_binding(env, symbol, true)
+        {
+            if value.kind() == SexpType::Promise {
+                value = force_promise(value)?;
+            }
+            if values::is_function(value) {
+                return Ok(value);
+            }
+            // The variable sits in its slot, so no cell binds the name.
+            None
         } else {
             heap.frame_cell(env, symbol)
         };
@@ -958,14 +1021,20 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
 /// it: the pool's own counts keep a reference that a slot releases, and a target that a code
 /// reference displaced, from being freed.
 unsafe fn new_reference(symbol: Sexp) -> R<(Sexp, Sexp)> {
-    let heap = crate::heap();
     let target = values::integer_vector(&[0, 0, 0])?;
-    heap.root(target);
-    let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
-    reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-    reference.increment_refcount();
+    crate::heap().root(target);
+    let reference = reference_over(symbol, target)?;
     target.increment_refcount();
     Ok((reference, target))
+}
+
+/// An argument reference naming `symbol` that keeps its target in `target`, with the pool's
+/// count on it.
+unsafe fn reference_over(symbol: Sexp, target: Sexp) -> R<Sexp> {
+    let reference = crate::heap().alloc_compiled_promise(unbound(), symbol, nil(), target)?;
+    reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+    reference.increment_refcount();
+    Ok(reference)
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -1267,10 +1336,10 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
     // held by its frame alone, so the frame's release would leave it forced, and the value it
     // holds would look shared for the rest of its life.
     reference.decrement_refcount();
-    let (fresh, target) = new_reference(nil())?;
-    let state = interp();
-    state.references[index] = fresh;
-    state.reference_targets[index] = target;
+    // The promise names its frame's environment from here on, so the target it gave up serves
+    // the reference that takes its place.
+    let fresh = reference_over(nil(), interp().reference_targets[index])?;
+    interp().references[index] = fresh;
     Ok(())
 }
 
@@ -2913,7 +2982,7 @@ pub unsafe fn run_inlined(
     args: &[Arg],
     run: impl FnOnce(u32) -> R<Sexp>,
 ) -> R<Sexp> {
-    let _window = SlotWindow(header);
+    let _window = SlotWindow(header, interp().references_used);
     activity::count(Counter::ClosureCalls);
     let _frame = crate::profile_summary::enter_closure(call, function);
     let state = interp();
@@ -3412,7 +3481,7 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
     let state = interp();
     let frame = &state.frames[depth - 1];
     let (call, function, header) = (frame.call, frame.function, frame.slots);
-    let (mark, owner) = (frame.handle_mark, frame.previous_owner);
+    let (mark, owner, references) = (frame.handle_mark, frame.previous_owner, frame.references);
     crate::heap().release_handles(mark as usize);
     match &result {
         Ok(value) => value.root(),
@@ -3422,6 +3491,7 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
     let result = finish_frame(call, depth, None, result);
     let result = pop_frame(function, depth, result);
     release_window(header);
+    release_frame_references(references);
     result
 }
 
@@ -3444,7 +3514,7 @@ unsafe fn run_frame_general(
             promised,
         } => (nil(), header, missing, promised),
     };
-    let _window = SlotWindow(slots);
+    let _window = SlotWindow(slots, interp().references_used);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
     let _frame = crate::profile_summary::enter_closure(call, function);
@@ -3697,14 +3767,21 @@ unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<&'static str
     (env.refcount() as usize > dying).then_some(PROMISE_OR_ENVIRONMENT_OUTLIVES)
 }
 
-/// A slot frame gives up the references of the variables still in its slots, and the register
-/// file drops the window, on every way out.
-struct SlotWindow(u32);
+/// A slot frame gives up the references of the variables still in its slots, the register file
+/// drops the window, and the argument references the frame made for its defaults go back to
+/// the pool ([`release_frame_references`], with the pool's level before the frame), on every
+/// way out.
+struct SlotWindow(u32, u32);
 
 impl Drop for SlotWindow {
     fn drop(&mut self) {
         // SAFETY: the window's header register is live until the window drops.
-        unsafe { release_window(self.0) }
+        unsafe {
+            release_window(self.0);
+            if self.0 != crate::NO_SLOTS {
+                release_frame_references(self.1);
+            }
+        }
     }
 }
 
@@ -3747,6 +3824,7 @@ unsafe fn push_frame(
     let (handlers, restarts) = (state.handlers.clone(), state.restarts.clone());
     let (srcref, closures) = (state.srcref, state.frame_closures.len() as u32);
     let (handle_mark, previous_owner) = (crate::heap().handle_mark() as u32, state.slot_owner);
+    let references = state.references_used;
     state.frames.push_with(|| Frame {
         call,
         function,
@@ -3767,6 +3845,7 @@ unsafe fn push_frame(
         reified_by: crate::NOT_REIFIED,
         handle_mark,
         previous_owner,
+        references,
     });
     let sampled = if activity::profile_ticked() {
         record_profile_sample(None)
@@ -3867,9 +3946,13 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
     }
 }
 
-/// Replaces the default of each formal in `promised`, which the binding
-/// put in its slot as the bare expression, with a promise of its code over the slot frame at
-/// `owner`.
+/// Replaces the default of each formal in `promised`, which the binding put in its slot as the
+/// bare expression, with what forces it over the slot frame at `owner`: an argument reference
+/// of the frame to itself, which runs the default's code on the frame's slots, or reads the
+/// variable a default names, the first time the formal is read. The reference comes from the
+/// pool, so a default costs the call no promise and no environment, and the frame gives it
+/// back when it returns ([`release_frame_references`]). A frame that moves the formal into a
+/// cell makes it the promise it stands for ([`detach_reference`]).
 pub(crate) unsafe fn default_promises(
     owner: usize,
     function: Sexp,
@@ -3884,13 +3967,33 @@ pub(crate) unsafe fn default_promises(
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         pending &= pending - 1;
-        let promise = slot_promise(owner, defaults.element(index))?;
+        let code = defaults.element(index);
+        let reference = if code.kind() == SexpType::Bytecode {
+            code_reference(owner, code)?
+        } else {
+            let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+            let slot = (0..values::length(names))
+                .find(|&slot| names.element(slot) == code)
+                .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
+            argument_reference(owner, slot, code)?
+        };
         crate::heap().store_slot(
             &mut *bytecode::register_address(header + 1 + index),
-            promise,
+            reference,
         );
     }
     Ok(())
+}
+
+/// Returns to the pool the argument references a slot frame made for its own defaults
+/// ([`default_promises`]), once its slots have given them up: `mark` is
+/// [`Frame::references`], the pool's level when the frame was pushed. The references its
+/// caller passed sit below the mark and go back when the calling instruction ends.
+#[inline(always)]
+unsafe fn release_frame_references(mark: u32) {
+    if interp().references_used > mark {
+        release_references(mark);
+    }
 }
 
 /// The stack a closure body may use before the interpreter moves to a fresh segment.
@@ -5872,6 +5975,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         reified_by: crate::NOT_REIFIED,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
+        references: state.references_used,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {

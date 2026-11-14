@@ -2373,6 +2373,14 @@ impl Heap {
         (*env.frame_ptr()).find(symbol)
     }
 
+    /// Whether `env`'s own frame may bind `symbol`: `false` only when it never has, and, for a
+    /// slot frame's environment, its frame keeps no slot of that name
+    /// ([`Heap::expect_bindings`]).
+    #[inline(always)]
+    pub unsafe fn may_bind(&self, env: Sexp, symbol: Sexp) -> bool {
+        (*env.frame_ptr()).may_bind(symbol)
+    }
+
     /// The cells `env`'s own frame holds as it stands ([`Heap::own_cell`]).
     pub unsafe fn own_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
         (*env.frame_ptr()).cells()
