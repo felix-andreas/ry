@@ -992,13 +992,13 @@ just bench hot --rounds 3 --extra-rounds 0 --filter rank
 ```
 | program | GNU R | ry | GNU R / ry | flags |
 | --- | ---: | ---: | ---: | --- |
-| testthat::expect_equal | 20.951 ms | 13.405 ms | 1.53x (0.87 to 1.70) | wide_interval (ry) |
-| base::rank | 20.015 ms | 35.547 ms | 0.57x (0.39 to 0.75) | wide_interval (ry) |
+| testthat::expect_equal | 20.369 ms | 14.012 ms | 1.68x (1.45 to 1.84) | wide_interval (ry) |
+| base::rank | 14.323 ms | 22.401 ms | 0.64x (0.64 to 0.71) | wide_interval (ry) |
 ...
-Geometric mean of GNU R / ry over 100 programs: 1.50x (95% interval 1.46 to 1.53)
-Predicted GNU R / ry for finbench: 1.41x (95% interval 1.22 to 1.48; 82 programs carrying 100% of its weight)
-Predicted GNU R / ry for dsbench: 1.47x (95% interval 1.15 to 1.56; 77 programs carrying 100% of its weight)
-Predicted GNU R / ry for biobench: 1.58x (95% interval 1.24 to 1.65; 75 programs carrying 100% of its weight)
+Geometric mean of GNU R / ry over 100 programs: 1.43x (95% interval 1.39 to 1.49)
+Predicted GNU R / ry for finbench: 1.27x (95% interval 1.20 to 1.38; 83 programs carrying 100% of its weight)
+Predicted GNU R / ry for dsbench: 1.39x (95% interval 1.29 to 1.46; 78 programs carrying 100% of its weight)
+Predicted GNU R / ry for biobench: 1.56x (95% interval 1.37 to 1.63; 77 programs carrying 100% of its weight)
 ```
 
 A **program** is one package entry: a function that the code bases' own code calls in a package,
