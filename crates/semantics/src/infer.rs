@@ -1258,7 +1258,7 @@ impl<'db> InferenceTable<'db> {
                 .iter()
                 .all(|&item| self.compatible_probe(db, item, *element, depth + 1)),
             // In R `list()` is also the empty named list, so it fits `list[named: T]`.
-            (TyKind::Tuple(items), TyKind::NamedList(_)) if items.is_empty() => true,
+            (TyKind::Tuple([]), TyKind::NamedList(_)) => true,
             (TyKind::Record(fields), TyKind::List(element))
             | (TyKind::Record(fields), TyKind::NamedList(element)) => fields
                 .iter()

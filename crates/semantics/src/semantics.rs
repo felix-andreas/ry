@@ -357,9 +357,11 @@ impl TreeStore {
             self.stored.fetch_add(1, Ordering::Relaxed);
         }
         drop(parsing);
-        while self.stored.load(Ordering::Relaxed) > self.capacity
-            && self.drop_least_recently_read(file)
-        {}
+        while self.stored.load(Ordering::Relaxed) > self.capacity {
+            if !self.drop_least_recently_read(file) {
+                break;
+            }
+        }
         (parse, in_order)
     }
 
@@ -389,10 +391,13 @@ impl TreeStore {
             stamps[nodes.len() - suffix..].copy_from_slice(&old_stamps[old_nodes.len() - suffix..]);
         }
         let fresh = stamps.iter().filter(|&&stamp| stamp == NO_STAMP).count() as u64;
-        let mut next = self.next_stamp.fetch_add(fresh, Ordering::Relaxed);
-        for stamp in stamps.iter_mut().filter(|stamp| **stamp == NO_STAMP) {
-            *stamp = next;
-            next += 1;
+        let first = self.next_stamp.fetch_add(fresh, Ordering::Relaxed);
+        for (stamp, fresh) in stamps
+            .iter_mut()
+            .filter(|stamp| **stamp == NO_STAMP)
+            .zip(first..)
+        {
+            *stamp = fresh;
         }
         let mut positions: Vec<(SyntaxStamp, u32)> = stamps
             .iter()

@@ -430,7 +430,7 @@ pub fn merge_annotations<'db>(
             Paired::Rest => continue,
             Paired::Named(index) => {
                 used[index] = true;
-                Some(comment_function.named[index].clone())
+                Some(comment_function.named[index])
             }
             Paired::Positional(index) => {
                 surplus = index + 1;
@@ -464,7 +464,7 @@ pub fn merge_annotations<'db>(
             .iter()
             .zip(&used)
             .filter(|(_, used)| !**used)
-            .map(|(parameter, _)| parameter.clone()),
+            .map(|(parameter, _)| *parameter),
     );
     let surplus: Vec<Ty<'db>> = comment_function.positional[surplus..].to_vec();
     let variadic = match (&inline_function.variadic, &comment_function.variadic) {

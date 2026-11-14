@@ -2555,14 +2555,14 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let item_name = matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-            .then(|| item.name(db).clone())
+            .then(|| item.name(db))
             .flatten();
         let broken = |range: TextRange| {
             error_ranges
                 .iter()
                 .any(|error| error.start() <= range.end() && range.start() <= error.end())
         };
-        if let Some(name) = item_name.clone()
+        if let Some(name) = item_name
             && let Some(module) = item_hir(db, item)
             && let Some(root) = module.root
             && let Some(name_range) = span.name_range

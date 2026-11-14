@@ -922,7 +922,7 @@ fn check_item_in<'db>(
                     binders: declared.binders,
                     body: context.check_declared_function(
                         *value,
-                        &function,
+                        function,
                         annotation.map_or(&[], |annotation| &annotation.inline_parameters),
                     ),
                 };
@@ -3254,7 +3254,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let (component, expected, found) = match module.kind(value) {
             ExpressionKind::Record(fields) => {
-                let TyKind::NativeRecord(found_fields) = found.kind(self.db).clone() else {
+                let TyKind::NativeRecord(found_fields) = *found.kind(self.db) else {
                     return None;
                 };
                 let expected_fields = unique_member(self.db, &candidates, |kind| match kind {
@@ -3282,7 +3282,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 single(differing)?
             }
             ExpressionKind::Tuple(items) => {
-                let TyKind::NativeTuple(found_items) = found.kind(self.db).clone() else {
+                let TyKind::NativeTuple(found_items) = *found.kind(self.db) else {
                     return None;
                 };
                 let expected_items = unique_member(self.db, &candidates, |kind| match kind {
@@ -5103,7 +5103,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         optional: false,
                     }]),
                 ),
-                TyKind::Tuple(items) if items.is_empty() => Ty::new(
+                TyKind::Tuple([]) => Ty::new(
                     self.db,
                     TyKind::Record(&[RecordField {
                         name: Name::new(self.db, field_name),
@@ -5231,7 +5231,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             return prior;
         }
         match prior.kind(self.db) {
-            TyKind::Tuple(items) if items.is_empty() => Ty::new(self.db, TyKind::NamedList(value)),
+            TyKind::Tuple([]) => Ty::new(self.db, TyKind::NamedList(value)),
             // `globals[[key]] <- value` under a computed key may add a field or replace any
             // one, so the record's fields are no longer known and a later `globals[[key]]` may
             // be `value` as much as an original field.
@@ -8478,7 +8478,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.adapt_components(&items, |_| Some(element), expected, value)
             }
             ExpressionKind::Tuple(items) => {
-                let TyKind::NativeTuple(expected_items) = expected.kind(self.db).clone() else {
+                let TyKind::NativeTuple(expected_items) = *expected.kind(self.db) else {
                     return LiteralFit::NotLiteral;
                 };
                 let items = module[items].to_vec();
@@ -8518,7 +8518,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 fit
             }
             ExpressionKind::Record(fields) => {
-                let TyKind::NativeRecord(expected_fields) = expected.kind(self.db).clone() else {
+                let TyKind::NativeRecord(expected_fields) = *expected.kind(self.db) else {
                     return LiteralFit::NotLiteral;
                 };
                 let fields = module[fields].to_vec();
@@ -11457,7 +11457,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let subject_ty = *self.recorded.get(&subject)?;
         let rest = &arguments[1..];
-        let (subject_kind, columns) = match self.structural(subject_ty).kind(db).clone() {
+        let (subject_kind, columns) = match *self.structural(subject_ty).kind(db) {
             TyKind::Frame(kind, Some(columns)) => (kind, columns),
             TyKind::Frame(_, None) => {
                 self.note_unchecked_columns(subject, rest);
@@ -11481,7 +11481,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 {
                     continue;
                 }
-                match checker.frame_argument(value, &columns, frame) {
+                match checker.frame_argument(value, columns, frame) {
                     Some(mut column) => {
                         if let Some(name) = module.argument_name(argument) {
                             column.name = name.to_string();
@@ -11519,7 +11519,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             DataFrameVerb::WithColumns { lazy } => {
                 let computed = expressions(self, &|_| true)?;
-                let mut result = existing(&columns);
+                let mut result = existing(columns);
                 for (name, ty) in fields(computed) {
                     match result.iter_mut().find(|(existing, _)| *existing == name) {
                         Some(slot) => slot.1 = ty,
@@ -11536,7 +11536,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let keys = fields(expressions(self, &|_| true)?);
                 let key_count = u32::try_from(keys.len()).ok()?;
                 let mut result = keys;
-                for (name, ty) in existing(&columns) {
+                for (name, ty) in existing(columns) {
                     if !result.iter().any(|(key, _)| *key == name) {
                         result.push((name, ty));
                     }
@@ -11578,7 +11578,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 result.extend(fields(computed));
                 Some(frame_of(db, frame_kind(lazy), result))
             }
-            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, &columns, frame, rest),
+            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
@@ -11650,7 +11650,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let matched = match_formals(self.module, arguments, formals);
         let other = matched[0]?;
         let other_ty = *self.recorded.get(&other)?;
-        let right = match self.structural(other_ty).kind(db).clone() {
+        let right = match *self.structural(other_ty).kind(db) {
             TyKind::Frame(FrameKind::DataFrame | FrameKind::LazyFrame, Some(columns)) => columns,
             _ => return None,
         };
@@ -16198,7 +16198,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     } else {
                                         column.ty
                                     },
-                                    ..column.clone()
+                                    ..*column
                                 })
                                 .collect()
                         }),
@@ -16235,9 +16235,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 (frame, subject_columns),
                                 (joined_name, joined_columns.as_deref()),
                             );
-                            layout.as_ref().map(|layout| {
-                                layout.iter().map(|column| column.field.clone()).collect()
-                            })
+                            layout
+                                .as_ref()
+                                .map(|layout| layout.iter().map(|column| column.field).collect())
                         }
                         None => {
                             self.infer(on_value);
@@ -16277,7 +16277,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         } else {
                             column.field.ty
                         },
-                        ..column.field.clone()
+                        ..column.field
                     })
                     .collect(),
             ),
@@ -16314,10 +16314,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .filter(|column| column.condition.is_some())
                         .collect();
                     compared.sort_by_key(|column| column.condition);
-                    compared
-                        .into_iter()
-                        .map(|column| column.field.clone())
-                        .collect()
+                    compared.into_iter().map(|column| column.field).collect()
                 })
             }
             Some(value) => self.query_groups(value),
@@ -16493,7 +16490,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             layout.push(JoinedColumn {
                 field: RecordField {
                     ty: joined.unwrap_or(column.ty),
-                    ..column.clone()
+                    ..*column
                 },
                 from_i: condition.is_some(),
                 condition,
@@ -16530,10 +16527,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 column.name
             };
             layout.push(JoinedColumn {
-                field: RecordField {
-                    name,
-                    ..column.clone()
-                },
+                field: RecordField { name, ..*column },
                 from_i: true,
                 condition: None,
             });
@@ -16636,7 +16630,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 match columns.iter().find(|column| column.name.text(db) == name) {
                     Some(column) => {
                         if let Some(groups) = groups.as_mut() {
-                            groups.push(column.clone());
+                            groups.push(*column);
                         }
                     }
                     None => {
@@ -16810,7 +16804,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .iter()
                 .zip(selected)
                 .filter(|(_, chosen)| *chosen != negated)
-                .map(|(column, _)| column.clone())
+                .map(|(column, _)| *column)
                 .collect(),
         )
     }
@@ -17682,7 +17676,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             },
             // `list()` is the accumulator idiom: code fills it after building it, often in
             // another function, so its type knows none of the elements read later.
-            TyKind::Tuple(items) if items.is_empty() => {
+            TyKind::Tuple([]) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(unknown(self.db))
             }
@@ -18115,7 +18109,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }),
                 }
             }
-            TyKind::Tuple(items) if items.is_empty() => {
+            TyKind::Tuple([]) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(unknown(self.db))
             }
@@ -19924,7 +19918,7 @@ mod tests {
 
     fn scheme_ret<'db>(db: &'db RootDatabase, check: &ItemCheck<'db>) -> Ty<'db> {
         let scheme = check.scheme.clone().expect("scheme");
-        let TyKind::Function(function) = scheme.body.kind(db).clone() else {
+        let TyKind::Function(function) = *scheme.body.kind(db) else {
             panic!("expected a function scheme");
         };
         function.ret

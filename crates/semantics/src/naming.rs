@@ -1926,10 +1926,10 @@ fn syntactic_masking_family<'a>(
     }
 }
 
-fn declared_masked_verb<'a>(
-    masked_verbs: &'a SymbolMap<Vec<String>>,
+fn declared_masked_verb(
+    masked_verbs: &SymbolMap<Vec<String>>,
     name: impl SymbolKey,
-) -> Option<Vec<&'a str>> {
+) -> Option<Vec<&str>> {
     masked_verbs
         .get(name)
         .map(|leading| leading.iter().map(String::as_str).collect())
