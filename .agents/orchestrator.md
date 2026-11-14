@@ -98,14 +98,13 @@ Steps: (1) finish the tier-0 call path: per-closure call plan for `run_closure` 
 
 Nightly (user ask, 2026-11-05): nightly.20261105.1146.82f7b6 published 12:07 UTC from main 82f7b65 (run 42022057491, smoke test passed; includes #342, not #343); docs deploy 42022062003 publishes the roadmap at https://ry-lang.org/development/design/r-runtime/#untyped-performance-roadmap for the user's test-user agent. Context: 0.4.2-beta is published (Linux only; Linux is tier 1, macOS and Windows never block a release). Hold 0.4.3-beta (numerics, S4) until the user says go; do not cut on landing. macOS/Windows dry run 4 (run 41812924116) still fails; fix for the next release. The site leads with the real-world geomean (0.90x GNU R) beside kernels (2.70x). The stats-only start-up peak (+6 MiB) is the speed session's. The package corpus (`tools/bench/packages/run.py`, rrepo.dev/rrepo.org) is installing in the speed session; `fs` needs `USE_BUNDLED_LIBUV=1`. Prior-art pass refocused (YJIT LBBV, Deegen, HHVM Jump-Start and Leyden, HHVM/Hack, Cinder, Sorbet, LXR, Bend auto-parallelism for untyped and typed, stackless tier 0, ALTREP fusion; CPython, PyPy, HotSpot one line each).
 
-| Session | Work | State (2026-11-13 18:40Z) |
+| Session | Work | State (2026-11-14 00:40Z) |
 | --- | --- | --- |
-| session_0111kWqELpTHa5zY5RjMNzVE (Fable high, tier-1 IR, PR #557, perf/tier1-ir) | R-level SSA IR with frame states, frame-elided inlining, chained deopt; also owns findings 1, 3, 5, the call path after #556 and its two review follow-ups (dots GC in call_fast, expressions=500000 hang), a[3,4,5] and data-frame rbind | checkpoint 2 done (orders 1.78x, apps 2.84x to 2.97x locally); fixing formal pass-through deopts and RSS, then merge main, gates, review, merge. Steered: make more bodies compile before widening frames |
-| session_0111kWqC9p7Z4Q3UQY2orCbx (Fable high, structure) | critique findings 4, 7, 12 merged (#559 f798d31, #560 2103f4e); next 8, 9 (analysis core), then 11 (CI, GC-torture segfault), 6 for new code | working |
-| session_0111kWqBVv4Qnem2sZFa9xZj (Fable high, AOT design, perf/aot) | decide by measurement whether --aot covers untyped R; implementation-ready design and ordered plan for `ry run --aot` / `ry build --aot` (--exe secondary); review, land docs, stop | started 18:31Z |
-| in-session Sonnet a4d1b185bb5588d3d (Windows release) | lattice doc/index.html open failure on Windows, revert diagnostic 6402afbc, green 3-platform dry run (publish=false) | waiting on its dry run |
-| session_0111kWqE88Ddi6iEmcmZiJRz (Sonnet, bench) | measure all suites on the 0.4.5 release archive (`just bench <suite> --release ARCHIVE --write`) | idle until 0.4.5 is published |
-| session_0111kWqCxRYWYSPDMDQ2Nsek (Opus, typed ports) | #558 merged (1165c78): all 54 public programs typed | done |
+| session_0111kWqELpTHa5zY5RjMNzVE (Fable high, tier 1) | #557 merged 0a06c4dd. Next PR: compile what runs (R-level IR in ssa, frames for defaults/named/dots, loops, direct calls, spectralnorm_alt_3); milestones code-base compiled share >40%, JIT on >=1.3x off; agree AOT step-2 ssa additions | briefed 00:3xZ; Fable limit resets 2026-11-16 10:00Z |
+| session_0111kWqC9p7Z4Q3UQY2orCbx (Fable high, structure) | analysis core after single lookup path: u32 SoA type store, delete 3 caches, item_links residual; ry check <0.70 s, RSS <237 MB | working |
+| in-session Sonnet (release prep) | bump 0.4.5, news entry, release dry run publish=false on all platforms | running; publish awaits user approval |
+| session_0111kWqE88Ddi6iEmcmZiJRz (Sonnet, bench) | measure all suites incl. codebases on the 0.4.5 archive | idle until 0.4.5 is published |
+| Opus AOT implementation (not started) | typed-code-file.md steps 1-4 | starts after 0.4.5 ships (user) |
 
 Queued on the user: (user: wait for #557) publish 0.4.5 (execstack, Windows, crash reports, aperm, call loop, DataFrame); dry run green 21:1xZ; then start an Opus AOT implementation session from the Fable design (user: "Start opus after 0.4.5 ships"). Unanswered older asks: deploy the docs site, pre-release the nightly, data.table name arms in check.rs.
 
