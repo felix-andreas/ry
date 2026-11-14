@@ -203,11 +203,22 @@ struct ShardTrees {
 
 struct StoredTree {
     parse: Parse,
-    stamps: Arc<[SyntaxStamp]>,
+    stamps: Stamps,
     /// The revision at which the tree was last compared with the file's text. A text cannot
     /// change within a revision, so a read at the same revision skips the comparison.
     confirmed: salsa::Revision,
     last_read: u64,
+}
+
+/// The stamps of one tree's top-level nodes.
+#[derive(Clone)]
+struct Stamps {
+    /// One stamp per child node of the root, in file order.
+    in_order: Arc<[SyntaxStamp]>,
+    /// Each stamp beside its node's position among the tree's elements, sorted by stamp. An
+    /// edit leaves the stamps of a file out of order, and every item of a file asks for its
+    /// node by stamp, so without this each of them would walk the root's children.
+    positions: Arc<[(SyntaxStamp, u32)]>,
 }
 
 /// Keeps one file's tree in a bounded store until dropped. A worker that derives everything it
@@ -310,7 +321,7 @@ impl TreeStore {
             {
                 stored.confirmed = revision;
                 stored.last_read = self.clock.fetch_add(1, Ordering::Relaxed);
-                return (stored.parse.clone(), stored.stamps.clone());
+                return (stored.parse.clone(), stored.stamps.in_order.clone());
             }
             if !trees.parsing.contains(&file) {
                 break trees
@@ -334,10 +345,11 @@ impl TreeStore {
             None => syntax::parse(text),
         };
         let stamps = self.stamps(previous.as_ref(), &parse);
+        let in_order = stamps.in_order.clone();
         self.parses.fetch_add(1, Ordering::Relaxed);
         let stored = StoredTree {
             parse: parse.clone(),
-            stamps: stamps.clone(),
+            stamps,
             confirmed: revision,
             last_read: self.clock.fetch_add(1, Ordering::Relaxed),
         };
@@ -348,22 +360,19 @@ impl TreeStore {
         while self.stored.load(Ordering::Relaxed) > self.capacity
             && self.drop_least_recently_read(file)
         {}
-        (parse, stamps)
+        (parse, in_order)
     }
 
     /// One stamp per child node of `parse`'s root. A node at the start or the end of the file
     /// whose subtree equals its counterpart's in `previous` keeps that stamp, which covers
     /// every node outside the one region an edit changes. Every other node gets a stamp no
     /// node has had.
-    fn stamps(
-        &self,
-        previous: Option<&(Parse, Arc<[SyntaxStamp]>)>,
-        parse: &Parse,
-    ) -> Arc<[SyntaxStamp]> {
+    fn stamps(&self, previous: Option<&(Parse, Stamps)>, parse: &Parse) -> Stamps {
         let tree = parse.tree();
         let nodes: SmallVec<[NodeRef<'_>; 64]> = tree.root().child_nodes().collect();
         let mut stamps = vec![NO_STAMP; nodes.len()];
         if let Some((old, old_stamps)) = previous {
+            let old_stamps = &old_stamps.in_order;
             let old_tree = old.tree();
             let old_nodes: SmallVec<[NodeRef<'_>; 64]> = old_tree.root().child_nodes().collect();
             let same = |(old_node, node): &(&NodeRef<'_>, &NodeRef<'_>)| {
@@ -385,22 +394,33 @@ impl TreeStore {
             *stamp = next;
             next += 1;
         }
-        stamps.into()
+        let mut positions: Vec<(SyntaxStamp, u32)> = stamps
+            .iter()
+            .zip(&nodes)
+            .map(|(&stamp, node)| (stamp, node.position()))
+            .collect();
+        positions.sort_unstable();
+        Stamps {
+            in_order: stamps.into(),
+            positions: positions.into(),
+        }
     }
 
     /// The subtree of the top-level node of `file` that carries `stamp`, when the store holds
     /// the tree the stamp was read from. A bounded store may have dropped that tree, and a
     /// tree parsed in its place has stamps of its own.
     fn stamped(&self, file: SourceFile, stamp: SyntaxStamp) -> Option<Tree> {
-        let (parse, stamps) = {
+        let (parse, positions) = {
             let mut trees = self.shard(file).lock();
             let stored = trees.entries.get_mut(&file)?;
             stored.last_read = self.clock.fetch_add(1, Ordering::Relaxed);
-            (stored.parse.clone(), stored.stamps.clone())
+            (stored.parse.clone(), stored.stamps.positions.clone())
         };
-        let position = stamps.iter().position(|&held| held == stamp)?;
+        let found = positions
+            .binary_search_by_key(&stamp, |&(held, _)| held)
+            .ok()?;
         let tree = parse.tree();
-        Some(tree.subtree(tree.root().child_nodes().nth(position)?))
+        Some(tree.subtree(tree.node_at(positions[found].1)?))
     }
 
     /// Drops the tree read longest ago that no worker holds, never `keep`'s. Whether there was
