@@ -22,8 +22,9 @@ pub use native::has_native;
 mod runtime;
 
 use {
-    analysis::Refusal,
+    analysis::{Plan, Refusal, Speculation},
     bumpalo::Bump,
+    codegen::Generated,
     heap::{
         activity::{self, Activity, Counter},
         object::{Header, Sexp, SexpType, gp},
@@ -35,10 +36,11 @@ use {
         unwind::{R, error},
         values,
     },
-    runtime::{Activation, Compiled, MAX_COLD_REFUSALS, MAX_COMPILES},
+    runtime::{Activation, Child, Compiled, MAX_COLD_REFUSALS, MAX_COMPILES, Parked},
     std::{
         cell::{Cell, RefCell},
         ffi::c_void,
+        mem::MaybeUninit,
         panic::resume_unwind,
         sync::OnceLock,
         time::Instant,
@@ -118,6 +120,30 @@ pub fn install() {
     install_mode(Mode::from_environment());
 }
 
+/// How many closure calls the compiled code of `function`'s body runs as inlined frames, or
+/// zero when the body has no compiled code.
+pub unsafe fn inlined_frames(function: Sexp) -> usize {
+    unsafe {
+        let code = function.cdr();
+        if function.kind() != SexpType::Closure || code.kind() != SexpType::Bytecode {
+            return 0;
+        }
+        let tier1 = code.cdr().element(TIER1);
+        if tier1 == values::nil() {
+            return 0;
+        }
+        let address = tier1.external_address() as *const Compiled;
+        address
+            .as_ref()
+            .map_or(0, |compiled| compiled.frames.len().saturating_sub(1))
+    }
+}
+
+/// How many times compiled code has left for tier 0 on this thread.
+pub fn deoptimizations() -> u64 {
+    runtime::DEOPTIMIZATIONS.with(Cell::get)
+}
+
 pub fn install_mode(mode: Mode) {
     let (entries, back_edges) = match mode {
         Mode::Off => {
@@ -188,7 +214,7 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
                 analysis::NEVER_NATIVE
             );
         }
-        profile[profile::TIER_STATE] = -1;
+        profile[profile::TIER_STATE] = runtime::refused(profile[profile::TIER_STATE]);
         false
     }
 }
@@ -268,7 +294,7 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                     && reason != analysis::MOSTLY_TIER0
                     && reason != analysis::BRIEF
                 {
-                    counters[profile::TIER_STATE] = -1;
+                    counters[profile::TIER_STATE] = runtime::refused(counters[profile::TIER_STATE]);
                     counters[profile::RECORDING] = 0;
                 }
                 None
@@ -364,7 +390,7 @@ unsafe fn compiled_for<'a>(
             return None;
         }
         if runtime::compiles(state) >= MAX_COMPILES {
-            counters[profile::TIER_STATE] = -1;
+            counters[profile::TIER_STATE] = runtime::refused(counters[profile::TIER_STATE]);
             counters[profile::RECORDING] = 0;
             return None;
         }
@@ -442,7 +468,7 @@ unsafe fn compiled_for<'a>(
                     counters[profile::ENTRIES] = 0;
                     counters[profile::BACK_EDGES] = 0;
                 } else {
-                    counters[profile::TIER_STATE] = -1;
+                    counters[profile::TIER_STATE] = runtime::refused(counters[profile::TIER_STATE]);
                     counters[profile::RECORDING] = 0;
                 }
                 None
@@ -549,15 +575,38 @@ unsafe fn compile_in<'a>(
                 return Err(Refusal(analysis::BRIEF));
             }
         }
-        let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
+        let Generated {
+            entry,
+            exits,
+            frames,
+            size,
+        } = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
+        let mut inlined = Vec::new();
+        inlined_plans(&plan, &mut inlined);
+        // An inlined closure looks its functions up from its own environment, whatever the
+        // compiled body's enclosure is.
         let rooted: Box<[bool]> = plan
             .speculations
             .iter()
             .map(|speculation| speculation.env == enclosure)
+            .chain(
+                inlined
+                    .iter()
+                    .flat_map(|(_, callee)| callee.speculations.iter().map(|_| false)),
+            )
             .collect();
-        let portable = plan
+        let speculations: Vec<Speculation> = plan
             .speculations
+            .iter()
+            .chain(
+                inlined
+                    .iter()
+                    .flat_map(|(_, callee)| callee.speculations.iter()),
+            )
+            .cloned()
+            .collect();
+        let portable = speculations
             .iter()
             .zip(&rooted)
             .all(|(speculation, &rooted)| {
@@ -588,19 +637,20 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} loops; tier 0 runs: {})",
+                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} frames, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 values::ints(machine.code.car()).len(),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
                 generated.as_micros(),
-                plan.speculations.len(),
+                speculations.len(),
                 if portable { ", portable" } else { "" },
                 plan.native_actions(),
                 plan.actions
                     .iter()
                     .filter(|action| matches!(action, analysis::Action::Inline { .. }))
                     .count(),
+                frames.len() - 1,
                 plan.loop_headers.len(),
                 if steps.is_empty() {
                     "nothing".to_string()
@@ -616,39 +666,23 @@ unsafe fn compile_in<'a>(
             .collect();
         let compiled = Box::new(Compiled {
             entry,
+            code: machine.code,
             enclosure,
             portable,
             checked: Cell::new(values::nil()),
             rooted,
-            registers: plan.registers,
-            slots: plan.slots.to_vec(),
-            frame: {
-                let table = machine.code.cdr().element(bytecode::SLOTS);
-                let names = if table == values::nil() {
-                    values::nil()
-                } else {
-                    table.element(1)
-                };
-                plan.slots
-                    .iter()
-                    .map(|&symbol| {
-                        (0..values::length(names)).find(|&index| names.element(index) == symbol)
-                    })
-                    .collect()
-            },
+            frames,
             loops: plan.loops,
-            speculations: plan.speculations.to_vec(),
             // No epoch or stamp matches, so the first run checks the compiling activation's own
             // frame.
             epoch: Cell::new(u64::MAX),
-            stamps: plan
-                .speculations
-                .iter()
-                .map(|_| Cell::new(u64::MAX))
-                .collect(),
+            stamps: speculations.iter().map(|_| Cell::new(u64::MAX)).collect(),
+            speculations,
             osr,
-            volatile: plan.volatile.iter().copied().collect(),
             exits,
+            declined_frames: Cell::new(0),
+            declined_loads: Cell::new(0),
+            retired: Cell::new(false),
         });
         // Everything the machine code and the speculations point to stays reachable from the
         // external pointer while the enclosure lives, so the collector never frees an object
@@ -660,7 +694,12 @@ unsafe fn compile_in<'a>(
         // enclosure.
         let mut kept = vec![enclosure];
         kept.extend(plan.slots.iter().copied());
-        for speculation in &plan.speculations {
+        for (function, callee) in &inlined {
+            // The code is kept apart from the closure, whose body can be replaced.
+            kept.extend([*function, function.cdr()]);
+            kept.extend(callee.slots.iter().copied());
+        }
+        for speculation in &compiled.speculations {
             kept.extend([speculation.symbol, speculation.cell, speculation.function]);
             speculation.symbol.set_gp_bits(gp::WATCHED, true);
             speculation.cell.set_gp_bits(gp::WATCHED, true);
@@ -746,6 +785,20 @@ pub(crate) unsafe fn owner(speculation: &analysis::Speculation) -> Option<Sexp> 
     }
 }
 
+/// The closures `plan` inlines as frames ([`analysis::Action::Frame`]), at any depth, with
+/// their plans. A closure inlined at several calls appears once per call.
+fn inlined_plans<'a>(plan: &'a Plan<'a>, found: &mut Vec<(Sexp, &'a Plan<'a>)>) {
+    for action in plan.actions.iter() {
+        if let analysis::Action::Frame {
+            function, callee, ..
+        } = action
+        {
+            found.push((*function, callee));
+            inlined_plans(callee, found);
+        }
+    }
+}
+
 /// Runs compiled code for the activation from `entry_pc`. `None` hands the activation to the
 /// interpreter unchanged.
 unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -> Option<TierExit> {
@@ -756,11 +809,12 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             runtime::invalidate(machine.code);
             return None;
         }
-        let cells = machine.base + compiled.registers;
-        if bytecode::reserve_registers(cells + compiled.slots.len()).is_err() {
+        let body = compiled.frames.first()?;
+        let cells = machine.base + body.registers;
+        if bytecode::reserve_registers(cells + body.slots.len()).is_err() {
             return None;
         }
-        std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
+        std::slice::from_raw_parts_mut(bytecode::register_address(cells), body.slots.len())
             .fill(values::nil());
         // Most compiled bodies have at most a few loops, so their state lives in a stack array.
         // A `SmallVec` here would be built by value and moved, copying its whole inline buffer
@@ -788,6 +842,22 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
                 state.step.to_bits() as i64,
             ]);
         }
+        let mut parked = Parked {
+            pending: None,
+            panic: None,
+        };
+        let parked: *mut Parked = &mut parked;
+        // An inlined call's activation is written when the call starts, so the storage costs a
+        // body that inlines nothing only the stack space.
+        let mut inline_children = [const { MaybeUninit::<Child>::uninit() }; 4];
+        let mut spilled_children: Vec<MaybeUninit<Child>>;
+        let children = match compiled.frames.len() - 1 {
+            count if count <= inline_children.len() => inline_children.as_mut_ptr(),
+            count => {
+                spilled_children = Vec::with_capacity(count);
+                spilled_children.as_mut_ptr()
+            }
+        };
         let mut activation = Activation {
             registers: bytecode::register_address(machine.base),
             loops: loops.as_mut_ptr(),
@@ -798,44 +868,42 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             enclosure: machine.enclosure(),
             machine: machine as *mut Machine<'_> as *mut c_void,
             compiled,
-            pending: None,
-            panic: None,
+            layout: body,
+            parked,
+            children: children.cast(),
             resume_pc: 0,
         };
         activity::count(Counter::JitEntries);
         let running = activity::enter(Activity::Compiled, 0);
         let activation_address: *mut Activation = &mut activation;
-        let pending = std::ptr::addr_of!((*activation_address).pending);
+        let pending = std::ptr::addr_of!((*parked).pending);
         interp().held_unwinds.push(pending);
         let result: *mut Header = (compiled.entry)(activation_address);
         let held = interp().held_unwinds.pop();
         debug_assert_eq!(held, Some(pending), "compiled code entries nest");
         drop(running);
-        if let Some(payload) = activation.panic.take() {
+        if let Some(payload) = (*parked).panic.take() {
             resume_unwind(payload);
         }
+        let pending = (*parked).pending.take();
         match result as usize {
             runtime::DECLINED => return None,
             runtime::DEOPTIMIZED => {
                 activity::count(Counter::JitDeoptimizations);
                 return Some(TierExit::Resume {
                     pc: activation.resume_pc,
-                    pending: activation.pending.take(),
+                    pending,
                 });
             }
             _ => {}
         }
-        Some(TierExit::Finished(match Sexp::from_raw(result) {
-            // An error parked by a helper whose failure compiled code does not branch on.
-            Some(_) if activation.pending.is_some() => Err(activation
-                .pending
-                .take()
-                .unwrap_or_else(|| error("compiled code failed without an error"))),
-            Some(value) => Ok(value),
-            None => Err(activation
-                .pending
-                .take()
-                .unwrap_or_else(|| error("compiled code failed without an error"))),
-        }))
+        Some(TierExit::Finished(
+            match (Sexp::from_raw(result), pending) {
+                // An error parked by a helper whose failure compiled code does not branch on.
+                (_, Some(unwind)) => Err(unwind),
+                (Some(value), None) => Ok(value),
+                (None, None) => Err(error("compiled code failed without an error")),
+            },
+        ))
     }
 }

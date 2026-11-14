@@ -7,8 +7,9 @@
 //! and compiled code reacts by deoptimizing, which hands the unwind to the interpreter.
 
 use {
-    crate::analysis::{Speculation, bit, resolve_function},
+    crate::analysis::{Speculation, bit, resolve_function, status},
     heap::{
+        activity,
         object::{
             Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
             UNBOXED_SLOTS, gp, is_na_real,
@@ -16,10 +17,13 @@ use {
         records::NativeKind,
     },
     interp::{
+        Signalling,
         annotations::{self, Entry},
         arith,
+        builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, TypedCall, profile},
-        eval, heap,
+        effects::calling_handler_established,
+        eval, heap, moves,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
         values,
@@ -55,11 +59,38 @@ pub struct Activation {
     pub enclosure: Sexp,
     pub machine: *mut c_void,
     pub compiled: *const Compiled,
-    pub pending: Option<Unwind>,
-    pub panic: Option<Box<dyn Any + Send>>,
+    /// The frame of the compiled body this activation runs: the body's own, or that of a
+    /// closure call inlined in it.
+    pub layout: *const Layout,
+    /// What the helpers hold for the whole entry of compiled code, shared by the body's
+    /// activation and those of its inlined calls.
+    pub parked: *mut Parked,
+    /// The activations of the body's inlined calls, by frame number less one.
+    pub children: *mut Child,
     /// Where tier 0 continues after a deoptimization.
     pub resume_pc: usize,
 }
+
+/// What a helper holds until compiled code hands the activation back.
+pub struct Parked {
+    /// An R error, `break` or `next` a helper raised. The collector traces it here through
+    /// [`interp::Interp::held_unwinds`].
+    pub pending: Option<Unwind>,
+    pub panic: Option<Box<dyn Any + Send>>,
+}
+
+/// The activation of an inlined closure call while it runs without a frame of its own: its
+/// registers sit above its caller's in the register file, and the interpreter state a real
+/// call would have saved in its frame is saved here.
+#[repr(C)]
+pub struct Child {
+    pub activation: Activation,
+    pub machine: Machine<'static>,
+    assignment_call: Option<(Sexp, Sexp, usize)>,
+    srcref: Sexp,
+}
+
+const _: () = assert!(std::mem::offset_of!(Child, activation) == 0);
 
 pub mod offset {
     pub const REGISTERS: i32 = 0;
@@ -93,6 +124,16 @@ pub mod reason {
     pub const INTERRUPT: i32 = 2;
     /// An inline fast path does not apply, so the interpreter runs the instruction.
     pub const HANDOFF: i32 = 3;
+    /// An inlined call read a formal of the compiled body that holds a promise only tier 0
+    /// forces, so the interpreter runs the instruction. It counts against the body
+    /// ([`UNFORCED_FORMALS`]), not against the inlined callee as a hand-off does.
+    pub const UNFORCED: i32 = 4;
+}
+
+thread_local! {
+    /// How many times compiled code has left for tier 0 on this thread. A test reads it to pin
+    /// that a body stops leaving at a point it left from repeatedly.
+    pub static DEOPTIMIZATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Results of [`jit_step`] and the load helpers.
@@ -128,6 +169,8 @@ pub mod quiet {
 /// for code tied to its enclosure, or directly for portable code.
 pub struct Compiled {
     pub entry: unsafe extern "C" fn(*mut Activation) -> *mut Header,
+    /// The body's code, whose `TIER1` constant owns this.
+    pub code: Sexp,
     /// The enclosure the code was compiled for.
     pub enclosure: Sexp,
     /// Whether the code runs for any enclosure its lookups resolve the same way from. It does
@@ -144,12 +187,8 @@ pub struct Compiled {
     /// Which speculations start from the enclosure, so that portable code resolves them from
     /// each activation's own.
     pub rooted: Box<[bool]>,
-    /// Tier 0's register count; the slot root cells follow.
-    pub registers: usize,
-    pub slots: Vec<Sexp>,
-    /// Each slot's position in the code's slot table, which numbers a slot frame's variables,
-    /// or `None` for a symbol the table does not number.
-    pub frame: Box<[Option<usize>]>,
+    /// The body's frame, then one frame per closure call inlined in it.
+    pub frames: Box<[Layout]>,
     pub loops: usize,
     pub speculations: Vec<Speculation>,
     /// The binding epoch the speculations were last checked against.
@@ -158,43 +197,112 @@ pub struct Compiled {
     pub stamps: Vec<Cell<u64>>,
     /// The loop headers on-stack replacement can enter at.
     pub osr: Vec<usize>,
-    /// By slot, a bitset of the variables the code loads at every read because a read called
-    /// an active binding.
-    pub volatile: Box<[u64]>,
     /// Each deoptimization point's write-back, indexed by the number compiled code passes to
     /// [`jit_deopt_exit`].
     pub exits: Box<[Exit]>,
+    /// How often an inlined call could not start without its frame for a reason that is not
+    /// the callee's: a calling handler was established, the stack was near its limit, or
+    /// something observes every call. When that is frequent ([`frequent`]) the code is
+    /// discarded and the body marked [`NO_FRAMES`].
+    pub declined_frames: Cell<u32>,
+    /// How often an inlined call's read of one of the body's formals ([`jit_peek_slot`],
+    /// [`jit_load_passed`]) found a promise it could not force without running code. Past
+    /// [`MAX_FRAME_HANDOFFS`] the code is discarded and the body marked [`UNFORCED_FORMALS`].
+    pub declined_loads: Cell<u32>,
+    /// Whether the code discarded itself. Activations still running it keep counting, and by
+    /// then the body may hold its recompiled code, which a second discard would throw away.
+    pub retired: Cell<bool>,
+}
+
+/// One frame of a compiled body: what its register window holds and which variables its slots
+/// stand for.
+pub struct Layout {
+    /// Tier 0's register count; the slot root cells follow.
+    pub registers: usize,
+    pub slots: Box<[Sexp]>,
+    /// Each slot's position in the code's slot table, which numbers a slot frame's variables,
+    /// or `None` for a symbol the table does not number.
+    pub frame: Box<[Option<usize>]>,
+    /// By slot, a bitset of the variables the code loads at every read because a read called
+    /// an active binding.
+    pub volatile: Box<[u64]>,
+    /// The call the frame belongs to, or `None` for the compiled body's own frame.
+    pub inlined: Option<Inlined>,
+}
+
+/// The closure call an inlined frame stands for, which is what building its real frame needs.
+pub struct Inlined {
+    pub function: Sexp,
+    /// The closure's compiled body when it was inlined.
+    pub code: Sexp,
+    pub call: Sexp,
+    /// The frame the call is made from.
+    pub parent: u32,
+    /// The call instruction in the parent's code, where an error of the call is raised.
+    pub call_pc: u32,
+    /// The parent's register that receives the result.
+    pub dst: u32,
+    /// Where an exit of the call finds each formal's argument, by position. An exit saves a
+    /// bitset of the formals the call has forced, then one cell per [`ArgumentSource::Saved`]
+    /// formal, in order.
+    pub formals: Box<[ArgumentSource]>,
+    /// How often the call started without a frame or tried to.
+    pub entries: Cell<u32>,
+    /// How often the call needed its real frame because of what the callee is or does: it
+    /// handed an instruction to tier 0, or the closure is being debugged or has another body
+    /// by now. When that is frequent ([`frequent`]) the code is discarded and the callee is
+    /// no longer inlined ([`NO_ELISION`]).
+    pub handoffs: Cell<u32>,
+}
+
+/// Where the argument of a formal that an inlined call has forced is found when the call gets
+/// its real frame, which binds the formal to a forced promise of that value.
+#[derive(Clone, Copy)]
+pub enum ArgumentSource {
+    /// In the exit, in this [`representation`]: the caller evaluated the argument.
+    Saved(i32),
+    /// In the binding of this formal of the compiled body, which was passed on unread; the
+    /// read forced that binding's promise.
+    Root(Sexp),
+    /// Nowhere: compiled code never reads the formal, so it never forces it.
+    Unread,
+}
+
+/// How many times something about a compiled body's inlined calls may go wrong before the
+/// body is recompiled to avoid it.
+pub const MAX_FRAME_HANDOFFS: u32 = 16;
+
+/// Whether `count` fallbacks in `entries` inlined calls are enough to recompile: more than
+/// one call in eight, and enough of them to say so. A rare fallback costs less than the frame
+/// every other call saves.
+fn frequent(count: u32, entries: u64) -> bool {
+    count >= MAX_FRAME_HANDOFFS && u64::from(count) * 8 > entries
 }
 
 /// What one deoptimization point writes back before tier 0 resumes at `pc`.
 ///
-/// Each point only stores its raw values into a scratch area, one 8-byte cell each in the order
-/// below, and jumps to one shared exit that calls [`jit_deopt_exit`] with this point's number.
-/// Boxing and flushing in a cold block per point would make those blocks most of a function's
-/// code and most of its compile time.
+/// Each point is the exit of a frame state: it only saves its raw values into a buffer, one
+/// 8-byte cell each in the order below, and continues in one shared block that calls
+/// [`jit_deopt_exit`] with the state's number. Boxing and flushing in a cold block per point
+/// would make those blocks most of a function's code and most of its compile time.
 pub struct Exit {
     pub pc: usize,
     pub why: i32,
+    /// The frame the point is in, an index into [`Compiled::frames`].
+    pub frame: u32,
+    /// For a point in an inlined call, the exit that describes the caller's frame once the
+    /// call has returned. Its `pc` is where the caller continues.
+    pub parent: Option<u32>,
+    /// Where the point's cells start in the buffer, after those of its callers' frames.
+    pub base: u32,
     /// Registers held unboxed, with their [`representation`]: one cell for the value, and a
     /// second for the integer flag of a [`representation::NUM`].
     pub registers: Box<[(u32, i32)]>,
     /// Slots that may be dirty: one cell for the status, then the value cells as for a
     /// register, none for a [`representation::BOXED`] slot.
     pub slots: Box<[(u32, i32)]>,
-}
-
-impl Exit {
-    /// The scratch cells this exit uses.
-    pub fn cells(&self) -> usize {
-        let value = |kind: i32| match kind {
-            representation::NUM => 2,
-            representation::BOXED => 0,
-            _ => 1,
-        };
-        let registers: usize = self.registers.iter().map(|&(_, kind)| value(kind)).sum();
-        let slots: usize = self.slots.iter().map(|&(_, kind)| 1 + value(kind)).sum();
-        registers + slots
-    }
+    /// The loops around `pc`, [`LOOP_WORDS`] cells each.
+    pub loops: Box<[u32]>,
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
@@ -358,6 +466,43 @@ pub const RARE_REFUSAL: i32 = 1 << 18;
 /// compilation serves them all instead of one per enclosure.
 pub const SHARED: i32 = 1 << 22;
 
+/// A tier state flag: calls of the body inlined without a frame kept needing one, so the
+/// compiler no longer inlines it.
+pub const NO_ELISION: i32 = 1 << 23;
+
+/// A tier state flag: inlined calls in the body's compiled code kept reading a formal whose
+/// promise needs code to force, which hands the call to tier 0. The compiler then neither
+/// reads a formal for an inlined call before the body itself has, nor passes one on to an
+/// inlined call that reads it.
+pub const UNFORCED_FORMALS: i32 = 1 << 24;
+
+/// A tier state flag: the body's inlined calls kept being unable to start without their
+/// frames for reasons that are not the callees', as when the body runs under a calling
+/// handler. Each such call left compiled code, so the compiler no longer inlines calls with
+/// frames of their own in the body, and compiled code calls the closures instead.
+pub const NO_FRAMES: i32 = 1 << 25;
+
+/// The tier state of a body the tier no longer compiles and whose calls it no longer inlines
+/// without a frame either.
+pub const NEVER_ELIDED: i32 = -2;
+
+/// Whether a body's tier state lets its calls be inlined without a frame. A body the tier
+/// refused to compile on its own is still inlined: what makes it not worth compiling alone,
+/// mostly that it runs nothing natively, says nothing about its calls.
+pub fn elidable(state: i32) -> bool {
+    if state < 0 {
+        state == -1
+    } else {
+        state & NO_ELISION == 0
+    }
+}
+
+/// The tier state of a body the tier stops compiling, which keeps whether its calls may still
+/// be inlined.
+pub fn refused(state: i32) -> i32 {
+    if elidable(state) { -1 } else { NEVER_ELIDED }
+}
+
 pub fn rare_refusals(state: i32) -> i32 {
     (state / RARE_REFUSAL) & 0xf
 }
@@ -398,7 +543,7 @@ pub unsafe fn invalidate(code: Sexp) {
     counters[profile::BACK_EDGES] = 0;
     counters[profile::NEXT] = i32::MIN;
     if compiles(state) >= MAX_COMPILES {
-        counters[profile::TIER_STATE] = -1;
+        counters[profile::TIER_STATE] = refused(state);
         counters[profile::RECORDING] = 0;
     } else if state >= 0 {
         counters[profile::TIER_STATE] = state & !SIZE_WAITED;
@@ -414,6 +559,10 @@ unsafe fn compiled<'a>(activation: &Activation) -> &'a Compiled {
     unsafe { &*activation.compiled }
 }
 
+unsafe fn layout<'a>(activation: &Activation) -> &'a Layout {
+    unsafe { &*activation.layout }
+}
+
 /// Runs `body`, parking a panic in the activation and returning `fallback` instead.
 unsafe fn guarded<T>(
     activation: *mut Activation,
@@ -421,13 +570,14 @@ unsafe fn guarded<T>(
     body: impl FnOnce(&mut Activation) -> T,
 ) -> T {
     let activation = unsafe { &mut *activation };
-    if activation.panic.is_some() {
+    let parked = activation.parked;
+    if unsafe { (*parked).panic.is_some() } {
         return fallback;
     }
     match catch_unwind(AssertUnwindSafe(|| body(&mut *activation))) {
         Ok(value) => value,
         Err(payload) => {
-            activation.panic = Some(payload);
+            unsafe { (*parked).panic = Some(payload) };
             fallback
         }
     }
@@ -449,7 +599,7 @@ unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
 /// Holds `unwind` until compiled code hands the activation back. The collector traces it there
 /// through [`interp::Interp::held_unwinds`].
 fn park(activation: &mut Activation, unwind: Unwind) {
-    activation.pending = Some(unwind);
+    unsafe { (*activation.parked).pending = Some(unwind) };
 }
 
 /// Like [`guarded`], but fails at once while an error is parked. A failed allocation in a box
@@ -463,7 +613,7 @@ unsafe fn checked<T>(
     body: impl FnOnce(&mut Activation) -> T,
 ) -> T {
     unsafe {
-        if (*activation).pending.is_some() {
+        if (*(*activation).parked).pending.is_some() {
             return fallback;
         }
         guarded(activation, fallback, body)
@@ -478,7 +628,7 @@ unsafe fn frame_slot(
     slot: i64,
 ) -> Option<*mut Sexp> {
     unsafe {
-        compiled(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
+        layout(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
     }
 }
 
@@ -486,8 +636,30 @@ unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     unsafe {
         activation
             .registers
-            .add(compiled(activation).registers + slot as usize)
+            .add(layout(activation).registers + slot as usize)
     }
+}
+
+/// Runs `step`, one tier-0 instruction of `activation`. In a closure call without a frame the
+/// instruction signals nothing ([`Signalling`]): an error it raises comes back unsignalled, and
+/// the exit it takes builds the call's frame and signals it there. `None` says the instruction
+/// gave up before a signal that runs R code, so the exit must carry no error, which makes
+/// tier 0 run the instruction again in the call's frame. The instruction runs no R code, so
+/// nothing nests.
+unsafe fn step_unsignalled<T>(activation: &Activation, step: impl FnOnce() -> T) -> Option<T> {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            interp::interp().signalling = Signalling::Immediate;
+        }
+    }
+    if unsafe { layout(activation).inlined.is_none() } {
+        return Some(step());
+    }
+    interp::interp().signalling = Signalling::Deferred;
+    let _restore = Restore;
+    let result = step();
+    (interp::interp().signalling != Signalling::Abandoned).then_some(result)
 }
 
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
@@ -502,18 +674,21 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                 0
             };
             let mark = heap.handle_mark();
-            let stepped = bytecode::step_one(machine, pc as usize);
+            let stepped = step_unsignalled(activation, || bytecode::step_one(machine, pc as usize));
             heap.release_handles(mark);
             match stepped {
-                Err(unwind) => {
+                None => outcome::FAILED,
+                Some(Err(unwind)) => {
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(Some(_)) => outcome::RETURNED,
-                Ok(None) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
+                Some(Ok(Some(_))) => outcome::RETURNED,
+                Some(Ok(None))
+                    if validate != 0 && !still_valid(compiled(activation), machine, epoch) =>
+                {
                     outcome::INVALIDATED
                 }
-                Ok(None) => outcome::OK,
+                Some(Ok(None)) => outcome::OK,
             }
         })
     }
@@ -529,18 +704,20 @@ pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> 
 /// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
 pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
     unsafe {
-        checked(
-            activation,
-            quiet::FAILED,
-            |activation| match bytecode::quiet_step(machine(activation), pc as usize) {
-                None => quiet::DECLINED,
-                Some(Ok(())) => quiet::STEPPED,
-                Some(Err(unwind)) => {
+        checked(activation, quiet::FAILED, |activation| {
+            let stepped = step_unsignalled(activation, || {
+                bytecode::quiet_step(machine(activation), pc as usize)
+            });
+            match stepped {
+                Some(None) => quiet::DECLINED,
+                Some(Some(Ok(()))) => quiet::STEPPED,
+                Some(Some(Err(unwind))) => {
                     park(activation, unwind);
                     quiet::FAILED
                 }
-            },
-        )
+                None => quiet::FAILED,
+            }
+        })
     }
 }
 
@@ -586,7 +763,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
             // argument at every load site costs the register allocator an instruction in loops.
             if result != outcome::LOAD_FAILED
                 && interp::interp().active_binding_reads != reads
-                && !bit(&compiled(activation).volatile, slot as usize)
+                && !bit(&layout(activation).volatile, slot as usize)
             {
                 bytecode::record_active_binding(machine.code, pc as usize);
                 return outcome::LOAD_INVALIDATED;
@@ -666,7 +843,7 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
-            let symbol = compiled(activation).slots[slot as usize];
+            let symbol = layout(activation).slots[slot as usize];
             let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
                 if machine.env() == values::nil() {
@@ -735,8 +912,65 @@ unsafe fn finish_load(
 pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
+            let found = peek_variable(activation, slot);
+            // Only a formal is worth counting: the recompile stops reading formals early,
+            // and reads every other variable exactly as before.
+            if found == outcome::LOAD_FAILED
+                && let Some(&symbol) = layout(activation).slots.get(slot as usize)
+                && values::pairlist_items(machine(activation).function.car())
+                    .iter()
+                    .any(|&(formal, _)| formal == symbol)
+            {
+                count_declined_load(compiled(activation));
+            }
+            found
+        })
+    }
+}
+
+/// Counts a time an inlined call could not take one of the compiled body's formals without
+/// running code. Once that is frequent among the body's inlined calls, the code is discarded
+/// and the body marked [`UNFORCED_FORMALS`].
+unsafe fn count_declined_load(compiled: &Compiled) {
+    let count = compiled.declined_loads.get().saturating_add(1);
+    compiled.declined_loads.set(count);
+    if frequent(count, frame_entries(compiled)) {
+        unsafe { retire(compiled, UNFORCED_FORMALS) };
+    }
+}
+
+/// How often the inlined calls of `compiled` have started, over all of them.
+fn frame_entries(compiled: &Compiled) -> u64 {
+    compiled
+        .frames
+        .iter()
+        .filter_map(|layout| layout.inlined.as_ref())
+        .map(|inlined| u64::from(inlined.entries.get()))
+        .sum()
+}
+
+/// Discards `compiled`, once, and marks its body with the tier state `flag` so that the
+/// recompile avoids what kept going wrong.
+unsafe fn retire(compiled: &Compiled, flag: i32) {
+    if compiled.retired.replace(true) {
+        return;
+    }
+    unsafe {
+        let counters = values::ints_mut(compiled.code.cdr().element(PROFILE));
+        if counters[profile::TIER_STATE] >= 0 {
+            counters[profile::TIER_STATE] |= flag;
+        }
+        invalidate(compiled.code);
+    }
+}
+
+unsafe fn peek_variable(activation: &mut Activation, slot: i64) -> i32 {
+    unsafe {
+        {
             let machine = machine(activation);
-            let symbol = compiled(activation).slots[slot as usize];
+            let Some(&symbol) = layout(activation).slots.get(slot as usize) else {
+                return outcome::LOAD_FAILED;
+            };
             let heap = heap();
             let empty = heap.known().empty_env;
             let mut env = machine.env();
@@ -778,7 +1012,7 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
                 env = env.enclosure();
             }
             outcome::LOAD_FAILED
-        })
+        }
     }
 }
 
@@ -929,18 +1163,52 @@ pub mod representation {
     pub const NUM: i32 = 4;
 }
 
-/// Boxes the registers and flushes the dirty slots that exit `exit` lists, reading their raw
-/// values from `scratch`, then deoptimizes like [`jit_deopt`].
+/// Leaves compiled code at exit `exit`, whose raw values are in `scratch`: writes the frame
+/// back as the exit lists it and deoptimizes like [`jit_deopt`]. An exit inside an inlined
+/// call first gives every inlined call around it its real frame and runs those calls to
+/// their ends in tier 0 ([`materialize`]).
 pub unsafe extern "C" fn jit_deopt_exit(
     activation: *mut Activation,
     scratch: *const i64,
     exit: i64,
 ) -> *mut Header {
     unsafe {
-        let Some(exit) = compiled(&*activation).exits.get(exit as usize) else {
+        let compiled = compiled(&*activation);
+        let Some(exit) = compiled.exits.get(exit as usize) else {
             panic!("compiled code named a deoptimization exit it does not have");
         };
-        let mut cell = scratch;
+        if exit.parent.is_some() {
+            return guarded(activation, std::ptr::null_mut(), |root| {
+                materialize(root, compiled, exit, scratch)
+            });
+        }
+        write_back(activation, exit, scratch);
+        jit_deopt(activation, exit.pc as i64, exit.why)
+    }
+}
+
+/// One slot of an exit as compiled code saved it.
+#[derive(Clone, Copy)]
+struct SavedSlot {
+    slot: u32,
+    status: i64,
+    /// The value's [`representation`], never [`representation::NUM`], and its bits. A boxed
+    /// value is in the slot's root cell instead.
+    kind: i32,
+    bits: i64,
+}
+
+/// Boxes the registers `exit` lists into `activation`'s window and writes its loops' words,
+/// reading the exit's raw values from `scratch`. Returns the slots it lists, which the caller
+/// writes to the frame, and the cell after the last one it read, where an inlined call's exit
+/// goes on with its arguments ([`Inlined::formals`]).
+unsafe fn restore(
+    activation: *mut Activation,
+    exit: &Exit,
+    scratch: *const i64,
+) -> (SmallVec<[SavedSlot; 8]>, *const i64) {
+    unsafe {
+        let mut cell = scratch.add(exit.base as usize);
         let mut next = || {
             let current = cell;
             cell = cell.add(1);
@@ -964,8 +1232,9 @@ pub unsafe extern "C" fn jit_deopt_exit(
                 *(*activation).registers.add(register as usize) = boxed;
             }
         }
+        let mut slots = SmallVec::new();
         for &(slot, kind) in &exit.slots {
-            let status = next().cast::<i32>().read();
+            let status = i64::from(next().cast::<i32>().read());
             let (kind, bits) = match kind {
                 representation::BOXED => (kind, 0),
                 representation::DOUBLE => (kind, next().read()),
@@ -981,12 +1250,537 @@ pub unsafe extern "C" fn jit_deopt_exit(
                 }
                 _ => (kind, i64::from(next().cast::<i32>().read())),
             };
-            if i64::from(status) == crate::analysis::status::RUNTIME_DIRTY {
-                // A failure parks its error, which the deoptimization below then raises.
-                jit_flush(activation, i64::from(slot), kind, bits);
+            slots.push(SavedSlot {
+                slot,
+                status,
+                kind,
+                bits,
+            });
+        }
+        for &index in &exit.loops {
+            let words = (*activation).loops.add(LOOP_WORDS * index as usize);
+            for word in 0..LOOP_WORDS {
+                *words.add(word) = next().read();
             }
         }
-        jit_deopt(activation, exit.pc as i64, exit.why)
+        (slots, cell)
+    }
+}
+
+/// [`restore`], then writes the dirty slots to the frame.
+unsafe fn write_back(activation: *mut Activation, exit: &Exit, scratch: *const i64) {
+    unsafe {
+        let (slots, _) = restore(activation, exit, scratch);
+        flush_dirty(activation, &slots);
+    }
+}
+
+unsafe fn flush_dirty(activation: *mut Activation, slots: &[SavedSlot]) {
+    for saved in slots {
+        if saved.status == status::RUNTIME_DIRTY {
+            // A failure parks its error, which tier 0 raises when it resumes.
+            unsafe { jit_flush(activation, i64::from(saved.slot), saved.kind, saved.bits) };
+        }
+    }
+}
+
+/// Leaves compiled code at `innermost`, an exit inside an inlined call. Up to here the call,
+/// and every inlined call around it, ran without a frame, so each one first gets the frame
+/// tier 0 would have built for it, outermost first. Then the calls finish in tier 0 from the
+/// inside out: the innermost resumes at the exit's instruction, and each caller resumes after
+/// its call with the result, or raises the callee's error at the call. The compiled body
+/// itself deoptimizes the same way, which is this function's result.
+unsafe fn materialize(
+    root: *mut Activation,
+    compiled: &Compiled,
+    innermost: &Exit,
+    scratch: *const i64,
+) -> *mut Header {
+    unsafe {
+        let mut chain: SmallVec<[&Exit; 4]> = SmallVec::new();
+        chain.push(innermost);
+        while let Some(parent) = chain.last().and_then(|exit| exit.parent) {
+            let Some(exit) = compiled.exits.get(parent as usize) else {
+                panic!("a deoptimization exit names a caller's exit that does not exist");
+            };
+            chain.push(exit);
+        }
+        let inlined_of = |exit: &Exit| -> &Inlined {
+            match compiled
+                .frames
+                .get(exit.frame as usize)
+                .and_then(|layout| layout.inlined.as_ref())
+            {
+                Some(inlined) => inlined,
+                None => panic!("a deoptimization exit of an inlined call is in no inlined frame"),
+            }
+        };
+        let child_of = |exit: &Exit| (*root).children.add(exit.frame as usize - 1);
+        let (Some(&body), Some(&outermost)) = (chain.last(), chain.iter().rev().nth(1)) else {
+            panic!("an inlined call's deoptimization exit has no caller");
+        };
+        let state = interp::interp();
+        let parked = (*root).parked;
+        if crate::logging() {
+            let code = inlined_of(innermost).code;
+            let op = values::ints(code.car())
+                .get(innermost.pc)
+                .and_then(|&word| bytecode::op_of(word as u32));
+            eprintln!(
+                "jit: deopt at pc {} ({op:?}, reason {}) in {} inlined in {}",
+                innermost.pc,
+                innermost.why,
+                crate::describe(code),
+                crate::describe(compiled.code)
+            );
+        }
+        write_back(root, body, scratch);
+        let srcref = state.srcref;
+        state.assignment_call = (*child_of(outermost)).assignment_call;
+        // A speculation on the callee's own feedback failed, so the recompile needs the type
+        // that broke it. The callee may not be recording, so it records while this call
+        // finishes in tier 0, which runs the instruction that saw the value.
+        let recording =
+            (innermost.why == reason::SPECULATION && (*parked).pending.is_none()).then(|| {
+                invalidate(compiled.code);
+                let counters = values::ints_mut(inlined_of(innermost).code.cdr().element(PROFILE));
+                std::mem::replace(&mut counters[profile::RECORDING], 1)
+            });
+        if innermost.why == reason::HANDOFF {
+            count_handoff(compiled, inlined_of(innermost));
+        }
+
+        // Chain positions of the frames pushed so far with their depths, outermost first.
+        let mut entered: SmallVec<[(usize, usize); 4]> = SmallVec::new();
+        let mut failed = None;
+        for (position, &exit) in chain.iter().enumerate().rev().skip(1) {
+            let inlined = inlined_of(exit);
+            let child = child_of(exit);
+            let activation = &raw mut (*child).activation;
+            let caller = match inlined.parent {
+                0 => *(*root).header,
+                parent => {
+                    *(*(*root).children.add(parent as usize - 1))
+                        .activation
+                        .header
+                }
+            };
+            let (slots, arguments) = restore(activation, exit, scratch);
+            match enter_inlined(&*root, child, inlined, caller, arguments) {
+                Ok(depth) => {
+                    entered.push((position, depth));
+                    flush_dirty(activation, &slots);
+                }
+                Err(unwind) => {
+                    failed = Some(unwind);
+                    break;
+                }
+            }
+        }
+
+        let mut result = match failed {
+            Some(unwind) => Err(unwind),
+            None => {
+                let Some((_, depth)) = entered.pop() else {
+                    panic!("an inlined call's deoptimization exit has no frame to resume");
+                };
+                let machine = &(*child_of(innermost)).machine;
+                state.srcref = srcref;
+                let result = bytecode::resume_slots(
+                    machine.function,
+                    machine.header,
+                    innermost.pc,
+                    (*parked).pending.take(),
+                );
+                if let Some(recording) = recording {
+                    let counters = inlined_of(innermost).code.cdr().element(PROFILE);
+                    values::ints_mut(counters)[profile::RECORDING] = recording;
+                }
+                eval::leave(depth, result)
+            }
+        };
+        while let Some((position, depth)) = entered.pop() {
+            let (Some(&exit), Some(&inner)) =
+                (chain.get(position), chain.get(position.wrapping_sub(1)))
+            else {
+                panic!("a frame resumes after an inlined call that has no exit");
+            };
+            let callee = inlined_of(inner);
+            let child = child_of(exit);
+            let (function, header) = ((*child).machine.function, (*child).machine.header);
+            let resumed = match result {
+                Ok(value) => {
+                    *(*child).activation.registers.add(callee.dst as usize) = value;
+                    bytecode::resume_slots(function, header, exit.pc, None)
+                }
+                Err(unwind) => {
+                    bytecode::resume_slots(function, header, callee.call_pc as usize, Some(unwind))
+                }
+            };
+            result = eval::leave(depth, resumed);
+        }
+        let callee = inlined_of(outermost);
+        match result {
+            Ok(value) => {
+                *(*root).registers.add(callee.dst as usize) = value;
+                jit_deopt(root, body.pc as i64, reason::HANDOFF)
+            }
+            Err(unwind) => {
+                park(&mut *root, unwind);
+                jit_deopt(root, i64::from(callee.call_pc), reason::PENDING)
+            }
+        }
+    }
+}
+
+/// Gives the inlined call `child` ran without a frame its real one: binds each formal in the
+/// frame's slots as the call would have, and pushes the frame, whose depth is the result.
+/// `caller` is the calling frame's environment, or `NULL` while that frame, which is then the
+/// slot owner, has none. `arguments` is the part of the call's exit that says what it forced:
+/// a bitset of formals, then the arguments the caller evaluated ([`Inlined::formals`]).
+///
+/// A formal the call has not forced is bound to a promise of its argument over the caller, as
+/// tier 0 binds it, so reading it later evaluates the argument then. A formal it has forced
+/// is bound to a forced promise of the argument's value.
+unsafe fn enter_inlined(
+    root: &Activation,
+    child: *mut Child,
+    inlined: &Inlined,
+    caller: Sexp,
+    arguments: *const i64,
+) -> R<usize> {
+    unsafe {
+        let state = interp::interp();
+        let header = (*child).machine.header;
+        let mark = heap().handle_mark();
+        // The caller's position is current again from here, for the frame that is pushed and
+        // for a failure before that.
+        state.srcref = (*child).srcref;
+        let forced = arguments.read() as u64;
+        let mut saved = arguments.add(1);
+        let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
+        let mut expressions = inlined.call.cdr();
+        for (index, &source) in inlined.formals.iter().enumerate() {
+            let expression = expressions.car();
+            expressions = expressions.cdr();
+            let cell = saved;
+            if matches!(source, ArgumentSource::Saved(_)) {
+                saved = saved.add(1);
+            }
+            let bound = (|| {
+                if forced >> index & 1 == 0 {
+                    return match expression.kind() {
+                        SexpType::Symbol
+                        | SexpType::Language
+                        | SexpType::Promise
+                        | SexpType::Bytecode => {
+                            if caller == values::nil() {
+                                eval::slot_promise(state.slot_owner as usize, expression)
+                            } else {
+                                eval::make_promise(expression, caller)
+                            }
+                        }
+                        _ => Ok(expression),
+                    };
+                }
+                let value = match source {
+                    ArgumentSource::Saved(representation::INTEGER) => {
+                        values::scalar_integer(cell.cast::<i32>().read())?
+                    }
+                    ArgumentSource::Saved(representation::DOUBLE) => {
+                        values::scalar_real(cell.cast::<f64>().read())?
+                    }
+                    ArgumentSource::Saved(representation::LOGICAL) => {
+                        values::scalar_logical(cell.cast::<i32>().read())?
+                    }
+                    ArgumentSource::Saved(_) => match Sexp::from_raw(cell.read() as *mut Header) {
+                        Some(value) => value,
+                        None => panic!("an inlined call's exit saved no object for an argument"),
+                    },
+                    ArgumentSource::Root(symbol) => match passed_binding(root, symbol) {
+                        Some(held) if held.kind() == SexpType::Promise => held.car(),
+                        Some(held) => held,
+                        None => panic!("an inlined call forced a formal its caller does not bind"),
+                    },
+                    ArgumentSource::Unread => {
+                        panic!("an inlined call forced an argument compiled code never reads")
+                    }
+                };
+                eval::forced_promise(expression, value)
+            })();
+            let value = match bound {
+                Ok(value) => value,
+                Err(unwind) => {
+                    // The slots bound so far keep their counts, which only makes their values
+                    // look shared.
+                    bytecode::release_registers(header);
+                    return Err(unwind);
+                }
+            };
+            value.increment_refcount();
+            *bytecode::register_address(header + 1 + index) = value;
+            args.push(Arg {
+                tag: values::nil(),
+                value,
+            });
+        }
+        heap().release_handles(mark);
+        let entered = eval::enter(
+            inlined.call,
+            inlined.function,
+            caller,
+            &args,
+            &[],
+            header as u32,
+            0,
+            0,
+        )?;
+        if entered.header == interp::NO_SLOTS {
+            panic!("an inlined call ran whole where only its frame was to be pushed");
+        }
+        Ok(entered.depth as usize)
+    }
+}
+
+/// What the formal `symbol` of the compiled body `root` runs is bound to, unless the binding
+/// is active.
+unsafe fn passed_binding(root: &Activation, symbol: Sexp) -> Option<Sexp> {
+    unsafe {
+        let machine = machine(root);
+        let env = machine.env();
+        if env == values::nil() {
+            machine.local_binding(symbol)
+        } else {
+            heap()
+                .frame_cell(env, symbol)
+                .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
+                .map(|cell| cell.cdr())
+        }
+    }
+}
+
+/// Counts a time the inlined call `inlined` needed its real frame because of the callee.
+/// Once that is frequent the callee is marked so that no compile inlines it, and the compiled
+/// body is discarded.
+unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
+    let count = inlined.handoffs.get().saturating_add(1);
+    inlined.handoffs.set(count);
+    if !frequent(count, u64::from(inlined.entries.get())) {
+        return;
+    }
+    unsafe {
+        let counters = values::ints_mut(inlined.code.cdr().element(PROFILE));
+        let state = counters[profile::TIER_STATE];
+        counters[profile::TIER_STATE] = match state {
+            profile::TIER_OFF => state,
+            ..0 => NEVER_ELIDED,
+            _ => state | NO_ELISION,
+        };
+        retire(compiled, 0);
+    }
+}
+
+/// Counts a time an inlined call of `compiled` could not start without its frame for a
+/// reason that is not the callee's. Once that is frequent among the body's inlined calls, the
+/// body is recompiled to call its callees ([`NO_FRAMES`]).
+unsafe fn count_declined_frame(compiled: &Compiled) {
+    let count = compiled.declined_frames.get().saturating_add(1);
+    compiled.declined_frames.set(count);
+    if frequent(count, frame_entries(compiled)) {
+        unsafe { retire(compiled, NO_FRAMES) };
+    }
+}
+
+/// Starts the inlined call of frame `frame`, made from `parent`, without a frame of its own:
+/// it reserves the call's register window above the caller's and returns the call's
+/// activation. Until [`jit_leave_frame`] or a deoptimization, the call is visible to R code
+/// only as the current call of warnings, so compiled code hands every instruction that could
+/// run R code to tier 0, which gives the call its frame first.
+///
+/// Returns null when the call needs its frame from the start, as tier 0's own frame entry
+/// decides, or when a calling handler could look at the stack. Compiled code then hands the
+/// call instruction to tier 0.
+pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) -> *mut Activation {
+    unsafe {
+        checked(parent, std::ptr::null_mut(), |parent| {
+            let compiled = compiled(parent);
+            let Some((layout, inlined)) = compiled
+                .frames
+                .get(frame as usize)
+                .and_then(|layout| Some((layout, layout.inlined.as_ref()?)))
+            else {
+                panic!("compiled code entered an inlined call it does not have");
+            };
+            let state = interp::interp();
+            let function = inlined.function;
+            let header = bytecode::register_top();
+            let slots = bytecode::slot_count(inlined.code);
+            let base = header + 1 + slots;
+            inlined.entries.set(inlined.entries.get().saturating_add(1));
+            if function == state.namespace_loader
+                || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+                || function.cdr() != inlined.code
+                || function.tag().has_gp(gp::PENDING_FRAME)
+            {
+                count_handoff(compiled, inlined);
+                return std::ptr::null_mut();
+            }
+            // The frames an exit would push all fit under the depth limit, so pushing them
+            // cannot fail there.
+            if activity::enabled()
+                || !state.object_systems
+                || state.debugger.is_some()
+                || moves::tracking()
+                || calling_handler_established()
+                || state.frames.len() + compiled.frames.len() > state.max_depth as usize
+                || bytecode::reserve_registers(base + layout.registers + layout.slots.len())
+                    .is_err()
+            {
+                count_declined_frame(compiled);
+                return std::ptr::null_mut();
+            }
+            // New registers hold `NULL`, which is what the header and the slot root cells
+            // start as. The frame's slots stay unbound for as long as the call has no frame.
+            std::slice::from_raw_parts_mut(bytecode::register_address(header + 1), slots)
+                .fill(values::unbound());
+            let child = parent.children.add(frame as usize - 1);
+            child.write(Child {
+                activation: Activation {
+                    registers: bytecode::register_address(base),
+                    loops: std::ptr::null_mut(),
+                    visible: parent.visible,
+                    entry_pc: 0,
+                    header: bytecode::register_address(header),
+                    hints: bytecode::lookup_hints(inlined.code),
+                    enclosure: function.tag(),
+                    machine: std::ptr::null_mut(),
+                    compiled: parent.compiled,
+                    layout,
+                    parked: parent.parked,
+                    children: parent.children,
+                    resume_pc: 0,
+                },
+                machine: Machine {
+                    function,
+                    code: inlined.code,
+                    header,
+                    base,
+                    mark: heap().handle_mark(),
+                    loops: &mut [],
+                },
+                // Warnings and errors raised while the call has no frame name it as their
+                // call through this marker, as they do for a builtin called without one.
+                assignment_call: state.assignment_call.replace((
+                    values::unbound(),
+                    inlined.call,
+                    state.frames.len(),
+                )),
+                srcref: std::mem::replace(
+                    &mut state.srcref,
+                    values::get_attr(function, values::symbols().srcref),
+                ),
+            });
+            (*child).activation.machine = (&raw mut (*child).machine).cast();
+            &raw mut (*child).activation
+        })
+    }
+}
+
+/// Ends the inlined call `activation` ran without a frame: its registers go back to the file,
+/// and the caller's call and srcref are current again. Nothing was bound in the frame's slots,
+/// so there is nothing to release.
+pub unsafe extern "C" fn jit_leave_frame(activation: *mut Activation) {
+    unsafe {
+        let child = &*activation.cast::<Child>();
+        let state = interp::interp();
+        state.assignment_call = child.assignment_call;
+        state.srcref = child.srcref;
+        bytecode::release_registers(child.machine.header);
+    }
+}
+
+/// Loads the variable of `slot` for an inlined call that runs without a frame and does not
+/// bind the variable, from the closure's environment and without running any code. A promise
+/// must already be forced, and an active binding or a missing variable declines with
+/// [`outcome::LOAD_FAILED`], which hands the load to tier 0. Otherwise the result is the
+/// slot's status.
+pub unsafe extern "C" fn jit_load_free(activation: *mut Activation, slot: i64) -> i32 {
+    unsafe {
+        let activation = &*activation;
+        let Some(&symbol) = layout(activation).slots.get(slot as usize) else {
+            return outcome::LOAD_FAILED;
+        };
+        let heap = heap();
+        let empty = heap.known().empty_env;
+        let mut env = activation.enclosure;
+        while env != empty {
+            if let Some(cell) = heap.frame_cell(env, symbol) {
+                if cell.has_gp(gp::ACTIVE_BINDING) {
+                    return outcome::LOAD_FAILED;
+                }
+                let mut value = cell.cdr();
+                if value.kind() == SexpType::Promise {
+                    value = value.car();
+                }
+                if value == values::missing_arg() || value == values::unbound() {
+                    return outcome::LOAD_FAILED;
+                }
+                *slot_cell(activation, slot) = value;
+                return status::RUNTIME_ENCLOSING as i32;
+            }
+            env = env.enclosure();
+        }
+        outcome::LOAD_FAILED
+    }
+}
+
+/// Loads the formal of `slot` for the inlined call `callee` from the formal `symbol` of
+/// `caller`, the root activation, which passed the variable without reading it
+/// ([`crate::analysis::Passing::Variable`]). A `forcing` load is the callee's own read of the
+/// formal, which is where a promise of the argument would be forced, so a promise the variable
+/// holds is forced when that runs no code ([`eval::settled_without_code`]). A load that is not
+/// `forcing` takes a promise only once it is forced. Any other promise, an active binding or
+/// a missing variable declines with [`outcome::LOAD_FAILED`], which hands the load to tier 0
+/// and counts against the caller's code.
+pub unsafe extern "C" fn jit_load_passed(
+    caller: *mut Activation,
+    symbol: *mut Header,
+    callee: *mut Activation,
+    slot: i64,
+    forcing: i64,
+) -> i32 {
+    unsafe {
+        checked(caller, outcome::LOAD_FAILED, |caller| {
+            let Some(symbol) = Sexp::from_raw(symbol) else {
+                return outcome::LOAD_FAILED;
+            };
+            let value = match passed_binding(caller, symbol) {
+                Some(value) if value.kind() == SexpType::Promise => {
+                    if forcing != 0 && value.car() == values::unbound() {
+                        match scoped(|| eval::settled_without_code(value)) {
+                            Ok(settled) => settled,
+                            Err(unwind) => {
+                                park(caller, unwind);
+                                return outcome::LOAD_FAILED;
+                            }
+                        }
+                    } else {
+                        Some(value.car())
+                    }
+                }
+                held => held,
+            };
+            match value {
+                Some(value) if value != values::missing_arg() && value != values::unbound() => {
+                    *slot_cell(&*callee, slot) = value;
+                    status::RUNTIME_LOCAL as i32
+                }
+                _ => {
+                    count_declined_load(compiled(caller));
+                    outcome::LOAD_FAILED
+                }
+            }
+        })
     }
 }
 
@@ -1001,7 +1795,7 @@ pub unsafe extern "C" fn jit_flush(
     unsafe {
         guarded(activation, 0, |activation| {
             let machine = machine(activation);
-            let symbol = compiled(activation).slots[slot as usize];
+            let symbol = layout(activation).slots[slot as usize];
             let cell = slot_cell(activation, slot);
             let frame = frame_slot(activation, machine, slot);
             // A boxed value into a slot frame allocates nothing, so it needs no handle scope.
@@ -1065,13 +1859,17 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
+            DEOPTIMIZATIONS.with(|count| count.set(count.get() + 1));
             if crate::logging() {
+                let op = values::ints(machine.code.car())
+                    .get(pc as usize)
+                    .and_then(|&word| bytecode::op_of(word as u32));
                 eprintln!(
-                    "jit: deopt at pc {pc} (reason {why}) in {}",
+                    "jit: deopt at pc {pc} ({op:?}, reason {why}) in {}",
                     crate::describe(machine.code)
                 );
             }
-            if why == reason::SPECULATION && activation.pending.is_none() {
+            if why == reason::SPECULATION && (*activation.parked).pending.is_none() {
                 invalidate(machine.code);
             }
             for index in 0..compiled.loops {
