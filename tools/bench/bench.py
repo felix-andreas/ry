@@ -273,7 +273,7 @@ def engines(args, suite):
             table.append(Engine("baseline_typed", "baseline typed", [args.baseline, "run", "--runtime", "ry"],
                                 ry_env, typed=True))
         return table
-    library = corpus.corpus / "library"
+    library = codebase_library() if suite == "codebases" else corpus.corpus / "library"
     if library.is_dir():
         # Both engines load packages from the corpus library and then base R's own, so neither
         # reads a different build of a package from a site library.
@@ -933,6 +933,11 @@ class PackageRunner:
         subprocess.run(["rm", "-rf", str(self.work)], check=True)
 
 
+def codebase_library():
+    """The benchmark dependency closure that `just corpus` installs, which the code bases import."""
+    return pathlib.Path(os.environ.get("RY_CORPUS_DIR", root / ".corpus")) / "library"
+
+
 class CodebaseRunner:
     """The benchmark code bases: `oracle bench` runs one code base's test blocks on one engine and
     reports each block's time, and the sum of those is the program's time."""
@@ -943,8 +948,8 @@ class CodebaseRunner:
         if not self.oracle.exists():
             sys.exit("error: the codebases suite runs through the oracle; build it with "
                      "`cargo build --release -p oracle`")
-        if not (corpus.corpus / "library").is_dir():
-            sys.exit("error: no corpus library; run `just bench-packages install` first")
+        if not codebase_library().is_dir():
+            sys.exit("error: no dependency closure; run `just corpus` first")
         self.ry = args.ry
         # `ry load --runtime gnu-r` loads libR.so itself, which finds libRblas.so only through the
         # loader path that R's own launcher script would set.

@@ -1,0 +1,6 @@
+[stdout]
+[messages]
+[warnings]
+[errors]
+- argument must be coercible to non-negative integer (in seq_len(k))
+[value]

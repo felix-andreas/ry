@@ -5,7 +5,7 @@
 
 use {
     crate::{
-        Frame,
+        Frame, Signalling,
         annotations::Entry,
         builtins::{
             Arg, BuiltinDef, Call, Generic, Kind, NativeArgs, Visibility, builtin, internal,
@@ -1603,6 +1603,9 @@ unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
             if failure.call == unbound() {
                 failure.call = blame;
             }
+            if interp().signalling != Signalling::Immediate {
+                return Unwind::Error(failure);
+            }
             conditions::signal_error(failure)
         }
         unwind => unwind,
@@ -2600,8 +2603,9 @@ pub unsafe fn call_with_plan(
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
     }
-    let result =
-        on_large_stack(|| bytecode::run_slots(function, entered.header as usize, shape.slots as usize));
+    let result = on_large_stack(|| {
+        bytecode::run_slots(function, entered.header as usize, shape.slots as usize)
+    });
     leave(entered.depth as usize, result)
 }
 
@@ -3823,7 +3827,12 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// Replaces the default of each formal in `promised`, which the binding
 /// put in its slot as the bare expression, with a promise of its code over the slot frame at
 /// `owner`.
-pub(crate) unsafe fn default_promises(owner: usize, function: Sexp, header: usize, promised: u64) -> R<()> {
+pub(crate) unsafe fn default_promises(
+    owner: usize,
+    function: Sexp,
+    header: usize,
+    promised: u64,
+) -> R<()> {
     if promised == 0 {
         return Ok(());
     }

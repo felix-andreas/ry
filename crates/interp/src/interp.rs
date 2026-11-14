@@ -627,6 +627,8 @@ pub struct Interp {
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
     pub immediate_warning: bool,
+    /// Where a condition raised by the instruction that is running is signalled.
+    pub signalling: Signalling,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
     /// A buffer builtins reuse to assemble each element of a character result
@@ -727,6 +729,23 @@ pub struct Interp {
     /// The graphics system, the tables and the data viewer, which crates above this one
     /// implement ([`extensions`]).
     pub extensions: extensions::Extensions,
+}
+
+/// Where a condition is signalled. The optimizing tier runs a closure call without a frame
+/// while nothing can tell, and a signal can: the default error handler, the `error` option and
+/// the traceback read the stack. So while it runs one instruction of such a call, nothing is
+/// signalled until the call has its frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Signalling {
+    /// Where the condition is raised.
+    Immediate,
+    /// Not here: an error a builtin raises is returned unsignalled, for the tier to signal
+    /// once the call has its frame.
+    Deferred,
+    /// As `Deferred`, after the instruction raised a warning whose signalling runs R code,
+    /// as under `options(warn = 2)`. The instruction gave up with an error that stands for
+    /// nothing, and runs again once the call has its frame.
+    Abandoned,
 }
 
 struct InterpState {
@@ -849,6 +868,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         loops: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
+        signalling: Signalling::Immediate,
         error_message: String::new(),
         text_buffer: Vec::new(),
         show_error_messages: true,

@@ -166,9 +166,44 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - Calls from tier-1 code while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
-- A deoptimization exit that materializes the callee's frame, so tier 1 can inline callees with
-  effects. Runtime work (closure calls, argument matching, allocation, collection) dominates
-  `just bench applications` with the JIT off, so this and unboxing are the larger levers.
+- Inlined closure calls without a frame are built (`decisions.md`, "Tier 1 leaves compiled code
+  through frame states"). On `just bench applications` they move one program, `orders` (85 ms
+  against 154 ms, 1.82x), because a call is only inlined into a caller tier 1 compiles, and tier 1
+  compiles 0 to 4 bodies per program (11 on `functional`). Three of those bodies get a frame:
+  one in `orders`, one in `conditions` and one in `timeseries`. In order of expected gain on the
+  applications:
+  - Compile the callers. Most application bodies are refused as "would hand most instructions
+    to tier 0" or "would run nothing natively": their instructions are builtin calls, vector
+    operators and calls of closures with `...` or defaults. Each of those needs a native form
+    in tier 1 before removing the calls between them can pay.
+  - Widen what gets an inlined frame. `RY_JIT_LOG=1` over the 15 applications prints 709
+    refusals: 445 "the call does not pass each formal one argument" (defaults), 115 "the callee
+    has no type feedback yet", 58 "a named, missing or `...` argument", 44 "the callee runs an
+    instruction only tier 0 has", 24 recursive calls, 8 callees too long, 8 callees that needed
+    their frame, 5 arguments with a possible effect that the callee reads, and 2 callees without
+    tier-0 code. Defaults and named arguments are 71% of them, so matching arguments at compile
+    time and binding a default as an unforced formal comes first.
+  - A direct call from compiled code when an inlined frame cannot start. `jit_enter_frame`
+    declines while a calling handler is established, the call instruction then deoptimizes the
+    whole root activation, and a root where that is frequent is recompiled without frames
+    (`NO_FRAMES`). A root that mostly runs under `withCallingHandlers` or `suppressWarnings`,
+    which includes every testthat expectation, therefore calls for real. Calling the callee
+    through the direct-call path instead keeps the root compiled with frames and makes
+    `NO_FRAMES` unnecessary.
+  - Evaluate more arguments before the call. An argument of an inlined callee that mentions one
+    of the callee's formals under a condition stays a promise, which costs the frame when the
+    inner callee reads it (`analysis.rs`, `Lowering.conditional`). Tracking which formals are
+    already forced at the call would allow it.
+  - Enter an inlined frame without the two helper calls (`jit_enter_frame`, `jit_leave_frame`),
+    then delete `Action::Inline` and `effects::effect_free_lookups`, which exist only because
+    the frame path costs those calls.
+  - Plan a callee that has no type feedback from the argument types at the call. Tier 0 runs
+    small closures without an activation and records no feedback for them, so the smallest
+    callees get a frame only through `Action::Inline`.
+  - R-level value nodes and passes in `crates/ssa`. The IR carries frame states, but its
+    instructions are still Cranelift's, and inlining is decided by the planner in
+    `analysis.rs`. Value numbering across an inlined call, guard removal and scalar
+    replacement need typed R-level nodes above the lowering.
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
 
@@ -321,7 +356,7 @@ The code file can only hold what the install session can compile for declared ty
 
 - **Goal.** A typed function of an installed package runs its first call on code compiled at install. Targets (design page, "The numbers to beat"): attach at most 20 µs per function, zero `typed: compiled for` lines for functions in the file, warm time within 2% of session code, `library()` at most 0.1 ms slower, code pages shared between processes, and the file holds every function `ry run --aot` compiles up front for the same program.
 - **Backend seam** (`crates/typed/src/backend.rs`). Replace the 102 `address!` uses by one static helper array and an `Address` that is an absolute word (session) or a table slot (file). The functions that embed process words are `call`, `call_words`, `call_typed`, `call_r`, `preserving`, `count`, the `Constant::Str` and `Constant::Object` arms, `construct` (shape ids) and `Op::Poll`. Make `Constant::Str` carry the string and `Constant::Object` the shape, so that `crates/typed/src/lower.rs` holds no process address (`ry_str_static` is called there today). Shape ids also enter as plain integers in `lower.rs` (`self.int(shape as i32)` in the cases of a `match`, and the `GT` tag of the sort comparator): add `Constant::Shape` and use it in both, and grep for every other `as i32` of a shape id. The emission of Cranelift IR reads thread-local state (`SHAPES`, `FREES`), so it stays on the main thread.
-- **`crates/ssa`** (owned by the tier-1 track: agree the additions with it before writing them). Add `table_word(slot)` (lowers to `symbol_value` of an external name on a PIC ISA, where every name goes through the offset table), a direct call inside one object, and `ssa::Object`. The lowering in `crates/ssa/src/lower.rs` is generic over `cranelift_module::Module`; give it a narrower trait of the operations it uses (declare a function, declare a name, define) that the JIT module and `ssa::Object` both implement. `ssa::Object` compiles with `cranelift_codegen::Context::compile`, keeps bytes and `MachBufferFinalized::relocs`, lays out, and resolves `X86GOTPCRel4`, `Aarch64AdrGotPage21`, `Aarch64Ld64GotLo12Nc` (table slots, including `ExternalName::LibCall` mapped to `Helper` slots, because the ISA is built with `use_colocated_libcalls` off) and `X86CallPCRel4`, `Arm64Call` (functions of the object). Any other relocation refuses the function. Cranelift is 0.136 and the emission was read in `cranelift-codegen` (`isa/x64/inst/emit.rs`, `LoadExtName`; `isa/aarch64/inst.isle`, `load_ext_name`); no new dependency. Only `Context::compile` runs on worker threads; lay results out in column order.
+- **`crates/ssa`** (owned by the tier-1 track, which has agreed to these additions; send it the pull request number when the hunk is up, and it reads it). Its conditions: `ssa::Relocatable` must not depend on frame states (`FrameState`, `emit_exits` in `crates/ssa/src/ssa.rs` are tier 1's exits, and a typed body has none), `table_word` goes beside the other address-producing instructions, and the JIT `Module` refuses `table_word` with an `Error`, never a panic. Add `table_word(slot)` (lowers to `symbol_value` of an external name on a PIC ISA, where every name goes through the offset table), a direct call inside one object, and `ssa::Relocatable`. The lowering in `crates/ssa/src/lower.rs` is generic over `cranelift_module::Module`; give it a narrower trait of the operations it uses (declare a function, declare a name, define) that the JIT module and `ssa::Relocatable` both implement. `ssa::Relocatable` compiles with `cranelift_codegen::Context::compile`, keeps bytes and `MachBufferFinalized::relocs`, lays out, and resolves `X86GOTPCRel4`, `Aarch64AdrGotPage21`, `Aarch64Ld64GotLo12Nc` (table slots, including `ExternalName::LibCall` mapped to `Helper` slots, because the ISA is built with `use_colocated_libcalls` off) and `X86CallPCRel4`, `Arm64Call` (functions of the object). Any other relocation refuses the function. Cranelift is 0.136 and the emission was read in `cranelift-codegen` (`isa/x64/inst/emit.rs`, `LoadExtName`; `isa/aarch64/inst.isle`, `load_ext_name`); no new dependency. Only `Context::compile` runs on worker threads; lay results out in column order.
 - **File** (new `crates/typed/src/file.rs`, writer and loader, one logical component). Format, columns (including the lookup kinds, the full `RCall` fields in `sites`, `confirms`, and types encoded against `shapes`), the `Data` slot for static strings and the closure identity (`.rdb` record offset, position in `unserialize_with_closures` order) are in the design page. `parse(bytes, build, stamp, target)` is a pure function. Path helper beside `rcmd::images::code_image` (`crates/rcmd/src/images.rs`), suffix `.ryt`; `images::prune` removes other builds' `.ryt` files.
 - **Writer hook.** Internal function `ryTypedCodeWrite(package)` beside `ryCodeImageWrite`, called from `crates/rcmd/src/code-image.R` after it; option `--ry-no-typed-code` beside `--ry-no-code-image` (`crates/rcmd/src/rcmd.rs`, where `--ry-train=` is parsed). `write_code_image` runs only when the code image is wanted today, so make the driver run when either output is wanted. The pass over the namespace is `typed::ahead::compile` with the namespace's bindings as definitions.
 - **Loader hook.** `do_lazy_load_fetch` (`crates/interp/src/serialize.rs`) notes (record, position, database stamp at first read) for typed closures of a namespace that has a file, keyed by the closure object (not the body, which copies share and `take_pending` replaces; `crates/interp/src/code_image.rs`). Its `Source::Database` arm calls plain `unserialize`; route it through `unserialize_with_closures` when the package has a file. Note only the package's own `.rdb`, never `sysdata.rdb`. `compiled_or_refusal` (`crates/typed/src/typed.rs`) asks the file on a miss before it lowers. Attach protocol, seven steps: design page, "Loading" (it roots the closure, confirms shapes, merges callee speculations and epochs as `Linker` does, and does not count toward `MAX_COMPILED`). Map on Linux; elsewhere reserve one anonymous range for table plus code and copy the code in, until the mapping is verified there.
@@ -329,7 +364,7 @@ The code file can only hold what the install session can compile for declared ty
 - **Leave out.** Functions with a `match` over any tag (count them in the install log), training instantiations (step 3), cross-namespace direct calls beyond the `Callee` slot, closures copied at run time (R6 methods, `environment<-`, per-class S4 method copies), which have no note and compile in the session.
 - **Tests.** The design page's table: the package mode of the tier matrix (plain and with every attach lookup failing), `install-typed-package.scenario` extended (attach line, second process, touched `.rdb`, other build), `fuzz_typed_code_file` and `fuzz_typed_code_parse` in `crates/interp/tests/test_fuzz.rs` style with `cargo fuzz` targets under `fuzz/fuzz_targets/`, round-trip and same-bytes tests (two writes against one install), a copied closure that calls R, a reinstall in a running session, shapes interned in another order, `RY_GC_STRESS` over attached code, a `robustness.md` row.
 - **Benchmarks.** Engine `ry_typed_file` in `tools/bench/bench.py` (`engines`, beside `ry_typed_aot`): generate a package from each typed program's definitions, install outside the clock, time the driver's first run and warm runs, and record how many functions compiled in the session. Render in `docs/src/lib/benchmarks.ts` (`comparedEngines`, `tableViews`). Never type the numbers into prose.
-- **Stop rules.** If macOS refuses executable file mappings, ship the copy path there and record it; do not chase entitlements. If warm file code is more than 2% slower than session code, find the table loads Cranelift did not hoist out of hot loops before changing the design. If more than a tenth of the typed benchmark functions are left out for a `match` over any tag, settle that open question before step 3. If the tier-1 track does not agree to the `crates/ssa` additions, put `Object` and the relocation resolver in `crates/typed` behind the same narrow trait and record why.
+- **Stop rules.** If macOS refuses executable file mappings, ship the copy path there and record it; do not chase entitlements. If warm file code is more than 2% slower than session code, find the table loads Cranelift did not hoist out of hot loops before changing the design. If more than a tenth of the typed benchmark functions are left out for a `match` over any tag, settle that open question before step 3.
 - **Docs.** `reference/cli.md` (`ry build --aot`, `ry install`), `typed-runtime.md` ("What exists"), `news.md`, the design page's status, `decisions.md` (move "The typed code file ..." to built, with the measured numbers).
 
 ### Step 3: fewer first-call compiles
@@ -356,7 +391,7 @@ Each item removes a reason a function is not in the file or not compiled by `ry 
 ### Not planned
 
 - **Machine code for untyped hot bodies.** Trained code images already carry the profile, so tier 1 compiles a hot body at its first calls. Storing its machine code too has a start condition, which the untyped decision names: the applications suite showing tier 1 winning, and its compile showing in a cold run.
-- **Session `--aot` in parallel.** `ry run --aot` compiles on the main thread (1 to 6 ms per benchmark program, 51 ms for `pidigits`). `ssa::Object` makes worker-thread code generation possible for the file writer; using it for a script would mean copying finished code into JIT memory, which is worth doing only if a real script's up-front compile exceeds about 100 ms.
+- **Session `--aot` in parallel.** `ry run --aot` compiles on the main thread (1 to 6 ms per benchmark program, 51 ms for `pidigits`). `ssa::Relocatable` makes worker-thread code generation possible for the file writer; using it for a script would mean copying finished code into JIT memory, which is worth doing only if a real script's up-front compile exceeds about 100 ms.
 
 ## Open: the Windows release build
 
@@ -402,9 +437,9 @@ Each item removes a reason a function is not in the file or not compiled by `ry 
 - **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
 
 - **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
-- **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 308,000 lines each; `oracle bench` through `just bench-compare`). ry matches GNU R on all of finbench's 10,452 tests, dsbench's 10,562 and biobench's 9,757. With the JIT on, the suite times are 1.30x, 1.35x and 1.21x GNU R's (312 s against 240 s, 157 s against 116 s, 168 s against 139 s). The JIT's own cost on the suites' cold code is within about 2% of `RY_JIT=off` (finbench 199.8 s against 195.9 s; dsbench 94.9 s against 89.6 s in suite time but 128 s against 131 s in process wall; single runs with about 4% of noise), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). Each suite compiles about 60 bodies in 0.65 s of Cranelift time and 1 MiB of code. Process wall times are about 0.97x, 0.78x and 0.75x GNU R's, because GNU R spends minutes in testthat's per-file `gc()`.
-- **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the corpus library). A one-round run on a library missing 37 of the 72 dependencies puts finbench at 74.6 s on ry (69.9 s with the JIT off) against 109.9 s on GNU R, so the 1.2x to 1.35x slowdown above needs the full dependency closure (`just corpus`, which installs `.corpus/library`; `just bench-compare` reads that path, while the suite reads the package corpus library) before it can be compared. `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits.
-- **Next.** Close the per-test gap, then run `ry check` over the generated code and treat every finding as a possible false report.
+- **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 306,000 lines each; the `codebases` suite, one round, release build). With the dependency closure installed except `polars`, `Rblpapi` and `esgtoolkit`, ry matches GNU R on every test (finbench 9,592, dsbench 9,416, biobench 8,927) and the suite times are 1.48x, 1.59x and 1.53x faster than GNU R's (135.3 s against 199.6 s, 63.0 s against 99.9 s, 73.8 s against 113.2 s); per-test geometric means are 1.44x, 1.59x and 1.57x. The JIT is within 3% of `RY_JIT=off` (131.5 s, 62.6 s, 73.5 s), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). The earlier figure of 1.21x to 1.35x slower, from a run with 10,000 or more tests per suite, predates these and is not reproduced; whether the cause is the library, the test set or the interpreter work since is not isolated.
+- **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. The compiled packages of the Posit snapshot are built for an older R, and xts 0.14.1's binary truncates `ATTRIB`'s result to an `int` (GNU R 4.6.2 aborts on `x[2:4]` of an xts object the same way), so the installer reinstalls xts from source.
+- **Next.** Re-measure on the release archive (`--write`), then run `ry check` over the generated code and treat every finding as a possible false report.
 
 ## Open: the CRAN package corpus
 
@@ -1170,10 +1205,9 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
   addressing and unboxed scalars, slot frames) close the interpreter and value-representation gaps
   to LuaJIT. The three that remain need one JIT-optimizer track, because each depends on the others:
-  - *Cross-closure inlining with deopt.* Inline hot callees under guards on the binding version and
-    on an observer bit (no `parent.frame`, `sys.call`, `eval` or `environment()` on the inlined
-    frame), and rebuild the callee frames from a snapshot when a guard fails. Needs the enter/leave
-    contract and the observer bitset from "Closure call setup: the 10x end shape" in `decisions.md`.
+  - *Cross-closure inlining with deopt.* Built for callees without loops, `...` or defaults
+    (`decisions.md`, "Tier 1 leaves compiled code through frame states"); what is left is under
+    "Open: JIT on against JIT off".
   - *Allocation sinking.* Escape analysis over the JIT IR, so a temporary vector, a scalar box or a
     short-lived list that never escapes the compiled region is never allocated, and is materialized
     only on a deopt exit. Builds on counted registers.
@@ -1472,6 +1506,12 @@ overhead, not allocation.
 
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.
+- A missing argument forwarded through two calls is reported on the wrong call: with `leaf <- function(x) x; mid <- function(a) leaf(a * 2); wrap <- function(q) mid(q)`, `wrap()` fails with `argument "q" is missing, with no default` on both engines, but GNU R's condition call is `wrap()` and ry's is `leaf(a * 2)`. The same in every tier.
+- `nargs()` evaluated in another function's frame counts nothing: with `f <- function(p) eval(quote(nargs()), parent.frame()); g <- function(a, b, c) f(a)`, `g(1, 2, 3)` is 3 on GNU R and 0 on ry. The same in every tier.
+- An out-of-bounds `v[[k]]` in a closure is signalled one frame deeper than on GNU R: with `pick <- function(v, k) v[[k]]`, an `options(error = )` handler counts 2 frames on GNU R for `pick(c(1, 2, 3), 7L)` and 3 on ry (the extra one is `stop`). Every tier does it.
+- `integer(NA_real_)` fails with "invalid 'length' argument" where GNU R says "vector size cannot be NA/NaN", and `matrix(1, -1L)` returns a 0 x 0 matrix where GNU R fails with "invalid 'nrow' value (< 0)".
+- `integer`, `character` and the other vector constructors are builtins on ry and closures on GNU R, so an error inside one shows a frame less (`Calls: f` against `Calls: f -> integer`).
+- GNU R calls an active binding twice on the second call of `f <- function(x) x * sc` (the cause is unverified; the second call is the one GNU R byte-compiles `f` at); ry calls it once. Low priority: nothing should depend on it.
 - `tracemem()` never reports a copy: it returns the address, and `untracemem` and `retracemem` do nothing (`crates/interp/src/system.rs`), so `x <- numeric(10); tracemem(x); y <- x; y[1] <- 1` prints nothing where GNU R prints a `tracemem[...]` line. Copy checks use `RY_GC_LOG` collection counts or `gc()`'s max used instead.
 - `.Call` into a package routine costs about 1.5x GNU R per call (`truelength()` x300k: 0.21 s
   against 0.14 s). What remains is the boundary itself: `call_native`'s native scope, rooting and
