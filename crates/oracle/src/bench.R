@@ -59,9 +59,10 @@ local({
   gc.time(TRUE)
   collecting <- gc.time()[[3L]]
   # GNU R's side of a function-by-function profile (`tools/bench/compare_profiles.py`); ry's side
-  # is the `RY_PROFILE_STACKS` file.
+  # is the `RY_PROFILE_STACKS` file. Both sample wall time: `Rprof()`'s default event on Linux is
+  # CPU time, which misses I/O waits and counts every thread of multithreaded native code.
   rprof <- Sys.getenv("RY_BENCH_RPROF")
-  if (nzchar(rprof)) utils::Rprof(rprof, interval = 0.001)
+  if (nzchar(rprof)) utils::Rprof(rprof, interval = 0.01, event = "elapsed")
   started <- proc.time()[["elapsed"]]
   status <- tryCatch(
     {
@@ -73,6 +74,7 @@ local({
   )
   if (!is.null(status)) {
     emit("<setup>", "<setup>", "error", 0L, status, "", proc.time()[["elapsed"]] - started)
+    if (nzchar(rprof)) utils::Rprof(NULL)
     close(connection)
     return(invisible())
   }

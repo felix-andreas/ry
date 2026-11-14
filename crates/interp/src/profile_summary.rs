@@ -21,7 +21,7 @@ use {
     smallvec::SmallVec,
     std::{
         fmt::Write as _,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{
             Mutex,
             atomic::{AtomicBool, Ordering},
@@ -266,10 +266,13 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope 
             }
         }
     };
+    // `pkg::f()`, `obj$f()` and `obj@f()` take the name `f`; GNU R's `Rprof()` writes these as
+    // `pkg::f`, `obj$f` and `obj@f`, and `tools/bench/compare_profiles.py` reduces those to `f` so
+    // the two engines' rows match.
     let mut head = call.car();
     if head.kind() == SexpType::Language
         && head.car().kind() == SexpType::Symbol
-        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::" | "$" | "@")
     {
         head = head.cdr().cdr().car();
     }
@@ -325,30 +328,27 @@ pub fn finish() -> R<()> {
     let ready = lock(&READY_AT).map(|ready| ready.duration_since(sampler.started));
     let text =
         report(&samples, elapsed, ready).map_err(|_| error("cannot format the profile summary"))?;
-    if let (Some(path), Some(stacks)) = (&sampler.stacks, &samples.stacks) {
-        std::fs::write(path, stack_lines(stacks)).map_err(|failure| {
-            error(format!(
-                "cannot write the profile stacks to '{}': {failure}",
-                path.display()
-            ))
-        })?;
-    }
-    let written = match sampler.path.parent() {
-        Some(directory) if !directory.as_os_str().is_empty() => {
-            std::fs::create_dir_all(directory).and_then(|()| std::fs::write(&sampler.path, text))
-        }
-        _ => std::fs::write(&sampler.path, text),
+    let write = |path: &Path, text: String, what: &str| {
+        let written = match path.parent() {
+            Some(directory) if !directory.as_os_str().is_empty() => {
+                std::fs::create_dir_all(directory).and_then(|()| std::fs::write(path, text))
+            }
+            _ => std::fs::write(path, text),
+        };
+        written.map_err(|failure| {
+            error(format!("cannot write the {what} to '{}': {failure}", path.display()))
+        })
     };
-    written.map_err(|failure| {
-        error(format!(
-            "cannot write the profile summary to '{}': {failure}",
-            sampler.path.display()
-        ))
-    })
+    write(&sampler.path, text, "profile summary")?;
+    if let (Some(path), Some(stacks)) = (&sampler.stacks, &samples.stacks) {
+        write(path, stack_lines(stacks), "profile stacks")?;
+    }
+    Ok(())
 }
 
 /// One line per distinct stack and activity: the sample count, the activity (`builtin:NAME` for
-/// a builtin, `native:PACKAGE` for native code), and the frames outermost first as `package::function`, separated by `;`.
+/// a builtin, `native:PACKAGE` for native code), and the frames outermost first as
+/// `owner::function`, separated by `;`. The owner is a namespace, `R_GlobalEnv` or `other`.
 fn stack_lines(stacks: &FxHashMap<(Vec<(u32, usize)>, u32), u64>) -> String {
     let mut owners: FxHashMap<u32, String> = FxHashMap::default();
     let mut functions: FxHashMap<usize, String> = FxHashMap::default();

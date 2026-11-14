@@ -7,8 +7,10 @@ directory `oracle bench --keep` leaves behind, once on GNU R under `Rprof()` and
 blocks (`run_block`), the time per closure (self and inclusive), per builtin and per package on
 each engine, with GNU R's time over ry's.
 
-Each engine's samples are scaled to that engine's own sum of block times from the same run, so
-the two profilers' different intervals and overheads cancel. "Self" is the innermost closure
+Each engine's samples are scaled to that engine's own sum of block times, so the two profilers'
+different intervals cancel. Profiling slows each engine by a different amount (ry about 9%), so
+pass `--times` with the directory of an unprofiled run (`run --no-profile`) to scale to
+unprofiled block times; without it, the profiled run's own block times are used. "Self" is the innermost closure
 together with the builtins it calls, on both engines, because GNU R's `.Internal` builtins run
 without a context of their own. A builtin row compares only builtins GNU R gives a context
 (true builtins called by name; the bytecode compiler's inlined operators such as `[` and `+`
@@ -18,7 +20,8 @@ The "excess" column ranks what keeps the suite from a target speed-up (`--target
 ry's time minus GNU R's time over the target. The excesses of all self rows sum to the whole gap.
 
     python3 tools/bench/compare_profiles.py run /tmp/ry-bench-123-finbench/finbench --out .profile/finbench
-    python3 tools/bench/compare_profiles.py report .profile/finbench
+    python3 tools/bench/compare_profiles.py run /tmp/ry-bench-123-finbench/finbench --out .profile/finbench-plain --no-profile
+    python3 tools/bench/compare_profiles.py report .profile/finbench --times .profile/finbench-plain
 """
 
 import argparse
@@ -43,6 +46,7 @@ def main():
     run.add_argument("--ry", type=pathlib.Path, default=ROOT / "target" / "release" / "ry")
     run.add_argument("--filter", default="", help="a regular expression test file names must match")
     run.add_argument("--engines", default="gnu-r,ry")
+    run.add_argument("--no-profile", action="store_true", help="only time the blocks, for `report --times`")
     report = commands.add_parser("report", help="compare the two profiles in a directory")
     report.add_argument("directory", type=pathlib.Path)
     report.add_argument("--top", type=int, default=40)
@@ -75,7 +79,9 @@ def run_profiles(arguments):
             LC_ALL="C.UTF-8",
             TZ="UTC",
         )
-        if engine == "gnu-r":
+        if arguments.no_profile:
+            pass
+        elif engine == "gnu-r":
             environment["RY_BENCH_RPROF"] = str(out / "gnu-r.rprof")
         else:
             environment["RY_PROFILE_SUMMARY"] = str(out / "ry-summary.md")
@@ -83,17 +89,19 @@ def run_profiles(arguments):
         command = [str(arguments.ry.resolve()), "load", str(package), "--runtime", engine, "--file", str(DRIVER)]
         print(f"{engine}: {' '.join(command)}", file=sys.stderr)
         with open(out / f"{engine}.stderr", "w") as stderr:
-            subprocess.run(command, cwd=package, env=environment, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=stderr, check=False)
+            status = subprocess.run(command, cwd=package, env=environment, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=stderr).returncode
+        if status != 0:
+            sys.exit(f"{engine} exited with status {status}; see {out / f'{engine}.stderr'}")
 
 
 def block_seconds(path):
     total = 0.0
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as failure:
+            sys.exit(f"{path}:{number}: not a JSON line ({failure})")
         if row["test"] not in ("<total>", "<file>", "<setup>"):
             total += row["seconds"]
     return total
@@ -159,24 +167,42 @@ def read_rprof(path, packages_of):
                 continue
             stacks[line.strip()] += 1
     for line, count in stacks.items():
-        names = [name.strip('"') for name in line.split('" "')]
-        names = ["(anonymous)" if name == "<Anonymous>" else name for name in reversed(names)]
-        leaf = names[-1] if names and names[-1] in primitives else None
-        closures = [name for name in names if name not in primitives]
-        # Rprof names no package; the package ry attributes the name to most often stands in.
-        frames = [f"{packages_of.get(name, '?')}::{name}" for name in closures]
+        names = [rprof_frame(name.strip('"')) for name in reversed(line.split('" "'))]
+        leaf = names[-1][1] if names and names[-1][1] in primitives else None
+        # Rprof names a package only for a `pkg::f()` call; otherwise the package ry attributes
+        # the name to most often stands in.
+        frames = [f"{package or packages_of.get(name, '?')}::{name}"
+                  for package, name in names if name not in primitives]
         profile.add(frames, leaf, "builtin" if leaf else "closure", count)
     return profile
+
+
+def rprof_frame(name):
+    """Splits an Rprof frame into its package and name: `pkg::f` and `pkg:::f` name a package,
+    and `obj$f` and `obj@f` reduce to `f`, as ry records them."""
+    if name == "<Anonymous>":
+        return None, "(anonymous)"
+    for separator in (":::", "::"):
+        package, found, function = name.partition(separator)
+        if found and package and function:
+            return package, function
+    for separator in ("$", "@"):
+        object, found, function = name.rpartition(separator)
+        if found and object and function:
+            return None, function
+    return None, name
 
 
 def print_report(arguments):
     directory = arguments.directory
     ry = read_ry(directory / "ry.stacks")
-    packages_of = {}
+    owners = collections.defaultdict(collections.Counter)
     for line in (directory / "ry.stacks").read_text(encoding="utf-8", errors="replace").splitlines():
-        for frame in line.split("\t", 2)[2].split(";"):
+        count, _, stack = line.split("\t", 2)
+        for frame in stack.split(";"):
             package, _, name = frame.rpartition("::")
-            packages_of.setdefault(name, package)
+            owners[name][package] += int(count)
+    packages_of = {name: counts.most_common(1)[0][0] for name, counts in owners.items()}
     gnu = read_rprof(directory / "gnu-r.rprof", packages_of)
     times = arguments.times or directory
     ry_seconds = block_seconds(times / "ry.jsonl")
@@ -190,7 +216,7 @@ def print_report(arguments):
     gnu_time = scale(gnu, gnu_seconds)
     print(f"# Profile comparison: {directory.name}\n")
     print(f"Block time: GNU R {gnu_seconds:.1f} s, ry {ry_seconds:.1f} s, GNU R over ry {gnu_seconds / ry_seconds:.2f}x.")
-    print(f"Samples in blocks: GNU R {gnu.total} (Rprof, which samples no faster than every 10 ms), "
+    print(f"Samples in blocks: GNU R {gnu.total} (Rprof's wall clock every 10 ms), "
           f"ry {ry.total} (1 ms). Excess is ry's time minus GNU R's over {target:g}.\n")
 
     def table(title, ry_counts, gnu_counts, keys=None, label="name", packages=True):
@@ -198,15 +224,16 @@ def print_report(arguments):
         rows = []
         for key in keys:
             ours, theirs = ry_time(ry_counts.get(key, 0)), gnu_time(gnu_counts.get(key, 0))
-            rows.append((ours - theirs / target, key, ours, theirs))
+            rows.append((ours - theirs / target, key, ours, theirs, gnu_counts.get(key, 0)))
         rows.sort(reverse=True)
         print(f"## {title}\n")
-        print(f"| {label} | package | ry s | GNU R s | GNU R over ry | ry share | excess s |")
-        print("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
-        for excess, key, ours, theirs in rows[: arguments.top]:
+        print("GNU R's sample count is the row's noise floor: 100 samples give about 10% error.\n")
+        print(f"| {label} | package | ry s | GNU R s | GNU R samples | GNU R over ry | ry share | excess s |")
+        print("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for excess, key, ours, theirs, samples in rows[: arguments.top]:
             ratio = f"{theirs / ours:.2f}x" if ours > 0 else "-"
-            print(f"| `{key}` | {packages_of.get(key, '') if packages else ''} | {ours:.2f} | {theirs:.2f} | {ratio} | "
-                  f"{100 * ours / ry_seconds:.1f}% | {excess:.2f} |")
+            print(f"| `{key}` | {packages_of.get(key, '') if packages else ''} | {ours:.2f} | {theirs:.2f} | "
+                  f"{samples} | {ratio} | {100 * ours / ry_seconds:.1f}% | {excess:.2f} |")
         print()
 
     if arguments.callers:
