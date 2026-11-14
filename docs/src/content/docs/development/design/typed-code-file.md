@@ -153,14 +153,18 @@ pointer from `ry_str_static`, `Constant::Object` carries the shape, not a box ad
 interned other shapes first pins that ("Tests").
 
 `crates/ssa` gains what the file target needs. Its lowering of existing instructions keeps its
-output, and the tier-1 track owns the crate, so these additions are agreed with it first:
+output. The tier-1 track owns the crate and has agreed to both additions on three conditions:
+`ssa::Relocatable` does not depend on frame states (`FrameState` and `emit_exits` in `ssa.rs`
+serve tier 1's exits, and a typed body has none), `table_word` sits beside the other
+instructions that produce an address, and the JIT module refuses it with an `Error`, not a
+panic.
 
 - an IR instruction `table_word(slot)` that lowers to the `symbol_value` above, and a direct call
   to a function of the same object;
-- `ssa::Object`, a module kind beside the JIT module. The lowering in `crates/ssa/src/lower.rs`
-  is generic over `cranelift_module::Module`, so `ssa::Object` either implements that trait or
+- `ssa::Relocatable`, a module kind beside the JIT module. The lowering in `crates/ssa/src/lower.rs`
+  is generic over `cranelift_module::Module`, so `ssa::Relocatable` either implements that trait or
   the lowering takes a narrower trait of the three operations it uses (declare a function,
-  declare an external name, define); the second is less code and is the plan. `ssa::Object`
+  declare an external name, define); the second is less code and is the plan. `ssa::Relocatable`
   compiles each function with `cranelift_codegen::Context::compile` on an ISA built with
   `is_pic`, keeps the bytes and the relocations (`MachBufferFinalized::relocs`), lays the
   functions out and resolves every relocation: the offset-table loads (`X86GOTPCRel4`,
