@@ -1250,6 +1250,18 @@ Two instruction passes over the same build agree to 0.01% on each code base's we
 (finbench 3,294,004,993 and 3,293,995,120). The median program differs by 0.013% and the worst,
 `brio::write_lines`, by 0.41%, so a change of 1% in one program is visible.
 
+A change in the suite's count shows up in a code base's count with the same sign. The whole test
+run of dsbench under callgrind, which takes about 65 minutes, cost 318.11 billion instructions,
+317.45 billion with the JIT off and 322.91 billion with the builtin fast paths off:
+
+| Change | Suite's total at dsbench's weights | dsbench's tests under callgrind |
+| --- | ---: | ---: |
+| JIT off | -0.27% | -0.21% |
+| Builtin fast paths off | +2.95% | +1.51% |
+
+The code base's count covers the whole process, with start-up and package loading, and each
+configuration ran once, so how closely two runs of one build agree is not measured.
+
 By default the runner adds ten rounds when any program's interval is wider than 10% either way,
 which on a shared machine is every time, so pass `--extra-rounds 0` for a quick look.
 
