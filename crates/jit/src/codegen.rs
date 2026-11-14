@@ -234,6 +234,8 @@ enum Passed {
     },
     /// The caller did not evaluate the argument, so a load of the formal needs the promise.
     Lazy,
+    /// A literal nothing evaluates: the default of a formal a call leaves out.
+    Literal(Sexp),
 }
 
 /// An object tier 0 already holds for a value compiled code keeps unboxed.
@@ -658,10 +660,18 @@ impl<'p> Translator<'p> {
                         self.load_slot(position, &before, slot, ty, forcing, volatile, Some(dst))?;
                     }
                 }
+                // A formal the callee has assigned is a local, and reading it forces nothing.
                 if !self.evaluating_arguments
                     && let Some(formal) = self.frame.formal(slot)
+                    && before.slots[slot].status != status::DIRTY
                 {
-                    self.force(formal);
+                    let assigned = before.slots[slot].may_be(status::DIRTY).then(|| {
+                        let status = self.status(slot);
+                        self.builder
+                            .ins()
+                            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY)
+                    });
+                    self.force(formal, assigned);
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.in_variables() {
@@ -754,11 +764,12 @@ impl<'p> Translator<'p> {
                 function,
                 call,
                 args,
+                positions,
                 forces,
                 dst,
             } => {
                 self.inlined_call(
-                    position, before, steps, callee, function, call, args, forces, dst,
+                    position, before, steps, callee, function, call, args, positions, forces, dst,
                 )?;
             }
             Action::NativeCall {
@@ -1773,6 +1784,7 @@ impl<'p> Translator<'p> {
         function: Sexp,
         call: Sexp,
         args: &[Passing],
+        positions: &[i32],
         forces: &[u64],
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
@@ -1827,13 +1839,18 @@ impl<'p> Translator<'p> {
                         symbol,
                     },
                 },
-                Passing::Promise => Passed::Lazy,
+                Passing::Promise | Passing::Omitted => Passed::Lazy,
+                Passing::Default(value) => Passed::Literal(value),
             };
             sources.push(match argument {
+                _ if positions.get(index).is_none_or(|&position| position < 0) => {
+                    ArgumentSource::Omitted
+                }
                 Passed::Object(_) => ArgumentSource::Saved(representation::BOXED),
                 Passed::Unboxed(_, ty) => ArgumentSource::Saved(exit_kind(ty)),
                 Passed::Variable { symbol, .. } => ArgumentSource::Root(symbol),
                 Passed::Lazy => ArgumentSource::Unread,
+                Passed::Literal(value) => ArgumentSource::Literal(value),
             });
             passed.push(argument);
             // Forcing this argument forces the caller's formals in `mask`, and with each of
@@ -1906,6 +1923,7 @@ impl<'p> Translator<'p> {
             call_pc: pc as u32,
             dst: dst.0 as u32,
             formals: sources.into_boxed_slice(),
+            positions: positions.into(),
             entries: Cell::new(0),
             handoffs: Cell::new(0),
         }));
@@ -1930,8 +1948,9 @@ impl<'p> Translator<'p> {
 
     /// Records that the inlined call being translated read its formal at `formal`, which is
     /// where the promise the call's real frame would hold is forced, and with it the promises
-    /// of the callers' formals the argument reads.
-    fn force(&mut self, formal: usize) {
+    /// of the callers' formals the argument reads. Nothing is forced when `assigned` holds at
+    /// run time: the formal is then a local the callee assigned before this read.
+    fn force(&mut self, formal: usize, assigned: Option<Value>) {
         let Some(call) = &self.frame.call else {
             return;
         };
@@ -1943,6 +1962,13 @@ impl<'p> Translator<'p> {
         for (variable, bits) in words {
             let word = self.builder.use_var(variable);
             let bits = self.builder.ins().iconst(I64, bits as i64);
+            let bits = match assigned {
+                Some(assigned) => {
+                    let none = self.builder.ins().iconst(I64, 0);
+                    self.builder.ins().select(assigned, none, bits)
+                }
+                None => bits,
+            };
             let word = self.builder.ins().bor(word, bits);
             self.builder.def_var(variable, word);
         }
@@ -4135,6 +4161,11 @@ impl<'p> Translator<'p> {
                 self.store_slot_cell(slot, value);
                 Some((value, local))
             }
+            Some(Passed::Literal(literal)) => {
+                let value = self.builder.ins().iconst(I64, literal.as_ptr() as i64);
+                self.store_slot_cell(slot, value);
+                Some((value, local))
+            }
             Some(Passed::Variable { caller, symbol }) => {
                 let source = self.builder.ins().iconst(I64, symbol.as_ptr() as i64);
                 let slot_constant = iconst(&mut self.builder, slot);
@@ -4577,15 +4608,28 @@ impl<'p> Translator<'p> {
 
     /// Moves a loaded slot's unboxed value into its root cell. A dirty slot owns a reference.
     ///
-    /// The box is a fresh object, not the one the frame binds, so a local slot becomes dirty:
-    /// an element write into the box edits it in place, and only a write-back makes the frame
-    /// see that. The analysis marks the join it flows into as possibly dirty to match.
+    /// A local slot is forgotten instead, and the next read loads the object the frame binds.
+    /// A fresh box could only stand for that object as a value to write back, and writing it
+    /// back would replace the promise a formal is bound to and end the formal being missing.
+    /// The analysis marks the join it flows into as possibly not loaded to match.
     unsafe fn box_slot(&mut self, slot: usize, ty: Ty) {
         let status = self.status(slot);
-        let loaded = self.builder.ins().icmp_imm_s(IntCC::NotEqual, status, 0);
         let boxing = self.builder.create_block();
+        let forgetting = self.builder.create_block();
         let done = self.builder.create_block();
-        self.builder.ins().brif(loaded, boxing, &[], done, &[]);
+        let local = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_LOCAL);
+        let unloaded = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+        let kept = self.builder.create_block();
+        self.builder.ins().brif(local, forgetting, &[], kept, &[]);
+        self.builder.switch_to_block(forgetting);
+        let none = self.builder.ins().iconst(I32, 0);
+        self.set_status(slot, none);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(kept);
+        self.builder.ins().brif(unloaded, done, &[], boxing, &[]);
         self.builder.switch_to_block(boxing);
         let boxed = if ty == Ty::Num {
             let value = self.builder.use_var(self.frame.slot_doubles[slot]);
@@ -4596,13 +4640,6 @@ impl<'p> Translator<'p> {
             self.box_value(ty, value)
         };
         self.store_slot_cell(slot, boxed);
-        let local = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_LOCAL);
-        let dirty_status = self.builder.ins().iconst(I32, status::RUNTIME_DIRTY);
-        let status = self.builder.ins().select(local, dirty_status, status);
-        self.set_status(slot, status);
         let dirty = self
             .builder
             .ins()
@@ -4721,7 +4758,7 @@ impl<'p> Translator<'p> {
                 Passed::Object(variable) | Passed::Unboxed(variable, _) => {
                     Some(Source::Variable(variable))
                 }
-                Passed::Variable { .. } | Passed::Lazy => None,
+                Passed::Variable { .. } | Passed::Lazy | Passed::Literal(_) => None,
             }));
         }
         let frame_state = self.builder.frame_state(parent, &sources);

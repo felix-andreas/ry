@@ -246,6 +246,9 @@ pub struct Inlined {
     /// bitset of the formals the call has forced, then one cell per [`ArgumentSource::Saved`]
     /// formal, in order.
     pub formals: Box<[ArgumentSource]>,
+    /// For each formal, the position of its argument in the call, or a negative number when
+    /// the call leaves the formal out ([`ArgumentSource::Omitted`]).
+    pub positions: Box<[i32]>,
     /// How often the call started without a frame or tried to.
     pub entries: Cell<u32>,
     /// How often the call needed its real frame because of what the callee is or does: it
@@ -266,6 +269,12 @@ pub enum ArgumentSource {
     Root(Sexp),
     /// Nowhere: compiled code never reads the formal, so it never forces it.
     Unread,
+    /// This literal, the default of a formal an inlined caller's call left out, which that
+    /// caller passed on.
+    Literal(Sexp),
+    /// Nowhere, because the call leaves the formal out: the frame binds the formal's default
+    /// or the missing argument, as tier 0 binds it.
+    Omitted,
 }
 
 /// How many times something about a compiled body's inlined calls may go wrong before the
@@ -1468,16 +1477,27 @@ unsafe fn enter_inlined(
         state.srcref = (*child).srcref;
         let forced = arguments.read() as u64;
         let mut saved = arguments.add(1);
-        let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
-        let mut expressions = inlined.call.cdr();
-        for (index, &source) in inlined.formals.iter().enumerate() {
-            let expression = expressions.car();
-            expressions = expressions.cdr();
+        let passed = values::pairlist_items(inlined.call.cdr());
+        let mut args: SmallVec<[Arg; 4]> = passed
+            .iter()
+            .map(|&(tag, value)| Arg { tag, value })
+            .collect();
+        let (mut missing, mut promised) = (0u64, 0u64);
+        let mut formal = inlined.function.car();
+        for (index, (&source, &position)) in
+            inlined.formals.iter().zip(&inlined.positions).enumerate()
+        {
+            let default = formal.car();
+            formal = formal.cdr();
             let cell = saved;
             if matches!(source, ArgumentSource::Saved(_)) {
                 saved = saved.add(1);
             }
+            let argument = passed.get(position as usize).filter(|_| position >= 0);
             let bound = (|| {
+                let Some(&(_, expression)) = argument else {
+                    return Ok(default);
+                };
                 if forced >> index & 1 == 0 {
                     return match expression.kind() {
                         SexpType::Symbol
@@ -1512,7 +1532,8 @@ unsafe fn enter_inlined(
                         Some(held) => held,
                         None => panic!("an inlined call forced a formal its caller does not bind"),
                     },
-                    ArgumentSource::Unread => {
+                    ArgumentSource::Literal(value) => value,
+                    ArgumentSource::Unread | ArgumentSource::Omitted => {
                         panic!("an inlined call forced an argument compiled code never reads")
                     }
                 };
@@ -1529,10 +1550,22 @@ unsafe fn enter_inlined(
             };
             value.increment_refcount();
             *bytecode::register_address(header + 1 + index) = value;
-            args.push(Arg {
-                tag: values::nil(),
-                value,
-            });
+            match argument {
+                Some(_) => {
+                    if let Some(arg) = args.get_mut(position as usize) {
+                        arg.value = value;
+                    }
+                }
+                // Tier 0 marks a formal that takes its default as missing, and makes the
+                // promise of a default that is code once the frame is pushed.
+                None if default != values::missing_arg() => {
+                    missing |= 1 << index;
+                    if !(default.kind().is_atomic() || default == values::nil()) {
+                        promised |= 1 << index;
+                    }
+                }
+                None => {}
+            }
         }
         heap().release_handles(mark);
         let entered = eval::enter(
@@ -1542,8 +1575,8 @@ unsafe fn enter_inlined(
             &args,
             &[],
             header as u32,
-            0,
-            0,
+            missing,
+            promised,
         )?;
         if entered.header == interp::NO_SLOTS {
             panic!("an inlined call ran whole where only its frame was to be pushed");

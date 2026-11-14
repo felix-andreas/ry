@@ -33,7 +33,9 @@ use {
     interp::{
         annotations::{self, Declared, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, Op, PROFILE, feedback, operand_count, profile},
-        effects, values,
+        effects,
+        eval::{DOTS_SOURCE, LITERAL_DEFAULT, MATCH_PER_CALL, direct_sources},
+        values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
     smallvec::{SmallVec, smallvec},
@@ -312,18 +314,17 @@ impl Slot {
         } else {
             self.ty.join(other.ty)
         };
-        // An unboxed local boxed on the way into a join is a fresh object the frame does not
-        // hold, so from there on it is a value to write back, not the frame's own (see
-        // `box_slot` in codegen).
-        let boxed = |side: Slot| {
+        // An unboxed local that the join needs as an object is forgotten on the way in, and
+        // the next read loads the frame's own object again (see `box_slot` in codegen).
+        let forgotten = |side: Slot| {
             side.ty.in_variables()
                 && side.may_be(status::LOCAL)
                 && ty != Ty::Bottom
                 && !ty.in_variables()
         };
         let mut status = self.status | other.status;
-        if boxed(self) || boxed(other) {
-            status |= status::DIRTY;
+        if forgotten(self) || forgotten(other) {
+            status |= status::NOT_LOADED;
         }
         Slot { status, ty }
     }
@@ -669,6 +670,13 @@ pub enum Passing {
     /// Nothing: the callee has never read the formal, and a read hands the call to tier 0,
     /// which binds the formal to a promise.
     Promise,
+    /// The formal's default, a literal, because the call leaves the formal out. Nothing
+    /// evaluates a literal, so the callee's load reads the object itself.
+    Default(Sexp),
+    /// Nothing, because the call leaves the formal out and it has no default or one that is
+    /// code. The callee has never read the formal, and a read hands the call to tier 0, which
+    /// binds the default as a promise or reports the missing argument.
+    Omitted,
 }
 
 /// A callback-taking library function compiled code runs as a loop of its own.
@@ -951,6 +959,10 @@ pub enum Action<'a> {
     /// the call to tier 0 through a frame state, which gives the call its real frame first.
     /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
     ///
+    /// `args[i]` is what formal `i` gets, and `positions[i]` the position of its argument in
+    /// the call, as tier 0 matches them (`interp::eval::direct_sources`), or a negative
+    /// number when the call leaves the formal out.
+    ///
     /// `forces[i]` is a bitset, by position, of the planning body's own formals whose promises
     /// the callee's first read of its formal `i` forces: the argument is that formal, or an
     /// expression that always reads it. Only a body that is itself inlined records them,
@@ -961,6 +973,7 @@ pub enum Action<'a> {
         function: Sexp,
         call: Sexp,
         args: &'a [Passing],
+        positions: &'a [i32],
         forces: &'a [u64],
         dst: (usize, Ty),
     },
@@ -3590,16 +3603,17 @@ impl<'a> Builder<'a> {
         }
         let formals = values::pairlist_items(function.car());
         let arguments = values::pairlist_items(call.cdr());
-        if arguments.len() != formals.len() {
-            return Err("the call does not pass each formal one argument");
-        }
-        let positional = arguments.iter().all(|&(tag, expression)| {
-            tag == values::nil()
-                && expression != values::missing_arg()
-                && expression != values::symbols().dots
-        });
-        if !positional {
-            return Err("a named, missing or `...` argument");
+        // Tier 0's own plan for the call says which argument each formal gets, so the frame
+        // a deoptimization builds is bound exactly as tier 0 binds it.
+        let Ok(Some((_, positions))) = direct_sources(function, call) else {
+            return Err("arguments tier 0 does not bind straight to the formals");
+        };
+        if positions.len() != formals.len()
+            || positions
+                .iter()
+                .any(|&position| position == DOTS_SOURCE || position == MATCH_PER_CALL)
+        {
+            return Err("a call that passes or collects `...`");
         }
         let (callee, result) = self.callee(function)?;
         let mut lowering = Lowering {
@@ -3614,14 +3628,44 @@ impl<'a> Builder<'a> {
         };
         let mut args = List::new_in(self.arena);
         let mut forces = List::new_in(self.arena);
-        for (&(_, expression), &(formal, _)) in arguments.iter().zip(&formals) {
+        for (&(formal, default), &position) in formals.iter().zip(&positions) {
+            let expression = match arguments.get(position as usize) {
+                Some(&(_, expression)) if position >= 0 => expression,
+                _ if position == LITERAL_DEFAULT => {
+                    args.push(Passing::Default(default));
+                    forces.push(0);
+                    continue;
+                }
+                _ => {
+                    if has_read(callee, function, formal) {
+                        return Err("a formal the call leaves out whose default is code");
+                    }
+                    args.push(Passing::Omitted);
+                    forces.push(0);
+                    continue;
+                }
+            };
             // An argument that is one of this body's formals forces that formal's promise
             // where the callee first reads it. A body with a frame has a real promise there,
             // which records the force itself.
-            let own = self
+            let mut own = self
                 .formal(expression)
                 .filter(|_| self.depth > 0)
                 .map_or(0, |position| 1 << position);
+            // A formal the body has assigned is a local, and reading it forces nothing. The
+            // forces of an argument are fixed with the code, so a formal assigned on some
+            // paths only cannot be passed on.
+            if own != 0
+                && let Some(&slot) = self.slot_of.get(&expression)
+            {
+                match lowering.state.slots[slot].status {
+                    status::DIRTY => own = 0,
+                    assigned if assigned & status::DIRTY != 0 => {
+                        return Err("an argument that is a formal assigned on some paths");
+                    }
+                    _ => {}
+                }
+            }
             // Reading the variable before the call would have to leave a promise unforced,
             // and a formal the caller passes on before it reads it is exactly that.
             if !self.lazy_formals
@@ -3704,6 +3748,7 @@ impl<'a> Builder<'a> {
             function,
             call,
             args: args.leak(),
+            positions: self.arena.0.alloc_slice_copy(&positions),
             forces: forces.leak(),
             dst: (dst, result),
         })
@@ -3800,15 +3845,13 @@ impl<'a> Builder<'a> {
         let mut result = Ty::Bottom;
         for (position, action) in plan.actions.iter().enumerate() {
             let frameless = match *action {
-                // The first load of a formal reads the argument, so it can neither evaluate a
-                // default nor call an active binding, and the frame the call may get later
-                // binds a formal to what the caller passed, not to a value assigned since.
-                Action::GetVar {
-                    forcing, volatile, ..
-                } => !forcing && !volatile,
-                Action::SetVar { slot, .. } => parameters
-                    .iter()
-                    .all(|&(symbol, _)| symbol != plan.slots[slot]),
+                // The first load of a formal reads the argument, and where the call leaves the
+                // formal out it reads a literal default or hands the call to tier 0, so it
+                // never evaluates a default. A binding that runs code on a read needs the
+                // frame. An assigned formal is a dirty slot like any local: the frame the call
+                // may get later binds the formal to what the caller passed, and the write-back
+                // of the dirty slots then replaces that binding.
+                Action::GetVar { volatile, .. } => !volatile,
                 Action::Step {
                     effect: Effect::Pure | Effect::PureUnlessObserved,
                     fast,
@@ -3858,7 +3901,6 @@ impl<'a> Builder<'a> {
                 }
                 return Err(match *action {
                     Action::GetVar { .. } => "the callee reads a variable that may run code",
-                    Action::SetVar { .. } => "the callee assigns a formal",
                     Action::Step { .. } if plan.insts[position].op == Op::Closure => {
                         "the callee creates a closure"
                     }
@@ -4007,10 +4049,16 @@ impl<'a> Builder<'a> {
                 // which is right only while the read tells nobody. In an inlined body a read
                 // of a formal is what forces its promise, so the formal must be one R reads on
                 // every path too.
+                // A formal the body has assigned is a local, which no read forces.
+                let assigned = self
+                    .slot_of
+                    .get(&expression)
+                    .map_or(0, |&slot| lowering.state.slots[slot].status);
                 if self.depth > 0
+                    && assigned != status::DIRTY
                     && let Some(position) = self.formal(expression)
                 {
-                    if lowering.conditional {
+                    if lowering.conditional || assigned & status::DIRTY != 0 {
                         return None;
                     }
                     lowering.forces |= 1 << position;

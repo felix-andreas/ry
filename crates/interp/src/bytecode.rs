@@ -63,12 +63,12 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
-    thin_vec::ThinVec,
     std::{
         hash::{Hash, Hasher},
         ops::Range,
         rc::Rc,
     },
+    thin_vec::ThinVec,
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -6754,8 +6754,30 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction. Answers
 /// the value the activation returns when the instruction returns from it, as a finished
 /// [`Op::Prologue`] does.
+///
+/// A closure call that [`call_fast`] takes enters its callee in place: the dispatch loop runs
+/// the body here and stops when it returns to the stepped call ([`Activation::stepping`]), so
+/// a call out of compiled code costs what a call between two interpreted bodies costs.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> {
-    match interpret::<true>(machine, pc) {
+    let mut state = activation(machine, true);
+    if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
+        state.resume_base = (*state.interp).bytecode.resumes.len();
+        state.stepping = true;
+        match call_fast(&mut state, pc) {
+            Some(STOP) => {}
+            Some(next) => {
+                (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
+            }
+            None => {
+                state.resume_base = NO_RESUMES;
+                state.stepping = false;
+                (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+            }
+        }
+    } else {
+        (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+    }
+    match (state.exit, state.stepped) {
         (Ok(value), STOP) => Ok(Some(value)),
         (result, _) => result.map(|_| None),
     }
@@ -6990,6 +7012,10 @@ struct Activation<'m, 'a> {
     /// the records above it are the callers of bodies this loop entered in place.
     /// [`NO_RESUMES`] for an activation that runs single instructions, whose calls nest.
     resume_base: usize,
+    /// Whether the activation the loop started with runs one call instruction for the
+    /// optimizing tier, with the callee entered in place: the loop then stops when the callee
+    /// returns to it, where an interpreted caller would go on.
+    stepping: bool,
 }
 
 impl Activation<'_, '_> {
@@ -7188,6 +7214,7 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
         exit: Ok(nil()),
         stepped: STOP,
         resume_base: NO_RESUMES,
+        stepping: false,
         machine,
     }
 }
@@ -7388,7 +7415,10 @@ unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> 
         }
         let returned = eval::leave(resume.depth as usize, result);
         let interp = &mut *state.interp;
-        interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+        interp
+            .bytecode
+            .loop_states
+            .truncate(resume.loop_mark as usize);
         let machine = &mut *state.machine;
         machine.function = resume.function;
         machine.code = resume.code;
@@ -7401,6 +7431,25 @@ unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> 
             eval::release_references(resume.references);
         }
         let at = resume.call_at;
+        if state.stepping && interp.bytecode.resumes.len() == state.resume_base {
+            // The stepped call's result is what a failed speculation on it saw, so it is
+            // recorded whether or not the body is recording, as every stepped instruction's is.
+            state.feedback = pool_ints(state.constants, FEEDBACK);
+            match returned {
+                Ok(value) => {
+                    state.record(at, value);
+                    *state.registers.add(*state.code.add(at + 1) as usize) = value;
+                    release(state);
+                    state.exit = Ok(nil());
+                    state.stepped = after_instruction(state.code, at);
+                }
+                Err(unwind) => {
+                    state.exit = Err(unwind);
+                    state.stepped = at;
+                }
+            }
+            return STOP;
+        }
         match returned {
             Ok(value) => {
                 state.record(at, value);
@@ -7517,7 +7566,11 @@ unsafe fn failed<const SINGLE: bool>(
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if SINGLE {
+    // A stepped call that fails before its callee is entered fails as any stepped instruction
+    // does: the optimizing tier finds the loop target itself.
+    let stepped =
+        SINGLE || (state.stepping && (*state.interp).bytecode.resumes.len() == state.resume_base);
+    let resumed = if stepped {
         Err(unwind)
     } else {
         continue_after(state.machine, at, unwind)
@@ -7736,9 +7789,8 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         || (*row).formals != function.car()
         || (*row).body != body
         || (*row).flags & PLAN_FAST == 0
-        || function.has_gp(
-            gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY,
-        )
+        || function
+            .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
         || function == interp.namespace_loader
         || function == interp.do_call
     {
@@ -7752,8 +7804,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     if depth as u32 >= interp.max_depth
         || end > interp.bytecode.registers.capacity()
         || (loops != 0
-            && interp.bytecode.loop_states.len() + loops
-                > interp.bytecode.loop_states.capacity())
+            && interp.bytecode.loop_states.len() + loops > interp.bytecode.loop_states.capacity())
     {
         return None;
     }
@@ -7786,7 +7837,11 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     let owner = interp.slot_owner as usize;
     let compiled = pool_constant(state, call_index + 1);
     let call = pool_constant(state, call_index);
-    let mut cell = if compiled == nil { call.cdr() } else { compiled };
+    let mut cell = if compiled == nil {
+        call.cdr()
+    } else {
+        compiled
+    };
     for index in 0..count {
         let expression = cell.car();
         let kind = *kinds.add(index);
@@ -7990,7 +8045,11 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     let heap = &mut *state.heap;
     let nil = heap.known().nil;
     let count = interp.bytecode.resumes.len();
-    if count <= state.resume_base || *state.header != nil || activity::hooks() != 0 {
+    // A stepped call's callee returns to the optimizing tier, not to the caller's code.
+    if count <= state.resume_base + usize::from(state.stepping)
+        || *state.header != nil
+        || activity::hooks() != 0
+    {
         return None;
     }
     let depth = interp.bytecode.resumes.get_unchecked(count - 1).depth as usize;
@@ -8026,7 +8085,10 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     let Some(resume) = interp.bytecode.resumes.pop() else {
         unreachable!("the dispatch loop's resume records are above its base");
     };
-    interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+    interp
+        .bytecode
+        .loop_states
+        .truncate(resume.loop_mark as usize);
     let machine = &mut *state.machine;
     machine.function = resume.function;
     machine.code = resume.code;
@@ -9341,8 +9403,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
 #[inline(always)]
 unsafe fn in_place(state: &Activation<'_, '_>, function: Sexp) -> bool {
     let loops = &(*state.interp).bytecode.loop_states;
-    state.resume_base != NO_RESUMES
-        && loops.len() + loop_count(function.cdr()) <= loops.capacity()
+    state.resume_base != NO_RESUMES && loops.len() + loop_count(function.cdr()) <= loops.capacity()
 }
 
 /// What a `CallGeneric` instruction does with the value of a call that ran whole: the pc it
