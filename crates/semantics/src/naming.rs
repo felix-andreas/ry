@@ -11,6 +11,7 @@ use {
             destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
+        stubs::{SymbolKey, SymbolMap},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
@@ -236,7 +237,7 @@ pub struct InvalidAssignmentTarget {
 /// before the defining namespace when a method body runs.
 pub fn resolve_item(
     module: &Module,
-    masked_verbs: &FxHashMap<String, Vec<String>>,
+    masked_verbs: &SymbolMap<Vec<String>>,
     is_member: &dyn Fn(RefClassKey, Symbol) -> bool,
 ) -> ItemNaming {
     let mut context = Context {
@@ -320,7 +321,7 @@ struct AssignmentWrite {
 
 struct Context<'a> {
     module: &'a Module,
-    masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    masked_verbs: &'a SymbolMap<Vec<String>>,
     is_member: &'a dyn Fn(RefClassKey, Symbol) -> bool,
     /// Function literals a Reference Class definition installs as methods.
     method_classes: FxHashMap<ExprId, RefClassKey>,
@@ -770,7 +771,7 @@ impl Context<'_> {
                 // matching the data formals resolve normally.
                 let masking_family = match (module.kind(*callee), builtin_callee) {
                     (_, Some(name)) => base_masking_family(name)
-                        .or_else(|| declared_masked_verb(self.masked_verbs, name)),
+                        .or_else(|| declared_masked_verb(self.masked_verbs, callee_symbol?)),
                     // Only `base::` names the base family; another package's `with` is its own.
                     (
                         ExpressionKind::Namespace {
@@ -1907,12 +1908,13 @@ fn declared_names(module: &Module, value: ExprId) -> Vec<Symbol> {
 /// local definition shadows the callee. Pre-minting runs before resolution, so it uses this.
 fn syntactic_masking_family<'a>(
     module: &Module,
-    masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    masked_verbs: &'a SymbolMap<Vec<String>>,
     callee: ExprId,
 ) -> Option<Vec<&'a str>> {
     match module.kind(callee) {
-        ExpressionKind::NameRef(name) => base_masking_family(name.as_str())
-            .or_else(|| declared_masked_verb(masked_verbs, name.as_str())),
+        ExpressionKind::NameRef(name) => {
+            base_masking_family(name.as_str()).or_else(|| declared_masked_verb(masked_verbs, name))
+        }
         ExpressionKind::Namespace {
             package,
             name: Some(name),
@@ -1924,10 +1926,10 @@ fn syntactic_masking_family<'a>(
     }
 }
 
-fn declared_masked_verb<'a>(
-    masked_verbs: &'a FxHashMap<String, Vec<String>>,
-    name: &str,
-) -> Option<Vec<&'a str>> {
+fn declared_masked_verb(
+    masked_verbs: &SymbolMap<Vec<String>>,
+    name: impl SymbolKey,
+) -> Option<Vec<&str>> {
     masked_verbs
         .get(name)
         .map(|leading| leading.iter().map(String::as_str).collect())
@@ -2324,7 +2326,7 @@ mod tests {
         let root = parse.syntax_node();
         let item = root.children().next().expect("one top-level item");
         let module = lower_item(&item);
-        resolve_item(&module, &FxHashMap::default(), &|_, _| false)
+        resolve_item(&module, &SymbolMap::default(), &|_, _| false)
     }
 
     #[test]

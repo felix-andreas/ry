@@ -1033,9 +1033,11 @@ cycle, where a growing self-referential type rode the iteration cap into a panic
 inference variables leaking through exported schemes into foreign tables. Both are of the class
 that only surfaces in the large, which is exactly what per-stage fuzzing exists to catch early.
 
-# Decision record: deep resolve is memoized per binding epoch and cuts a cycle to `Unknown`
+# Decision record: deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
 
-**Status:** built.
+**Status:** built. The table of finished subtrees lives for one call, as "Decision record: types
+and symbols are four-byte ids into append-only columns" describes. It replaced a table kept across
+calls and cleared by a binding epoch.
 
 `InferenceTable::resolve`, the deep resolver in `crates/semantics/src/infer.rs`, walked the interned
 type structure recursively with only a depth-64 cap as protection. Interned types form a directed
@@ -1046,20 +1048,25 @@ lines this measured 397 million inner resolve steps, and resolve alone cost more
 previous stack's entire pipeline. The depth cap also truncated meaning. Past depth 64 a type silently
 stayed unexpanded, which is a position-dependent semantics that no cache can be layered onto.
 
-Deep resolve is now a memoized walk over the interned graph with explicit cycle detection.
+Deep resolve is a walk over the interned graph with explicit cycle detection that resolves a
+shared subtree once per call.
 
 - **A cycle cuts to `Unknown`.** The walk carries a `visiting` stack of the variables under
   expansion. Re-encountering one means an infinite type, and it resolves to `Unknown`. That matches
   the pin-to-`Unknown` doctrine used everywhere self-reference grows, including the fixpoint cap and
   loop widening. Alias expansion keeps a depth guard as a pure resource backstop, not as a
   semantics.
-- **Only a clean subtree is memoized.** A result caches in `resolve_cache` keyed by the interned
-  type, but only when no cycle was cut beneath it. A node containing a variable currently being
-  expanded resolves differently at top level.
-- **An epoch invalidates the cache.** Every binding mutation and rollback bumps an epoch counter,
-  and the cache self-clears on an epoch mismatch. No entry can serve a stale binding. The common
-  case, which is many resolves between mutations such as rendering a whole item's diagnostics, hits
-  warm.
+- **Only a clean subtree is kept.** A walk that has taken 64 steps keeps the subtrees it
+  finishes from then on, keyed by the interned type, but only those with no cycle cut beneath
+  them. A node containing a variable currently being expanded resolves differently at top level.
+  The steps are counted, not read off the size of the type the call started from, because a
+  variable has size one whatever its binding holds: a chain of variables that each bind a tuple
+  holding the next one twice is a walk of 2^depth steps without the table
+  (`infer::tests::a_subtree_shared_through_variables_resolves_once`). Most calls end within a few
+  steps, where a table costs more than the walk.
+- **Nothing outlives the call.** Bindings change between calls, so a table kept across calls
+  needs an invalidation rule. A type whose id says it holds no variable and applies no alias
+  returns without a walk, which is what most repeated calls ask.
 
 Correctness: silent depth truncation is replaced by the established cycle semantics, so an infinite
 type resolves to `Unknown` at the point of self-reference instead of expanding arbitrarily deep.
@@ -3997,7 +4004,9 @@ first lines R had already read, leaving R mid-command.
 
 ## Types and names are hash-consed outside salsa
 
-**Status:** built.
+**Status:** built, with the storage superseded: a type is an id into columns, not a pointer to an
+entry in a sharded table ("Decision record: types and symbols are four-byte ids into append-only
+columns"). Hash-consing outside salsa and the reasoning for never sweeping stand.
 
 - **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
   through salsa's interner (a shard lock plus an id-to-slot lookup), every `ty.kind(db)` resolved an
@@ -4714,7 +4723,8 @@ check` releases its trees once, and memoized records are compact" below).
   `crates/ry/src/cli.rs`). Tree readers stay memoized queries with small results, so a check
   never walks another file's tree. The type interner (`crates/semantics/src/types.rs`) gained a
   direct-mapped per-thread cache in front of its 64 shard mutexes, which sampling showed
-  contended on hot types.
+  contended on hot types. A lookup that takes no lock replaced both ("Decision record: types and
+  symbols are four-byte ids into append-only columns").
 - **Correctness.** Findings are identical on the three benchmark code bases (2337, 1853, 784).
 - **Simplicity.** The batching driver, `limit_resident_trees` and the eviction-only comments are
   gone.
@@ -8491,8 +8501,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
     the capacity keeps the most recently read trees. Holds alone were rejected: a read of a
     file nobody holds (an item of another file, a rewrite after the check) would parse the
     whole file on every read.
-  - `item_syntax` is a plain window of the stored tree. An edited file's items lower again and
-    backdate on `item_hir` equality.
+  - `item_syntax` is a plain window of the stored tree. "Decision record: an item's syntax has a
+    stamp, so an edit lowers only the items it changed" says which items an edit lowers.
   - `item_links(item)` resolves every name the item's naming lists against the project name
     maps, in parallel arrays (one row per name, one per binding), and holds the item's interface
     edges and whether its file belongs to the project. It is the item's projection of the
@@ -8543,13 +8553,194 @@ Each one trades a narrow class of missed errors for a class of false reports see
   edit settle in 3 ms and a new top-level definition in 5 to 6 ms at the median on both builds.
   A file opened on an idle server settles its diagnostics in 13 ms at the median on both
   builds. The file open at start-up settles in 44 ms at the median (38 to 46) against 38 ms
-  (35 to 52) (`backlog.md`, "Open: the analysis core after the single lookup path").
+  (35 to 52). "Decision record: types and symbols are four-byte ids into append-only columns"
+  has the measurements after the memory and the start-up cost were taken back.
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
   so the re-check stays with the readers of the name. A file's groups list items, not positions
   in the file, so the value stays equal when a statement is added beside a recursive function.
   An item's links read the project's file list for "is my file in the project" and no fold
   over the project's names, so a name a test or script adds re-runs no package item's links.
+
+# Decision record: types and symbols are four-byte ids into append-only columns
+
+**Status:** built, except the per-item store for types that contain inference variables, which
+is rejected below.
+
+- **Previous source of truth.** A `Ty` was a `&'static` pointer to a leaked
+  `TypeEntry { kind, size }`, found through a 64-way sharded `hashbrown` table with a
+  direct-mapped per-thread cache of 1,024 recent entries in front. A kind owned its children in
+  `Vec`s. A `Symbol` was an index into a `boxcar::Vec`, found through a sharded map with a
+  thread-local map in front. `InferenceTable` kept `resolve_cache`, a table of resolved types
+  cleared by a counter that every binding change bumped, and `definition_cache`, a hash map from
+  a type name to its definition.
+- **What was structurally weak.** Four caches stood in front of two interners because a lookup
+  took a shard mutex that the checking threads contended for. A type reference was eight bytes.
+  "Does this type contain a variable" was a walk or a cache probe, and it is asked on every
+  resolve.
+- **Target shape.**
+  - `crates/semantics/src/intern.rs` holds the two halves of an interner. `Column<T, CHUNKS>` is
+    an append-only column in fixed chunks of 4,096 that never move, so a read is a shift, a load
+    and an offset. `IdTable<W>` is an open-addressing table from a hash to an id whose slots
+    change once, from empty to filled, and that grows by replacement, so a lookup takes no lock
+    and writes no shared memory. Storing a new value takes the table's one lock.
+  - A `Ty` is a `NonZeroU32`. The low 27 bits index two parallel columns, the kind and the
+    facts derived at construction (size, and the type names it applies). The upper bits say
+    whether the type is a variable and whether a variable, a named type, a rigid parameter or
+    `Unknown` occurs in it. `TyKind` is `Copy`, with child slices in a bump arena behind the
+    writer lock. The 15 leaf kinds and the first 4,081 inference variables fill the first chunk
+    as constants, so building one is arithmetic.
+  - A `Symbol` is an id into a column of `{ text, hash, first eight bytes, length }`. It hashes
+    as its stored spelling hash and orders by spelling. `Symbol::lookup` finds a spelling
+    without interning it, which is what a probe with text nobody may have spelled needs.
+  - `InferenceTable::resolve` and `substitute_rigid` return on the id's bits when nothing in the
+    type can change. Otherwise each keeps a table of finished subtrees for one call, and only
+    when the work is large: `resolve` once its walk has taken 64 steps, `substitute_rigid` for a
+    type of more than 64 nodes.
+  - `InferenceTable::named_types` holds the definitions of the type names an item has asked
+    about as two parallel inline lists, searched front to back.
+- **Rejected.**
+  - A per-item store for types that contain inference variables. Such types leave the item
+    that made them: `EditorFacts` carries them, 59 fields of `TypeErrorKind` carry them, and a
+    diagnostic renders a variable by name. Moving them out of a per-item store means a copy
+    into the shared store at every one of those exits. On the finance bench 696 of the 2,589
+    distinct types a check builds contain a variable, so the shared store pays little for
+    holding them.
+  - Dropping the definition lookup's memo outright. 91% of 1.08 million lookups on the finance
+    bench repeat a name the item already asked about, and an uncached answer is two salsa
+    fetches and a scan. The memo is sized to what an item asks (a handful of names), not a hash
+    map.
+  - Freeing entries. The reasoning in "Types and names are hash-consed outside salsa" holds.
+    The store holds at most 2^24 types and the symbol store 2^28 spellings, and a full store
+    panics.
+- **Correctness.** `ry check` prints byte-identical output on the finance bench, and every
+  fixture suite passes unchanged. An id is assigned in interning order, which differs between
+  runs of a parallel check, so nothing that reaches output may walk types or symbols in id
+  order: `Symbol` orders by spelling for that reason.
+- **Simplicity.** The per-thread type cache, the thread-local symbol map, `resolve_cache` with
+  its epoch, the `boxcar` dependency and the two sharded tables are gone. One table type and
+  one column type serve both interners.
+- **Performance.** Together with the two records that follow, on the finance bench (4 cores,
+  `ry check --no-cache`, three interleaved rounds of seven runs, medians per round):
+
+  | Build | Wall | CPU | Peak RSS |
+  |---|---|---|---|
+  | Two lookup paths (before "every host resolves names through one path") | 0.81 to 0.91 s | 2.97 to 3.17 s | 239 MB |
+  | One lookup path, pointer types | 0.85 to 0.92 s | 3.09 to 3.28 s | 248 MB |
+  | Ids, stamps and the tables of the next two records | 0.77 to 0.80 s | 2.81 to 2.91 s | 230 MB |
+
+  The machine ran about a fifth slower than for the numbers in the record above, so compare
+  within this table only. Under callgrind a check executes 18.06 billion instructions, against
+  19.07 billion with one lookup path and pointer types.
+  In the editor on the same project (`tools/bench/tooling/lsp_latency.py`, time until
+  diagnostics settle; the start-up open is the median of six interleaved server starts, the
+  others are medians within one run of six rounds):
+
+  | Build | Start-up open | Open at idle | Edit in a body | Edit to a signature | Edit to a definition |
+  |---|---|---|---|---|---|
+  | Two lookup paths | 46.5 ms | 15.9 ms | 5.4 ms | 5.2 ms | 10.7 ms |
+  | One lookup path, pointer types | 47.4 ms | 17.4 ms | 3.4 ms | 3.4 ms | 6.7 ms |
+  | Ids, stamps and the tables of the next two records | 36.4 ms | 15.9 ms | 3.0 ms | 2.7 ms | 5.8 ms |
+- **Incremental.** A type or symbol has no inputs, and its id is stable for the life of the
+  process, so a memo that holds one compares four bytes where it compared a pointer.
+
+# Decision record: an item's syntax has a stamp, so an edit lowers only the items it changed
+
+**Status:** built.
+
+- **Previous source of truth.** `item_syntax` read the item's range from `item_spans` and took
+  that window of the file's tree. Every reader of an item's syntax therefore depended on the
+  file's spans, which change with every edit to the file.
+- **What was structurally weak.** After an edit, every item of the file lowered again, and
+  `item_hir` backdated for the untouched ones. The cut-off was an equality test on the lowered
+  item, paid per item per keystroke. `TreeStore` was one mutex for the process, and two workers
+  that read one file at the same moment both parsed it.
+- **Target shape.**
+  - The store keeps one `SyntaxStamp` (a `u64`) per top-level node of each file. On a reparse,
+    the nodes at the start and at the end of the file whose subtrees equal their counterparts
+    in the previous tree keep their stamps, and every other node takes a fresh one from a
+    store-wide counter. Equal stamps imply equal subtrees, by an exact comparison.
+  - `item_stamp(item)` is a tracked query that returns the stamp. It runs for every item of an
+    edited file and backdates for every item outside the edited region. `item_syntax` records
+    a read of the stamp alone and asks the store for the node that carries it, through a
+    per-file index sorted by stamp. When a bounded store has dropped that tree, it falls back
+    to the item's range in a fresh parse.
+  - `item_annotation_syntax` and `item_name_range` are plain reads of per-file memos
+    (`file_item_annotations`, `item_spans`). `file_item_annotations` holds detached subtrees,
+    which compare by content, so it backdates while no `#:` block changes.
+  - `TreeStore` has 16 shards by file with a lock each. A parse runs outside every lock, and a
+    second reader of a file that is being parsed waits for that tree.
+- **Rejected.**
+  - The stamp as a field of `item_syntax_flags`. Other items read an item's flags (whether a
+    callee is declared pure, whether an item binds only its own name), so they would re-run
+    when that item's body changed.
+  - A content hash as the stamp. Two different subtrees could share one, and a wrong match
+    would keep a stale lowering with no way to notice.
+  - Matching moved nodes anywhere in the file. One edit changes one region, so the prefix and
+    suffix comparison covers it, and it is linear with no table.
+- **Correctness.** Under `enable_invariants()` every stamp read compares the subtree the stamp
+  names with the item's node in the file as it stands. `test_incremental.rs` pins the query
+  counts for an edit inside an item, a new item above the others, a removed item, the second of
+  two equal statements removed, and edits at both ends.
+- **Simplicity.** One more tracked query per item. Its memo boxes and dependency edges take
+  3.3 MB at the heap peak of a check of the finance bench (50,815 items).
+- **Performance.** A cold check does the same work. After an edit to one item of a file,
+  lowering, annotations and naming run for that item alone.
+- **Incremental.** Edits at both ends of a file between two reads change one region that spans
+  the file, so the items between them lower again and `item_hir` backdates. An edit to any `#:`
+  block re-runs `item_annotations` for every item of that file, and each comes out equal and
+  backdates unless its own block changed.
+
+# Decision record: the analysis core's per-item and per-file tables after the type store
+
+**Status:** built.
+
+- **Previous source of truth.** `ItemLinks` was an 80-byte value of five allocations: four
+  boxed slices (the names, where each name's bindings end, the kinds, the items) and the
+  interface edges. Three definitions of "is this file strict" disagreed on the default. `item_links` sorted its
+  edges by `Symbol::index()`. `StubLibrary` was nine maps keyed by `String`. The server's worker
+  kept `attached_by_file`, a hand-written copy of what `file_attached_namespaces` answers. Tag
+  completion and two reference searches walked every file's tree on each request. The checker
+  sized two per-body facts to the whole item.
+- **What was structurally weak.** `item_links` keeps one memo per item for the whole run
+  (50,815 on the finance bench), so every byte of the value's inline size and every separate
+  allocation is paid that many times. Interning order differs between runs of a parallel check, so an order by symbol
+  index is not reproducible. A copy of a query's answer can drift from the query.
+- **Target shape.**
+  - `ItemLinks` is two thin vectors: `words` (a header, the listed names, then one word per
+    binding holding its name's position above its kind) and `items` (the item of each binding,
+    then the interface edges). The memo is two pointers wide and an item without links
+    allocates nothing. The names are searched and never walked for a result. The edges are
+    sorted by file, name spelling, kind and disambiguator, which is the same on every
+    run.
+  - `file_follows_strict` is the one answer to "is this file strict".
+  - `Item.name` is a `Symbol`. `item_tree_positions` is the one map from an item to its
+    position in its file.
+  - Only an item that binds more than its own name keeps a memo of the names it binds
+    (`item_bound_names`). For every other item `item_top_level_names` yields the item's name.
+  - The stub library's collections are `SymbolMap` and `SymbolSet`. A caller that holds a
+    symbol probes without hashing text, and a caller that holds text uses `Symbol::lookup`.
+  - The server derives the attached set from the per-file scans. Before an edit it reads the
+    edited file's scan, as a cancellable read, and recomputes the union only when the scan
+    moved.
+  - `ide::spelled_names` lists the tags a file spells beside its names, so tag completion and
+    the tag and type-name searches open only the files that can match.
+  - A function body keeps its superassignment seeds and its callees as short inline lists.
+- **Correctness.** The scan of the edited file's `library()` calls ran outside the worker's
+  cancellation catch at first. A notification queued behind the edit then cancelled it, and
+  the uncaught cancellation stopped the worker (about one run in ten of the server suite under
+  load, in `burst_of_edits_settles_on_the_final_text`). Every tracked read on the worker
+  outside `Worker::cancellable` has that failure, so the worker's exit message names an
+  escaped cancellation.
+- **Performance.** Part of the measurements in "Decision record: types and symbols are four-byte
+  ids into append-only columns". At the heap peak of a check of the finance bench the
+  `item_links` memos hold 10.5 MB, where 11 MB was measured before: 2.4 MB of memo boxes (48
+  bytes each, down from 112), 4.2 MB in the two vectors, and 3.9 MB of the dependency edges
+  salsa records per memo. `item_links` with what it calls is 4.6% of the check's instructions
+  (824 million), down from 4.8% (922 million). Both are mostly the cost of resolving every
+  listed name in one memo per item, which this layout does not change; the backlog has it.
+- **Incremental.** `item_links` backdates as before: its value lists the item's own names and
+  bindings and nothing that moves with another item.
 
 ## The standard library is the `std` namespace, with an optional prelude
 

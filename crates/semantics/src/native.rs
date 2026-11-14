@@ -565,7 +565,7 @@ pub struct Judged<'a, 'db> {
     /// Each expression's resolved type, where the check recorded one.
     pub types: &'a dyn Fn(ExprId) -> Option<Ty<'db>>,
     /// The declared signature of each function literal that has one.
-    pub signatures: &'a Column<'a, ExprId, FunctionType<'db>>,
+    pub signatures: &'a Column<'a, ExprId, &'db FunctionType<'db>>,
     /// The function literals whose signature only a type alias gives, so that no type is
     /// written where the runtime reads one (see `Annotation::written_signature`).
     pub aliased: &'a Bitset<'a, ExprId>,
@@ -1756,7 +1756,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         match (first.kind(db), later.kind(db)) {
             (TyKind::NativeRecord(first), TyKind::NativeRecord(later)) => {
                 first.len() != later.len()
-                    || first.iter().zip(later).any(|(first, later)| {
+                    || first.iter().zip(later.iter()).any(|(first, later)| {
                         first.name != later.name || self.layout_differs(first.ty, later.ty)
                     })
             }
@@ -1764,7 +1764,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 first.len() != later.len()
                     || first
                         .iter()
-                        .zip(later)
+                        .zip(later.iter())
                         .any(|(&first, &later)| self.layout_differs(first, later))
             }
             (TyKind::Named(first_name, first), TyKind::Named(later_name, later)) => {
@@ -1772,7 +1772,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     || first.len() != later.len()
                     || first
                         .iter()
-                        .zip(later)
+                        .zip(later.iter())
                         .any(|(&first, &later)| self.layout_differs(first, later))
             }
             _ => match (self.kind_of_value(first), self.kind_of_value(later)) {
