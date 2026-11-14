@@ -2766,6 +2766,91 @@ pub unsafe fn run_inlined(
     result
 }
 
+/// A register window for a call of `function` that [`run_inlined`] runs, with `values` in its
+/// first slots (the formals, in order) and every other slot unbound; `None` when the closure's
+/// body has no slot table, so a call of it needs an environment.
+pub unsafe fn open_slot_window(function: Sexp, values: &[Sexp]) -> R<Option<u32>> {
+    let body = bytecode::compile_before_call(function)?;
+    if body.kind() != SexpType::Bytecode {
+        return Ok(None);
+    }
+    let table = body.cdr().element(bytecode::SLOTS);
+    if table == nil() {
+        return Ok(None);
+    }
+    let count = values::length(table.element(1));
+    if values.len() > count {
+        return Ok(None);
+    }
+    let header = bytecode::register_top();
+    bytecode::reserve_registers(header + 1 + count)?;
+    let registers = bytecode::register_address(header);
+    for (index, &value) in values.iter().enumerate() {
+        value.increment_refcount();
+        *registers.add(1 + index) = value;
+    }
+    for index in values.len()..count {
+        *registers.add(1 + index) = unbound();
+    }
+    Ok(Some(header as u32))
+}
+
+/// Binds `symbol` to `value` in the frame at `index`, as an assignment in its body would: in its
+/// environment once it has one, and in the slot of that name otherwise. Returns whether the
+/// frame's slot table has the name; a slot frame binds nothing outside it.
+pub unsafe fn set_frame_variable(index: usize, symbol: Sexp, value: Sexp) -> R<bool> {
+    let frame = &interp().frames[index];
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        define(symbol, value, frame.env)?;
+        return Ok(true);
+    }
+    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) else {
+        return Ok(false);
+    };
+    let register = bytecode::register_address(frame.slots as usize + 1 + slot);
+    value.increment_refcount();
+    if *register != unbound() {
+        (*register).decrement_refcount();
+    }
+    *register = value;
+    // A formal assigned to is no longer missing.
+    if slot < 64 {
+        interp().frames[index].missing &= !(1 << slot);
+    }
+    Ok(true)
+}
+
+/// A closure made from the `function` expression with `formals`, `body` and `srcref` in the code
+/// `outer`, defined in the frame at `owner`, which shares compiled code as
+/// [`bytecode::inner_closure`] makes it. A slot frame without an environment encloses it in its
+/// pending environment, as [`slot_closure`] does.
+pub unsafe fn frame_inner_closure(
+    owner: usize,
+    outer: Sexp,
+    formals: Sexp,
+    body: Sexp,
+    srcref: Sexp,
+) -> R<Sexp> {
+    let state = interp();
+    let frame = &state.frames[owner];
+    let made = state
+        .pending_closures
+        .iter()
+        .filter(|&&(frame, _)| frame as usize == owner)
+        .count();
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS || made >= crate::FRAME_CLOSURES {
+        let env = frame_env(owner, Reify::Site("function definition"))?;
+        return bytecode::inner_closure(outer, formals, body, srcref, env);
+    }
+    let env = pending_env(owner)?;
+    let closure = bytecode::inner_closure(outer, formals, body, srcref, env)?;
+    let state = interp();
+    state.pending_closures.push((owner as u32, closure));
+    state.frames[owner].unforced += 1;
+    Ok(closure)
+}
+
 /// The environment of the frame at `index`, made from its slots first if it is a slot frame
 /// that has none yet. Everything that hands a frame's environment to R code or native code
 /// reads it here.
@@ -2962,9 +3047,12 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     }
     materialize_references(index)?;
     let frame = &interp().frames[index];
-    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
-    // generic path would have bound a promise of the variable, forced by the builtin call, and
-    // `substitute` reads the variable from it. Constants bind as themselves either way.
+    // An argument the caller passed to an inlined frame sits in its slot as the value; the
+    // generic path would have bound a promise of the argument's code, and `substitute` reads the
+    // code from it. Constants bind as themselves either way. A slot that holds a promise is an
+    // argument still being evaluated when the frame was pushed (the expression a native
+    // `tryCatch` forces under its helper frames): it binds as the promise of its own code in the
+    // caller's environment, in the state the promise it stands for is in.
     if frame.inlined
         && let Some((shape, sources)) = direct_sources(frame.function, frame.call)?
     {
@@ -2979,11 +3067,23 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
                 cell = cell.cdr();
             }
             let expression = cell.car();
-            if expression.kind() != SexpType::Symbol {
+            if !matches!(expression.kind(), SexpType::Symbol | SexpType::Language) {
                 continue;
             }
+            let held = *bytecode::register_address(header + 1 + slot);
+            let promise = if held.kind() == SexpType::Promise {
+                if held.car() != unbound() {
+                    forced_promise(expression, held.car())?
+                } else {
+                    let caller = frame_sys_parent(index, Reify::Site("promise over the frame"))?;
+                    let promise = make_promise(expression, caller)?;
+                    promise.set_gp_bits(PROMISE_SEEN, held.has_gp(PROMISE_SEEN));
+                    promise
+                }
+            } else {
+                forced_promise(expression, held)?
+            };
             let register = bytecode::register_address(header + 1 + slot);
-            let promise = forced_promise(expression, *register)?;
             promise.increment_refcount();
             (*register).decrement_refcount();
             *register = promise;

@@ -48,9 +48,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryMessage", 0, do_message).prologue(),
     internal("ryWarning", 0, do_warning).prologue(),
     internal("rySignalCondition", 0, do_signal_condition).prologue(),
+    internal("ryWithCallingHandlers", 0, do_with_calling_handlers).prologue(),
     internal("ryTryCatch", 0, do_try_catch).prologue(),
-    internal("ryTryCatchList", 0, do_try_catch_list).prologue(),
-    internal("ryDoTryCatch", 0, do_do_try_catch).prologue(),
     internal("ryWithRestarts", 0, do_with_restarts).prologue(),
     internal("ryWithOneRestart", 0, do_with_one_restart).prologue(),
     internal("ryDoWithOneRestart", 0, do_do_with_one_restart).prologue(),
@@ -82,6 +81,11 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("message", "ryMessage", 0x9b452884cddd7ceb),
     ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
+    (
+        "withCallingHandlers",
+        "ryWithCallingHandlers",
+        0x0c246a7f0b9c191b,
+    ),
     ("tryCatch", "ryTryCatch", 0xd94c74ab7d1c9df2),
     ("withRestarts", "ryWithRestarts", 0xcebb374dbd62409d),
     ("tryInvokeRestart", "ryTryInvokeRestart", 0xe95eb95ec8453f49),
@@ -98,13 +102,6 @@ const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
         "ryAssignNativeRoutines",
         0x26c985af62edd0db,
     ),
-    (
-        "tryCatch",
-        "tryCatchList",
-        "ryTryCatchList",
-        0x2e065bb04214d605,
-    ),
-    ("tryCatch", "doTryCatch", "ryDoTryCatch", 0xacf47eb5e4bfc044),
     (
         "withRestarts",
         "withOneRestart",
@@ -169,10 +166,7 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
             "ryMatchArg",
             "ryReduce",
             "ryTraceBack",
-            "rySignalCondition",
             "ryTryCatch",
-            "ryTryCatchList",
-            "ryDoTryCatch",
             "ryWithRestarts",
             "ryWithOneRestart",
             "ryDoWithOneRestart",
@@ -3303,13 +3297,17 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
 /// `signalCondition(cond)` for a condition list whose message and call come from base's
 /// `conditionMessage.condition` and `conditionCall.condition`. The R body reaches them through
 /// `inherits()`, two generics and their methods, which all return before any handler runs, so
-/// only the variables they leave in the frame, `msg` and `call`, can be observed.
+/// only the variables they leave in the frame, `msg` and `call`, can be observed. They go in the
+/// frame's slots, so the frame stays a slot frame.
 unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
     if !fast_paths_enabled() {
         return decline();
     }
-    let frame = call.env()?;
-    let Some(condition) = argument(ClosureFrame::Env(frame), symbols().cond)? else {
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = ClosureFrame::of(call);
+    let Some(condition) = argument(frame, symbols().cond)? else {
         return decline();
     };
     let class = values::get_attr(condition, symbols().class);
@@ -3327,7 +3325,8 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
     };
     // `conditionMessage(cond)` and `conditionCall(cond)` dispatch on the class, and the base
     // methods read the fields with `$`, which dispatches too: only base's `condition` methods
-    // may apply.
+    // may apply. The lookup starts in base rather than the frame, whose only bindings, `cond`,
+    // `message` and `call`, are never methods.
     let base = values::base_namespace();
     let mut method_name: SmallVec<[u8; 64]> = SmallVec::new();
     for index in 0..length(class) {
@@ -3341,15 +3340,76 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
             method_name.push(b'.');
             method_name.extend_from_slice(name);
             let method = values::install_bytes(&method_name)?;
-            if crate::dispatch::lookup_method(method, frame, base)?.is_some() {
+            if crate::dispatch::lookup_method(method, base, base)?.is_some() {
                 return decline();
             }
         }
     }
-    eval::define(symbols().msg, message, frame)?;
-    eval::define(symbols().call, condition_call, frame)?;
+    eval::set_frame_variable(index, symbols().msg, message)?;
+    eval::set_frame_variable(index, symbols().call, condition_call)?;
     let value = crate::conditions::signal_condition(condition, condition_call)?;
-    finish(ClosureFrame::Env(frame), value, true)
+    finish(frame, value, true)
+}
+
+/// `withCallingHandlers(expr, ...)`: forces the handlers in order as `list(...)` does, binds
+/// `handlers`, `classes` and `parentenv` in the frame's slots, establishes the calling handlers
+/// as `.addCondHands()` does and evaluates `expr`, all without the frame's environment. A handler
+/// without a name, or a missing `expr`, sends the call to the R body, which reports it.
+unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = ClosureFrame::of(call);
+    let names = symbols();
+    if !is_supplied(frame, names.expr)? {
+        return decline();
+    }
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    if items.iter().any(|&(tag, _)| tag == nil()) {
+        return decline();
+    }
+    let mut forced: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    for &(tag, item) in &items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        forced.push((tag, value));
+    }
+    let handlers = tagged_list(&forced)?;
+    crate::heap().root(handlers);
+    let classes = values::get_attr(handlers, names.names);
+    let parent_env = eval::frame_sys_parent_pending(index)?;
+    eval::set_frame_variable(index, names.handlers, handlers)?;
+    eval::set_frame_variable(index, names.classes, classes)?;
+    eval::set_frame_variable(index, names.parentenv, parent_env)?;
+    let state = interp();
+    let mut stack = state.handlers.clone();
+    for position in (0..forced.len()).rev() {
+        stack = Some(crate::conditions::new_handler(crate::conditions::Handler {
+            class: classes.element(position),
+            handler: handlers.element(position),
+            calling: true,
+            calling_below: true,
+            parent_env,
+            target: nil(),
+            next: stack,
+        }));
+    }
+    state.handlers = stack;
+    if !forced.is_empty() {
+        activity::count(Counter::HandlersEstablished);
+    }
+    interp().visible = true;
+    let Some(value) = argument(frame, names.expr)? else {
+        return Err(crate::unwind::error(
+            "argument \"expr\" is missing, with no default",
+        ));
+    };
+    finish(frame, value, interp().visible)
 }
 
 /// `list$name` for a list without a `$` method: the element named exactly `name`, or `NULL`
@@ -3381,7 +3441,7 @@ unsafe fn original_statements(index: usize) -> Sexp {
 /// the closure shares the compiled code the outer closure holds for that `function`
 /// expression, where a closure made from the expression alone would be compiled again on every
 /// call of the outer function.
-unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()> {
+unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<Sexp> {
     // `name <- function(formals, body, srcref)`
     let definition = nth(statement, 2);
     let formals = nth(definition, 1);
@@ -3393,7 +3453,8 @@ unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()
     let outer = interp().frames[index].function.cdr();
     let closure = crate::bytecode::inner_closure(outer, formals, body, srcref, env)?;
     crate::heap().root(closure);
-    eval::define(nth(statement, 1), closure, env)
+    eval::define(nth(statement, 1), closure, env)?;
+    Ok(closure)
 }
 
 /// The element at `position` of the pairlist or call `list`.
@@ -3427,10 +3488,10 @@ unsafe fn tagged_list(items: &[(Sexp, Sexp)]) -> R<Sexp> {
     Ok(list)
 }
 
-/// `tryCatch(expr, ..., finally)`. Its frames stay: the R body's `tryCatchList(...)` statement
-/// runs as written, so `sys.calls()` and the call of a caught condition read as in GNU R. The
-/// prologue does the rest of the body natively: it registers `finally` with `on.exit`, forces
-/// the handlers in order as `list(...)` does, and binds `handlers`, `classes` and `parentenv`.
+/// `tryCatch(expr, ..., finally)`. The prologue does the body natively: it registers `finally`
+/// with `on.exit`, forces the handlers in order as `list(...)` does, binds `handlers`, `classes`
+/// and `parentenv`, and runs the `tryCatchList(...)` call as a [`TryCatch`], whose frames read
+/// as GNU R's.
 unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     if !fast_paths_enabled() {
         return decline();
@@ -3444,8 +3505,8 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     };
     let statements = original_statements(index);
     let names = symbols();
-    define_inner_closure(index, nth(statements, 0), frame)?;
-    define_inner_closure(index, nth(statements, 1), frame)?;
+    let list = define_inner_closure(index, nth(statements, 0), frame)?;
+    let one = define_inner_closure(index, nth(statements, 1), frame)?;
     if is_supplied(ClosureFrame::Env(frame), names.finally)? {
         let on_exit = &mut interp().frames[index].on_exit;
         on_exit.clear();
@@ -3459,72 +3520,291 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     }
     let handlers = tagged_list(&forced)?;
     let classes = values::get_attr(handlers, names.names);
+    let parent_env = eval::frame_sys_parent_pending(index)?;
     eval::define(names.handlers, handlers, frame)?;
     eval::define(names.classes, classes, frame)?;
-    eval::define(
-        names.parentenv,
-        eval::frame_sys_parent_pending(index)?,
-        frame,
-    )?;
+    eval::define(names.parentenv, parent_env, frame)?;
     if length(classes) != forced.len() {
         eval::eval(nth(statements, 6), frame)?;
     }
-    let value = eval::eval(nth(statements, 7), frame)?;
+    let list_call = nth(statements, 7);
+    let expr = eval::find_var_in_frame(names.expr, frame)?;
+    let plan = TryCatch::new(list, one, expr, classes, handlers, parent_env)?;
+    let value = match plan {
+        Some(plan) => plan.list_level(length(classes), list_call, frame)?,
+        None => eval::eval(list_call, frame)?,
+    };
     finish(ClosureFrame::Env(frame), value, interp().visible)
 }
 
-/// `tryCatchList(expr, names, parentenv, handlers)` with one handler, which calls `tryCatchOne`
-/// through the R body's own call so its frame reads as in GNU R.
-unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
-    if !fast_paths_enabled() {
-        return decline();
-    }
-    let Some(index) = call.frame_index() else {
-        return decline();
-    };
-    let frame = call.env()?;
-    let Some(classes) = argument(ClosureFrame::Env(frame), symbols().names)? else {
-        return decline();
-    };
-    if classes.is_object() || length(classes) != 1 {
-        return decline();
-    }
-    eval::define(symbols().nh, values::scalar_integer(1)?, frame)?;
-    // `if (nh > 1L) ... else if (nh == 1L) tryCatchOne(...) else expr`
-    let branches = nth(original_statements(index), 1);
-    let one = nth(nth(branches, 3), 2);
-    let value = eval::eval(one, frame)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
+/// The calls under `tryCatch(expr, ...)` run natively with their frames as slot frames:
+/// `tryCatchList`, then per handler from the last to the first `tryCatchOne` and `doTryCatch`,
+/// with `expr` forced under the innermost `doTryCatch`. Each frame holds the values its R body
+/// would hold, so `sys.calls()`, `sys.function()`, `sys.parents()` and a caught condition's call
+/// read as in GNU R, and anything that asks for a frame's environment gets one made from its
+/// slots ([`eval::reify`]), with `expr` and the other arguments as promises of their code. The
+/// code that runs once a handler has caught a condition, the rest of `tryCatchOne`'s body, runs
+/// as written in that frame's environment.
+struct TryCatch {
+    list: Sexp,
+    one: Sexp,
+    /// The promise of `tryCatch`'s `expr`, or its value when the caller passed a constant. Every
+    /// helper frame's `expr` slot holds it, standing for the promise chain GNU R builds from it.
+    expr: Sexp,
+    classes: Sexp,
+    handlers: Sexp,
+    parent_env: Sexp,
+    /// `tryCatchList(expr, names[-nh], parentenv, handlers[-nh])` in `tryCatchList`'s body.
+    inner_list_call: Sexp,
+    /// `tryCatchOne(tryCatchList(...), names[nh], parentenv, handlers[[nh]])`.
+    many_one_call: Sexp,
+    /// `tryCatchOne(expr, names, parentenv, handlers[[1L]])`.
+    single_one_call: Sexp,
+    /// `doTryCatch <- function(expr, name, parentenv, handler) ...` in `tryCatchOne`'s body.
+    do_definition: Sexp,
+    /// `doTryCatch(return(expr), name, parentenv, handler)`.
+    do_call: Sexp,
+    /// `tryCatchOne`'s statements from the `value <- doTryCatch(...)` assignment on.
+    one_rest: Sexp,
+    /// The slot owner `tryCatch` was called with, which forcing `expr` restores.
+    owner: u32,
 }
 
-/// `doTryCatch(expr, name, parentenv, handler)`: establishes the exiting handler with the
-/// frame as its target and evaluates `expr`, whose `return(expr)` returns from `tryCatchOne`.
-unsafe fn do_do_try_catch(call: &Call<'_>) -> R<Sexp> {
-    if !fast_paths_enabled() {
-        return decline();
+impl TryCatch {
+    /// The plan for a call whose helper closures are `list` and `one`; `None` when the calls must
+    /// run as R code: `expr` is missing, a debugger is attached, or a helper's body has no slot
+    /// table.
+    unsafe fn new(
+        list: Sexp,
+        one: Sexp,
+        expr: Sexp,
+        classes: Sexp,
+        handlers: Sexp,
+        parent_env: Sexp,
+    ) -> R<Option<TryCatch>> {
+        if expr == values::unbound()
+            || expr == missing_arg()
+            || activity::hooks() & activity::DEBUGGER != 0
+            || classes.is_object()
+            || length(classes) != length(handlers)
+        {
+            return Ok(None);
+        }
+        for helper in [list, one] {
+            let body = crate::bytecode::compile_before_call(helper)?;
+            if body.kind() != SexpType::Bytecode
+                || body.cdr().element(crate::bytecode::SLOTS) == nil()
+            {
+                return Ok(None);
+            }
+        }
+        // `{ nh <- length(names); if (nh > 1L) many else if (nh == 1L) single else expr }`
+        let branches = nth(crate::bytecode::closure_body(list), 2);
+        let many = nth(branches, 2);
+        let single = nth(nth(branches, 3), 2);
+        // `{ doTryCatch <- function(...) ...; value <- doTryCatch(...); ... }`
+        let one_statements = crate::bytecode::closure_body(one).cdr();
+        Ok(Some(TryCatch {
+            list,
+            one,
+            expr,
+            classes,
+            handlers,
+            parent_env,
+            inner_list_call: nth(many, 1),
+            many_one_call: many,
+            single_one_call: single,
+            do_definition: nth(one_statements.car(), 2),
+            do_call: nth(nth(one_statements, 1), 2),
+            one_rest: one_statements.cdr(),
+            owner: interp().slot_owner,
+        }))
     }
-    let frame = call.env()?;
-    let names = symbols();
-    let mut values: [Sexp; 3] = [nil(); 3];
-    for (slot, symbol) in values
-        .iter_mut()
-        .zip([names.name, names.handler, names.parentenv])
-    {
-        let Some(value) = argument(ClosureFrame::Env(frame), symbol)? else {
-            return decline();
+
+    /// `tryCatchList` over the first `level` handlers, called by `call` from `sys_parent`, or
+    /// from the slot owner when that is `NULL`.
+    unsafe fn list_level(&self, level: usize, call: Sexp, sys_parent: Sexp) -> R<Sexp> {
+        let total = length(self.classes);
+        let (names, handlers) = if level == total {
+            (self.classes, self.handlers)
+        } else {
+            (prefix(self.classes, level)?, prefix(self.handlers, level)?)
         };
-        *slot = value;
+        let heap = crate::heap();
+        heap.root(names);
+        heap.root(handlers);
+        let values = [self.expr, names, self.parent_env, handlers];
+        let header = slot_window(self.list, &values)?;
+        let args = untagged(&values);
+        eval::run_inlined(call, self.list, header, 0, sys_parent, &args, |frame| {
+            let frame = frame as usize;
+            eval::set_frame_variable(frame, symbols().nh, values::scalar_integer(level as i32)?)?;
+            if level == 0 {
+                return self.force_expr();
+            }
+            self.one_level(level, frame, names, handlers)
+        })
     }
-    let [name, handler, parent_env] = values;
-    let handlers = values::list_vector(&[handler])?;
-    let calling = values::scalar_logical(0)?;
-    kernel(
-        crate::conditions::do_add_cond_hands,
-        &[name, handlers, parent_env, frame, calling],
-        ClosureFrame::Env(frame),
-    )?;
-    let value = eval::eval(names.expr, frame)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
+
+    /// `tryCatchOne` for handler `level` of `names` and `handlers`, called from the
+    /// `tryCatchList` frame at `list_frame`.
+    unsafe fn one_level(
+        &self,
+        level: usize,
+        list_frame: usize,
+        names: Sexp,
+        handlers: Sexp,
+    ) -> R<Sexp> {
+        let (name, call) = if level == 1 {
+            (names, self.single_one_call)
+        } else {
+            let name = values::scalar_string_charsxp(names.element(level - 1))?;
+            crate::heap().root(name);
+            (name, self.many_one_call)
+        };
+        let handler = handlers.element(level - 1);
+        let values = [self.expr, name, self.parent_env, handler];
+        let header = slot_window(self.one, &values)?;
+        let args = untagged(&values);
+        let state = interp();
+        let owner = state.slot_owner;
+        state.slot_owner = list_frame as u32;
+        let result = eval::run_inlined(call, self.one, header, 0, nil(), &args, |frame| {
+            self.do_level(level, list_frame, frame as usize, &values)
+        });
+        interp().slot_owner = owner;
+        result
+    }
+
+    /// The body of the `tryCatchOne` frame at `frame`: defines `doTryCatch`, calls it, and runs
+    /// the rest of the R body once its handler has caught a condition.
+    unsafe fn do_level(
+        &self,
+        level: usize,
+        list_frame: usize,
+        frame: usize,
+        values: &[Sexp; 4],
+    ) -> R<Sexp> {
+        let names = symbols();
+        let definition = self.do_definition;
+        let srcref = match definition.cdr().cdr().cdr() {
+            rest if rest.kind() == SexpType::Pairlist => rest.car(),
+            _ => nil(),
+        };
+        let closure = eval::frame_inner_closure(
+            frame,
+            self.one.cdr(),
+            nth(definition, 1),
+            nth(definition, 2),
+            srcref,
+        )?;
+        crate::heap().root(closure);
+        eval::set_frame_variable(frame, names.do_try_catch, closure)?;
+        let Some(header) = eval::open_slot_window(closure, values)? else {
+            let env = eval::frame_env(frame, eval::Reify::Site("tryCatch"))?;
+            return eval_statements(self.one_rest, env);
+        };
+        let args = untagged(values);
+        let mut normal = false;
+        let state = interp();
+        let owner = state.slot_owner;
+        state.slot_owner = frame as u32;
+        let result = eval::run_inlined(self.do_call, closure, header, 0, nil(), &args, |inner| {
+            let target = eval::pending_env(inner as usize)?;
+            let state = interp();
+            let below = state.handlers.clone();
+            state.handlers = Some(crate::conditions::new_handler(crate::conditions::Handler {
+                class: values[1].element(0),
+                handler: values[3],
+                calling: false,
+                calling_below: crate::conditions::calling_established(&below),
+                parent_env: self.parent_env,
+                target,
+                next: below,
+            }));
+            activity::count(Counter::HandlersEstablished);
+            let value = if level > 1 {
+                interp().slot_owner = list_frame as u32;
+                self.list_level(level - 1, self.inner_list_call, nil())?
+            } else {
+                self.force_expr()?
+            };
+            normal = true;
+            Ok(value)
+        });
+        interp().slot_owner = owner;
+        let value = result?;
+        if normal {
+            return Ok(value);
+        }
+        crate::heap().root(value);
+        eval::set_frame_variable(frame, names.value, value)?;
+        let env = eval::frame_env(frame, eval::Reify::Site("tryCatch"))?;
+        eval_statements(self.one_rest.cdr(), env)
+    }
+
+    /// The value of `expr`, forced as the slot owner `tryCatch` was called with would force it.
+    unsafe fn force_expr(&self) -> R<Sexp> {
+        let state = interp();
+        let owner = state.slot_owner;
+        state.slot_owner = self.owner;
+        let result = if self.expr.kind() == SexpType::Promise && self.expr.car() == values::unbound()
+        {
+            eval::force_promise(self.expr)
+        } else {
+            interp().visible = true;
+            eval::value_of(self.expr)
+        };
+        interp().slot_owner = owner;
+        result
+    }
+}
+
+/// The register window for a helper frame of a native `tryCatch`, whose slot table
+/// [`TryCatch::new`] checked.
+unsafe fn slot_window(function: Sexp, values: &[Sexp]) -> R<u32> {
+    match eval::open_slot_window(function, values)? {
+        Some(header) => Ok(header),
+        None => Err(crate::unwind::error(
+            "a tryCatch helper closure lost its slot table",
+        )),
+    }
+}
+
+/// Untagged arguments with `values`, as a call with positional arguments records them.
+fn untagged(values: &[Sexp]) -> SmallVec<[Arg; 4]> {
+    values
+        .iter()
+        .map(|&value| Arg { tag: nil(), value })
+        .collect()
+}
+
+/// The first `count` elements of the vector `vector`, with the names it has: `x[-length(x)]`
+/// for a plain vector.
+unsafe fn prefix(vector: Sexp, count: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let result = values::alloc(vector.kind(), count)?;
+    heap.root(result);
+    for index in 0..count {
+        heap.set_element(result, index, vector.element(index));
+    }
+    let names = values::get_attr(vector, symbols().names);
+    if names != nil() {
+        values::set_attr(result, symbols().names, prefix(names, count)?)?;
+    }
+    Ok(result)
+}
+
+/// Evaluates `statements` in `env` in order and returns the last value.
+unsafe fn eval_statements(statements: Sexp, env: Sexp) -> R<Sexp> {
+    let mut rest = statements;
+    let mut value = nil();
+    while rest.kind() == SexpType::Pairlist {
+        value = eval::eval(rest.car(), env)?;
+        crate::heap().root(value);
+        rest = rest.cdr();
+    }
+    Ok(value)
 }
 
 /// `withRestarts(expr, ...)` for restarts given as functions or descriptions, as the warning
