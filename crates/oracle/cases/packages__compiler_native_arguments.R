@@ -15,3 +15,6 @@ traced <- character()
 g <- compiler::compile({traced <- c(traced, "e"); quote(1)},
                        env = {traced <- c(traced, "env"); globalenv()})
 print(traced)
+# parent.env takes an environment, never a search position as as.environment does.
+print(tryCatch(parent.env(1), error = function(e) conditionCall(e)))
+print(tryCatch(parent.env(NULL), error = conditionMessage))

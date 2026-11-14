@@ -7,9 +7,11 @@
 | [1] "argument is not an environment"
 | [1] 6
 | [1] "env" "e"  
+| parent.env(1)
+| [1] "argument is not an environment"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| c("env", "e")
+| "argument is not an environment"

@@ -455,7 +455,19 @@ unsafe fn do_new_env(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "env")?;
+    // GNU R takes an environment or an S4 object extending one, never a search position as
+    // `as.environment` does.
+    let value = call.arg(0);
+    let env = match value.kind() {
+        SexpType::Environment => value,
+        SexpType::Object if value.has_gp(gp::S4_OBJECT) => {
+            get_attr(value, symbols().dot_xdata)
+        }
+        _ => nil(),
+    };
+    if env.kind() != SexpType::Environment {
+        return Err(error("argument is not an environment"));
+    }
     if env == empty_env() {
         return Err(call.error("the empty environment has no parent"));
     }
