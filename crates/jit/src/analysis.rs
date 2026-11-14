@@ -1165,10 +1165,10 @@ impl fmt::Debug for Plan<'_> {
     }
 }
 
-/// The refusal at entry for a body with a loop whose compiled code would save nothing per call:
-/// outside its loops it hands too many instructions back to tier 0, each of which costs a call
-/// into tier 0 on top of the work. The loops still gain, so the body compiles once a loop is
-/// hot, and only the loop enters compiled code.
+/// The refusal at entry for a body with a loop whose work outside the loops would save nothing
+/// in compiled code: there it hands instructions back to tier 0, each of which costs a call
+/// into tier 0 on top of the work, and runs too little natively to make up for them. The loops
+/// still gain, so the body compiles once a loop is hot, and only the loop enters compiled code.
 pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
 
 /// The refusal for a body whose loops would hand so many instructions back to tier 0 that an

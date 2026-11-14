@@ -1686,6 +1686,12 @@ fn inlined_program(rng: &mut SplitMix64) -> (String, Vec<String>) {
     ];
     let threshold = 8 + rng.below(20);
     let mut body = Vec::new();
+    // A local that shadows a global and is never assigned: after a deoptimization tier 0
+    // must find its slot unbound and read the global, whatever a call inlined beside this
+    // one left in the window the two share.
+    if rng.chance(1, 2) {
+        body.push("if (x < 0L) scale <- 0L".to_owned());
+    }
     if rng.chance(1, 4) {
         body.push(pick(rng, ASSIGNED));
     }
@@ -1718,13 +1724,26 @@ fn inlined_program(rng: &mut SplitMix64) -> (String, Vec<String>) {
         _ => format!("{first}, {second}, {third}"),
     };
     let formals = pick(rng, FORMALS);
+    let beside = match rng.below(3) {
+        0 => "",
+        1 => "s <- s + beside(i)\n",
+        _ => "s <- s + beside(i) + inner(i, 1L)\n",
+    };
+    // A global that changes its type in the middle of the loop fails the callee's guard on
+    // it in an iteration after the first, when the calls beside it have run and returned.
+    let retype = if rng.chance(1, 2) {
+        "if (i == 5L && is.double(scale)) scale <<- 2L\n"
+    } else {
+        ""
+    };
     let setup = format!(
         "scale <- 2\noffset <- 5L\nseen <- 0L\n\
          inner <- function(a, b) {{\nif (a > {}L) return(b)\na\n}}\n\
+         beside <- function(a) {{\nb <- a + 1L\nif (b > 1000000L) b <- 0L\nb * 2L\n}}\n\
          callee <- function({formals}) {{\n{}\n}}\n\
-         caller <- function(n, k) {{\ns <- 0\ni <- 0L\nwhile (i < n) {{\ni <- i + 1L\n\
+         caller <- function(n, k) {{\ns <- 0\ni <- 0L\nwhile (i < n) {{\ni <- i + 1L\n{retype}{beside}\
          r <- callee({arguments})\nif (is.list(r)) return(r)\ns <- s + r\n}}\ns\n}}\n\
-         outer <- function(n, k) caller(n, k)",
+         outer <- function(n, k) caller(n, k)\nbeside(1L)\nbeside(2L)",
         threshold + 1,
         body.join("\n")
     );

@@ -144,7 +144,7 @@ the host's store", has the shape and the measurements behind this list.
 
 ## Open: JIT on against JIT off
 
-The baseline tier was deleted (`decisions.md`, "No baseline tier, and code images hold bytecode only"). JIT on runs about 1% more instructions than JIT off on `just bench applications` and is not faster in wall time. What is left, in order of expected gain:
+With the JIT on, thirteen of the fifteen `just bench applications` programs run 0.01% to 0.55% more instructions than with it off, and `orders` and `bond_book` run 37% and 23% fewer (callgrind). The remainder is the entry and back-edge counters, one recording window per hot body and the compiles themselves. Tier 1 compiles a body only when its native work covers what compiled code costs (`decisions.md`, "A body compiles only when its native work covers what compiled code costs"), so most application bodies stay in tier 0: their instructions are builtin calls on boxed values, which compiled code can only step through tier 0. What is left, in order of expected gain:
 
 - Take a speedup ceiling from plain callgrind self cost, never from a run with `RY_PROFILE_SUMMARY`. The summary hooks call `top_env` from `profile_summary::enter_closure`, about 1.1% of `validation_full`, which rescaling the shares by the total does not remove.
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
@@ -153,12 +153,21 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
   `jit_step` (158,500 times in one `functional` body). Loads probe the frame inline
   (`decisions.md`, "Tier 1 probes the frame inline for a variable load").
-- JIT on above JIT off on `testthat_full`: 7.134G against 7.047G (callgrind, bench profile,
-  `RY_BENCH_REPEAT=2`). Of the 87M, compiled code and compiling are under 10M; tier 0's own
-  functions run more with the JIT on (`run` +30M, `execute_code` +12M, `run_get_var` +8M,
-  `run_call_builtin` +8M, `run_call_generic` +5M). The likely cause is tier 0's type-feedback
-  recording and entry and back-edge counting (unconfirmed; compare against
-  `RY_JIT_THRESHOLDS=0,0`).
+- Cheaper steps. An instruction compiled code hands to tier 0 costs about 300 machine
+  instructions more than tier 0 running it (`STEP_COST`, `crates/jit/src/jit.rs`), so a loop
+  that mostly steps is refused (`STEPPING_LOOP`): the `vasicek` kernel's loop (`stats::rnorm`,
+  `rates[t, ]`, six vector operators), and the loops of `team_scores`, `records`, `report`
+  and `objects`. Two levers: native forms for the hot builtins on boxed values, and a step
+  that does not synchronise the whole frame before and after the instruction.
+- A refused plan is wasted work. Planning a body that ends as `NOTHING_NATIVE` or `SMALL`
+  after the plan costs 0.5M to 1.4M instructions, and a body can ask up to three times.
+  Decide more of those from `analysis::shape` before planning.
+- A loop whose compiled code deoptimized is compiled again from the same feedback on
+  `team_scores` (the loop is refused today, so the path is idle; check it when cheaper steps
+  let the loop compile).
+- Native recursion is bounded by the depth budget only, not by the native stack
+  (`decisions.md`, "A native recursive function's depth budget shrinks with the interpreter
+  depth").
 - The JIT's first compile costs about 4 MB of peak RSS (code generator start-up). On
   `testthat_full` one compile of `isTRUE`'s body (3 KB of code) makes JIT on 4 MB above JIT off;
   a compile that saves microseconds should not cost megabytes (`decisions.md`, "withr's
@@ -174,22 +183,32 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
 - Inlined closure calls without a frame are built (`decisions.md`, "Tier 1 leaves compiled code
-  through frame states"). On `just bench applications` they move one program, `orders` (85 ms
-  against 154 ms, 1.82x), because a call is only inlined into a caller tier 1 compiles, and tier 1
-  compiles 0 to 4 bodies per program (11 on `functional`). Three of those bodies get a frame:
-  one in `orders`, one in `conditions` and one in `timeseries`. In order of expected gain on the
-  applications:
-  - Compile the callers. Most application bodies are refused as "would hand most instructions
-    to tier 0" or "would run nothing natively": their instructions are builtin calls, vector
-    operators and calls of closures with `...` or defaults. Each of those needs a native form
+  through frame states", "An inlined call starts with one leaf helper call"). They pay where a
+  compiled loop calls a small closure (`spectralnorm_alt_3`, `orders`), and nowhere else yet,
+  because a call is only inlined into a caller tier 1 compiles. In order of expected gain:
+  - A lean entry from the dispatch loop into compiled code. An entry costs about 570 machine
+    instructions more than starting the body in tier 0 (`count_entry`, `entry_event`,
+    `jit::enter`, `compiled_for`, `jit::run`, the register file, the boxed result), which is why
+    a loop-free body under five native instructions is refused (`decisions.md`, "A body
+    compiles only when its native work covers what compiled code costs"). The end
+    shape jumps from the call instruction to a code pointer in the code header. Recalibrate
+    `ENTRY_COST` (`crates/jit/src/jit.rs`) when it lands.
+  - Evaluate more arguments before an inlined call. An argument is computed eagerly only when
+    `lower_expression` can produce it as an unboxed scalar without a failure; anything else stays
+    a promise, and the frame is refused when the callee reads it ("an argument the callee reads
+    that may have an effect"). A pure expression that can fail (`x[[i]]`, `a / b` on vectors) or
+    yields a boxed value can still run before the call, with an exit at the call instruction
+    when it fails. An argument that mentions one of the callee's formals under a condition stays
+    a promise too (`analysis.rs`, `Lowering.conditional`); tracking which formals are already
+    forced at the call would allow it.
+  - Compile the callers. Most application and code-base bodies are refused as `SMALL`,
+    `STEPPING_LOOP` or "would run nothing natively": their instructions are builtin calls on
+    boxed values, vector operators and calls of closures with `...`. Each needs a native form
     in tier 1 before removing the calls between them can pay.
-  - Widen what gets an inlined frame. `RY_JIT_LOG=1` over the 15 applications prints 709
-    refusals: 445 "the call does not pass each formal one argument" (defaults), 115 "the callee
-    has no type feedback yet", 58 "a named, missing or `...` argument", 44 "the callee runs an
-    instruction only tier 0 has", 24 recursive calls, 8 callees too long, 8 callees that needed
-    their frame, 5 arguments with a possible effect that the callee reads, and 2 callees without
-    tier-0 code. Defaults and named arguments are 71% of them, so matching arguments at compile
-    time and binding a default as an unforced formal comes first.
+  - Callees tier 1 cannot inline yet: one with `...`, a loop, a default that is code and is
+    read, a recursive call, a call that needs its own frame, and a callee without type feedback
+    (tier 0 runs the smallest closures without an activation and records nothing for them;
+    plan those from the argument types at the call).
   - A direct call from compiled code when an inlined frame cannot start. `jit_enter_frame`
     declines while a calling handler is established, the call instruction then deoptimizes the
     whole root activation, and a root where that is frequent is recompiled without frames
@@ -197,23 +216,16 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
     which includes every testthat expectation, therefore calls for real. Calling the callee
     through the direct-call path instead keeps the root compiled with frames and makes
     `NO_FRAMES` unnecessary.
-  - Evaluate more arguments before the call. An argument of an inlined callee that mentions one
-    of the callee's formals under a condition stays a promise, which costs the frame when the
-    inner callee reads it (`analysis.rs`, `Lowering.conditional`). Tracking which formals are
-    already forced at the call would allow it.
   - Start an inlined frame without the one remaining helper call (`jit_enter_frame`, a leaf of
-    about 50 instructions; `decisions.md`, "An inlined call starts with one leaf helper call"),
-    then delete `Action::Inline` and `effects::effect_free_lookups`, which exist only because
-    the frame path costs that call.
-  - Plan a callee that has no type feedback from the argument types at the call. Tier 0 runs
-    small closures without an activation and records no feedback for them, so the smallest
-    callees get a frame only through `Action::Inline`.
+    about 50 instructions), then delete `Action::Inline` and `effects::effect_free_lookups`,
+    which exist only because the frame path costs that call.
   - R-level value nodes and passes in `crates/ssa`. The IR carries frame states, but its
     instructions are still Cranelift's, and inlining is decided by the planner in
     `analysis.rs`. Value numbering across an inlined call, guard removal and scalar
     replacement need typed R-level nodes above the lowering.
-- `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
-  once per call.
+- `conditions` leaves compiled code 4438 times at one call site, once per call: the compiled
+  `tryCatch` body calls `doTryCatch`, the R error raised under it unwinds through the compiled
+  frame, and the exit (`reason::PENDING`) rebuilds the frame for tier 0 to handle it.
 
 - **Tier 1 costs more wall time than its instruction count suggests**, because it adds mispredicted branches that callgrind's instruction count does not show. Closing the gap needs cheaper tier-1 compiles, not a change of the entry threshold (`decisions.md`, "Tier 1 keeps the 3000-entry threshold"). With the inline frame probe, `functional` runs 1.8% fewer instructions with the JIT on than off, and `testthat_full` runs 1.2% more, mostly in tier 0's own functions.
 

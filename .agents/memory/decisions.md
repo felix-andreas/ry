@@ -9517,7 +9517,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## A loop-free hot body compiles only when its call rate repays the compile
 
-**Status:** built, except the baseline threshold in the back-edge check, which "No baseline tier, and code images hold bytecode only" supersedes.
+**Status:** built, except the baseline threshold in the back-edge check, which "No baseline tier, and code images hold bytecode only" supersedes. The saving per call (100 per native instruction below) is replaced by the model of "A body compiles only when its native work covers what compiled code costs".
 
 - **Previous shape.** Every body that reached 3000 entries compiled. A loop-free body saves a bounded amount per call, so one that turned hot slowly never repaid its compile: on testthat, `isTRUE` (188 words) compiled for about 11M instructions and then ran about 1400 more times, and JIT on cost 17.6M more than JIT off.
 - **Chosen shape.** At the entry threshold, `compile_in` asks `repays` before planning a loop-free body (`analysis::shape` reads the words once and counts the instructions the plan may run natively). Expected calls are the body's rate over its recording window, 375 calls per however many closure calls the session made meanwhile (`Interp::calls_ever`, stamped into `profile::WINDOW` when the window opens), times a fixed horizon of 2^19 calls. The body compiles when calls times 100 instructions per native instruction reach 2M plus 50k per word. A refusal (`RARE`) is not final: the count restarts and the next attempt measures the rate afresh. A recompile skips the check.
@@ -11242,11 +11242,90 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **The srcref is saved by the compiled code.** The start stores the current srcref into the `Child` record and makes the closure's own current, and each return restores it, as two loads and two stores on `Interp.srcref`.
 - **The call marker is set by the helper that needs it.** `sys.call()`, an error's `Calls:` line and a warning's call read `Interp.assignment_call` for a call that has no frame. Only code that runs inside a helper can read it, so `guarded` sets it around the helper's body when the helper's activation is an inlined frame, and restores it after. A deoptimization gets the root activation, so resumed tier-0 code never runs under the marker.
 - **The window is cleared inline.** A return stores `NULL` over the callee's registers and slots with one store per word for up to `CLEARED_INLINE` (16) words, and calls `jit_clear_window` above that. The words must be cleared because the collector scans the whole extent and a stale word would keep an object alive.
+- **A frame's slots are marked unbound when a deoptimization builds the frame.** The calls inlined in one caller share one window (each starts at the same header, with its registers laid out after its own slot count), so a call with fewer slots keeps registers where a call with more slots keeps locals, and its return leaves `NULL` there. Tier 0 reads a slot as bound unless it holds the unbound marker, so `enter_inlined` (`runtime.rs`) fills the slots before it writes the bound ones; filling them at the first start of the call instead showed tier 0 a never-assigned local as `NULL` after a sibling call had returned. Compiled code never reads a slot of a frame that does not exist, so the start writes nothing there. Pinned by the oracle case `jit__inlined_sibling_frames`.
 - **A free variable is found inline.** Compilation walks the callee's enclosing environments once (`heap::Probe`), and the machine code repeats that walk against the frames' own fields: the symbol filter of a frame that lacks the binding, the slot of the frame that has it, or the cell on the symbol for the base and global frames. A moved slot, an active binding, an unforced promise or a pending frame goes to `jit_load_free`.
 - **Frames bind what tier 0 would bind.** The planner binds a call's arguments with tier 0's own call plan (`eval::direct_sources`), so named and omitted arguments and literal defaults get a frame, and the frame a deoptimization builds matches tier 0's. A formal whose default is code hands the call to tier 0 when the callee reads it. An assigned formal is a dirty slot like any local.
 - **An entry of optimized code skips the schedule.** `bytecode::entry_event` asks the tier at every entry of a body that has optimized code and returns as long as the body keeps it, without recomputing `profile::NEXT`, which only changes when the code is discarded.
 - **Not built.** One word that every change of the watched state bumps (a handler pushed or popped, a debug bit, `environment<-`, the debugger, the activity log, `options(expressions=)`) would make the start one compare in compiled code and remove the call. It touches every site that changes that state, and a missed site would be a wrong result, so it waits for a workload where the remaining call matters.
 - **Impact.** One iteration of `spectralnorm_alt_3`'s inner loop, which calls `function(i, j) cache[[i, j]]`, runs about 345 instructions: 294 of compiled code and 52 in `jit_enter_frame`. The program reports about 0.10 to 0.12 s for `execute(250)`, against 0.25 s before, 0.70 s with the JIT off and 1.42 s for GNU R. `RY_JIT_CODE=<directory>` writes each compiled body's machine code to a file named after its address, which lines a per-address profile (callgrind with `--dump-instr=yes`) up with a disassembly.
+
+## A body compiles only when its native work covers what compiled code costs
+
+**Status:** built. The lean entry under "Not built" is planned.
+
+- **Previous shape.** The compile policy ("A loop-free hot body compiles only when its call rate repays the compile") assumed every native instruction saves 100 machine instructions per call and charged nothing for entering compiled code. A hot one-line closure therefore compiled, and then ran slower than in tier 0: with the JIT on, seven of the fifteen application programs were 3 to 7% slower than with it off, and the three benchmark code bases about 3% slower.
+- **Measured.** Closures called 400,000 times from `vapply`, in machine instructions per call (callgrind), compiled against tier 0. Entering compiled code from the dispatch loop goes through `count_entry`, `entry_event`, `jit::enter`, `compiled_for` and `jit::run`, grows the register file and boxes the result, which together cost about 570 instructions more than starting the same body in tier 0.
+
+  | body | native instructions | saved per call when compiled |
+  |---|---|---|
+  | `x^2` | 1 | -325 |
+  | `x * 2 + 1` | 2 | -309 |
+  | `(x * 2 + y) * (x - y)` | 4 | -27 |
+  | seven operations, two locals | 7 | 575 |
+  | twelve operations, three locals | 12 | 1393 |
+
+- **A step costs too.** An instruction compiled code cannot run natively is handed to tier 0 through `jit_step`, which costs about 300 instructions more than tier 0 running it in its own loop (the call out, the frame synchronised before and after it). A body that steps most of its instructions therefore loses in compiled code however hot it is.
+- **Chosen shape.** `analysis.rs`, `Work` counts three kinds of work: native instructions, calls the plan removes or makes direct, and steps. `jit.rs`, `saving` values them at `SAVING_PER_NATIVE` (130), `SAVING_PER_CALL` (1000) and minus `STEP_COST` (300), and `saving_per_call` subtracts `ENTRY_COST` (570), so a step-free body breaks even at five native instructions or one call. `repays` multiplies that saving by the expected calls. `Plan::work` returns the counts three ways (`BodyWork`): for the whole body, for the instructions outside every loop, and for the instructions in loops, where an instruction nested `d` loops deep weighs `LOOP_WEIGHT` (8) to the power `d - 1`. The weight stands for the iterations an inner loop runs per outer iteration, so one stepped instruction in an outer loop does not refuse a native inner loop. The decision after planning, skipped under `RY_JIT=force`:
+
+  | body | refused when | refusal | final |
+  |---|---|---|---|
+  | no loop, hot by entries | `saving_per_call` of the whole body is zero | `SMALL` | yes |
+  | loops | `saving` of the weighted loop work is zero | `STEPPING_LOOP` | yes |
+  | loops, entered at the top | the work outside the loops has steps and its `saving` is zero | `MOSTLY_TIER0` | no: a hot loop still compiles, and only the loop enters compiled code |
+
+  `SMALL` is also decided once before planning, from the instruction counts of `analysis::shape` (`Shape::work`), which spares the plan.
+- **A refused body stops recording.** `bytecode.rs`, `back_edge`: a body whose tier state is negative (refused for good, or off the tiers) sets its back-edge counter to a value that reaches no threshold. Its loops used to reopen the recording window at half the threshold with no compile left to close it, so every variable load and field access in the loop recorded its type for the rest of the run.
+- **A cold body with an empty window is refused once.** `COLD` normally lets a body ask again up to `MAX_COLD_REFUSALS` times, each after planning the body. When the whole feedback vector is still zero after a window, a native prologue finishes every call before any instruction records, so another window cannot differ, and the refusal is final at once.
+- **A refused body keeps its feedback.** `SMALL` is decided after the recording window, unlike `NEVER_NATIVE`, which is decided before it. The body stops recording and counting, and its feedback stays, so a compiled caller still inlines it as a frame. That is where a one-line closure pays: inlined, it costs no entry at all.
+- **The allocator follows the body's size.** A loop-free body of at most `SINGLE_PASS_FROM` (2000) SSA instructions compiles with the backtracking register allocator (`codegen.rs`). Single-pass allocation spilled every value it defined, which made compiled `x^2` 100 instructions long. Above that size, and only for loop-free bodies, single-pass keeps the compile cheap.
+- **Rejected: trimming the entry chain first.** Even an entry of 200 instructions leaves a one-operation body about even with tier 0, so the policy has to refuse it either way. A lean entry (below) lowers `ENTRY_COST` and with it the break-even size; it does not remove the need for the model.
+- **Not built.** An entry from the dispatch loop that jumps to the compiled code without `jit::enter`, `compiled_for` and `jit::run` (the code pointer in the code header, the register window already sized), and a result returned unboxed to a caller that wants a scalar. Recalibrate the constants when either lands. Cheaper steps (a step that does not synchronise the whole frame) would lower `STEP_COST` and let more loops compile.
+- **Pinned by** `a_body_that_could_run_nothing_natively_never_records`, `a_hot_body_that_runs_rarely_waits_to_compile` and `fully_typed_closure_compiles_at_its_first_call` in `crates/jit/tests/test_tiers.rs`. No test pins the constants: they are calibrated on instruction counts of the application programs and the numeric kernels (`array_sum` is the kernel a wrong loop weight refuses).
+- **Impact.** Machine instructions with the JIT on minus with it off, per application program (callgrind, `tools/bench/applications`), before and after:
+
+  | program | before | after |
+  |---|---|---|
+  | `expr_tree` | +261M | +1M |
+  | `team_scores` | +249M | +33M |
+  | `report` | +143M | +12M |
+  | `objects` | +134M | +26M |
+  | `records` | +126M | +21M |
+  | `conditions` | +102M | +71M |
+  | `validation` | +56M | +19M |
+  | `orders` | -4956M | -4956M |
+  | `bond_book` | -3426M | -3426M |
+
+  After the change no program runs more than 0.55% more instructions with the JIT on. Of the kernels, every loop that compiled before still compiles except `vasicek`'s, which steps eleven of its instructions and runs as fast in tier 0.
+
+## A compiled return writes locals back only when something can still read the frame
+
+**Status:** built.
+
+- **Previous shape.** Compiled code keeps assigned locals in SSA variables and marks their frame slots dirty. Every `Return` of the body flushed all dirty slots (`flush_all`): one `jit_flush` call per slot, which boxed an unboxed scalar and stored it through `Machine::assign`. A body with two assigned locals paid about 450 instructions per call for values nothing read again.
+- **Who reads a frame after its body returns.** Tier 0 finishes a frame (`bytecode.rs`, `finish_frame`) only when it has an environment, registered exit code, or a pending environment, which is the name a promise or a closure created over a slot frame holds until the frame is reified. Exit code compiled for slots runs on the slot frame, and a reified environment is filled from the slots, so each of the three reads the slots after the return. Nothing else does: a slot frame without them is dropped with its registers.
+- **Chosen shape.** At the body's own `Return`, `codegen.rs`, `finish_slots` calls the leaf `jit_frame_read_later` (`runtime.rs`) when some slot may be dirty. It answers from the interpreter frame: the slot frame has no environment, the top frame is this body's, and that frame has no environment, pending environment or exit code. When nothing reads the frame, the return skips the write-back and only releases the counted references the dirty boxed values hold. Otherwise it flushes as before. An inlined callee's return was already free of write-backs, because its frame exists only in an exit's frame state.
+- **Why a run-time test and not a compile-time proof.** Whether exit code is registered or the frame was captured depends on what the body's callees did (`do.call(on.exit, ..., envir = parent.frame())`, `sys.function`, `environment()` in a default), which the planner cannot see. The test is four loads against a flush per local.
+- **Pinned by** the oracle case `jit__locals_read_after_return`: exit code that reads a reassigned local, a closure returned before a local is reassigned, a promise an escaping closure holds, exit code a callee registers on the caller's frame, and `environment()` captured in the middle of a body.
+
+## A call compiled code cannot inline enters the callee in tier 0's dispatch loop
+
+**Status:** built.
+
+- **Previous shape.** A closure call that tier 1 neither inlines nor calls directly ran through a tier-0 step (`jit_step`), and the step started a nested dispatch loop for the callee: a native stack frame per call, and no tier-0 fast call path.
+- **Chosen shape.** The step enters the callee the way tier 0's own call does (`bytecode.rs`, `enter_in_place`): the callee runs in the loop the step started, and a `Resume` record on `State::resumes` says where its result goes. `return_fast` leaves a stepped call's record to `resume_caller`, which hands the result back to the compiled code, so a tier-0 callee never runs on into the compiled caller's tier-0 instructions. Compiled code entered in place this way grows the native stack as a closure call does, because a deep recursion through compiled bodies otherwise overflowed it (`recursion__and_recall` on `ry-jit`).
+- **A formal passed on as a subscript is the `Argument` instruction.** `x[i]` and `x[[i, j]]` with a formal as subscript compiled to `DispatchSubject`, which only tier 0 runs, because a missing formal is an empty subscript. `Argument` yields the empty argument for a missing formal and is `GetVar` otherwise. It records `feedback::MISSING` when it sees one, and tier 1 compiles it as a variable load unless that bit is set, with a hand-off to tier 0 when a compiled load meets a missing formal. An accessor such as `function(i, j) cache[[i, j]]` runs natively and inlines.
+- **A local a join needs as an object is forgotten, not written back.** When a control-flow join needed an unboxed local as an object, the local was boxed and its slot marked dirty, and the later write-back replaced the promise a formal was bound to and cleared its missing bit, so `substitute(x)` and `missing(x)` differed from tier 0. The join drops the local from the compiled state, and the next read loads the frame's own object.
+- **Pinned by** the tier tests for stepped calls and the oracle cases `jit__stepped_calls_reach_the_caller` and `jit__inlined_frames_defaults`.
+
+## A native recursive function's depth budget shrinks with the interpreter depth
+
+**Status:** built. Bounding native recursion by the native stack is not built.
+
+- **Previous shape.** A native scalar function (`crates/jit/src/native.rs`) counts a depth budget down per nested call and fails as a whole when it runs out, and tier 0 then reruns the call. The budget was the `expressions` limit minus the interpreter depth (`runtime.rs`, `jit_depth_budget`). When tier 0 reran a failed call, the callee's own recursive call tried the native function again one frame deeper, with almost the whole budget again. Under `options(expressions = 500000)` a recursion past the limit therefore ran the native function about `limit` times to a depth of about `limit` each: quadratic, more than two minutes where tier 0 alone reports the error in 1.6 s.
+- **Chosen shape.** The budget is the smaller of the frames left under the limit and `RETRY_NESTING` (8,000,000) divided by the interpreter depth. A retry started `d` frames deep nests at most `8M / d` native calls, so the retries of one failed recursion sum to a bounded amount of work that grows with the logarithm of the depth instead of its square. At the default limit of 5000 the product of depth and remaining frames never exceeds 6.25M, so the limit is always the smaller bound and nothing changes there.
+- **Rejected: marking the function as failed and never retrying.** A recursion that fails once at depth 400,000 still succeeds natively for every shallower call, and those are the common ones.
+- **Not built.** The native stack does not bound native recursion: a native frame's size is not known to the budget, and only a 128 KiB red zone is guaranteed below the stack check. A raised limit with a deep native recursion relies on the budget alone.
+- **Pinned by** `a_recursion_past_a_raised_depth_limit_fails_as_in_tier_zero` in `crates/jit/tests/test_tiers.rs`.
 
 ## A fatal signal prints one report from the executable, which asks the runtime for the R stack
 

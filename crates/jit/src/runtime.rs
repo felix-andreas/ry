@@ -1544,6 +1544,11 @@ unsafe fn enter_inlined(
         // The caller's position is current again from here, for the frame that is pushed and
         // for a failure before that.
         state.srcref = (*child).srcref;
+        // The slots hold whatever the calls inlined beside this one left there, because the
+        // calls of one caller share a window and each lays its registers out after its own
+        // slot count. Tier 0 reads a slot as bound unless it holds the unbound marker.
+        std::slice::from_raw_parts_mut(bytecode::register_address(header + 1), inlined.frame_slots)
+            .fill(values::unbound());
         let forced = arguments.read() as u64;
         let mut saved = arguments.add(1);
         let passed = values::pairlist_items(inlined.call.cdr());
@@ -1815,10 +1820,8 @@ unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
         let header = parent.root_top + inlined.header;
         let base = header + 1 + inlined.frame_slots;
         // The window holds `NULL` from the entry of the compiled body, which is what the
-        // header and the slot root cells start as. The frame's slots stay unbound for as
-        // long as the call has no frame.
-        std::slice::from_raw_parts_mut(bytecode::register_address(header + 1), inlined.frame_slots)
-            .fill(values::unbound());
+        // header and the slot root cells start as. Nothing reads the frame's slots while the
+        // call has no frame, and `enter_inlined` fills them when it gets one.
         let child = parent.children.add(frame as usize - 1);
         child.write(Child {
             activation: Activation {
