@@ -168,7 +168,7 @@ unsafe fn do_serialize(call: &Call<'_>, format: Format) -> ApiResult<Sexp> {
     Ok(result)
 }
 
-unsafe fn serialize_to_bytes(
+pub(crate) unsafe fn serialize_to_bytes(
     object: Sexp,
     format: Format,
     version: c_int,

@@ -14,9 +14,15 @@
 //! Each key keeps a reservoir of sampled calls; a sample's inputs are serialized at entry,
 //! because the environments it reads may change while the call runs, and its value at exit.
 //!
+//! The recorder never runs the recorded program's R code: it forces no promise and calls no
+//! active binding, because either would move the program's side effects and conditions in front
+//! of the call, outside the handlers the callee establishes. A variable bound to an unforced
+//! promise is deferred instead: the promise is read again when the call ends, and its value then
+//! completes the sample and decides whether the call was capturable after all.
+//!
 //! Recording runs from the end of start-up to the end of the session. The work it does for a
-//! call (forcing promises, serializing) runs suspended, so the calls that work makes are not
-//! recorded themselves.
+//! call (serializing, reading a sample back) runs suspended, so the calls that work makes are
+//! not recorded themselves.
 
 use {
     crate::{
@@ -24,7 +30,9 @@ use {
         eval::{self, Reify},
         interp,
         unwind::{R, Unwind, error},
-        values::{self, base_env, base_namespace, global_env, missing_arg, nil, symbol_name},
+        values::{
+            self, base_env, base_namespace, global_env, missing_arg, nil, symbol_name, unbound,
+        },
     },
     heap::{
         activity,
@@ -32,6 +40,7 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
+        borrow::Cow,
         cell::{Cell, RefCell},
         path::PathBuf,
         rc::Rc,
@@ -146,6 +155,9 @@ enum Role {
         sample: Option<Pending>,
         /// Whether user code ran below the call.
         reentered: bool,
+        /// The variables bound to unforced promises at entry, each preserved until the call
+        /// ends.
+        deferred: Vec<Deferred>,
     },
     Uncapturable {
         key: usize,
@@ -157,6 +169,38 @@ enum Role {
 struct Pending {
     slot: usize,
     inputs: Vec<u8>,
+}
+
+/// A variable the call reads whose binding held an unforced promise at entry. If the callee
+/// forces the promise, its value is the variable's value; if not, a replay that does not force
+/// it either does not need the variable.
+#[derive(Clone, Copy)]
+struct Deferred {
+    symbol: Sexp,
+    promise: Sexp,
+    place: Place,
+}
+
+/// Where a variable the call reads is bound, which decides what a replay needs for its value.
+#[derive(Clone, Copy)]
+enum Place {
+    /// A frame between the caller's environment and its top-level environment.
+    Local,
+    /// The user's top-level environment.
+    Top,
+    /// The imports of the user's namespace.
+    Imports,
+    /// The global environment seen from a user namespace, or an environment on the search path,
+    /// such as an attached package's.
+    Search,
+}
+
+/// What a replay needs for a variable's value.
+enum Input {
+    /// The value itself, from the sample's `variables`.
+    Variable,
+    /// The function of this name from the namespace it names, from the sample's `imports`.
+    Import(String),
 }
 
 #[derive(Clone, Copy)]
@@ -347,17 +391,15 @@ pub unsafe fn enter(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<Scope> {
 }
 
 unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
-    let name: Rc<str> = match head_symbol(call) {
-        Some(symbol) => symbol_name(symbol).as_ref().into(),
-        None => "<anonymous>".into(),
-    };
+    let name = call_name(call);
     let covered = STATE.with_borrow(|state| state.as_ref().is_some_and(|s| s.covering.is_some()));
     if covered {
         return Ok(push(Layer::Package, |_| Role::Covered));
     }
     let free = free_names(call);
     let _suspended = Suspend::start();
-    let mark = crate::heap().handle_mark();
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
     let inspected = if free.dots {
         Inspection::Uncapturable(Reason::Dots)
     } else if reads_caller_frame(&owner, &name, call) {
@@ -366,7 +408,7 @@ unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
         match inspect(&free, sys_parent) {
             Ok(inspected) => inspected,
             Err(unwind) => {
-                crate::heap().release_handles(mark);
+                heap.release_handles(mark);
                 return Err(unwind);
             }
         }
@@ -379,7 +421,7 @@ unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
         Inspection::Capturable {
             variables,
             imports,
-            complete,
+            deferred,
         } => {
             let key = key_of(&owner, &name);
             let slot = STATE.with_borrow_mut(|state| {
@@ -395,7 +437,7 @@ unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
                 (draw < slots as u64).then_some(draw as usize)
             });
             let sample = match slot {
-                Some(slot) if complete => {
+                Some(slot) => {
                     let inputs = sample_inputs(&owner, &name, call, &variables, &imports)
                         .and_then(|inputs| serialize(inputs));
                     match inputs {
@@ -413,16 +455,20 @@ unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
                         }
                     }
                 }
-                _ => None,
+                None => None,
             };
+            for deferred in &deferred {
+                heap.preserve(deferred.promise);
+            }
             Role::Capturable {
                 key,
                 sample,
                 reentered: false,
+                deferred,
             }
         }
     };
-    crate::heap().release_handles(mark);
+    heap.release_handles(mark);
     drop(_suspended);
     let capturable = matches!(role, Role::Capturable { .. });
     let scope = push(Layer::Package, |state| {
@@ -460,12 +506,14 @@ fn push(layer: Layer, role: impl FnOnce(&mut Capture) -> Role) -> Scope {
 
 /// Pops the record at `index`, and any a non-local exit left above it, and attributes its time.
 unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
-    let finished = STATE.with_borrow_mut(|state| {
+    let Some((record, inclusive, exclusive)) = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
         if state.stack.len() <= index {
             return None;
         }
-        state.stack.truncate(index + 1);
+        for abandoned in state.stack.drain(index + 1..) {
+            release_deferred(&abandoned.role);
+        }
         let record = state.stack.pop()?;
         if state.covering.is_some_and(|covering| covering >= index) {
             state.covering = None;
@@ -475,50 +523,126 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
             parent.nested += inclusive;
         }
         let exclusive = inclusive.saturating_sub(record.nested);
-        match record.role {
-            Role::User => state.user += exclusive,
-            Role::Covered => {}
-            Role::Capturable {
-                key,
-                sample,
-                reentered,
-            } => {
-                state.covered += inclusive;
-                let stats = state.keys.get_mut(key)?;
-                stats.calls += 1;
-                stats.reentered += u64::from(reentered);
-                stats.seconds += inclusive;
-                return sample.map(|sample| (key, sample, inclusive));
-            }
-            Role::Uncapturable { key, reason } => {
-                state.uncapturable += exclusive;
-                let stats = state.keys.get_mut(key)?;
-                stats.uncapturable_calls += 1;
-                stats.uncapturable_seconds += exclusive;
-                match reason {
-                    Reason::Dots => stats.dots += 1,
-                    Reason::LocalClosure => stats.local_closure += 1,
-                    Reason::UserBinding => stats.user_binding += 1,
-                    Reason::CallerFrame => stats.caller_frame += 1,
-                }
-            }
+        Some((record, inclusive, exclusive))
+    }) else {
+        return;
+    };
+    let (key, sample, reentered, deferred) = match record.role {
+        Role::User => {
+            with_state(|state| state.user += exclusive);
+            return;
         }
-        None
+        Role::Covered => return,
+        Role::Uncapturable { key, reason } => {
+            count_uncapturable(key, reason, exclusive);
+            return;
+        }
+        Role::Capturable {
+            key,
+            sample,
+            reentered,
+            deferred,
+        } => (key, sample, reentered, deferred),
+    };
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    let settled = settle_deferred(&deferred);
+    let settled = match settled {
+        Ok(settled) => settled,
+        Err(reason) => {
+            // The call was counted as covering the user code below it, which recorded no time
+            // of its own, so the call owns its inclusive time even though it turned out
+            // uncapturable.
+            count_uncapturable(key, reason, inclusive);
+            with_key(key, |stats| stats.seen = stats.seen.saturating_sub(1));
+            heap.release_handles(mark);
+            return;
+        }
+    };
+    with_state(|state| {
+        state.covered += inclusive;
+        if let Some(stats) = state.keys.get_mut(key) {
+            stats.calls += 1;
+            stats.reentered += u64::from(reentered);
+            stats.seconds += inclusive;
+        }
     });
-    if let Some((key, sample, seconds)) = finished {
+    if let Some(sample) = sample {
         let _suspended = Suspend::start();
-        let mark = crate::heap().handle_mark();
         let value = match result {
             Some(Ok(value)) => {
-                crate::heap().root(*value);
+                heap.root(*value);
                 Some(*value)
             }
             _ => None,
         };
-        if let Err(unwind) = write_sample(key, sample, seconds, value) {
+        if let Err(unwind) = write_sample(key, sample, inclusive, value, &settled) {
             note_failure(&unwind);
         }
-        crate::heap().release_handles(mark);
+    }
+    heap.release_handles(mark);
+}
+
+fn with_state(update: impl FnOnce(&mut Capture)) {
+    STATE.with_borrow_mut(|state| {
+        if let Some(state) = state.as_mut() {
+            update(state);
+        }
+    });
+}
+
+/// Counts a call of `key` that cannot be replayed, for `reason`, as owning `seconds`.
+fn count_uncapturable(key: usize, reason: Reason, seconds: Duration) {
+    with_state(|state| {
+        state.uncapturable += seconds;
+        let Some(stats) = state.keys.get_mut(key) else {
+            return;
+        };
+        stats.uncapturable_calls += 1;
+        stats.uncapturable_seconds += seconds;
+        match reason {
+            Reason::Dots => stats.dots += 1,
+            Reason::LocalClosure => stats.local_closure += 1,
+            Reason::UserBinding => stats.user_binding += 1,
+            Reason::CallerFrame => stats.caller_frame += 1,
+        }
+    });
+}
+
+/// Ends the preserves a record's deferred promises hold.
+fn release_deferred(role: &Role) {
+    if let Role::Capturable { deferred, .. } = role {
+        let heap = crate::heap();
+        for deferred in deferred {
+            heap.release(deferred.promise);
+        }
+    }
+}
+
+/// Reads the deferred promises of a call that ended and releases them: the variables whose
+/// promises the call forced, with their values rooted in the current handle scope and what a
+/// replay needs for each, or the reason a value it forced makes the call uncapturable.
+unsafe fn settle_deferred(deferred: &[Deferred]) -> Result<Vec<(Sexp, Sexp, Input)>, Reason> {
+    let heap = crate::heap();
+    let mut settled = Vec::new();
+    let mut uncapturable = None;
+    for deferred in deferred {
+        let value = deferred.promise.car();
+        if value != unbound() {
+            heap.root(value);
+        }
+        heap.release(deferred.promise);
+        if uncapturable.is_some() || value == unbound() {
+            continue;
+        }
+        match classify(deferred.place, value) {
+            Ok(input) => settled.push((deferred.symbol, value, input)),
+            Err(reason) => uncapturable = Some(reason),
+        }
+    }
+    match uncapturable {
+        Some(reason) => Err(reason),
+        None => Ok(settled),
     }
 }
 
@@ -545,8 +669,9 @@ pub fn without_recording<T>(work: impl FnOnce() -> T) -> T {
 }
 
 /// Restores [`SUSPENDED`] and the visibility of the last value when dropped, however the
-/// recorder's own work ends: the R code it runs (`serialize`, forcing promises) sets the
-/// visibility, and the call being recorded may have returned invisibly.
+/// recorder's own work ends: the R code it runs (reading a sample back finds namespaces through
+/// base R's functions) sets the visibility, and the call being recorded may have returned
+/// invisibly.
 struct Suspend {
     suspended: bool,
     visible: bool,
@@ -593,18 +718,37 @@ unsafe fn owner_of(top: Sexp) -> (Rc<str>, bool) {
     })
 }
 
-unsafe fn head_symbol(call: Sexp) -> Option<Sexp> {
+/// The name a call used for its function: the symbol it names, `pkg::` or not, `$name` or
+/// `@name` for a function taken from an object, as `logger$info(...)` takes an R6 method, and
+/// `<anonymous>` for any other head.
+unsafe fn call_name(call: Sexp) -> Rc<str> {
     if call.kind() != SexpType::Language {
-        return None;
+        return "<anonymous>".into();
     }
     let mut head = call.car();
-    if head.kind() == SexpType::Language
-        && head.car().kind() == SexpType::Symbol
-        && matches!(&*symbol_name(head.car()), "::" | ":::")
-    {
-        head = head.cdr().cdr().car();
+    if head.kind() == SexpType::Language && head.car().kind() == SexpType::Symbol {
+        let operator = symbol_name(head.car());
+        match &*operator {
+            "::" | ":::" => head = head.cdr().cdr().car(),
+            "$" | "@" => {
+                let field = head.cdr().cdr().car();
+                let field = match field.kind() {
+                    SexpType::Symbol => Some(symbol_name(field)),
+                    SexpType::String => values::first_string(field),
+                    _ => None,
+                };
+                if let Some(field) = field {
+                    return format!("{operator}{field}").into();
+                }
+            }
+            _ => {}
+        }
     }
-    (head.kind() == SexpType::Symbol).then_some(head)
+    if head.kind() == SexpType::Symbol {
+        symbol_name(head).as_ref().into()
+    } else {
+        "<anonymous>".into()
+    }
 }
 
 /// Base functions whose result depends on the frame that called them, not only on their
@@ -720,6 +864,14 @@ unsafe fn free_names(call: Sexp) -> Rc<FreeNames> {
                     symbols.push(object);
                 }
             }
+            // The field of `object$field` and `object@field` is a name, not a variable.
+            SexpType::Language
+                if object.car().kind() == SexpType::Symbol
+                    && matches!(&*symbol_name(object.car()), "$" | "@") =>
+            {
+                pending.push(object.cdr().car());
+                pending.push(object.car());
+            }
             // A cell's tag is an argument or formal name, not a variable the call reads.
             SexpType::Language | SexpType::Pairlist => {
                 pending.push(object.cdr());
@@ -755,16 +907,16 @@ enum Inspection {
     Capturable {
         variables: Vec<(Sexp, Sexp)>,
         imports: Vec<(Sexp, String)>,
-        /// False when a variable's value could not be read (forcing its promise failed): the
-        /// call is still capturable, but it is not sampled.
-        complete: bool,
+        deferred: Vec<Deferred>,
     },
 }
 
 /// Decides whether the call whose names are `free` can be replayed without the user's code,
-/// and collects what a replay needs: the values of the variables it reads from user code and
-/// the namespaces of the functions it reads from the user namespace's imports. The values it
-/// collects are rooted in the current handle scope.
+/// and collects what a replay needs: the values of the variables it reads from user code, the
+/// namespaces of the functions it reads from the user namespace's imports, and the variables
+/// whose values are promises nothing has forced yet. The values it collects are rooted in the
+/// current handle scope. It runs none of the program's code, so the answer for a deferred
+/// variable waits for the call's end.
 unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
     let env = caller_env(sys_parent)?;
     let top = dispatch::top_env(env);
@@ -772,91 +924,135 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
     let heap = crate::heap();
     let mut variables = Vec::new();
     let mut imports = Vec::new();
-    let mut complete = true;
+    let mut deferred = Vec::new();
     for &symbol in &free.symbols {
         let mut scope = env;
         let mut found = None;
         while scope != top && scope != values::empty_env() {
             let frame = eval::resolved_env(scope)?;
             if let Some(cell) = heap.frame_cell(frame, symbol) {
-                found = Some(cell);
+                found = Some((cell, Place::Local));
                 break;
             }
             scope = frame.enclosure();
         }
-        if let Some(cell) = found {
-            let Some(value) = binding_value(cell)? else {
-                complete = false;
-                continue;
-            };
-            if value == missing_arg() {
-                continue;
-            }
-            if value.kind() == SexpType::Closure {
-                let closure_env = value.tag();
-                if !(closure_env == global_env()
-                    || closure_env == base_env()
-                    || closure_env == base_namespace()
-                    || envir::is_namespace(closure_env))
-                {
-                    return Ok(Inspection::Uncapturable(Reason::LocalClosure));
-                }
-                // A function of the user's code reached through a variable is user code like
-                // one named directly.
-                if is_user_top(closure_env) {
-                    return Ok(Inspection::Uncapturable(Reason::UserBinding));
-                }
-            }
-            heap.root(value);
-            variables.push((symbol, value));
-            continue;
-        }
-        if !user_top {
-            continue;
-        }
-        if let Some(cell) = heap.frame_cell(top, symbol) {
-            if cell.has_gp(gp::ACTIVE_BINDING) {
-                return Ok(Inspection::Uncapturable(Reason::UserBinding));
-            }
-            let Some(value) = binding_value(cell)? else {
-                complete = false;
-                continue;
-            };
-            if value.kind() == SexpType::Closure {
-                return Ok(Inspection::Uncapturable(Reason::UserBinding));
-            }
-            heap.root(value);
-            variables.push((symbol, value));
-            continue;
-        }
-        if top == global_env() {
-            continue;
-        }
-        let imports_env = top.enclosure();
-        if let Some(cell) = heap.frame_cell(imports_env, symbol) {
-            let Some(value) = binding_value(cell)? else {
-                complete = false;
-                continue;
-            };
-            if value.kind() == SexpType::Closure {
-                let owner = dispatch::top_env(value.tag());
-                let namespace = if owner == global_env() {
-                    GLOBAL_LABEL.to_owned()
-                } else {
-                    envir::namespace_name(owner).unwrap_or_else(|| "other".to_owned())
-                };
-                imports.push((symbol, namespace));
+        if found.is_none() && user_top {
+            if let Some(cell) = heap.frame_cell(top, symbol) {
+                found = Some((cell, Place::Top));
             } else {
+                // Past the top-level environment R looks in a namespace's imports, then the base
+                // namespace, the global environment and the search path; from the global
+                // environment, the search path. As for the frames above, the first binding
+                // wins, a function or not.
+                let mut scope = top.enclosure();
+                let imports = (top != global_env()).then_some(scope);
+                while scope != values::empty_env() {
+                    if let Some(cell) = heap.frame_cell(scope, symbol) {
+                        if scope != base_env() && scope != base_namespace() {
+                            let place = if Some(scope) == imports {
+                                Place::Imports
+                            } else {
+                                Place::Search
+                            };
+                            found = Some((cell, place));
+                        }
+                        break;
+                    }
+                    scope = scope.enclosure();
+                }
+            }
+        }
+        // Not found, or found in base, which a replay finds the same way.
+        let Some((cell, place)) = found else {
+            continue;
+        };
+        // Reading an active binding calls its function, which is the program's code.
+        if cell.has_gp(gp::ACTIVE_BINDING) {
+            return Ok(Inspection::Uncapturable(Reason::UserBinding));
+        }
+        let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise {
+            if value.car() == unbound() {
+                deferred.push(Deferred {
+                    symbol,
+                    promise: value,
+                    place,
+                });
+                continue;
+            }
+            value = value.car();
+        }
+        if value == missing_arg() {
+            continue;
+        }
+        match classify(place, value) {
+            Ok(Input::Variable) => {
                 heap.root(value);
                 variables.push((symbol, value));
             }
+            Ok(Input::Import(namespace)) => imports.push((symbol, namespace)),
+            Err(reason) => return Ok(Inspection::Uncapturable(reason)),
         }
     }
     Ok(Inspection::Capturable {
         variables,
         imports,
-        complete,
+        deferred,
     })
+}
+
+/// What a replay needs for `value`, bound at `place`, or why no replay without the user's code
+/// can rebuild it.
+unsafe fn classify(place: Place, value: Sexp) -> Result<Input, Reason> {
+    if value.kind() != SexpType::Closure {
+        return Ok(Input::Variable);
+    }
+    let closure_env = value.tag();
+    match place {
+        Place::Local => {
+            if !(closure_env == global_env()
+                || closure_env == base_env()
+                || closure_env == base_namespace()
+                || envir::is_namespace(closure_env))
+            {
+                return Err(Reason::LocalClosure);
+            }
+            // A function of the user's code reached through a variable is user code like one
+            // named directly.
+            if is_user_top(closure_env) {
+                return Err(Reason::UserBinding);
+            }
+            Ok(Input::Variable)
+        }
+        Place::Top => Err(Reason::UserBinding),
+        Place::Imports => {
+            let owner = dispatch::top_env(closure_env);
+            Ok(Input::Import(namespace_label(owner)))
+        }
+        Place::Search => {
+            if !(closure_env == global_env()
+                || closure_env == base_env()
+                || closure_env == base_namespace()
+                || envir::is_namespace(closure_env))
+            {
+                return Err(Reason::LocalClosure);
+            }
+            let owner = dispatch::top_env(closure_env);
+            if is_user_top(owner) {
+                return Err(Reason::UserBinding);
+            }
+            Ok(Input::Import(namespace_label(owner)))
+        }
+    }
+}
+
+/// The name a replay finds the top-level environment `owner` under with `asNamespace`.
+unsafe fn namespace_label(owner: Sexp) -> String {
+    if owner == global_env() {
+        GLOBAL_LABEL.to_owned()
+    } else {
+        envir::namespace_name(owner).unwrap_or_else(|| "other".to_owned())
+    }
 }
 
 /// Whether `top` is a top-level environment of the user's code.
@@ -888,25 +1084,6 @@ unsafe fn caller_env(sys_parent: Sexp) -> R<Sexp> {
     Ok(if env == nil() { global_env() } else { env })
 }
 
-/// The value bound in `cell`, its promise forced, or `None` when reading it raised an error.
-/// A jump (an exiting handler, a restart) passes through: the code that established it is
-/// waiting for it.
-unsafe fn binding_value(cell: Sexp) -> R<Option<Sexp>> {
-    let value = match eval::cell_value(cell) {
-        Ok(value) => value,
-        Err(Unwind::Error(_)) => return Ok(None),
-        Err(unwind) => return Err(unwind),
-    };
-    if value.kind() != SexpType::Promise {
-        return Ok(Some(value));
-    }
-    match eval::force_promise(value) {
-        Ok(value) => Ok(Some(value)),
-        Err(Unwind::Error(_)) => Ok(None),
-        Err(unwind) => Err(unwind),
-    }
-}
-
 /// The list a sample file holds before the call ran: `package`, `name`, `call`, `variables`,
 /// `imports` and `seed`.
 unsafe fn sample_inputs(
@@ -935,12 +1112,12 @@ unsafe fn sample_inputs(
     let imports = values::string_vector(&import_namespaces)?;
     let import_names = values::string_vector(&import_names)?;
     values::set_attr(imports, values::symbols().names, import_names)?;
-    let seed = eval::find_var_in_frame(values::symbols().dot_random_seed, global_env())?;
-    let seed = if seed == values::unbound() || seed.kind() == SexpType::Promise {
-        nil()
-    } else {
-        seed
-    };
+    let seed = crate::heap()
+        .frame_cell(global_env(), values::symbols().dot_random_seed)
+        .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
+        .map(|cell| cell.cdr())
+        .filter(|seed| *seed != unbound() && seed.kind() != SexpType::Promise)
+        .unwrap_or_else(nil);
     values::named_list(&[
         ("package", values::scalar_string(owner)?),
         ("name", values::scalar_string(name)?),
@@ -951,32 +1128,62 @@ unsafe fn sample_inputs(
     ])
 }
 
-/// `object` serialized as `saveRDS` writes it without compression: XDR, version 3.
+/// `object` serialized as `saveRDS` writes it without compression: XDR, version 3. The host
+/// serializes it directly: through `eval`, an error would be signalled to the recorded
+/// program's handlers.
 unsafe fn serialize(object: Sexp) -> R<Vec<u8>> {
-    // The object sits in the call as a constant: a list evaluates to itself.
-    let inner = values::call(
-        values::install("serialize")?,
-        &[object, nil(), values::scalar_integer(0)?, nil(), nil()],
-    )?;
-    let outer = values::call(values::install(".Internal")?, &[inner])?;
-    let bytes = eval::eval(outer, base_env())?;
-    if bytes.kind() != SexpType::Raw {
-        return Err(error("serialize did not return a raw vector"));
-    }
-    Ok(bytes.slice::<u8>().to_vec())
+    (interp().hooks.serialize)(object)
 }
 
 /// Completes the sample of a call that took `seconds` and returned `value` (`None` when it
-/// ended in an unwind), and writes it to its reservoir slot's file.
+/// ended in an unwind), with the variables whose deferred promises the call forced, and writes
+/// it to its reservoir slot's file. A sample whose inputs outgrow the size limit with those
+/// variables is dropped as oversize.
 unsafe fn write_sample(
     key: usize,
     sample: Pending,
     seconds: Duration,
     value: Option<Sexp>,
+    settled: &[(Sexp, Sexp, Input)],
 ) -> R<()> {
     let max = max_bytes();
     let inputs = crate::serialize::unserialize(&sample.inputs, nil())?;
     crate::heap().root(inputs);
+    if !settled.is_empty() {
+        let variables = values::list_elt(inputs, 3);
+        let imports = values::list_elt(inputs, 4);
+        let mut variable_names = string_items(values::names(variables));
+        let mut variable_values: Vec<Sexp> = (0..values::length(variables))
+            .map(|index| values::list_elt(variables, index))
+            .collect();
+        let mut import_names = string_items(values::names(imports));
+        let mut import_namespaces = string_items(imports);
+        for (symbol, value, input) in settled {
+            let name = symbol_name(*symbol).into_owned();
+            match input {
+                Input::Variable => {
+                    variable_names.push(name);
+                    variable_values.push(*value);
+                }
+                Input::Import(namespace) => {
+                    import_names.push(name);
+                    import_namespaces.push(namespace.clone());
+                }
+            }
+        }
+        let variables = values::list_vector(&variable_values)?;
+        values::set_elt(inputs, 3, variables);
+        let names = values::string_vector(&variable_names)?;
+        values::set_attr(variables, values::symbols().names, names)?;
+        let imports = values::string_vector(&import_namespaces)?;
+        values::set_elt(inputs, 4, imports);
+        let names = values::string_vector(&import_names)?;
+        values::set_attr(imports, values::symbols().names, names)?;
+        if serialize(inputs)?.len() > max {
+            with_key(key, |stats| stats.oversize += 1);
+            return Ok(());
+        }
+    }
     let kept = match value {
         Some(value) => {
             let wrapped = values::list_vector(&[value])?;
@@ -1046,6 +1253,16 @@ unsafe fn write_sample(
         .map_err(|failure| error(format!("cannot write '{}': {failure}", path.display())))
 }
 
+/// The elements of the character vector `strings`, or none for `NULL`.
+unsafe fn string_items(strings: Sexp) -> Vec<String> {
+    if strings.kind() != SexpType::String {
+        return Vec::new();
+    }
+    (0..values::length(strings))
+        .map(|index| values::string_at(strings, index).map_or_else(String::new, Cow::into_owned))
+        .collect()
+}
+
 /// Stops recording and writes `entries.tsv`, `samples.tsv` and `summary.tsv`.
 pub fn finish() -> R<()> {
     let Some(mut state) = STATE.with_borrow_mut(Option::take) else {
@@ -1064,6 +1281,7 @@ pub fn finish() -> R<()> {
     let now = Instant::now();
     // The records still open are the root user record and whatever an exit to top level left.
     while let Some(record) = state.stack.pop() {
+        release_deferred(&record.role);
         let inclusive = now.duration_since(record.started);
         if let Some(parent) = state.stack.last_mut() {
             parent.nested += inclusive;

@@ -508,6 +508,10 @@ pub struct Hooks {
     /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
     /// finds `user_unif_rand`.
     pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
+    /// `object` serialized as `saveRDS` writes it without compression (XDR, version 3), without
+    /// evaluating R code: the boundary-call recorder serializes inputs of the program it
+    /// records, and an error it raised through `eval` would reach that program's handlers.
+    pub serialize: unsafe fn(Sexp) -> R<Vec<u8>>,
 }
 
 /// The ALTREP summary methods `sum`, `min` and `max` consult.
@@ -972,6 +976,7 @@ pub fn default_hooks() -> Hooks {
         },
         connection_vfprintf: None,
         find_native_symbol: |_| None,
+        serialize: |_| Err(unwind::error("serialization needs the libR host")),
     }
 }
 
