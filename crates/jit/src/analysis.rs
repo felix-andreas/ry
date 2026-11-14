@@ -1165,12 +1165,16 @@ impl fmt::Debug for Plan<'_> {
     }
 }
 
-/// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
-/// runs itself. Each instruction it hands back costs a call into tier 0 on top of the work, and
-/// such bodies are mostly large ones (`[.data.frame`, S4 dispatch) whose compilation costs as
-/// much as tens of thousands of interpreted calls. A loop in the body still compiles once it is
-/// hot, because there the compiled loop control and the native instructions repeat.
+/// The refusal at entry for a body with a loop whose compiled code would save nothing per call:
+/// outside its loops it hands too many instructions back to tier 0, each of which costs a call
+/// into tier 0 on top of the work. The loops still gain, so the body compiles once a loop is
+/// hot, and only the loop enters compiled code.
 pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
+
+/// The refusal for a body whose loops would hand so many instructions back to tier 0 that an
+/// iteration in compiled code costs more than one in tier 0. It is final, and like [`SMALL`]
+/// it leaves the recorded type feedback in place.
+pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to tier 0";
 
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run
 /// long: the body has no loop and calls no closure or native function directly, so the
@@ -1325,10 +1329,23 @@ pub const NATIVE_ENTRY: &str = "the closure's calls run natively";
 pub const RARE: &str = "the body runs too rarely to repay compiling it";
 
 /// The refusal for a loop-free body whose native work saves less per call than entering
-/// compiled code from tier 0 costs, such as `function(x) x^2`. It is final: the body's
-/// instructions decide it, or the calls its plan could not inline. The body keeps the type
-/// feedback it recorded, so compiled callers can still inline it.
+/// compiled code from tier 0 and handing instructions back to it cost, such as
+/// `function(x) x^2`. It is final: the body's instructions decide it, or what its plan had to
+/// leave to tier 0. The body keeps the type feedback it recorded, so compiled callers can
+/// still inline it.
 pub const SMALL: &str = "the body does too little natively to repay entering compiled code";
+
+/// What compiled code does itself and what it hands to tier 0, as instruction counts.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Work {
+    /// The instructions compiled code runs itself, other than [`Work::calls`].
+    pub native: usize,
+    /// The calls compiled code makes itself: closure calls it inlines or enters directly, and
+    /// calls of a builtin it runs as a loop over their argument.
+    pub calls: usize,
+    /// The instructions compiled code hands to tier 0 one at a time.
+    pub steps: usize,
+}
 
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1350,6 +1367,15 @@ impl Shape {
     /// Whether some profile could make [`Plan::runs_natively`] true.
     pub fn may_run_natively(self) -> bool {
         self.loops || self.native > 0 || self.calls > 0
+    }
+
+    /// The most a plan of the body could run itself, with nothing handed to tier 0.
+    pub fn work(self) -> Work {
+        Work {
+            native: self.native,
+            calls: self.calls,
+            steps: 0,
+        }
     }
 }
 
@@ -1460,7 +1486,7 @@ impl Plan<'_> {
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
-        !self.loop_headers.is_empty() || self.native_actions() > 0
+        !self.loop_headers.is_empty() || self.actions.iter().any(native)
     }
 
     /// Whether one activation of the body can run long: it has a loop, or it calls a closure
@@ -1473,36 +1499,65 @@ impl Plan<'_> {
                 .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
     }
 
-    /// How many actions compiled code does itself, and how many it hands to tier 0.
-    pub fn native_actions(&self) -> usize {
-        self.actions.iter().filter(|action| native(action)).count()
-    }
-
-    /// How many calls compiled code makes itself: closure calls it inlines or enters directly,
-    /// and builtin calls it runs as a loop over their argument.
-    pub fn direct_calls(&self) -> usize {
-        self.actions
+    /// The work of the whole body, split into the instructions outside its loops and those
+    /// inside. An instruction is inside a loop when it lies between a backward jump and the
+    /// jump's target, and it counts [`LOOP_WEIGHT`] times per loop around the innermost one,
+    /// the usual static estimate of how much more often a nested loop's body runs: one
+    /// instruction handed to tier 0 in an outer loop must not outweigh an inner loop that runs
+    /// natively. A backward jump counts as native work, because a compiled loop's own control
+    /// costs no dispatch.
+    pub fn work(&self) -> BodyWork {
+        let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
+        let loops: SmallVec<[(usize, usize); 4]> = self
+            .insts
             .iter()
-            .filter(|action| {
-                matches!(
-                    action,
-                    Action::Inline { .. }
-                        | Action::Frame { .. }
-                        | Action::Traverse { .. }
-                        | Action::Call { .. }
-                        | Action::NativeCall { .. }
-                )
-            })
-            .count()
-    }
-
-    pub fn tier0_actions(&self) -> usize {
-        self.actions
-            .iter()
-            .filter(|action| matches!(action, Action::Step { .. }))
-            .count()
+            .filter(|inst| backward(inst))
+            .map(|inst| (inst.operand(0), inst.pc))
+            .collect();
+        let mut work = BodyWork::default();
+        for (inst, action) in self.insts.iter().zip(self.actions.iter()) {
+            let (native, calls, steps) = match action {
+                Action::Inline { .. }
+                | Action::Frame { .. }
+                | Action::Traverse { .. }
+                | Action::Call { .. }
+                | Action::NativeCall { .. } => (0, 1, 0),
+                Action::Step { .. } => (0, 0, 1),
+                action if native(action) || backward(inst) => (1, 0, 0),
+                _ => continue,
+            };
+            let depth = loops
+                .iter()
+                .filter(|&&(first, last)| first <= inst.pc && inst.pc <= last)
+                .count();
+            let (part, weight) = match depth.checked_sub(1) {
+                None => (&mut work.outside, 1),
+                Some(around) => (
+                    &mut work.looped,
+                    LOOP_WEIGHT.pow(around.min(MAX_WEIGHTED_DEPTH) as u32),
+                ),
+            };
+            for (part, weight) in [(part, weight), (&mut work.whole, 1)] {
+                part.native += weight * native;
+                part.calls += weight * calls;
+                part.steps += weight * steps;
+            }
+        }
+        work
     }
 }
+
+/// [`Plan::work`]: the plain counts of the whole body, the counts outside its loops, and the
+/// nesting-weighted counts inside them.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct BodyWork {
+    pub whole: Work,
+    pub outside: Work,
+    pub looped: Work,
+}
+
+const LOOP_WEIGHT: usize = 8;
+const MAX_WEIGHTED_DEPTH: usize = 4;
 
 fn native(action: &Action<'_>) -> bool {
     matches!(

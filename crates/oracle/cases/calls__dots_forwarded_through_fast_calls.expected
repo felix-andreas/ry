@@ -1,0 +1,10 @@
+[stdout]
+| [1] 2400
+| [1] "a b"
+| [1] "a" "b" "" 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("a", "b", "")

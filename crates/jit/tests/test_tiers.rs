@@ -1960,6 +1960,28 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
 }
 
 #[test]
+fn a_recursion_past_a_raised_depth_limit_fails_as_in_tier_zero() {
+    // A native function that runs out of depth budget fails as a whole and tier 0 runs the
+    // call again, trying the native function at every nested call. The budget shrinks with
+    // the interpreter's depth, so those attempts stay cheap. With a budget of the whole
+    // remaining depth each time, the work was quadratic in the limit, and a recursion past a
+    // limit of 500,000 took minutes to report its error.
+    with_interpreter(|| unsafe {
+        let limit = std::mem::replace(&mut interp::interp().max_depth, 100_000);
+        run("deep <- function(n) if (n == 0) 0 else 1 + deep(n - 1)");
+        let mut outcomes = Vec::new();
+        for mode in [Mode::Off, Mode::On] {
+            jit::install_mode(mode);
+            outcomes.push((run("deep(4000)"), run("deep(300000)")));
+        }
+        interp::interp().max_depth = limit;
+        assert_eq!(outcomes[0], outcomes[1]);
+        assert_eq!(outcomes[0].0, "4000");
+        assert!(outcomes[0].1.starts_with("error: "), "{}", outcomes[0].1);
+    });
+}
+
+#[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
     // The signature stands in for the profile, so a first call runs compiled code: a typed
     // scalar function runs as a native function from its first call, whose values fix the

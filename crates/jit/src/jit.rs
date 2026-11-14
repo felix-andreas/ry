@@ -22,7 +22,7 @@ pub use native::has_native;
 mod runtime;
 
 use {
-    analysis::{Plan, Refusal, Speculation},
+    analysis::{Plan, Refusal, Speculation, Work},
     bumpalo::Bump,
     codegen::Generated,
     heap::{
@@ -31,7 +31,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{self, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
+        bytecode::{self, FEEDBACK, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
         heap, interp,
         unwind::{R, error},
         values,
@@ -85,16 +85,24 @@ const COMPILE_PER_WORD: u64 = 50_000;
 /// compiled code from tier 0 costs about [`ENTRY_COST`] more than starting the same body in
 /// the dispatch loop: the tier's entry checks, the activation record, the register window of
 /// the root cells, and a boxed result. Against that, an instruction compiled code runs
-/// natively saves about [`SAVING_PER_NATIVE`] (tier 0 runs a scalar `+` in about 90
-/// instructions and compiled code in about 20), and a call it inlines or enters directly
-/// saves about [`SAVING_PER_CALL`]. Measured on closures called 400,000 times from `vapply`: with
-/// one native instruction (`x^2`) compiled code cost 325 instructions more per call than tier
-/// 0, with two (`x * 2 + 1`) 309 more, and a body that only builds a list from its arguments
-/// 1646 more. A body whose saving does not exceed the entry cost therefore never compiles on
-/// its own, however hot it is; its calls from compiled code can still be inlined there.
-const ENTRY_COST: u64 = 450;
-const SAVING_PER_NATIVE: u64 = 70;
+/// natively saves about [`SAVING_PER_NATIVE`], which includes the variable loads and stores
+/// around it that stay in machine registers, and a call it inlines or enters directly saves
+/// about [`SAVING_PER_CALL`]. Measured on closures called 400,000 times from `vapply`, in
+/// instructions per call against tier 0: a body of one native instruction (`x^2`) lost 325
+/// and one of two (`x * 2 + 1`) lost 309, one of four without a local lost 27, and with
+/// locals one of seven saved 575 and one of twelve saved 1393. A body whose saving does not
+/// exceed the entry cost therefore never compiles on its own, however hot it is; its calls
+/// from compiled code can still be inlined there.
+///
+/// An instruction compiled code hands back to tier 0 costs about [`STEP_COST`] more than the
+/// same instruction in the dispatch loop: the helper call with its panic guard, the dirty
+/// slots written back before it, the activation state built for one instruction, and the
+/// feedback a step always records. On an application loop of 3 native instructions among 20
+/// such steps, 480,000 steps cost 143M instructions more than tier 0 ran for the same loop.
+const ENTRY_COST: u64 = 570;
+const SAVING_PER_NATIVE: u64 = 130;
 const SAVING_PER_CALL: u64 = 1000;
+const STEP_COST: u64 = 300;
 /// A body's expected calls are its share of the closure calls the session made over its
 /// recording window, times this many calls. The session's call count measures how much
 /// interpreted work ran between two calls of the body: it is deterministic and does not move
@@ -230,11 +238,18 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
     }
 }
 
-/// What one call of a loop-free body is expected to save in compiled code, by the model at
-/// [`ENTRY_COST`]: zero when entering compiled code costs more than the body's native work
+/// What running `work` once in compiled code is expected to save over tier 0, by the model
+/// at [`ENTRY_COST`]: zero when handing instructions back costs more than the native work
 /// saves.
-fn saving_per_call(native: usize, calls: usize) -> u64 {
-    (SAVING_PER_NATIVE * native as u64 + SAVING_PER_CALL * calls as u64).saturating_sub(ENTRY_COST)
+fn saving(work: Work) -> u64 {
+    (SAVING_PER_NATIVE * work.native as u64 + SAVING_PER_CALL * work.calls as u64)
+        .saturating_sub(STEP_COST * work.steps as u64)
+}
+
+/// What one call of a body is expected to save when tier 0 enters its compiled code: zero when
+/// entering costs more than the body's work saves.
+fn saving_per_call(work: Work) -> u64 {
+    saving(work).saturating_sub(ENTRY_COST)
 }
 
 /// Whether a loop-free body that just turned hot is expected to repay its compilation, by the
@@ -252,7 +267,7 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
         let calls = window_entries * HORIZON_CALLS / window_calls;
         let words = values::ints(machine.code.car()).len() as u64;
         let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
-        let saving = calls * saving_per_call(shape.native, shape.calls);
+        let saving = calls * saving_per_call(shape.work());
         if logging() {
             eprintln!(
                 "jit: {} expects {calls} calls ({window_entries} of {window_calls} calls) saving {saving} against a compile of {cost}",
@@ -310,6 +325,8 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                 if reason != analysis::COLD
                     && reason != analysis::NOTHING_NATIVE
                     && reason != analysis::MOSTLY_TIER0
+                    && reason != analysis::SMALL
+                    && reason != analysis::STEPPING_LOOP
                     && reason != analysis::BRIEF
                 {
                     counters[profile::TIER_STATE] = runtime::refused(counters[profile::TIER_STATE]);
@@ -479,9 +496,15 @@ unsafe fn compiled_for<'a>(
                     if refusals < 0xf {
                         counters[profile::TIER_STATE] = state + runtime::RARE_REFUSAL;
                     }
-                } else if reason == analysis::COLD {
+                } else if reason == analysis::COLD
+                    && values::ints(constants.element(FEEDBACK))
+                        .iter()
+                        .any(|&bits| bits != 0)
+                {
                     // The next attempt waits for as many entries or backward jumps as this one did,
-                    // so the body runs long enough to record the types it is missing.
+                    // so the body runs long enough to record the types it is missing. A body whose
+                    // window recorded nothing at all does not run its instructions (a native
+                    // prologue finishes every call), so waiting would only repeat the plan.
                     counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
                     counters[profile::ENTRIES] = 0;
                     counters[profile::BACK_EDGES] = 0;
@@ -565,7 +588,7 @@ unsafe fn compile_in<'a>(
             return Err(Refusal(analysis::NATIVE_ENTRY));
         }
         if !forced && trigger == Trigger::HotEntry && !shape.loops {
-            if saving_per_call(shape.native, shape.calls) == 0 {
+            if saving_per_call(shape.work()) == 0 {
                 return Err(Refusal(analysis::SMALL));
             }
             if !repays(machine, shape) {
@@ -587,20 +610,22 @@ unsafe fn compile_in<'a>(
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
+        // Entering a body with loops at the top or at a loop costs about the same, so what
+        // decides between the two is the work around the loops alone.
+        let work = plan.work();
         if !forced {
             let reason = if !plan.runs_natively() {
                 Some(analysis::NOTHING_NATIVE)
-            } else if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions()
+            } else if plan.loop_headers.is_empty() {
+                (trigger == Trigger::HotEntry && saving_per_call(work.whole) == 0)
+                    .then_some(analysis::SMALL)
+            } else if saving(work.looped) == 0 {
+                Some(analysis::STEPPING_LOOP)
+            } else if trigger != Trigger::HotLoop
+                && work.outside.steps > 0
+                && saving(work.outside) == 0
             {
                 Some(analysis::MOSTLY_TIER0)
-            } else if trigger == Trigger::HotEntry
-                && plan.loop_headers.is_empty()
-                && saving_per_call(
-                    plan.native_actions() - plan.direct_calls(),
-                    plan.direct_calls(),
-                ) == 0
-            {
-                Some(analysis::SMALL)
             } else {
                 None
             };
@@ -659,7 +684,7 @@ unsafe fn compile_in<'a>(
         if logging() {
             let steps = tier0_steps(&plan, machine.code);
             eprintln!(
-                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} frames, {} loops; tier 0 runs: {})",
+                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} calls, {} steps, {} inlined, {} frames, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 values::ints(machine.code.car()).len(),
                 (planned + generated).as_micros(),
@@ -667,7 +692,9 @@ unsafe fn compile_in<'a>(
                 generated.as_micros(),
                 speculations.len(),
                 if portable { ", portable" } else { "" },
-                plan.native_actions(),
+                work.whole.native,
+                work.whole.calls,
+                work.whole.steps,
                 plan.actions
                     .iter()
                     .filter(|action| matches!(action, analysis::Action::Inline { .. }))

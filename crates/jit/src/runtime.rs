@@ -2718,10 +2718,21 @@ pub extern "C" fn jit_handlers_present() -> i32 {
 
 /// How many closure calls may still nest before R's expression depth limit, which a native
 /// function call counts down instead of pushing frames.
+///
+/// A native call that runs out of budget fails as a whole, and tier 0, running it again, tries
+/// the native function at every call nested inside, each of which nests as deep again before
+/// it fails. Under a raised limit (`options(expressions = 500000)`) a recursion past the limit
+/// therefore did work quadratic in the limit before it reported the error. So the budget also
+/// shrinks with the interpreter's own depth, which bounds the nesting of all those attempts
+/// along one recursion by [`RETRY_NESTING`] times the logarithm of the depth. At R's default
+/// limit of 5000 the depth limit is always the smaller of the two.
 pub extern "C" fn jit_depth_budget() -> i64 {
     let state = interp::interp();
-    i64::from(state.max_depth) - state.frames.len() as i64
+    let frames = state.frames.len() as i64;
+    (i64::from(state.max_depth) - frames).min(RETRY_NESTING / frames.max(1))
 }
+
+const RETRY_NESTING: i64 = 8_000_000;
 
 /// `^` on doubles, as tier 0 computes it.
 pub extern "C" fn jit_power(base: f64, exponent: f64) -> f64 {

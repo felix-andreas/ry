@@ -12565,8 +12565,12 @@ unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-    if profile[profile::TIER_STATE] == profile::TIER_OFF {
-        profile[profile::BACK_EDGES] = 0;
+    // A negative state is final: the body is off the tiers or refused for good. Its loops then
+    // count up from a value that reaches no threshold, because a recording window opened here
+    // would stay open with no compile to close it, and every instruction of the loop would
+    // record its types for nothing.
+    if profile[profile::TIER_STATE] < 0 {
+        profile[profile::BACK_EDGES] = i32::MIN;
         return BackEdge::Continue(pc);
     }
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
