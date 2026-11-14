@@ -1,5 +1,9 @@
 use {
-    crate::{Db, hir::Symbol, intern::IdTable},
+    crate::{
+        Db,
+        hir::Symbol,
+        intern::{CHUNK_LENGTH, Column, FirstChunk, IdTable},
+    },
     bumpalo::Bump,
     rustc_hash::{FxBuildHasher, FxHashMap},
     smallvec::SmallVec,
@@ -87,10 +91,10 @@ impl IntoSymbol for &String {
 /// never moves or frees an entry. The checker builds and compares types far more often than
 /// anything else, which is why none of those operations consults a database or takes a lock.
 ///
-/// The id's low 28 bits are the store index. The top four bits say what occurs anywhere in
-/// the type's tree, so the walks that only rewrite one kind return a type without it by a
-/// bit test, without reading the store. The lifetime is phantom: no type borrows from a
-/// database, which is what lets the store outlive them all.
+/// The id's low 27 bits are the store index. The bits above say what the type is and what
+/// occurs anywhere in its tree, so asking whether a type is an inference variable, and the
+/// walks that only rewrite one kind, are a bit test that reads no memory. The lifetime is
+/// phantom: no type borrows from a database, which is what lets the store outlive them all.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ty<'db> {
     bits: NonZeroU32,
@@ -103,13 +107,16 @@ const HAS_VAR: u32 = 1 << 31;
 const HAS_NAMED: u32 = 1 << 30;
 const HAS_RIGID: u32 = 1 << 29;
 const HAS_UNKNOWN: u32 = 1 << 28;
+/// The type is an inference variable itself, the question unification asks of every type
+/// it touches.
+const IS_VAR: u32 = 1 << 27;
 const CONTENT_BITS: u32 = HAS_VAR | HAS_NAMED | HAS_RIGID | HAS_UNKNOWN;
-const INDEX_BITS: u32 = !CONTENT_BITS;
+const INDEX_BITS: u32 = IS_VAR - 1;
 
 /// The kinds without a payload that needs the store. Their ids are constants, so building
-/// one costs nothing and reading one is an index into this table. Index 0 is never an id,
-/// which keeps an `Option<Ty>` the size of a `Ty`.
-static LEAF_KINDS: [TyKind<'static>; LEAVES] = [
+/// one costs nothing, and they are the store's first entries from the start. Index 0 is
+/// never an id, which keeps an `Option<Ty>` the size of a `Ty`.
+const LEAF_KINDS: [TyKind<'static>; LEAVES] = [
     TyKind::Any,
     TyKind::Any,
     TyKind::Unknown,
@@ -127,6 +134,11 @@ static LEAF_KINDS: [TyKind<'static>; LEAVES] = [
     TyKind::Native(NativeScalar::Str),
 ];
 const LEAVES: usize = 15;
+/// The inference variables whose ids are constants too: they fill the rest of the store's
+/// first chunk, right after the leaves. An item numbers its variables from zero and rarely
+/// reaches this many, so making a variable's type and reading the variable back out of it
+/// are arithmetic on the id.
+const CONSTANT_VARS: usize = CHUNK_LENGTH - LEAVES;
 const ANY: u32 = 1;
 const UNKNOWN: u32 = 2 | HAS_UNKNOWN;
 const NULL: u32 = 3;
@@ -143,19 +155,40 @@ impl<'db> Ty<'db> {
             TyKind::OtherTags => OTHER_TAGS,
             TyKind::Scalar(atomic) => FIRST_SCALAR + atomic as u32,
             TyKind::Native(native) => FIRST_NATIVE + native as u32,
+            TyKind::Var(InferenceVar(var)) if (var as usize) < CONSTANT_VARS => {
+                (LEAVES as u32 + var) | HAS_VAR | IS_VAR
+            }
             _ => return intern_type(kind),
         };
         Ty::from_bits(bits)
     }
 
     pub fn kind<D: ?Sized>(self, _db: &D) -> &'db TyKind<'db> {
-        let index = (self.bits.get() & INDEX_BITS) as usize;
-        if index < LEAVES {
-            return &LEAF_KINDS[index];
+        // SAFETY: an id is a leaf, which the column holds from the start, or was made by
+        // `insert_type` after it wrote this entry, and reached this thread through the type
+        // table or another synchronized hand-off.
+        unsafe { KINDS.get_unchecked((self.bits.get() & INDEX_BITS) as usize) }
+    }
+
+    /// The variable the type is, if it is one. Read off the id, except for a variable
+    /// numbered past the constant ones.
+    pub fn as_var<D: ?Sized>(self, db: &D) -> Option<InferenceVar> {
+        let bits = self.bits.get();
+        if bits & IS_VAR == 0 {
+            return None;
         }
-        // SAFETY: an id past the leaves is only ever made by `insert_type`, after it pushed
-        // the entry at this index, and the column never removes an entry.
-        unsafe { KINDS.get_unchecked(index - LEAVES) }
+        let index = (bits & INDEX_BITS) as usize;
+        if index < CHUNK_LENGTH {
+            return Some(InferenceVar((index - LEAVES) as u32));
+        }
+        match self.kind(db) {
+            TyKind::Var(var) => Some(*var),
+            _ => None,
+        }
+    }
+
+    pub fn is_var(self) -> bool {
+        self.bits.get() & IS_VAR != 0
     }
 
     /// Whether resolving through an inference table can change the type: only a variable or
@@ -174,10 +207,8 @@ impl<'db> Ty<'db> {
     }
 
     fn facts(self) -> &'static TypeFacts {
-        let index = (self.bits.get() & INDEX_BITS) as usize;
-        debug_assert!(index >= LEAVES, "a leaf has no stored facts");
-        // SAFETY: as in `kind`; `insert_type` pushes both columns before it makes the id.
-        unsafe { FACTS.get_unchecked(index - LEAVES) }
+        // SAFETY: as in `kind`; `insert_type` writes both columns before it makes the id.
+        unsafe { FACTS.get_unchecked((self.bits.get() & INDEX_BITS) as usize) }
     }
 
     fn from_bits(bits: u32) -> Ty<'db> {
@@ -1040,9 +1071,6 @@ pub fn type_size<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> u64 {
 pub const TYPE_SIZE_CEILING: u64 = 100_000;
 
 fn stored_size(ty: Ty<'_>) -> u32 {
-    if (ty.bits.get() & INDEX_BITS) < LEAVES as u32 {
-        return 1;
-    }
     ty.facts().size
 }
 
@@ -1295,21 +1323,45 @@ pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     if ty.bits.get() & HAS_VAR == 0 {
         return ty;
     }
-    if matches!(ty.kind(db), TyKind::Var(_)) {
+    if ty.is_var() {
         return unknown(db);
     }
     map_child_types(db, ty, &mut |child| erase_vars(db, child))
 }
 
-/// The kind of every type past the leaves, indexed by the type's id less [`LEAVES`]. The
-/// column appends without moving an entry, so a read takes no lock.
-static KINDS: boxcar::Vec<TyKind<'static>> = boxcar::Vec::new();
+/// The kind of every type, indexed by the low bits of its id.
+static KINDS: Column<TyKind<'static>, TYPE_CHUNKS> = Column::starting_with(&CONSTANT_KINDS);
+static CONSTANT_KINDS: FirstChunk<TyKind<'static>> = FirstChunk::new({
+    let mut kinds = [TyKind::Any; CHUNK_LENGTH];
+    let mut index = 0;
+    while index < CHUNK_LENGTH {
+        kinds[index] = if index < LEAVES {
+            LEAF_KINDS[index]
+        } else {
+            TyKind::Var(InferenceVar((index - LEAVES) as u32))
+        };
+        index += 1;
+    }
+    kinds
+});
 
 /// What the store derives from a type's structure when it is built, while its children's
 /// facts are at hand. A column of its own, parallel to [`KINDS`], because a check reads a
 /// type's kind far more often than these.
-static FACTS: boxcar::Vec<TypeFacts> = boxcar::Vec::new();
+static FACTS: Column<TypeFacts, TYPE_CHUNKS> = Column::starting_with(&CONSTANT_FACTS);
+static CONSTANT_FACTS: FirstChunk<TypeFacts> = FirstChunk::new(
+    [TypeFacts {
+        size: 1,
+        applied_names: &[],
+    }; CHUNK_LENGTH],
+);
 
+/// The store holds at most 2^24 distinct types. The id has room for more, but each chunk
+/// address costs the binary eight bytes, and a process that built this many types would
+/// have run out of memory for them first.
+const TYPE_CHUNKS: usize = (1 << 24) / CHUNK_LENGTH;
+
+#[derive(Clone, Copy)]
 struct TypeFacts {
     /// Nodes in the type tree, capped at [`TYPE_SIZE_CEILING`].
     size: u32,
@@ -1338,17 +1390,16 @@ fn insert_type<'db>(kind: TyKind<'_>, hash: u64) -> Ty<'db> {
     if let Some(bits) = writer.find(hash, holds) {
         return Ty::from_bits(bits.get());
     }
-    let count = writer.count();
-    let index = count + LEAVES;
+    let index = writer.count() + CHUNK_LENGTH;
     assert!(
-        index <= INDEX_BITS as usize,
-        "the type store is full: it holds at most 2^28 distinct types"
+        index < Column::<TyKind<'static>, TYPE_CHUNKS>::CAPACITY,
+        "the type store is full: it holds at most 2^24 distinct types"
     );
     let arena: &Bump = writer.state().get_or_insert_with(Bump::new);
 
     let mut size: u32 = 1;
     let mut contents = match kind {
-        TyKind::Var(_) => HAS_VAR,
+        TyKind::Var(_) => HAS_VAR | IS_VAR,
         TyKind::Rigid(_) => HAS_RIGID,
         TyKind::Named(..) => HAS_NAMED,
         _ => 0,
@@ -1389,15 +1440,18 @@ fn insert_type<'db>(kind: TyKind<'_>, hash: u64) -> Ty<'db> {
     // the lifetimes of `Ty` and `Name` are phantom.
     let stored = unsafe { mem::transmute::<TyKind<'_>, TyKind<'static>>(stored) };
 
-    let pushed = KINDS.push(stored);
-    let pushed_facts = FACTS.push(TypeFacts {
-        size,
-        applied_names,
-    });
-    debug_assert!(
-        pushed == count && pushed_facts == count,
-        "the store's columns are pushed together under the writer lock"
-    );
+    // SAFETY: `writer` is the lock that serializes the store's writers, `index` is the next
+    // one, and no reader learns it before the table publishes it below.
+    unsafe {
+        KINDS.write(index, stored);
+        FACTS.write(
+            index,
+            TypeFacts {
+                size,
+                applied_names,
+            },
+        );
+    }
     let Some(bits) = NonZeroU32::new(index as u32 | contents) else {
         unreachable!("a stored type's index starts past the leaves")
     };

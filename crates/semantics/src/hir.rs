@@ -2,7 +2,10 @@
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
 use {
-    crate::{dense::DenseId, intern::IdTable},
+    crate::{
+        dense::DenseId,
+        intern::{CHUNK_LENGTH, Column, IdTable},
+    },
     rustc_hash::FxHasher,
     std::{
         cell::Cell,
@@ -93,8 +96,12 @@ pub struct Symbol(NonZeroU32);
 /// and nearly all of them are spellings the table already holds, which it finds without a lock.
 static SYMBOLS: IdTable<()> = IdTable::new(());
 
-/// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
-static SYMBOL_TEXT: boxcar::Vec<SymbolEntry> = boxcar::Vec::new();
+/// Symbol to spelling, indexed by the symbol. Appending never moves an entry, so a read needs
+/// no lock.
+static SYMBOL_TEXT: Column<SymbolEntry, SYMBOL_CHUNKS> = Column::new();
+
+/// Room for 2^28 distinct spellings.
+const SYMBOL_CHUNKS: usize = (1 << 28) / CHUNK_LENGTH;
 
 /// What a hot loop asks of a symbol without reading its spelling: the spelling's hash for a
 /// map probe, its first bytes for an ordered set's comparison, and its length in characters
@@ -132,12 +139,13 @@ impl Symbol {
         if let Some(id) = writer.find(hash, |id| Symbol(id).as_str() == text) {
             return Symbol(id);
         }
-        let id = u32::try_from(writer.count() + 1)
+        let index = writer.count() + 1;
+        let id = u32::try_from(index)
             .ok()
             .and_then(NonZeroU32::new)
             .expect("fewer than 2^32 distinct identifiers");
         let interned: &'static str = Box::leak(text.into());
-        let index = SYMBOL_TEXT.push(SymbolEntry {
+        let entry = SymbolEntry {
             text: interned,
             hash,
             prefix: {
@@ -147,11 +155,10 @@ impl Symbol {
                 u64::from_be_bytes(bytes)
             },
             characters: u32::try_from(interned.chars().count()).unwrap_or(u32::MAX),
-        });
-        debug_assert!(
-            index == writer.count(),
-            "the spellings are pushed under the writer lock"
-        );
+        };
+        // SAFETY: `writer` is the lock that serializes the writers, `index` is the next one,
+        // and no reader learns it before the table publishes it below.
+        unsafe { SYMBOL_TEXT.write(index, entry) };
         writer.insert(hash, id, |held| Symbol(held).entry().hash);
         Symbol(id)
     }
@@ -172,9 +179,9 @@ impl Symbol {
     }
 
     fn entry(self) -> &'static SymbolEntry {
-        SYMBOL_TEXT
-            .get(self.0.get() as usize - 1)
-            .expect("a symbol indexes the table that minted it")
+        // SAFETY: only `store` makes a symbol, after it wrote this entry, and the symbol
+        // reached this thread through the symbol table or another synchronized hand-off.
+        unsafe { SYMBOL_TEXT.get_unchecked(self.0.get() as usize) }
     }
 }
 

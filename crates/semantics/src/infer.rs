@@ -232,22 +232,15 @@ impl<'db> InferenceTable<'db> {
 
     pub fn shallow_resolve(&self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
         let mut current = ty;
-        loop {
-            match current.kind(db) {
-                TyKind::Var(var) => match self.entry(*var) {
-                    Entry::Bound { ty: bound, .. } => current = *bound,
-                    _ => {
-                        let representative = self.find(*var);
-                        return if representative == *var {
-                            current
-                        } else {
-                            Ty::new(db, TyKind::Var(representative))
-                        };
-                    }
-                },
-                _ => return current,
+        while let Some(var) = current.as_var(db) {
+            let representative = self.find(var);
+            match self.entries[representative.0 as usize] {
+                Entry::Bound { ty: bound, .. } => current = bound,
+                _ if representative == var => return current,
+                _ => return Ty::new(db, TyKind::Var(representative)),
             }
         }
+        current
     }
 
     /// Also expands aliases. Self-referential bindings and aliases cut to
@@ -287,10 +280,10 @@ impl<'db> InferenceTable<'db> {
         mut done: Option<&mut FxHashMap<Ty<'db>, Ty<'db>>>,
     ) -> (Ty<'db>, bool) {
         RESOLVE_CALLS.set(RESOLVE_CALLS.get() + 1);
-        if let TyKind::Var(var) = ty.kind(db) {
-            let root = self.find(*var);
+        if let Some(var) = ty.as_var(db) {
+            let root = self.find(var);
             let shallow = self.shallow_resolve(db, ty);
-            if let TyKind::Var(_) = shallow.kind(db) {
+            if shallow.is_var() {
                 return (shallow, true);
             }
             if visiting.contains(&root) {
@@ -922,8 +915,7 @@ impl<'db> InferenceTable<'db> {
             }
             self.rollback(snapshot);
         }
-        if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
-        {
+        if actual.is_var() || expected.is_var() {
             return self.unify(db, actual, expected).is_ok();
         }
         if self.undeclared_nominal(db, actual) || self.undeclared_nominal(db, expected) {
@@ -938,9 +930,7 @@ impl<'db> InferenceTable<'db> {
                     .any(|member| matches!(member.kind(db), TyKind::OtherTags))
                     && expected_members
                         .iter()
-                        .filter(|&&member| {
-                            matches!(self.shallow_resolve(db, member).kind(db), TyKind::Var(_))
-                        })
+                        .filter(|&&member| self.shallow_resolve(db, member).is_var())
                         .count()
                         == 1 =>
             {
@@ -948,7 +938,7 @@ impl<'db> InferenceTable<'db> {
                 let mut concrete = Vec::new();
                 for &member in expected_members.iter() {
                     let member = self.shallow_resolve(db, member);
-                    if matches!(member.kind(db), TyKind::Var(_)) {
+                    if member.is_var() {
                         variable = Some(member);
                     } else {
                         concrete.push(member);
@@ -1031,10 +1021,9 @@ impl<'db> InferenceTable<'db> {
             // Concrete members first: `NULL` into `T | NULL` must match the `NULL` member
             // and bind nothing, leaving `T` for a later argument.
             (_, TyKind::Union(members)) => {
-                let (variables, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
-                    members.iter().partition(|&&member| {
-                        matches!(self.shallow_resolve(db, member).kind(db), TyKind::Var(_))
-                    });
+                let (variables, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) = members
+                    .iter()
+                    .partition(|&&member| self.shallow_resolve(db, member).is_var());
                 concrete
                     .into_iter()
                     .chain(variables)
@@ -1229,7 +1218,7 @@ impl<'db> InferenceTable<'db> {
             (
                 TyKind::Frame(_, Some(columns)),
                 TyKind::List(element) | TyKind::NamedList(element),
-            ) if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) => {
+            ) if self.resolve(db, *element).is_var() => {
                 let joined = union_of(db, columns.iter().map(|column| column.ty));
                 self.unify(db, *element, joined).is_ok()
             }
@@ -1244,7 +1233,7 @@ impl<'db> InferenceTable<'db> {
             // so it leaves `T` open; binding it to the empty join would fail every constraint
             // on `T`, as in `List.max(list())`.
             (TyKind::Tuple(items), TyKind::List(element))
-                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
+                if self.resolve(db, *element).is_var() =>
             {
                 if items.is_empty() {
                     return true;
@@ -1254,7 +1243,7 @@ impl<'db> InferenceTable<'db> {
             }
             (TyKind::Record(fields), TyKind::List(element))
             | (TyKind::Record(fields), TyKind::NamedList(element))
-                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
+                if self.resolve(db, *element).is_var() =>
             {
                 let joined = union_of(db, fields.iter().map(|field| field.ty));
                 self.unify(db, *element, joined).is_ok()
@@ -2063,10 +2052,7 @@ mod tests {
             table.entry(InferenceVar(0)),
             Entry::Unbound { .. }
         ));
-        assert!(matches!(
-            table.resolve(&db, outer).kind(&db),
-            TyKind::Var(_)
-        ));
+        assert!(table.resolve(&db, outer).is_var());
     }
 
     #[test]
@@ -2121,7 +2107,7 @@ mod tests {
         let t = table.fresh_ty(&db, Constraint::Unconstrained);
         let nullable = union_of(&db, [t, null]);
         assert!(table.compatible(&db, null, nullable));
-        assert!(matches!(table.resolve(&db, t).kind(&db), TyKind::Var(_)));
+        assert!(table.resolve(&db, t).is_var());
     }
 
     #[test]
@@ -2134,7 +2120,7 @@ mod tests {
         let tuple_with_var = Ty::new(&db, TyKind::Tuple(&[var, chr]));
         let tuple_expected = Ty::new(&db, TyKind::Tuple(&[int, int]));
         assert!(!table.compatible(&db, tuple_with_var, tuple_expected));
-        assert!(matches!(table.resolve(&db, var).kind(&db), TyKind::Var(_)));
+        assert!(table.resolve(&db, var).is_var());
         let named_lambda = Ty::new(
             &db,
             TyKind::Function(&FunctionType::declared(

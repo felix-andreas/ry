@@ -1,11 +1,14 @@
-//! The lookup half of a process-wide interner: hash to id, read without a lock.
+//! The two halves of a process-wide interner: a [`Column`] that holds the values by dense
+//! id, and an [`IdTable`] that finds the id of a value already stored.
 //!
-//! An interner here keeps its values in an append-only column indexed by a dense id, and an
-//! [`IdTable`] finds the id of a value it has already stored. Every analysis thread interns
-//! the same few thousand types and identifiers millions of times, so the lookup takes no
-//! lock and writes no shared memory. Only storing a new value takes the table's one lock.
+//! Every analysis thread interns the same few thousand types and identifiers millions of
+//! times and reads them far more often still, so neither a lookup nor a read takes a lock
+//! or writes shared memory. Only storing a new value takes the table's one lock.
 
 use std::{
+    alloc::{Layout, alloc, handle_alloc_error},
+    cell::UnsafeCell,
+    mem::MaybeUninit,
     num::NonZeroU32,
     ptr,
     sync::{
@@ -14,7 +17,104 @@ use std::{
     },
 };
 
-/// An open-addressing table from a value's hash to the nonzero id its owner gave it.
+/// An append-only column of at most `CHUNKS * CHUNK_LENGTH` values, indexed by a dense id.
+///
+/// The values sit in chunks of one fixed size that are allocated as the column grows and
+/// never move or free, so a reference to an entry lives as long as the column, and a read is
+/// a shift, a load of the chunk's address and an offset. The chunk addresses are a fixed
+/// array, which is why the capacity is part of the type.
+pub(crate) struct Column<T, const CHUNKS: usize> {
+    chunks: [AtomicPtr<T>; CHUNKS],
+}
+
+const CHUNK_BITS: u32 = 12;
+pub(crate) const CHUNK_LENGTH: usize = 1 << CHUNK_BITS;
+
+/// A column's first chunk as a constant, for a column whose first entries exist before any
+/// code runs.
+pub(crate) struct FirstChunk<T>(UnsafeCell<[MaybeUninit<T>; CHUNK_LENGTH]>);
+
+// SAFETY: the chunk is only reached through its `Column`, which hands out shared references
+// to written entries and writes each entry once, before any reader can know its index.
+unsafe impl<T: Sync> Sync for FirstChunk<T> {}
+
+impl<T: Copy> FirstChunk<T> {
+    pub(crate) const fn new<const N: usize>(values: [T; N]) -> FirstChunk<T> {
+        assert!(N <= CHUNK_LENGTH, "the constant entries fit one chunk");
+        let mut chunk = [const { MaybeUninit::uninit() }; CHUNK_LENGTH];
+        let mut index = 0;
+        while index < N {
+            chunk[index] = MaybeUninit::new(values[index]);
+            index += 1;
+        }
+        FirstChunk(UnsafeCell::new(chunk))
+    }
+}
+
+impl<T, const CHUNKS: usize> Column<T, CHUNKS> {
+    pub(crate) const CAPACITY: usize = CHUNKS << CHUNK_BITS;
+
+    pub(crate) const fn new() -> Column<T, CHUNKS> {
+        Column {
+            chunks: [const { AtomicPtr::new(ptr::null_mut()) }; CHUNKS],
+        }
+    }
+
+    /// A column that already holds the entries `first` was built with.
+    pub(crate) const fn starting_with(first: &'static FirstChunk<T>) -> Column<T, CHUNKS> {
+        let mut column = Column::new();
+        column.chunks[0] = AtomicPtr::new(first.0.get().cast::<T>());
+        column
+    }
+
+    /// The entry at `index`.
+    ///
+    /// # Safety
+    ///
+    /// The entry was written, by [`Column::write`] or as one of the constant first entries,
+    /// and the write happened before this read: the reader got `index` from the thread that
+    /// wrote it through a synchronized hand-off, such as an [`IdTable`] slot or a lock.
+    pub(crate) unsafe fn get_unchecked(&self, index: usize) -> &T {
+        // SAFETY: a written entry lies inside the column and its chunk is allocated, and the
+        // hand-off the caller vouches for orders the chunk's address before this load.
+        unsafe {
+            let chunk = self
+                .chunks
+                .get_unchecked(index >> CHUNK_BITS)
+                .load(Ordering::Relaxed);
+            &*chunk.add(index & (CHUNK_LENGTH - 1))
+        }
+    }
+
+    /// Writes the entry at `index`.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the one lock that serializes this column's writers, writes each
+    /// index at most once, and hands `index` to no reader before this returns.
+    pub(crate) unsafe fn write(&self, index: usize, value: T) {
+        assert!(index < Self::CAPACITY, "the column is full");
+        let slot = &self.chunks[index >> CHUNK_BITS];
+        let mut chunk = slot.load(Ordering::Relaxed);
+        if chunk.is_null() {
+            let Ok(layout) = Layout::array::<T>(CHUNK_LENGTH) else {
+                panic!("a column chunk's size overflows");
+            };
+            assert!(layout.size() > 0, "a column holds no zero-sized values");
+            // SAFETY: the layout has a nonzero size.
+            chunk = unsafe { alloc(layout) }.cast::<T>();
+            if chunk.is_null() {
+                handle_alloc_error(layout);
+            }
+            slot.store(chunk, Ordering::Release);
+        }
+        // SAFETY: the chunk holds `CHUNK_LENGTH` entries and no reader knows this one yet.
+        unsafe { chunk.add(index & (CHUNK_LENGTH - 1)).write(value) };
+    }
+}
+
+/// An open-addressing table from a value's hash to the nonzero id its owner gave it, and the
+/// hand-off that publishes an id to the readers of the owner's [`Column`]s.
 ///
 /// A slot is empty (0) or holds the upper half of the value's hash above its id, so a probe
 /// compares values only where the hashes agree. At most half the slots are ever filled, so
