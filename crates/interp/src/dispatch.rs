@@ -592,7 +592,16 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
 unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>> {
     if scope.attached && !name.has_gp(gp::BOUND_ELSEWHERE) {
         let found = base_method(name, scope.table)?;
-        if syntax::testing::invariants_enabled() {
+        // An active binding makes a new value on every read, so a second read cannot agree.
+        let active = |env: Sexp| {
+            crate::heap()
+                .frame_cell(env, name)
+                .is_some_and(|cell| cell.has_gp(gp::ACTIVE_BINDING))
+        };
+        if syntax::testing::invariants_enabled()
+            && !active(values::base_env())
+            && !scope.table.is_some_and(active)
+        {
             let walk = scope_walk(scope.call_env);
             let walked = walked_method(name, &walk, scope.table)?;
             assert!(
