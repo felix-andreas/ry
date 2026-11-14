@@ -2402,7 +2402,7 @@ pub fn completion_with(
             }
             // A project global outranks a same-named stub at deduplication, mirroring resolution.
             if let Some(library) = stubs(db) {
-                let documentation = |name: &String| {
+                let documentation = |name: Symbol| {
                     library
                         .exports_by_namespace
                         .iter()
@@ -2426,7 +2426,7 @@ pub fn completion_with(
                         .filter_map(|(name, schemes)| {
                             Some(CompletionItem {
                                 documentation: documentation(name),
-                                ..scheme_completion(db, name.clone(), schemes.first()?)
+                                ..scheme_completion(db, name.as_str().to_owned(), schemes.first()?)
                             })
                         }),
                 );
@@ -2445,7 +2445,7 @@ pub fn completion_with(
                         .map(|name| CompletionItem {
                             documentation: documentation(name),
                             ..CompletionItem::new(
-                                name.clone(),
+                                name.as_str().to_owned(),
                                 CompletionKind::Variable,
                                 CompletionSource::Stdlib,
                             )
@@ -4432,6 +4432,10 @@ fn tag_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<(String, Te
 fn tag_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Occurrence> {
     let mut result = Vec::new();
     for &file in files.files(db) {
+        let tags = &spelled_names(db, file).tags;
+        if tags.binary_search_by(|tag| tag.as_str().cmp(name)).is_err() {
+            continue;
+        }
         let root = semantics::parse(db, file).syntax_node();
         for node in root.descendants().filter(|node| is_tag_node(node.kind())) {
             let Some(tag_name) = child_node(&node, NAME) else {
@@ -4689,7 +4693,15 @@ fn annotation_definition_hover(db: &dyn Db, file: SourceFile, offset: TextSize) 
 
 fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Occurrence> {
     let mut result = Vec::new();
+    let unquoted = name.trim_matches('`');
     for &file in files.files(db) {
+        let uses = &spelled_names(db, file).uses;
+        if uses
+            .binary_search_by(|(spelled, _)| spelled.as_str().cmp(unquoted))
+            .is_err()
+        {
+            continue;
+        }
         let root = semantics::parse(db, file).syntax_node();
         for annotation in root.descendants().filter(is_type_region) {
             let shadowed = binder_names(&annotation)
@@ -5092,14 +5104,18 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
 }
 
 /// The names a file spells after `@`, `$` and `::`, which untyped completion offers, and how
-/// often it spells each name anywhere, which ranks completion.
+/// often it spells each name anywhere, which ranks completion. Project-wide searches read it to
+/// skip the files that cannot match before they walk a syntax tree.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 struct SpelledNames {
     at: Vec<String>,
     dollar: Vec<String>,
     /// As `(package, name)`.
     namespace: Vec<(String, String)>,
-    /// Sorted by name.
+    /// The names of the tags the file spells (`:Some`), sorted.
+    tags: Vec<String>,
+    /// Every identifier and keyword token, annotations included, without backquotes. Sorted
+    /// by name.
     uses: Vec<(String, u32)>,
     /// How often the file calls each name, `f` in `f(x)` or `pkg::f(x)`. Sorted by name.
     calls: Vec<(String, u32)>,
@@ -5112,6 +5128,7 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         at: Vec::new(),
         dollar: Vec::new(),
         namespace: Vec::new(),
+        tags: Vec::new(),
         uses: Vec::new(),
         calls: Vec::new(),
     };
@@ -5137,6 +5154,11 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         sorted.sort_unstable();
     }
     for node in root.descendants() {
+        if is_tag_node(node.kind())
+            && let Some(name) = child_node(&node, NAME)
+        {
+            spelled.tags.push(name.text().to_string());
+        }
         // The lhs is an expression node, so the last bare NAME child is the spelled name.
         let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
             continue;
@@ -5153,7 +5175,7 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
             _ => {}
         }
     }
-    for names in [&mut spelled.at, &mut spelled.dollar] {
+    for names in [&mut spelled.at, &mut spelled.dollar, &mut spelled.tags] {
         names.sort_unstable();
         names.dedup();
     }
@@ -5399,13 +5421,18 @@ fn tag_completions(
     }
     let mut names = BTreeSet::new();
     for &project_file in files.files(db) {
+        if project_file != file {
+            names.extend(spelled_names(db, project_file).tags.iter().cloned());
+            continue;
+        }
+        // The half-typed tag under the cursor is not a suggestion for itself, so the file being
+        // edited is walked rather than read from its memo.
         let root = semantics::parse(db, project_file).syntax_node();
         names.extend(
             root.descendants()
                 .filter(|node| is_tag_node(node.kind()))
                 .filter_map(|node| child_node(&node, NAME))
-                // The half-typed tag under the cursor is not a suggestion for itself.
-                .filter(|name| project_file != file || name.text_range().start() != word_start)
+                .filter(|name| name.text_range().start() != word_start)
                 .map(|name| name.text().to_string()),
         );
     }
@@ -5975,7 +6002,7 @@ fn namespace_completions(
                 .iter()
                 .filter(|name| search_match(name, query).is_some())
                 .map(|name| {
-                    let label = insertable_name(name);
+                    let label = insertable_name(&name);
                     match library
                         .schemes
                         .get(name)

@@ -110,15 +110,8 @@ the host's store", has the shape and the measurements behind this list.
   holds the item's syntax. It does not show in request latency after an edit. Lowering only
   the items whose window of the tree changed needs the splice to report which top-level runs
   it copied.
-- **Tag completion and two reference searches walk every syntax tree untracked** (`ide.rs`,
-  the callers of `parse` over all project files). The `spelled_names` query is the model: a
-  per-file memo of the names a file spells, so a search opens only the files that can match.
 - **"Is this file strict" has three definitions** (`semantics.rs` twice, `load_index.rs` once)
   that disagree on the default. One function should answer it.
-- **`StubLibrary` is nine maps keyed by `String`**, and `visible_arithmetic_classes` merges two
-  cloned sets per file. Keys should be `Symbol`s.
-- **The server mirrors a tracked query by hand** (`attached_by_file` in `Worker`,
-  `server.rs`). Read `file_attached_namespaces` instead.
 - **`item_links` sorts its names and edges by `Symbol::index()`**, which is interning order, and
   parallel workers intern in a different order on every run. Every reader is order-insensitive
   today. Sort by the name's text, or by first use in the item, before a reader depends on the

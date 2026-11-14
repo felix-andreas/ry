@@ -48,9 +48,9 @@ use {
             project_fold_shares, warm_project_folds,
         },
         metadata::{
-            NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
-            parse_description_collate, parse_description_dependencies, parse_description_package,
-            parse_namespace,
+            NativeSymbols, PackageMetadata, attached_union, file_attached_namespaces,
+            normalized_imports, parse_description_collate, parse_description_dependencies,
+            parse_description_package, parse_namespace,
         },
         project_global_names,
         stubs::{
@@ -471,12 +471,10 @@ struct Worker {
     /// Whether the last walk over the `source()` literals met one that names no file on disk.
     /// Such a literal starts to resolve when the file appears, which no edit announces.
     source_literal_unresolved: bool,
-    /// Non-empty sets only. Kept current per synced or primed file, never by a
-    /// whole-project sweep, so keystroke work stays O(open documents).
-    attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
-    /// Files whose `library()` scan a cancellation interrupted. The edit that cancelled it may
-    /// be to another file, so nothing else would rescan this one: idle time owes it.
-    pending_attached_scans: BTreeSet<PathBuf>,
+    /// Set when a cancellation interrupted the attach union. The edit that cancelled it may be
+    /// to a file whose `library()` calls did not change, so nothing else would recompute the
+    /// union: idle time owes it.
+    attached_union_stale: bool,
     /// The fix-bearing findings of each open document's last settled publish, with the text they
     /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
     /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
@@ -608,8 +606,7 @@ impl Worker {
             editor_folds_stale: false,
             pending_lowering: Vec::new(),
             source_literal_unresolved: false,
-            attached_by_file: HashMap::new(),
-            pending_attached_scans: BTreeSet::new(),
+            attached_union_stale: false,
             published_fixes: HashMap::new(),
             literate_documents: HashMap::new(),
             recorded_diagnostics: HashMap::new(),
@@ -712,47 +709,25 @@ impl Worker {
         }
     }
 
-    fn attached_union(&self) -> BTreeSet<String> {
-        self.attached_by_file
-            .values()
-            .flat_map(|namespaces| namespaces.iter().cloned())
-            .collect()
-    }
-
-    /// When the project-wide attach union moves, every file's resolution universe
-    /// changes, so all diagnostics refresh. A cancelled scan is queued as idle work, because
-    /// the edit that cancelled it may belong to another file and re-scan only that one.
-    fn refresh_attached(&mut self, path: &Path) {
-        self.pending_attached_scans.remove(path);
-        let scanned = match self.files.get(path) {
-            Some(&file) => {
-                let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
-                match scan {
-                    Ok(scanned) => scanned,
-                    Err(_) => {
-                        self.pending_attached_scans.insert(path.to_owned());
-                        return;
-                    }
-                }
-            }
-            None => Default::default(),
-        };
-        let changed = if scanned.is_empty() {
-            self.attached_by_file.remove(path).is_some()
-        } else if self.attached_by_file.get(path) != Some(&scanned) {
-            self.attached_by_file.insert(path.to_owned(), scanned);
-            true
-        } else {
-            false
-        };
-        if !changed || !self.unscanned.is_empty() {
+    /// When the project-wide attach union moves, every file's resolution universe changes, so
+    /// all diagnostics refresh. The union reads each file's memoized scan, so recomputing it
+    /// rescans only the files whose text changed, but it still visits every file: a keystroke
+    /// calls it only when the edited file's own scan moved. A cancelled union is queued as
+    /// idle work.
+    fn refresh_attached(&mut self) {
+        self.attached_union_stale = false;
+        if !self.unscanned.is_empty() {
             return;
         }
-        self.apply_attached_union();
+        let union =
+            self.cancellable(|worker| attached_union(&worker.db, worker.files.values().copied()));
+        match union {
+            Ok(union) => self.apply_attached_union(union),
+            Err(_) => self.attached_union_stale = true,
+        }
     }
 
-    fn apply_attached_union(&mut self) {
-        let union = self.attached_union();
+    fn apply_attached_union(&mut self, union: BTreeSet<String>) {
         let metadata = PackageMetadata::get(&self.db);
         if metadata.attached(&self.db) == &union {
             return;
@@ -974,7 +949,7 @@ impl Worker {
 
     fn has_idle_work(&self) -> bool {
         !self.unwarmed.is_empty()
-            || !self.pending_attached_scans.is_empty()
+            || self.attached_union_stale
             || !self.pending_semantic_publishes.is_empty()
             || !self.pending_lowering.is_empty()
             || !self.prime_queue.is_empty()
@@ -989,8 +964,8 @@ impl Worker {
             return;
         }
         // Next, because a changed attach set refreshes every document's diagnostics.
-        if let Some(path) = self.pending_attached_scans.pop_first() {
-            self.refresh_attached(&path);
+        if self.attached_union_stale {
+            self.refresh_attached();
             return;
         }
         if let Some(path) = self.pending_semantic_publishes.pop() {
@@ -1053,21 +1028,21 @@ impl Worker {
     fn warm_up(&mut self) {
         if !self.unscanned.is_empty() {
             let paths = mem::take(&mut self.unscanned);
-            let (scanned, rest) =
-                self.in_parallel(paths, |db, file| file_attached_namespaces(db, file));
-            for (path, attached) in scanned {
-                if attached.is_empty() {
-                    self.attached_by_file.remove(&path);
-                } else {
-                    self.attached_by_file.insert(path, attached);
-                }
-            }
+            let (_, rest) = self.in_parallel(paths, |db, file| {
+                drop(file_attached_namespaces(db, file));
+            });
             self.unscanned = rest;
             if !self.unscanned.is_empty() {
                 return;
             }
-            // Before the folds: every memo that reads the attach set would re-run after it.
-            self.apply_attached_union();
+            self.attached_union_stale = true;
+        }
+        // Before the folds: every memo that reads the attach set would re-run after it.
+        if self.attached_union_stale {
+            self.refresh_attached();
+            if self.attached_union_stale {
+                return;
+            }
         }
         let paths = mem::take(&mut self.unwarmed);
         let cancel = self.cancel.clone();
@@ -1542,7 +1517,7 @@ impl Worker {
         if let (Some(document), Some(&file)) = (document, self.files.get(&path)) {
             self.literate_documents.insert(file, document);
         }
-        self.refresh_attached(&path);
+        self.refresh_attached();
         if !self.supports_pull_diagnostics {
             self.publish_first_wave(&path, version);
         }
@@ -1596,6 +1571,11 @@ impl Worker {
         // walk over every file runs when they changed, or while some literal names no file,
         // because that file can appear without the client reporting it.
         let sourced_before = self.source_calls(file);
+        // The attach union is a function of each file's `library()` calls, and an edit can
+        // change only the edited file's, so the walk over every file runs when they changed.
+        // While a union is owed the comparison decides nothing, so the scan is skipped.
+        let attached_before = (!self.attached_union_stale && self.unscanned.is_empty())
+            .then(|| file_attached_namespaces(&self.db, file));
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
@@ -1604,7 +1584,15 @@ impl Worker {
         {
             self.rebuild_project_files();
         }
-        self.refresh_attached(&path);
+        let attached_moved = match attached_before {
+            Some(before) => self
+                .cancellable(|worker| file_attached_namespaces(&worker.db, file))
+                .map_or(true, |after| after != before),
+            None => true,
+        };
+        if attached_moved {
+            self.refresh_attached();
+        }
         if !self.supports_pull_diagnostics {
             self.publish_first_wave(&path, version);
         }
@@ -1785,7 +1773,7 @@ impl Worker {
                             .with_durability(Durability::MEDIUM)
                             .to(text);
                     }
-                    self.refresh_attached(&path);
+                    self.refresh_attached();
                     return;
                 }
                 Err(error) => {
@@ -1798,14 +1786,14 @@ impl Worker {
         self.files.remove(&path);
         self.virtual_document_uris.remove(&path);
         self.rebuild_project_files();
-        self.refresh_attached(&path);
+        self.refresh_attached();
     }
 
     fn did_change_watched_files(&mut self, params: lsp_types::DidChangeWatchedFilesParams) {
         self.recorded_diagnostics.clear();
         let mut config_changed = false;
         let mut metadata_changed = false;
-        let mut reloaded_documents: Vec<PathBuf> = Vec::new();
+        let mut reloaded_document = false;
         let mut data_changed = false;
         for change in &params.changes {
             let Ok(path) = change.uri.to_file_path() else {
@@ -1877,7 +1865,7 @@ impl Worker {
                             file.set_text(&mut self.db)
                                 .with_durability(Durability::MEDIUM)
                                 .to(text);
-                            reloaded_documents.push(path.clone());
+                            reloaded_document = true;
                         }
                         None => {
                             let kind = document_kind(&path, &self.workspace_root);
@@ -1886,13 +1874,13 @@ impl Worker {
                                 .new(&self.db);
                             self.files.insert(path.clone(), file);
                             self.rebuild_project_files();
-                            reloaded_documents.push(path.clone());
+                            reloaded_document = true;
                         }
                     },
                     Err(_) => {
                         if self.files.remove(&path).is_some() {
                             self.rebuild_project_files();
-                            reloaded_documents.push(path.clone());
+                            reloaded_document = true;
                         }
                     }
                 }
@@ -1915,11 +1903,11 @@ impl Worker {
                         self.rebuild_project_files();
                     }
                 }
-                reloaded_documents.push(path.clone());
+                reloaded_document = true;
             }
         }
-        for path in &reloaded_documents {
-            self.refresh_attached(path);
+        if reloaded_document {
+            self.refresh_attached();
         }
         if metadata_changed {
             self.refresh_metadata();

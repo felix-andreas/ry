@@ -9,7 +9,9 @@ use {
         diagnostics::{
             Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics, top_level_diagnostics,
         },
-        file_typing_mode, item_check, item_hir, item_spans, item_tree,
+        file_typing_mode,
+        hir::Symbol,
+        item_check, item_hir, item_spans, item_tree,
         metadata::{
             PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
             parse_description_package, parse_namespace,
@@ -379,13 +381,13 @@ fn render_stub_source(source: &str) -> String {
     let db = RootDatabase::default();
     let sources = StubSources::new(&db, vec![("base".to_owned(), source.to_owned())], vec![]);
     let library = stub_library(&db, sources);
-    let mut names: Vec<(&String, _)> = library
+    let mut names: Vec<(Symbol, _)> = library
         .declarations
         .iter()
         .map(|(name, declaration)| (name, declaration.range.start()))
         .collect();
     names.sort_by_key(|(_, start)| *start);
-    let mut nominals: Vec<&String> = library.nominals.iter().collect();
+    let mut nominals: Vec<Symbol> = library.nominals.iter().collect();
     nominals.sort();
     let mut output = String::new();
     for nominal in nominals {
@@ -397,7 +399,7 @@ fn render_stub_source(source: &str) -> String {
             let pure = if library
                 .pure_by_namespace
                 .get("base")
-                .is_some_and(|names| names.contains(name.as_str()))
+                .is_some_and(|names| names.contains(name))
             {
                 "@pure "
             } else {

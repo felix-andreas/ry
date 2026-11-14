@@ -25,8 +25,8 @@ use {
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, prelude_enabled, project_type_definitions,
         stubs::{
-            CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, dormant_namespace_exports,
-            namespace_exports, namespace_known, outside_prelude, stubs,
+            CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
+            dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
         },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
@@ -829,7 +829,7 @@ fn classify_non_local_read(
             package.top_level.contains_key(&symbol) || package.conditional.contains_key(&symbol)
         })
     };
-    if crate::package_scheme_exists_in(db, context.library, name, package_binds)
+    if crate::package_scheme_exists_in(db, context.library, symbol, package_binds)
         || test_files.is_some_and(|_| crate::name_layer(db, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
@@ -930,7 +930,12 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     // Only a miss pays for the whole vocabulary, which the suggestion ranks.
     let mut known: BTreeSet<String> = stub_nominals
-        .map(|nominals| nominals.iter().cloned().collect())
+        .map(|nominals| {
+            nominals
+                .iter()
+                .map(|name| name.as_str().to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     if let Some(files) = ProjectFiles::try_get(db) {
         for name in project_type_definitions(db, files).keys() {
@@ -980,7 +985,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
     let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
-    let no_nominals = FxHashSet::default();
+    let no_nominals = SymbolSet::default();
     let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
 
     for annotation in file_annotation_references(db, file) {
@@ -1677,7 +1682,7 @@ fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
     definitions: TypeDefinitions<'db>,
-    stub_nominals: &FxHashSet<String>,
+    stub_nominals: &SymbolSet,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
     let mut current = element;
@@ -1696,7 +1701,7 @@ fn vector_element_atomic<'db>(
                         continue;
                     }
                     Some(_) => false,
-                    None => !stub_nominals.contains(name),
+                    None => !stub_nominals.contains(interned.symbol()),
                 }
             }
             _ => false,
@@ -2328,8 +2333,8 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .schemes
             .keys()
             .chain(library.known_exports.iter())
-            .map(String::as_str)
-            .filter(|candidate| !outside_prelude(db, library, candidate)),
+            .filter(|candidate| !outside_prelude(db, library, candidate))
+            .map(Symbol::as_str),
     )
 }
 

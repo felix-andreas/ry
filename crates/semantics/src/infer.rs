@@ -64,7 +64,7 @@ pub struct InferenceTable<'db> {
     pub definitions: Option<TypeDefinitions<'db>>,
     /// Includes project classes: operator dispatch resolves methods through the
     /// global scope, so the numeric constraint must consult the same set.
-    pub arithmetic_classes: Option<&'db FxHashSet<String>>,
+    pub arithmetic_classes: Option<crate::ArithmeticClasses<'db>>,
     /// Declared bounds of rigid binders in scope (`<T: numeric>`): a rigid `T` is
     /// not a numeric atom, so constraint admission needs its declared bound.
     pub rigid_constraints: FxHashMap<Name<'db>, Constraint>,
@@ -226,7 +226,7 @@ impl<'db> InferenceTable<'db> {
             None => !self
                 .definitions
                 .map_or_else(|| stubs(db), TypeDefinitions::library)
-                .is_some_and(|library| library.nominals.contains(name.text(db))),
+                .is_some_and(|library| library.nominals.contains(name.symbol())),
         }
     }
 
@@ -1786,7 +1786,7 @@ fn constraint_rejects<'db>(
 ) -> Option<UnifyError<'db>> {
     let arithmetic_classes = table.arithmetic_classes;
     let declares_arithmetic = |name: &Name<'db>| {
-        arithmetic_classes.is_some_and(|classes| classes.contains(name.text(db)))
+        arithmetic_classes.is_some_and(|classes| classes.contains(name.symbol()))
     };
     // The declared bound implies the required one when joining does not strengthen it.
     let binder_implies = |name: &Name<'db>| {

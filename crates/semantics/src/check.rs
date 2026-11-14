@@ -718,7 +718,7 @@ pub trait GlobalEnv<'db> {
     /// Every stub candidate for `name`, ignoring project definitions: what `pkg::name` or a
     /// call that skipped the project's non-function binding reaches. Empty for an export
     /// the stubs list without a type.
-    fn library_candidates(&self, name: &str) -> Option<&'db [TypeScheme<'db>]>;
+    fn library_candidates(&self, name: Symbol) -> Option<&'db [TypeScheme<'db>]>;
 
     /// What a call reaches once its lookup has left the file's top-level frame without finding
     /// a function, the library aside. A package file's frame is the namespace itself, so it
@@ -734,7 +734,7 @@ pub trait GlobalEnv<'db> {
     /// item pay for the whole table.
     fn type_definitions(&self) -> TypeDefinitions<'db>;
 
-    fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
+    fn arithmetic_classes(&self) -> crate::ArithmeticClasses<'db>;
 
     /// Whether the project defines an arithmetic or `Ops` method for a class that no type
     /// declares, so a plain list operand may carry that class.
@@ -1046,7 +1046,7 @@ fn check_item_in<'db>(
                         !naming.resolutions.contains_key(callee)
                             && context
                                 .globals
-                                .and_then(|globals| globals.library_candidates(name))
+                                .and_then(|globals| globals.library_candidates(*name))
                                 .is_some_and(|candidates| {
                                     candidates.iter().any(|scheme| {
                                         builds_fresh_items(db, scheme)
@@ -3651,7 +3651,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        self.library?.schemes.get(name.as_str())?.last().cloned()
+                        self.library?.schemes.get(name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -3999,7 +3999,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 && self.library.is_some_and(|library| {
                     NATIVE_NAMESPACES
                         .iter()
-                        .any(|namespace| library.exports(namespace, function))
+                        .any(|namespace| library.exports(*namespace, function))
                 }))
         {
             return;
@@ -4335,7 +4335,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             && !is_base_export(self.db, name)
             && (self
                 .globals
-                .is_some_and(|globals| globals.library_candidates(name).is_some())
+                .is_some_and(|globals| globals.library_candidates(*name).is_some())
                 || imported_by_name(self.db, name))
         {
             self.record_strict_origin(
@@ -5394,8 +5394,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let probed = &self.module[text];
         self.globals.is_some_and(|globals| {
-            globals
-                .library_candidates(probed)
+            Symbol::lookup(probed)
+                .and_then(|probed| globals.library_candidates(probed))
                 .is_some_and(|candidates| !candidates.is_empty())
                 && !globals.defined_in_project(Symbol::new(probed), false)
         })
@@ -6709,7 +6709,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     ExpressionKind::NameRef(name) => {
                         let forwards = self
                             .globals
-                            .is_none_or(|globals| globals.library_candidates(name).is_none());
+                            .is_none_or(|globals| globals.library_candidates(*name).is_none());
                         let optional_targets = match forwards {
                             true => self.optional_argument_targets(
                                 *callee,
@@ -8926,13 +8926,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         // `Period` that `+.Period` gives. So every class with arithmetic methods is a fit.
         let own_classes = classes.len();
         if !flexible.is_empty() && !classes.is_empty() {
-            let mut others: Vec<&String> = globals
+            let mut others: Vec<Symbol> = globals
                 .arithmetic_classes()
                 .iter()
-                .filter(|class| !classes.contains(class))
+                .filter(|class| !classes.iter().any(|known| known == class))
                 .collect();
             others.sort();
-            classes.extend(others.into_iter().cloned());
+            classes.extend(others.into_iter().map(|class| class.as_str().to_owned()));
         }
         let mut fitting_returns: Vec<Ty<'db>> = Vec::new();
         let mut fits_another_class = false;
@@ -11257,7 +11257,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// The library's candidates for `name` when the last one, which a plain read takes, is a
     /// function.
     fn library_function(&mut self, name: Symbol) -> Option<&'db [TypeScheme<'db>]> {
-        let candidates = self.globals?.library_candidates(&name)?;
+        let candidates = self.globals?.library_candidates(name)?;
         match candidates.last() {
             Some(last) if self.callable(last.body) == Callable::No => None,
             _ => Some(candidates),
@@ -13350,7 +13350,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.library?.schemes.get(name.as_str())?;
+                    let schemes = self.library?.schemes.get(name)?;
                     if schemes.len() < 2 {
                         return None;
                     }
@@ -14364,7 +14364,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // An export the stubs list without a type is still a function.
                 if let Some(candidates) = self
                     .globals
-                    .and_then(|globals| globals.library_candidates(name.as_str()))
+                    .and_then(|globals| globals.library_candidates(*name))
                 {
                     argument.named_function = Some(match candidates.last() {
                         Some(scheme) => self.instantiate(scheme),
@@ -19476,7 +19476,7 @@ mod tests {
             .find(|child| is_expression_kind(child.kind()))
             .expect("one top-level item");
         let module = lower_item(&item);
-        let naming = resolve_item(&module, &FxHashMap::default(), &|_, _| false);
+        let naming = resolve_item(&module, &Default::default(), &|_, _| false);
         check_item_with_annotation(
             db,
             &module,

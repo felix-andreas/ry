@@ -638,7 +638,7 @@ pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
 #[salsa::tracked(returns(ref))]
 pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::ItemNaming> {
     let module = item_hir(db, item).as_ref()?;
-    let no_masked_verbs = FxHashMap::default();
+    let no_masked_verbs = stubs::SymbolMap::default();
     let masked_verbs = stubs::stubs(db).map_or(&no_masked_verbs, |library| &library.masked);
     let file = *item.file(db);
     let files = ProjectFiles::try_get(db);
@@ -827,7 +827,8 @@ const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"]
 /// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     let files = ProjectFiles::try_get(db);
-    package_scheme_exists_in(db, stubs::stubs(db), name, |name| {
+    let symbol = Symbol::new(name);
+    package_scheme_exists_in(db, stubs::stubs(db), symbol, |name| {
         files.is_some_and(|files| package_binds(db, files, name))
     })
 }
@@ -837,10 +838,10 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
 pub fn package_scheme_exists_in(
     db: &dyn Db,
     library: Option<&stubs::StubLibrary<'_>>,
-    name: &str,
+    name: Symbol,
     package_binds: impl FnOnce(&str) -> bool,
 ) -> bool {
-    if BUILTIN_GLOBAL_NAMES.contains(&name) || package_binds(name) {
+    if BUILTIN_GLOBAL_NAMES.contains(&name.as_str()) || package_binds(name.as_str()) {
         return true;
     }
     library.is_some_and(|library| {
@@ -3044,14 +3045,50 @@ fn project_type_definition<'db>(
     project_type_definitions(db, files).get(&name).cloned()
 }
 
-#[salsa::tracked(returns(ref))]
-fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
-    let mut classes = stub_arithmetic_classes(db);
-    if let Some(files) = ProjectFiles::try_get(db) {
-        classes.extend(project_arithmetic_classes(db, files).iter().cloned());
+/// The classes with arithmetic methods a file sees: the stubs', the package's and the file's
+/// own. A question asks each layer in turn, so no file holds a merged copy of the others.
+#[derive(Debug, Clone, Copy)]
+pub struct ArithmeticClasses<'db> {
+    layers: [Option<&'db stubs::SymbolSet>; 3],
+}
+
+impl<'db> ArithmeticClasses<'db> {
+    pub fn contains(self, class: impl stubs::SymbolKey) -> bool {
+        class.symbol().is_some_and(|class| {
+            self.layers
+                .iter()
+                .flatten()
+                .any(|layer| layer.contains(class))
+        })
     }
-    classes.extend(file_arithmetic_classes(db, file).iter().cloned());
-    classes
+
+    /// Each class once, in no particular order.
+    pub fn iter(self) -> impl Iterator<Item = Symbol> + 'db {
+        let layers = self.layers;
+        layers
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, layer)| Some((index, layer?)))
+            .flat_map(move |(index, layer)| {
+                layer.iter().filter(move |&class| {
+                    !layers
+                        .iter()
+                        .take(index)
+                        .flatten()
+                        .any(|earlier| earlier.contains(class))
+                })
+            })
+    }
+}
+
+fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> ArithmeticClasses<'_> {
+    ArithmeticClasses {
+        layers: [
+            Some(stub_arithmetic_classes(db)),
+            ProjectFiles::try_get(db).map(|files| project_arithmetic_classes(db, files)),
+            Some(file_arithmetic_classes(db, file)),
+        ],
+    }
 }
 
 /// A project's `+.string` method dispatches on a class attribute that `class(x) <- "string"`
@@ -3059,16 +3096,11 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
 #[salsa::tracked]
 fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
     let definitions = TypeDefinitions::of(db, file);
-    let tracked = |class: &String| {
-        definitions
-            .get(db, types::Name::new(db, class.as_str()))
-            .is_some()
-    };
-    let project_classes = ProjectFiles::try_get(db)
+    let tracked = |class: Symbol| definitions.get(db, types::Name::new(db, class)).is_some();
+    ProjectFiles::try_get(db)
         .map(|files| project_arithmetic_classes(db, files))
-        .unwrap_or_default();
-    project_classes
-        .iter()
+        .into_iter()
+        .flat_map(stubs::SymbolSet::iter)
         .chain(file_arithmetic_classes(db, file).iter())
         .any(|class| !tracked(class))
 }
@@ -3343,12 +3375,12 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
         // candidates specific-first, so the last is the most general.
-        self.bare_library_candidates(name.as_str())?.last().cloned()
+        self.bare_library_candidates(name)?.last().cloned()
     }
 
     /// The shipped declarations a bare `name` reaches, which leave out the standard library's
     /// when `[check] prelude` is off.
-    fn bare_library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+    fn bare_library_candidates(&self, name: Symbol) -> Option<&'db [types::TypeScheme<'db>]> {
         let library = self.library?;
         if stubs::outside_prelude(self.db, library, name) {
             return None;
@@ -3402,7 +3434,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         if let Some(scheme) = self.layer_scheme(self.bindings(name, false).package, name) {
             return Some(scheme);
         }
-        self.library?.schemes.get(name.as_str())?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 
     fn enclosing_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
@@ -3414,7 +3446,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
             .find_map(|layer| self.layer_scheme(layer, name))
     }
 
-    fn library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+    fn library_candidates(&self, name: Symbol) -> Option<&'db [types::TypeScheme<'db>]> {
         let library = self.library?;
         if stubs::outside_prelude(self.db, library, name) {
             return None;
@@ -3426,7 +3458,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
-        let candidates = self.bare_library_candidates(name.as_str())?;
+        let candidates = self.bare_library_candidates(name)?;
         if candidates.len() < 2 {
             return None;
         }
@@ -3444,7 +3476,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         self.definitions
     }
 
-    fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
+    fn arithmetic_classes(&self) -> ArithmeticClasses<'db> {
         visible_arithmetic_classes(self.db, self.file)
     }
 
@@ -3459,22 +3491,22 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 }
 
-#[salsa::tracked(returns(clone))]
-fn stub_arithmetic_classes(db: &dyn Db) -> FxHashSet<String> {
+#[salsa::tracked(returns(ref))]
+fn stub_arithmetic_classes(db: &dyn Db) -> stubs::SymbolSet {
     let Some(library) = stubs::stubs(db) else {
-        return FxHashSet::default();
+        return stubs::SymbolSet::default();
     };
-    arithmetic_classes_among(library.schemes.keys().map(String::as_str))
+    arithmetic_classes_among(library.schemes.keys())
 }
 
 /// A union of the per-file sets, which are almost always empty, rather than a scan of every
 /// project name: a new top-level name then costs one file's scan.
-#[salsa::tracked(returns(clone))]
-fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<String> {
-    let mut classes = FxHashSet::default();
+#[salsa::tracked(returns(ref))]
+fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> stubs::SymbolSet {
+    let mut classes = stubs::SymbolSet::default();
     for &file in files.files(db) {
         if *file.kind(db) == DocumentKind::Package {
-            classes.extend(file_arithmetic_classes(db, file).iter().cloned());
+            classes.extend(file_arithmetic_classes(db, file).iter());
         }
     }
     classes
@@ -3497,23 +3529,19 @@ fn file_defines_dollar_method(db: &dyn Db, file: SourceFile) -> bool {
 }
 
 #[salsa::tracked(returns(ref))]
-fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
-    arithmetic_classes_among(
-        file_definitions(db, file)
-            .iter()
-            .map(|(name, _)| name.as_str()),
-    )
+fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> stubs::SymbolSet {
+    arithmetic_classes_among(file_definitions(db, file).iter().map(|(name, _)| *name))
 }
 
-fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashSet<String> {
+fn arithmetic_classes_among(names: impl Iterator<Item = Symbol>) -> stubs::SymbolSet {
     let prefixes: Vec<String> = check::arithmetic_method_prefixes().collect();
-    let mut classes = FxHashSet::default();
+    let mut classes = stubs::SymbolSet::default();
     for name in names {
         for prefix in &prefixes {
-            if let Some(class) = name.strip_prefix(prefix.as_str())
+            if let Some(class) = name.as_str().strip_prefix(prefix.as_str())
                 && !class.is_empty()
             {
-                classes.insert(class.to_owned());
+                classes.insert(Symbol::new(class));
             }
         }
     }
