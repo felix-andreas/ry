@@ -61,6 +61,7 @@ length.widget <- function(x) if (is.null(x)) 0L else 7L
 "$.gadget" <- function(x, name) if (is.null(x)) 0L else name
 format.widget <- function(x, ...) if (is.null(x)) "" else "widget"
 quoted <- quote(i + 1L)
+classed <- structure(class = c("custom", "error", "condition"), list(message = "m", call = NULL))
 """
 
 # (name, expression). The loop assigns the expression's value, so an operation's count includes
@@ -110,6 +111,10 @@ OPERATIONS = [
     ("condition: `suppressWarnings`, no condition", "suppressWarnings(i + 1L)"),
     ("condition: `warning` muffled", 'withCallingHandlers(warning("w"), warning = function(w) invokeRestart("muffleWarning"))'),
     ("condition: `signalCondition`, no handler", 'signalCondition(simpleCondition("m"))'),
+    ("condition: `suppressMessages`, no condition", "suppressMessages(i + 1L)"),
+    ("condition: `tryCatch` with two handlers, no condition", "tryCatch(i + 1L, warning = function(w) 1L, error = function(e) 0L)"),
+    ("condition: `message` muffled", 'suppressMessages(message("m"))'),
+    ("condition: `stop` of a classed condition caught", "tryCatch(stop(classed), custom = function(e) 0L)"),
     ("builtin: `length`", "length(plain)"),
     ("builtin: `is.null`", "is.null(plain)"),
     ("builtin: `[[` by position", "plain[[1L]]"),
