@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Runs ry's published benchmark suites and writes each suite's results.json. Four suites time ry
-against GNU R, and one times typed ry against Rust.
+"""Runs ry's published benchmark suites and writes each suite's results.json. Every suite but one
+times ry against GNU R, and the typed suite times typed ry against Rust.
 
-The five suites, each described by the suite.toml in its directory:
+The suites, each described by the suite.toml in its directory:
 
   public        Public R JIT benchmarks: the 54 Ř and rcp programs, vendored under public/.
   packages      Package test suites: the pinned CRAN packages of packages/lock.tsv.
   kernels       Numeric kernels: our loops, recursion, arrays and numeric math.
   applications  Application workloads: our calls, dispatch, conditions, records and tables.
+  codebases     The three 300,000-line benchmark code bases, each running its test suite.
+  hot           Hot package entries: the package calls that dominate the code bases, replayed in a loop.
   typed         Typed ry against Rust: every typed kernel and application beside its Rust twin.
 
 In the first four the engines are GNU R, ry, ry typed, and ry typed with `--aot`: a program whose
@@ -93,11 +95,25 @@ FILE and options resumes after the last complete round. A run of several suites 
 in FILE with the suite's name before its extension (`samples.kernels.json`). `--write` needs at least 10 rounds and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
+The hot suite (hot/suite.toml, which tooling/hot.py generates from a capture of the code bases)
+runs differently: one process per engine and round runs every selected program through
+hot/harness.R, so packages load once, and the harness times each program's batches of calls
+inside the process, so a program counts as too short only under 1 ms. Each code base also gets a
+predicted speed-up: the programs' speed-ups averaged with the weights the suite gives them in that
+code base (`hot_summary`). Two passes run on ry alone after the rounds: `--breakdown` reads where the
+runtime spent each program's time from its region profile, and `--instructions` counts each
+program's instructions under callgrind, which `--save-instructions FILE` keeps and
+`--baseline-instructions FILE` (or a `--baseline` build) compares against. `--functions N` adds
+the N functions of the runtime and the packages' compiled code that hold the most of each code
+base's instructions, which needs a build with symbols (`cargo build --profile profiling`).
+
 Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial] [--any-build]
+                            [--breakdown] [--instructions] [--save-instructions FILE]
+                            [--baseline-instructions FILE] [--functions N]
 """
-import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
+import argparse, atexit, concurrent.futures, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
 import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
@@ -107,11 +123,13 @@ sys.path.insert(0, str(here))
 import packages as corpus  # noqa: E402
 from evict import evict  # noqa: E402
 
-SUITES = ["public", "packages", "kernels", "applications", "codebases", "typed"]
+SUITES = ["public", "packages", "kernels", "applications", "codebases", "hot", "typed"]
 # The suites whose programs may have a typed version, which the `ry typed` engine runs.
 TYPED_SUITES = ("public", "kernels", "applications")
 # The suite that times typed ry against Rust, where every other suite times ry against GNU R.
 RUST_SUITE = "typed"
+# The suite of captured package entries, whose runner times every program in one process.
+HOT_SUITE = "hot"
 # `rustc -O` is opt-level 3, the level of cargo's release profile, and names no target CPU, so a
 # Rust twin is built the way a released Rust program is.
 RUSTC_FLAGS = ["-O", "--edition", "2024"]
@@ -126,6 +144,14 @@ SHORT = 0.1
 PER_TEST_FLOOR = 0.001
 # A code base's run takes minutes on each engine.
 CODEBASE_TIMEOUT = 7200
+# The hot suite's harness times batches of about 20 ms of GNU R work inside the process, with a
+# clock that resolves to the microsecond on both engines, so a batch under a millisecond measures
+# the clock.
+HOT_SHORT = 0.001
+# One process runs every program of the suite, and under callgrind ry runs about 50 times slower.
+HOT_TIMEOUT = 3600
+# The harness processes one instruction pass deals the suite's programs over (`instructions_of`).
+INSTRUCTION_SHARDS = 4
 # The same floor for the typed suite. Both of its harnesses time a warm run inside the process, so
 # start-up is not in the time, and both print it to the microsecond: 0.1 ms is 100 of those steps.
 RUST_SHORT = 0.0001
@@ -170,6 +196,15 @@ def main():
                         help="run even when the corpus library lacks packages, and mark the results partial")
     parser.add_argument("--any-build", action="store_true",
                         help="also time a ry that is not a release build, and say so in the output")
+    parser.add_argument("--breakdown", action="store_true",
+                        help="hot suite: one more ry process that profiles where each program spends its time")
+    parser.add_argument("--instructions", action="store_true",
+                        help="hot suite: count each program's instructions on ry under callgrind")
+    parser.add_argument("--save-instructions", metavar="FILE", help="hot suite: keep the instruction counts in FILE")
+    parser.add_argument("--functions", metavar="N", type=int, default=0,
+                        help="hot suite: with --instructions, the N functions holding the most of each code base's instructions")
+    parser.add_argument("--baseline-instructions", metavar="FILE",
+                        help="hot suite: compare the instruction counts with those of an earlier --save-instructions")
     args = parser.parse_args()
     # Programs run from their own directories.
     args.ry = os.path.abspath(args.ry)
@@ -179,6 +214,12 @@ def main():
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
+    if (args.save_instructions or args.baseline_instructions or args.functions) and not args.instructions:
+        sys.exit("error: --save-instructions, --baseline-instructions and --functions go with --instructions")
+    if (args.breakdown or args.instructions) and suites != [HOT_SUITE]:
+        sys.exit(f"error: --breakdown and --instructions measure the {HOT_SUITE} suite alone")
+    if args.rounds < 0 or (args.rounds == 0 and not (args.breakdown or args.instructions)):
+        sys.exit("error: --rounds must be at least 1, or 0 for only a --breakdown or --instructions pass")
     release = None
     if args.release:
         args.ry, release = unpack_release(args.release)
@@ -205,7 +246,7 @@ def main():
                  "with `cargo build --release -p ry-lang -p libr`, or pass --any-build for a quick look")
     refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
     manifests = {suite: load_suite(suite) for suite in suites}
-    missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
+    missing = {suite: missing_packages(suite, selected(manifest, args), args.rscript) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
         sys.exit("error: the corpus library lacks packages the suites load; run "
                  "`just bench-packages install`, or pass --partial to run without them:\n"
@@ -257,7 +298,7 @@ def ratio_kind(suite):
 
 
 def short_floor(suite):
-    return RUST_SHORT if suite == RUST_SUITE else SHORT
+    return {RUST_SUITE: RUST_SHORT, HOT_SUITE: HOT_SHORT}.get(suite, SHORT)
 
 
 def engines(args, suite):
@@ -273,13 +314,8 @@ def engines(args, suite):
             table.append(Engine("baseline_typed", "baseline typed", [args.baseline, "run", "--runtime", "ry"],
                                 ry_env, typed=True))
         return table
-    library = codebase_library() if suite == "codebases" else corpus.corpus / "library"
-    if library.is_dir():
-        # Both engines load packages from the corpus library and then base R's own, so neither
-        # reads a different build of a package from a site library.
-        gnu_r_library = subprocess.run([args.rscript, "--vanilla", "-e", "cat(.Library)"],
-                                       capture_output=True, text=True, check=True).stdout.strip()
-        base.update(R_LIBS=str(library), R_LIBS_USER=str(library), R_LIBS_SITE=gnu_r_library)
+    library = codebase_library() if suite in ("codebases", HOT_SUITE) else corpus.corpus / "library"
+    base.update(library_environment(args.rscript, library))
     ry = [args.ry, "run", "--runtime", "ry"]
     ry_env = dict(base, RY_IMAGE_LOG="1")
     table = [Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base),
@@ -297,6 +333,21 @@ def engines(args, suite):
         if typed:
             table.append(Engine("baseline_typed", "baseline typed", baseline, baseline_env, typed=True))
     return table
+
+
+def library_environment(rscript, library):
+    """The variables that make both engines load packages from `library` and then base R's own,
+    so neither reads a different build of a package from a site library; none when there is no
+    such library."""
+    if not library.is_dir():
+        return {}
+    return {"R_LIBS": str(library), "R_LIBS_USER": str(library), "R_LIBS_SITE": gnu_r_library(rscript)}
+
+
+def gnu_r_library(rscript):
+    """GNU R's own library, which holds base R's packages and whatever was installed beside them."""
+    return subprocess.run([rscript, "--vanilla", "-e", "cat(.Library)"],
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 def file_contains(path, needle):
@@ -387,6 +438,8 @@ def runtime_library_name():
 
 
 def load_suite(suite):
+    if suite == HOT_SUITE:
+        return load_hot_suite(here / suite)
     manifest = tomllib.loads((here / suite / "suite.toml").read_text())
     if suite == RUST_SUITE:
         check_rust_suite(manifest)
@@ -411,6 +464,27 @@ def load_suite(suite):
         if present != listed:
             sys.exit(f"error: {suite}/suite.toml lists {sorted(listed - present)} without a file and "
                      f"misses {sorted(present - listed)}")
+    return manifest
+
+
+def load_hot_suite(directory):
+    """The hot suite's manifest, after checking that every sample it names is there and that each
+    program gives every sample its iterations and its rng, threw and fresh flags."""
+    path = directory / "suite.toml"
+    if not path.exists():
+        sys.exit(f"error: the {HOT_SUITE} suite has not been generated: {path} does not exist. It comes from a "
+                 "capture of the benchmark code bases on ry; generate them with tools/bench/tooling/generate.py, "
+                 "then run `just bench-hot-capture DIR` on that directory")
+    manifest = tomllib.loads(path.read_text())
+    if not isinstance(manifest.get("session"), list):
+        sys.exit(f"error: {path} does not list the packages a replay loads (`session`)")
+    for program in manifest["programs"]:
+        count = len(program["samples"])
+        if not count or any(len(program.get(key, ())) != count for key in ("iterations", "rng", "threw", "fresh")):
+            sys.exit(f"error: {path} gives {program['id']} {count} samples but not as many iterations, rng, threw and fresh flags")
+        for sample in program["samples"]:
+            if not (directory / sample).is_file():
+                sys.exit(f"error: {path} names {sample}, which does not exist")
     return manifest
 
 
@@ -445,10 +519,18 @@ def selected(manifest, args):
             if args.filter in program["id"] or args.filter == program.get("group")]
 
 
-def missing_packages(suite, programs):
+def missing_packages(suite, programs, rscript):
     """The packages the programs load that the corpus library lacks at the locked version, each
     with the reason. A package's test suite may load any locked package, so the packages suite
     needs all of them."""
+    if suite == HOT_SUITE:
+        # The captured code bases import the dependency closure, which pins no versions of its own.
+        # A package installed beside base R is not installed into the closure again, and both
+        # engines find it there (`library_environment`).
+        needed = {name for program in programs for name in program["namespaces"]} - corpus.BASE_PACKAGES
+        libraries = [codebase_library(), pathlib.Path(gnu_r_library(rscript))] if needed else []
+        return sorted((name for name in needed
+                       if not any((library / name / "DESCRIPTION").is_file() for library in libraries)), key=str.lower)
     versions = {name: version for name, version, _ in corpus.locked()}
     if suite == "packages":
         needed = set(versions)
@@ -486,7 +568,8 @@ def run_suite(suite, manifest, missing, args, meta):
         meta = dict(meta, partial={"missing_packages": missing})
     table = engines(args, suite)
     programs = selected(manifest, args)
-    runners = {"public": PublicRunner, "packages": PackageRunner, "codebases": CodebaseRunner, RUST_SUITE: RustRunner}
+    runners = {"public": PublicRunner, "packages": PackageRunner, "codebases": CodebaseRunner, RUST_SUITE: RustRunner,
+               HOT_SUITE: HotRunner}
     runner = runners.get(suite, WorkloadRunner)(suite, args)
     samples_path = samples_file(args, suite)
     state = load_samples(samples_path, args, table, programs)
@@ -520,9 +603,13 @@ def run_suite(suite, manifest, missing, args, meta):
         if samples_path is not None:
             print(f"samples in {samples_path}", flush=True)
         results = summarize(suite, manifest, programs, table, state, args, meta, runner)
+        if suite == HOT_SUITE:
+            hot_passes(runner, programs, table, args, results)
     finally:
         runner.close()
     print_table(results, table)
+    if suite == HOT_SUITE:
+        print_hot(results)
     for key, found in results["worst"].items():
         print(f"Worst program, {results['engines'][key]}: {found['id']} at {found['ratio']:.2f}x")
     for row in results["programs"]:
@@ -560,14 +647,21 @@ def shuffle_round(shuffle, programs, table):
 
 
 def run_round(runner, plan, state):
-    measured = {}
-    for program, engines_here in plan:
-        results = {}
-        for engine in engines_here:
-            results[engine.key] = runner.run(program, engine)
-        measured[program["id"]] = results
+    measured = {program["id"]: {} for program, _ in plan}
+    if getattr(runner, "batched", False):
+        # One process per engine runs the round's programs, in the round's order, and the engines
+        # take turns in the order the round drew for its first program.
+        for engine in plan[0][1] if plan else []:
+            programs = [program for program, engines_here in plan if engine in engines_here]
+            for name, result in runner.run_batch(programs, engine).items():
+                measured[name][engine.key] = result
+    else:
+        for program, engines_here in plan:
+            for engine in engines_here:
+                measured[program["id"]][engine.key] = runner.run(program, engine)
+    for name, results in measured.items():
         line = " ".join(f"{key} {describe(result)}" for key, result in sorted(results.items()))
-        print(f"  {program['id']}: {line}", flush=True)
+        print(f"  {name}: {line}", flush=True)
     return measured
 
 
@@ -585,11 +679,11 @@ def duration(seconds):
 
 # Running one program on one engine.
 
-def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
+def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True, sample=True):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
-    memory in MiB (`MEMORY_PARTS`, from `sample_memory`). The status is None when the process timed
-    out or, with `check_images`, when ry reported an image it could not use: such a process timed a
-    slow start, so its numbers do not count."""
+    memory in MiB (`MEMORY_PARTS`, from `sample_memory`; empty without `sample`). The status is
+    None when the process timed out or, with `check_images`, when ry reported an image it could
+    not use: such a process timed a slow start, so its numbers do not count."""
     with tempfile.TemporaryFile("w+") as stdout, tempfile.TemporaryFile("w+") as stderr:
         started = time.monotonic()
         child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd)
@@ -601,15 +695,17 @@ def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True):
             child.kill()
 
         timer = threading.Timer(timeout, expire)
-        sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory))
+        sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory)) if sample else None
         timer.start()
-        sampler.start()
+        if sampler:
+            sampler.start()
         try:
             _, status = os.waitpid(child.pid, 0)
         finally:
             timer.cancel()
             finished.set()
-            sampler.join()
+            if sampler:
+                sampler.join()
         child.returncode = os.waitstatus_to_exitcode(status)
         seconds = time.monotonic() - started
         stdout.seek(0)
@@ -680,7 +776,27 @@ def merge_memory(memories):
 
 def same_checksum(value, reference):
     """Numeric checksums agree to a relative 1e-10, since a typed program may sum in another order;
-    any other checksum must match exactly."""
+    any other checksum must match exactly. A hot program prints one checksum per sample, joined by
+    commas, so it is compared part by part. A sample's checksum (hot/replay.R) is
+    `<kind>:<length>:<hash>:<magnitude>:<balance>`: the kind, the length and the hash of
+    everything exact (types, lengths, non-finite counts, text, attribute names) must match, and the
+    two sums over the numbers at every depth agree to an absolute 1e-10 or a relative 1e-13."""
+    values, references = value.split(","), reference.split(",")
+    return len(values) == len(references) and all(map(same_checksum_part, values, references))
+
+
+HOT_CHECKSUM_KINDS = {"lgl", "int", "dbl", "cpl", "chr", "raw", "list", "s4"}
+
+
+def same_checksum_part(value, reference):
+    fields, expected = value.split(":"), reference.split(":")
+    if len(fields) == len(expected) == 5 and fields[0] in HOT_CHECKSUM_KINDS:
+        try:
+            return (fields[:3] == expected[:3]
+                    and all(math.isclose(float(a), float(b), rel_tol=1e-13, abs_tol=1e-10)
+                            for a, b in zip(fields[3:], expected[3:])))
+        except ValueError:
+            return value == reference
     try:
         number, expected = float(value), float(reference)
     except ValueError:
@@ -951,11 +1067,7 @@ class CodebaseRunner:
         if not codebase_library().is_dir():
             sys.exit("error: no dependency closure; run `just corpus` first")
         self.ry = args.ry
-        # `ry load --runtime gnu-r` loads libR.so itself, which finds libRblas.so only through the
-        # loader path that R's own launcher script would set.
-        lib = subprocess.run([args.rscript, "--vanilla", "-e", "cat(R.home('lib'))"],
-                             capture_output=True, text=True, check=True).stdout.strip()
-        self.environment = {"ORACLE_R_RSCRIPT": args.rscript, "LD_LIBRARY_PATH": lib}
+        self.environment = codebase_environment(args.rscript)
         self.work = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-codebases-"))
         generator = load_suite(suite)["generator"]
         subprocess.run([sys.executable, "-I", str(here / "tooling/generate.py"), "--out", str(self.work),
@@ -964,29 +1076,504 @@ class CodebaseRunner:
                        check=True, stdout=subprocess.DEVNULL)
 
     def run(self, program, engine):
-        report = self.work / f"{program['id']}-{engine.key}.json"
-        side = "--gnu-r-only" if engine.key == "gnu_r" else "--ry-only"
-        command = [str(self.oracle), "bench", "--ry", self.ry, side, "--json", str(report),
-                   str(self.work / program["id"])]
-        status, out, err, seconds, _ = spawn(command, dict(engine.env, **self.environment),
-                                             timeout=CODEBASE_TIMEOUT, check_images=False)
-        # The oracle exits 1 when the engines' tests do not all match, which a single-engine run
-        # never satisfies, so the report decides.
-        if status not in (0, 1) or not report.exists():
-            return {"seconds": None, "reason": failure_reason(out, err)}
-        summary = json.loads(report.read_text())[0]
-        report.unlink()
-        prefix = "gnu_r" if engine.key == "gnu_r" else "ry"
-        suite_seconds = summary[f"{prefix}_suite_seconds"]
-        if suite_seconds is None:
-            return {"seconds": None, "reason": f"the run never finished ({summary['ry_exit']})"}
-        return {"seconds": round(suite_seconds, 3),
-                "checksum": f"{summary['tests']} tests, {summary[prefix + '_passing']} passing",
-                "wall": round(seconds, 1),
-                "blocks": [comparison[f"{prefix}_seconds"] for comparison in summary["comparisons"]]}
+        return run_codebase(self.oracle, self.ry, self.work / program["id"], engine,
+                            dict(engine.env, **self.environment), self.work / f"{program['id']}-{engine.key}.json")
 
     def close(self):
         subprocess.run(["rm", "-rf", str(self.work)], check=True)
+
+
+def codebase_environment(rscript):
+    """What `oracle bench` needs beside an engine's environment: GNU R's Rscript, and the loader
+    path to GNU R's libraries, because `ry load --runtime gnu-r` loads libR.so itself, which finds
+    libRblas.so only through the loader path that R's own launcher script would set."""
+    lib = subprocess.run([rscript, "--vanilla", "-e", "cat(R.home('lib'))"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return {"ORACLE_R_RSCRIPT": rscript, "LD_LIBRARY_PATH": lib}
+
+
+def run_codebase(oracle, ry, directory, engine, env, report):
+    """One run of a generated code base's test suite on one engine through `oracle bench`, which
+    loads the package with `ry load` and times each test block; the time is the sum of the blocks'.
+    tooling/hot.py runs the same command to capture the code base's package entries."""
+    side = "--gnu-r-only" if engine.key == "gnu_r" else "--ry-only"
+    command = [str(oracle), "bench", "--ry", ry, side, "--json", str(report), str(directory)]
+    status, out, err, seconds, _ = spawn(command, env, timeout=CODEBASE_TIMEOUT, check_images=False)
+    # The oracle exits 1 when the engines' tests do not all match, which a single-engine run
+    # never satisfies, so the report decides.
+    if status not in (0, 1) or not report.exists():
+        return {"seconds": None, "reason": failure_reason(out, err)}
+    summary = json.loads(report.read_text())[0]
+    report.unlink()
+    prefix = "gnu_r" if engine.key == "gnu_r" else "ry"
+    suite_seconds = summary[f"{prefix}_suite_seconds"]
+    if suite_seconds is None:
+        return {"seconds": None, "reason": f"the run never finished ({summary['ry_exit']})"}
+    return {"seconds": round(suite_seconds, 3),
+            "checksum": f"{summary['tests']} tests, {summary[prefix + '_passing']} passing",
+            "wall": round(seconds, 1),
+            "blocks": [comparison[f"{prefix}_seconds"] for comparison in summary["comparisons"]]}
+
+
+class HotRunner:
+    """The hot suite: hot/harness.R, after hot/replay.R, runs the round's programs in one process
+    per engine, so packages load once, and prints a line per program with the checksums of its
+    samples' last results and the times of its batches (`parse_hot_line`). A program's time in a
+    round is the median of its batches in that process."""
+
+    batched = True
+
+    def __init__(self, suite, args, directory=None):
+        self.network = []
+        # The harness runs in a directory of its own, so a relative suite path would not resolve.
+        self.directory = (directory or here / suite).resolve()
+        self.work = pathlib.Path(tempfile.mkdtemp(prefix=f"ry-bench-{suite}-"))
+        self.script = self.work / "harness.R"
+        self.script.write_text((here / HOT_SUITE / "replay.R").read_text() + "\n"
+                               + (here / HOT_SUITE / "harness.R").read_text())
+        self.session = ",".join(tomllib.loads((self.directory / "suite.toml").read_text())["session"])
+
+    def run(self, program, engine):
+        return self.run_batch([program], engine)[program["id"]]
+
+    def run_batch(self, programs, engine, mode="time", env=None, wrapper=(), timeout=HOT_TIMEOUT, shard=""):
+        """Each program's result from one harness process on `engine`. A process that ends early
+        keeps the lines it printed, but one that timed out or started without its images counts
+        for nothing. Processes that run at the same time each name a `shard` of their own, which
+        keeps their program tables apart."""
+        table = self.work / f"programs{shard}.tsv"
+        table.write_text(hot_program_table(programs))
+        variables = dict(engine.env, RY_HOT_SUITE=str(self.directory), RY_HOT_PROGRAMS=str(table), RY_HOT_MODE=mode,
+                         RY_HOT_SESSION=self.session, **(env or {}))
+        # No memory sampling: the suite reports no peaks, and reading the memory map of a process
+        # with a hundred packages loaded every 20 ms would slow the process it measures.
+        status, out, err, _, _ = spawn([*wrapper, *engine.command, self.script.name], variables, cwd=self.work,
+                                       timeout=timeout, sample=False)
+        names = {program["id"] for program in programs}
+        reported = {} if status is None else dict(
+            found for line in out.splitlines() if (found := parse_hot_line(line)) and found[0] in names)
+        missing = {"seconds": None, "reason": failure_reason(out, err) if status != 0 else "the harness printed no line for it"}
+        return {program["id"]: reported.get(program["id"], missing) for program in programs}
+
+    def close(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+
+def hot_program_table(programs):
+    """The program table hot/harness.R reads: a header, then per program its id and
+    comma-separated lists of its sample files, iterations, rng, threw and fresh flags and namespaces."""
+    def flags(program, key):
+        return ",".join("1" if flag else "0" for flag in program[key])
+    lines = ["id\tsamples\titerations\trng\tthrew\tfresh\tnamespaces"]
+    for program in programs:
+        lines.append("\t".join([program["id"], ",".join(program["samples"]), ",".join(map(str, program["iterations"])),
+                                flags(program, "rng"), flags(program, "threw"), flags(program, "fresh"),
+                                ",".join(program["namespaces"])]))
+    return "\n".join(lines) + "\n"
+
+
+def parse_hot_line(line):
+    """A hot/harness.R line as `(id, result)`, or None for any other line. The line is `<id>
+    <checksums> <min batch seconds> <median batch seconds> <calls per batch>`, with `NA` times in
+    instructions mode, which times nothing, or `<id> failed <reason>`."""
+    fields = line.split(" ")
+    if len(fields) >= 3 and fields[1] == "failed":
+        return fields[0], {"seconds": None, "reason": " ".join(fields[2:])}
+    if len(fields) != 5:
+        return None
+    name, checksum, least, median, calls = fields
+    try:
+        result = {"checksum": checksum, "calls": int(calls)}
+        if median != "NA":
+            result.update(seconds=float(median), min=float(least))
+    except ValueError:
+        return None
+    return name, result
+
+
+def hot_summary(results, programs, table, state, args):
+    """Adds what the hot suite records beside the common fields: each program's calls per batch,
+    its share and weight in each code base, and per engine the predicted speed-up of each code base.
+
+    A program's `share` of a code base is the share of the capture run's time (ry with the JIT off
+    and the recorder on) measured in calls to its function. Its `weight` is its share of the code
+    base's GNU R time among the suite's programs, which tooling/hot.py estimates from the capture
+    when it generates the suite. The predicted speed-up of a code base is GNU R's time over ry's
+    for the programs run in the proportions the code base runs them: with each program's paired
+    speed-up r (GNU R / ry), 1 / sum(w / r), the weighted harmonic mean, over the programs that
+    have a speed-up, whose summed weight `weight` records. Its interval is a bootstrap of that
+    weighted harmonic mean (`predicted_interval`) that resamples each program's rounds, so it
+    covers round-to-round noise only: not the uncertainty in the weights, nor which programs the
+    suite selected."""
+    rows = {row["id"]: row for row in results["programs"]}
+    for program in programs:
+        row = rows[program["id"]]
+        calls = [run["calls"] for round_ in state["rounds"] for run in round_.get(program["id"], {}).values() if "calls" in run]
+        if calls:
+            row["calls"] = calls[-1]
+        row["share"] = program.get("share", {})
+        row["weight"] = program.get("weight", {})
+    codebases = list(dict.fromkeys(codebase for program in programs for codebase in program.get("weight", {})))
+    predicted = {}
+    for engine in table[1:]:
+        found = {}
+        for codebase in codebases:
+            weighted = [(program["weight"][codebase], round_ratios(state, program["id"], table, engine, "speedup"))
+                        for program in programs
+                        if program["weight"].get(codebase, 0) > 0 and not rows[program["id"]].get("failures")]
+            weighted = [(weight, ratios) for weight, ratios in weighted if ratios]
+            if weighted:
+                point, low, high = predicted_interval(weighted, args.seed)
+                found[codebase] = {"median": round(point, 4), "low": round(low, 4), "high": round(high, 4),
+                                   "weight": round(sum(weight for weight, _ in weighted), 4), "programs": len(weighted)}
+        if found:
+            predicted[engine.key] = found
+    results["predicted"] = predicted
+
+
+def predicted_interval(weighted, seed, resamples=2000):
+    """The weighted harmonic mean of the programs' median speed-ups, `weighted` being pairs of a
+    weight and the program's per-round ratios, and a 95% bootstrap interval that resamples each
+    program's rounds."""
+    total = sum(weight for weight, _ in weighted)
+
+    def predict(medians):
+        return total / sum(weight / median for (weight, _), median in zip(weighted, medians))
+    point = predict([statistics.median(ratios) for _, ratios in weighted])
+    draw = random.Random(seed)
+    values = sorted(predict([statistics.median(draw.choices(ratios, k=len(ratios))) for _, ratios in weighted])
+                    for _ in range(resamples))
+    return point, values[int(0.025 * resamples)], values[int(0.975 * resamples) - 1]
+
+
+def hot_passes(runner, programs, table, args, results):
+    """The hot suite's passes on ry beside the timed rounds: `--breakdown` and `--instructions`."""
+    rows = {row["id"]: row for row in results["programs"]}
+    ry = next(engine for engine in table if engine.key == "ry")
+    if args.breakdown:
+        path = runner.work / "regions.jsonl"
+        path.unlink(missing_ok=True)
+        measured = runner.run_batch(programs, ry, mode="regions",
+                                    env={"RY_PROFILE_REGIONS": str(path), "RY_PROFILE_INTERVAL_US": "100"})
+        regions = parse_regions(path.read_text()) if path.exists() else {}
+        if not regions:
+            print(f"warning: {args.ry} wrote no region profile, so it has no `.ry_bench_region`; no breakdown")
+        for program in programs:
+            name = program["id"]
+            if name in regions:
+                rows[name]["breakdown"] = regions[name]
+            elif regions:
+                print(f"warning: no region profile for {name}: {measured[name].get('reason', 'the profile has no such region')}")
+        results["breakdown_weighting"], results["breakdown"] = weighted_breakdown(results["programs"])
+    if args.instructions:
+        found, functions = instructions_of(runner, programs, ry, functions=args.functions > 0)
+        counts = {"ry": found}
+        if functions:
+            results["functions"] = weighted_functions(programs, found, functions, args.functions)
+        for engine in table:
+            if engine.key in ("baseline", "ry_nojit"):
+                counts[engine.key], _ = instructions_of(runner, programs, engine)
+        for key, measured in counts.items():
+            for name, found in measured.items():
+                rows[name].setdefault("instructions", {})[key] = found
+        results["instructions"] = {key: weighted_instructions(programs, measured) for key, measured in counts.items()}
+        if args.save_instructions:
+            saved = {"ry": args.ry, "ry_commit": results["meta"].get("ry_commit"), "programs": counts["ry"]}
+            pathlib.Path(args.save_instructions).write_text(json.dumps(saved, indent=2) + "\n")
+            print(f"instruction counts in {args.save_instructions}")
+        changes = {}
+        if args.baseline_instructions:
+            saved = json.loads(pathlib.Path(args.baseline_instructions).read_text())
+            changes[args.baseline_instructions] = compare_instructions(programs, saved["programs"], counts["ry"])
+        if "baseline" in counts:
+            changes[args.baseline] = compare_instructions(programs, counts["baseline"], counts["ry"])
+        if "ry_nojit" in counts:
+            changes["the JIT off"] = compare_instructions(programs, counts["ry_nojit"], counts["ry"])
+        if changes:
+            results["instruction_changes"] = changes
+
+
+def parse_regions(text):
+    """The region profile ry writes under RY_PROFILE_REGIONS, one JSON object per line and region,
+    as each region's seconds, profiler samples, share of samples per activity, and counters. The
+    activity keys are whatever categories the runtime reports. The empty region is the time
+    outside every region."""
+    regions = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        region = json.loads(line)
+        if not region.get("region"):
+            continue
+        activities = region.get("activities", {})
+        total = sum(activities.values())
+        regions[region["region"]] = {
+            "seconds": region.get("seconds"), "samples": region.get("samples"),
+            "activities": {key: round(count / total, 4) for key, count in sorted(activities.items(), key=lambda item: -item[1])}
+            if total else {},
+            "counters": region.get("counters", {}),
+        }
+    return regions
+
+
+def weighted_breakdown(rows):
+    """Per code base, the share of ry's time in each activity, and which time weighs the programs.
+    Each program's breakdown is weighted by its share of the code base's ry time, which is its GNU
+    R weight over its speed-up. Without a speed-up for every program with a breakdown (a run with
+    `--rounds 0` times nothing) it is weighted by the GNU R weight alone, for every program, and
+    the weighting returned says `GNU R time` in place of `ry time`."""
+    found = {}
+    profiled = [row for row in rows if row.get("breakdown")]
+    timed = all(row.get("ratio", {}).get("ry", {}).get("median") for row in profiled)
+    weighting = "ry time" if timed else "GNU R time"
+    codebases = list(dict.fromkeys(codebase for row in rows for codebase in row.get("weight", {})))
+    for codebase in codebases:
+        weighted = [(row["weight"][codebase] / (row["ratio"]["ry"]["median"] if timed else 1.0), row["breakdown"]["activities"])
+                    for row in profiled if row["weight"].get(codebase, 0) > 0]
+        total = sum(weight for weight, _ in weighted)
+        if not total:
+            continue
+        shares = {}
+        for weight, activities in weighted:
+            for key, share in activities.items():
+                shares[key] = shares.get(key, 0.0) + weight / total * share
+        found[codebase] = {key: round(share, 4) for key, share in sorted(shares.items(), key=lambda item: -item[1])}
+    return weighting, found
+
+
+def instructions_of(runner, programs, engine, functions=False):
+    """Each program's instructions in one batch on `engine`, counted by callgrind in the region
+    the harness opens around it, which dumps each time the region ends; a region entered more
+    than once has its dumps summed. With `functions`, also each program's instructions per
+    function (`parse_callgrind_functions`); otherwise that is empty.
+
+    The programs are dealt over `INSTRUCTION_SHARDS` harness processes that run side by side,
+    because callgrind runs a process some fifty times slower. A program's count depends a little
+    on the programs its process ran before it (what the collector has to trace, what is compiled),
+    so the deal is by position in the suite and not by the number of cores: the same selection
+    of programs counts the same on every machine.
+
+    Native code runs on one OpenMP thread. Callgrind counts every thread, and the idle workers of
+    a thread pool spin while they wait, for a time that differs from run to run: with data.table's
+    default threads, a `:=` by group counted 80 to 96 million instructions, and 45.8 million on
+    one thread in every run."""
+    if shutil.which("valgrind") is None:
+        sys.exit("error: --instructions runs ry under callgrind, and valgrind is not on the PATH")
+    prefix = runner.work / f"callgrind.{engine.key}"
+    for old in runner.work.glob(f"{prefix.name}*"):
+        old.unlink()
+
+    def count(shard):
+        wrapper = ["valgrind", "--tool=callgrind", "--instr-atstart=no", "--smc-check=all-non-file",
+                   f"--callgrind-out-file={prefix}.{shard}"]
+        return runner.run_batch(programs[shard::INSTRUCTION_SHARDS], engine, mode="instructions", wrapper=wrapper,
+                                env={"OMP_NUM_THREADS": "1"}, timeout=CODEBASE_TIMEOUT, shard=f".{shard}")
+
+    measured = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
+        for part in pool.map(count, range(min(INSTRUCTION_SHARDS, len(programs)))):
+            measured.update(part)
+    dumps, by_function = {}, {}
+    for path in sorted(runner.work.glob(f"{prefix.name}.*")):
+        text = path.read_text(errors="replace")
+        if found := parse_callgrind_dump(text):
+            dumps[found[0]] = dumps.get(found[0], 0) + found[1]
+            if functions:
+                summed = by_function.setdefault(found[0], {})
+                for key, count in parse_callgrind_functions(text).items():
+                    summed[key] = summed.get(key, 0) + count
+    counts = {}
+    for program in programs:
+        name, result = program["id"], measured[program["id"]]
+        if name in dumps and result.get("calls"):
+            counts[name] = {"batch": dumps[name], "calls": result["calls"], "per_call": round(dumps[name] / result["calls"], 1)}
+        else:
+            print(f"warning: no instruction count for {name} on {engine.label}: "
+                  f"{result.get('reason') or 'callgrind wrote no dump for its region'}")
+    return counts, by_function
+
+
+def parse_callgrind_dump(text):
+    """The region and instruction count of one callgrind dump, or None for a dump no region
+    triggered (the one at program exit). A dump the region call triggers names the region in its
+    `desc: Trigger: Client Request: <name>` line, and its `totals:` line starts with the count of
+    the first event, which is instructions unless other events are asked for. The `summary:` line
+    is no use: it reads 0, because the region stops instrumentation before it dumps."""
+    trigger = re.search(r"^desc: Trigger: Client Request: (.*)$", text, re.M)
+    total = re.search(r"^totals: (\d+)", text, re.M)
+    if trigger is None or total is None or not trigger[1].strip():
+        return None
+    return trigger[1].strip(), int(total[1])
+
+
+def parse_callgrind_functions(text):
+    """The instructions each function ran itself in one callgrind dump, as `{(object, function):
+    count}`, with a function callgrind has no symbol for folded into `(no symbols)` of its object.
+
+    A dump names an object or a function in full once, as `(id) name`, and by `(id)` afterwards,
+    and `ob`/`cob` share one id table as `fn`/`cfn` do. A cost line starts with one position per
+    entry of the `positions:` header and then the instruction count. The cost line after a
+    `calls=` line is what the callee ran, which the callee's own lines already hold."""
+    names = {"ob": {}, "fn": {}}
+    current = {"ob": "???", "fn": None}
+    columns = 1
+    costs = {}
+    after_call = False
+    for line in text.splitlines():
+        if not line:
+            continue
+        if line[0].isdigit() or line[0] in "+-*":
+            if after_call:
+                after_call = False
+            elif current["fn"] is not None:
+                key = (current["ob"], current["fn"])
+                costs[key] = costs.get(key, 0) + int(line.split()[columns])
+            continue
+        key, separator, value = line.partition("=")
+        if key == "positions: instr line":
+            columns = 2
+        if not separator:
+            continue
+        if key == "calls":
+            after_call = True
+        elif key in ("ob", "cob", "fn", "cfn"):
+            table = names[key[-2:]]
+            name = value
+            if compressed := re.match(r"\((\d+)\)\s*(.*)$", value):
+                name = table.setdefault(compressed[1], compressed[2]) if compressed[2] else table.get(compressed[1], value)
+            if key in ("ob", "fn"):
+                current[key] = name
+    folded = {}
+    for (shared_object, function), count in costs.items():
+        label = os.path.basename(shared_object) or shared_object
+        # Callgrind numbers the levels of a recursion as `name'2`, `name'3`.
+        function = re.sub(r"'\d+$", "", function)
+        function = "(no symbols)" if re.fullmatch(r"0x[0-9a-fA-F]+", function) else re.sub(r"::h[0-9a-f]{16}$", "", function)
+        folded[label, function] = folded.get((label, function), 0) + count
+    return folded
+
+
+def weighted_functions(programs, counts, by_function, limit):
+    """The `limit` functions that hold the most of the code bases' instructions, with each one's
+    share per code base: a program's instructions in a function are scaled like the program's
+    total in `weighted_instructions`, and a share is over the sum of all functions. A function's
+    rank is its largest share in any code base."""
+    codebases = list(dict.fromkeys(codebase for program in programs for codebase in program.get("weight", {})))
+    totals = {codebase: {} for codebase in codebases}
+    for program in programs:
+        name = program["id"]
+        if name not in counts or name not in by_function:
+            continue
+        scale = 1 / (counts[name]["calls"] * program["gnu_seconds_per_call"])
+        for codebase in codebases:
+            weight = program["weight"].get(codebase, 0)
+            for key, count in by_function[name].items():
+                totals[codebase][key] = totals[codebase].get(key, 0) + weight * scale * count
+    sums = {codebase: sum(found.values()) for codebase, found in totals.items()}
+    shares = {}
+    for codebase, found in totals.items():
+        for key, value in found.items():
+            if sums[codebase]:
+                shares.setdefault(key, {})[codebase] = value / sums[codebase]
+    ranked = sorted(shares.items(), key=lambda item: (-max(item[1].values()), item[0]))[:limit]
+    return [{"object": key[0], "function": key[1], "share": {codebase: round(share, 5) for codebase, share in found.items()}}
+            for key, found in ranked]
+
+
+def weighted_instructions(programs, counts):
+    """Per code base, ry's instructions per second of GNU R work: each program's instructions per
+    call over GNU R's seconds per call, averaged with the program's weight over the programs
+    counted. The GNU R time is the one fixed when the suite was generated, so the figure moves only
+    with the build under test."""
+    found = {}
+    codebases = list(dict.fromkeys(codebase for program in programs for codebase in program.get("weight", {})))
+    for codebase in codebases:
+        weighted = [(program["weight"][codebase], counts[program["id"]]["per_call"] / program["gnu_seconds_per_call"])
+                    for program in programs if program["id"] in counts and program["weight"].get(codebase, 0) > 0]
+        total = sum(weight for weight, _ in weighted)
+        if total:
+            found[codebase] = round(sum(weight * rate for weight, rate in weighted) / total)
+    return found
+
+
+def compare_instructions(programs, old, new):
+    """Each program's change in instructions per call from `old` to `new`, with its effect on each
+    code base's weighted total (`weighted_instructions`) in percent, sorted by the largest effect,
+    over the programs both count."""
+    common = [program for program in programs if program["id"] in old and program["id"] in new]
+    codebases = list(dict.fromkeys(codebase for program in common for codebase in program.get("weight", {})))
+    totals = {codebase: sum(program["weight"].get(codebase, 0) * old[program["id"]]["per_call"] / program["gnu_seconds_per_call"]
+                            for program in common) for codebase in codebases}
+    changes = []
+    for program in common:
+        before, after = old[program["id"]]["per_call"], new[program["id"]]["per_call"]
+        effect = {codebase: round(100 * program["weight"].get(codebase, 0) * (after - before) / program["gnu_seconds_per_call"]
+                                  / totals[codebase], 3) for codebase in codebases if totals[codebase]}
+        changes.append({"id": program["id"], "before": before, "after": after,
+                        "change": round(100 * (after - before) / before, 3) if before else None, "effect": effect})
+    changes.sort(key=lambda change: (-max((abs(value) for value in change["effect"].values()), default=0), change["id"]))
+    return changes
+
+
+def print_hot(results):
+    """What the hot suite adds to the common table: the predicted speed-up of each code base, the
+    breakdown and the instruction counts."""
+    for key, found in results.get("predicted", {}).items():
+        for codebase, value in found.items():
+            print(f"\nPredicted {ratio_label(results, key)} for {codebase}: {value['median']:.2f}x "
+                  f"(95% interval {value['low']:.2f} to {value['high']:.2f}; {value['programs']} programs "
+                  f"carrying {value['weight']:.0%} of its weight)")
+    rows = [row for row in results["programs"] if row.get("breakdown")]
+    if rows:
+        totals = {}
+        for row in rows:
+            for key, share in row["breakdown"]["activities"].items():
+                totals[key] = totals.get(key, 0.0) + share
+        activities = sorted(totals, key=lambda key: (-totals[key], key))
+        print("\nWhere ry spends each program's time, in shares of its profiler samples\n")
+        print("| program | samples | " + " | ".join(activities) + " |")
+        print("| --- | ---: |" + " ---: |" * len(activities))
+        for row in rows:
+            shares = row["breakdown"]["activities"]
+            print(f"| {row['display']} | {row['breakdown']['samples']} | "
+                  + " | ".join(f"{shares[key]:.0%}" if key in shares else "" for key in activities) + " |")
+        for codebase, shares in results.get("breakdown", {}).items():
+            weighting = results.get("breakdown_weighting", "ry time")
+            print(f"| {codebase}, weighted by {weighting} | | " + " | ".join(f"{shares[key]:.0%}" if key in shares else "" for key in activities) + " |")
+    counted = [row for row in results["programs"] if row.get("instructions")]
+    if counted:
+        keys = list(dict.fromkeys(key for row in counted for key in row["instructions"]))
+        print("\nInstructions under callgrind, in one batch and per call\n")
+        print("| program | calls | " + " | ".join(f"{results['engines'][key]}, batch | per call" for key in keys) + " |")
+        print("| --- | ---: |" + " ---: | ---: |" * len(keys))
+        for row in counted:
+            cells = []
+            for key in keys:
+                found = row["instructions"].get(key)
+                cells += [f"{found['batch']:,}", f"{found['per_call']:,.0f}"] if found else ["", ""]
+            calls = next(iter(row["instructions"].values()))["calls"]
+            print(f"| {row['display']} | {calls} | " + " | ".join(cells) + " |")
+        for key, totals in results["instructions"].items():
+            for codebase, total in totals.items():
+                print(f"Weighted, {codebase}, {results['engines'][key]}: {total:,} instructions per second of GNU R work")
+    if results.get("functions"):
+        codebases = list(dict.fromkeys(codebase for row in results["functions"] for codebase in row["share"]))
+        print("\nFunctions by their own share of each code base's instructions\n")
+        print("| function | object | " + " | ".join(codebases) + " |")
+        print("| --- | --- |" + " ---: |" * len(codebases))
+        for row in results["functions"]:
+            print(f"| {row['function']} | {row['object']} | "
+                  + " | ".join(f"{row['share'].get(codebase, 0):.2%}" for codebase in codebases) + " |")
+    for against, changes in results.get("instruction_changes", {}).items():
+        print(f"\nInstructions per call against {against}, by effect on each code base's weighted total\n")
+        codebases = list(dict.fromkeys(codebase for change in changes for codebase in change["effect"]))
+        print("| program | before | after | change | " + " | ".join(f"effect, {codebase}" for codebase in codebases) + " |")
+        print("| --- | ---: | ---: | ---: |" + " ---: |" * len(codebases))
+        for change in changes:
+            percent = "" if change["change"] is None else f"{change['change']:+.2f}%"
+            print(f"| {change['id']} | {change['before']:,.0f} | {change['after']:,.0f} | {percent} | "
+                  + " | ".join(f"{change['effect'][codebase]:+.3f}%" if codebase in change["effect"] else ""
+                               for codebase in codebases) + " |")
 
 
 def per_block(state, name, table, engine):
@@ -1209,6 +1796,8 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
     }
     if pairs:
         results["paired_geomean"] = geomeans(paired_included)
+    if suite == HOT_SUITE:
+        hot_summary(results, programs, table, state, args)
     return results
 
 
@@ -1219,6 +1808,9 @@ def ratio_label(results, key):
 
 
 def print_table(results, table):
+    # A run of zero rounds (the hot suite's passes on their own) timed nothing to tabulate.
+    if not any(row["seconds"] or row.get("failures") for row in results["programs"]):
+        return
     keys = [engine.key for engine in table if engine.key in results["engines"]]
     pairs = [key for key in keys if key in results.get("paired_geomean", {}) or
              any(key in row.get("paired", {}) for row in results["programs"])]
@@ -1238,13 +1830,15 @@ def print_table(results, table):
         if row.get("failures"):
             flags = ", ".join(["FAILED"] + ([flags] if flags else []))
         print(f"| {row['display']} | " + " | ".join(cells) + f" | {flags} |")
-    print("\nPeak memory in MiB: whole process / anonymous / start-up image / libR.so resident\n")
-    print("| program | " + " | ".join(label[key] for key in keys) + " |")
-    print("| --- |" + " ---: |" * len(keys))
-    for row in results["programs"]:
-        cells = [" / ".join(f"{row[field][key]:.1f}" if key in row.get(field, {}) else "-"
-                            for field in MEMORY_PARTS.values()) for key in keys]
-        print(f"| {row['display']} | " + " | ".join(cells) + " |")
+    # The hot suite runs every program in one process, so no program has a peak of its own.
+    if any(row.get(field) for row in results["programs"] for field in MEMORY_PARTS.values()):
+        print("\nPeak memory in MiB: whole process / anonymous / start-up image / libR.so resident\n")
+        print("| program | " + " | ".join(label[key] for key in keys) + " |")
+        print("| --- |" + " ---: |" * len(keys))
+        for row in results["programs"]:
+            cells = [" / ".join(f"{row[field][key]:.1f}" if key in row.get(field, {}) else "-"
+                                for field in MEMORY_PARTS.values()) for key in keys]
+            print(f"| {row['display']} | " + " | ".join(cells) + " |")
     for key, mean in results["geomean"].items():
         print(f"\nGeometric mean of {ratio_label(results, key)} over {mean['programs']} programs: "
               f"{mean['median']:.2f}x (95% interval {mean['low']:.2f} to {mean['high']:.2f})")

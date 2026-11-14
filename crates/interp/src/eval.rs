@@ -222,7 +222,7 @@ pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The `*tmp*` a complex assignment running in `env` or an environment it encloses stands for,
 /// or `R_UnboundValue`.
-unsafe fn tmp_value(env: Sexp) -> Sexp {
+pub(crate) unsafe fn tmp_value(env: Sexp) -> Sexp {
     let empty = values::empty_env();
     for &(assignment_env, value) in interp().tmp_values.iter().rev() {
         let mut scope = env;
@@ -409,14 +409,26 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     {
         panic!("a promise was forced after its last counted reference was released");
     }
+    // A reference only reads a variable of another frame; forcing the promise it reaches records
+    // the code that runs.
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
-    } else if env.has_gp(gp::PENDING_FRAME) {
-        force_slot_promise(promise, env)
-    } else if code.kind() == SexpType::Bytecode {
-        bytecode::run_promise(code, env)
     } else {
-        eval(promise.cdr(), env)
+        let pending = env.has_gp(gp::PENDING_FRAME);
+        let _recorded = crate::capture::evaluating(|| {
+            if pending {
+                interp().frames[pending_owner(env)].function.tag()
+            } else {
+                env
+            }
+        });
+        if pending {
+            force_slot_promise(promise, env)
+        } else if code.kind() == SexpType::Bytecode {
+            bytecode::run_promise(code, env)
+        } else {
+            eval(promise.cdr(), env)
+        }
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
@@ -2716,7 +2728,7 @@ pub unsafe fn run_inlined(
 ) -> R<Sexp> {
     let _window = SlotWindow(header);
     activity::count(Counter::ClosureCalls);
-    let _frame = crate::profile_summary::enter_closure(call, function);
+    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil());
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -2749,7 +2761,9 @@ pub unsafe fn run_inlined(
     } else {
         result
     };
-    pop_frame(function, depth, result)
+    let result = pop_frame(function, depth, result);
+    hooks.returned(&result);
+    result
 }
 
 /// The environment of the frame at `index`, made from its slots first if it is a slot frame
@@ -3413,7 +3427,8 @@ unsafe fn run_frame_general(
     let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
-    let _frame = crate::profile_summary::enter_closure(call, function);
+    let mut hooks =
+        crate::profile_summary::enter_closure(call, function, sys_parent, method_vars, env);
     if slots == crate::NO_SLOTS {
         moves::entering_closure(function, env)?;
     }
@@ -3503,7 +3518,9 @@ unsafe fn run_frame_general(
         Err(unwind) => (None, Err(unwind)),
     };
     let result = finish_frame(call, depth, signature, result);
-    pop_frame(function, depth, result)
+    let result = pop_frame(function, depth, result);
+    hooks.returned(&result);
+    result
 }
 
 /// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
@@ -5858,11 +5875,13 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         previous_owner: state.slot_owner,
     });
     let depth = state.frames.len();
+    let recorded = crate::capture::evaluating(|| env);
     let result = scope(|| match expression.kind() {
         SexpType::Expression => eval_all(expression, env),
         SexpType::Promise => force_promise(expression),
         _ => eval(expression, env),
     });
+    drop(recorded);
     // `return()` may come from the body or from an `on.exit` expression, which runs in the
     // same frame and so returns from it too.
     let result = catch_return(env, run_on_exit(depth, catch_return(env, result)));

@@ -410,6 +410,7 @@ pub(crate) unsafe fn install_all() {
         crate::serialize::BUILTINS,
         crate::connections::BUILTINS,
         crate::system::BUILTINS,
+        crate::profile_summary::BUILTINS,
         crate::lower::BUILTINS,
         crate::bytecode::BUILTINS,
         crate::code_image::BUILTINS,

@@ -58,6 +58,7 @@ pub struct State {
 }
 
 /// Whether a move is being tracked, which every closure entry must take part in.
+#[inline]
 pub fn tracking() -> bool {
     !interp().moves.moves.is_empty()
 }

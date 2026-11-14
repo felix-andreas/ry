@@ -139,6 +139,34 @@ the interpreter, and the flag under the bar names what was refused.
 
 <BenchmarkPrograms suite="applications" />
 
+<BenchmarkSection suite="hot">
+
+The suites above are programs somebody chose. This one is derived from a measurement of the three
+[benchmark code bases](/development/corpus-and-oracle#the-benchmark-generator), 300,000 lines each for finance, data
+science and biostatistics. A recorder in the runtime ran their tests and measured how much time
+they spend in each package function their own code calls, such as `stats::lm`, `zoo::rollapply` or
+`testthat::expect_equal`. The suite is the 100 functions that hold the most of that time, each
+with up to three of the calls the code bases made to it, captured with their arguments. A program
+replays those calls in a loop, on both engines, with every package the code bases import loaded.
+
+<SpeedChart suite="hot" />
+
+The suite exists to steer performance work: a round takes about half a minute where the code
+bases take minutes, and weighting each program by its share of a code base's time predicts that
+code base's speed-up. [The hot suite](/development/testing#the-hot-suite-a-runtime-change-measured-in-seconds)
+describes how the programs are selected, weighted and checked against the code bases. One process
+per engine runs every program: one warm-up batch of its calls, then five timed batches, and a
+program's time is the median batch.
+
+<details>
+<summary>The numbers: milliseconds per batch of calls</summary>
+
+<BenchmarkTable suite="hot" />
+
+</details>
+
+</BenchmarkSection>
+
 <BenchmarkSection suite="typed">
 
 This suite asks how close typed ry comes to Rust. It takes the typed version of every numeric

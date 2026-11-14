@@ -79,7 +79,15 @@ impl Module {
     fn new(allocator: Allocator) -> Result<Self, Error> {
         let mut flags = settings::builder();
         let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
-            flags.set("opt_level", "speed")?;
+            // The mid-end rewrite pass is a third of a single-pass compile, and loop-free code
+            // is mostly helper calls it cannot improve, so only loop bodies pay for it.
+            flags.set(
+                "opt_level",
+                match allocator {
+                    Allocator::SinglePass => "none",
+                    Allocator::Backtracking => "speed",
+                },
+            )?;
             flags.set("use_colocated_libcalls", "false")?;
             flags.set("is_pic", "false")?;
             flags.set(

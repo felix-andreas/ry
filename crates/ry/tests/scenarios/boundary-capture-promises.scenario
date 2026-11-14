@@ -1,0 +1,74 @@
+# The boundary-call recorder runs none of the recorded program's code: a variable bound to an
+# unforced promise is read when the call ends, so the program behaves the same with the
+# recorder on, and a sample holds only the promises the call forced. A function found on the
+# search path, such as stats' `sd` called by its bare name, is recorded as an import.
+
+requires ry-runtime
+
+file workload.R
+| logged <- function(expr) tryCatch(expr, error = function(e) "handled")
+| r <- tryCatch(logged(stop("broken")), error = function(e) "leaked")
+| cat("logged:", r, "\n")
+| twice <- function(v) vapply(v, function(x) x * 2, numeric(1))
+| d <- twice(c(1, 2, 3))
+| quiet <- function(kinds) suppressWarnings(sqrt(4), classes = kinds)
+| q <- quiet(stop("never forced"))
+| apply_it <- function(f) vapply(1:2, f, numeric(1))
+| k <- apply_it(function(i) i + 0.5)
+| hits <- 0
+| watched <- function() {
+|   makeActiveBinding("seen", function() { hits <<- hits + 1; 7 }, environment())
+|   rev(seen)
+| }
+| w <- watched()
+| tools <- list(average = mean)
+| m <- tools$average(c(1, 3))
+| spread <- sd(c(1, 3))
+| cat("values:", d, q, k, w, m, spread, "\n")
+| cat("active binding read", hits, "time\n")
+
+run ry run workload.R
+expect exit 0
+expect stdout "logged: handled"
+expect stdout "values: 2 4 6 2 1.5 2.5 7 2 1.414214"
+expect stdout "active binding read 1 time"
+
+env RY_CAPTURE_PACKAGE R_GlobalEnv
+env RY_CAPTURE_DIR capture
+run ry run workload.R
+expect exit 0
+expect stdout "logged: handled"
+expect stdout "values: 2 4 6 2 1.5 2.5 7 2 1.414214"
+expect stdout "active binding read 1 time"
+expect file capture/entries.tsv "base	$average	1	"
+
+unset RY_CAPTURE_PACKAGE
+unset RY_CAPTURE_DIR
+file replay.R
+| entries <- read.delim("capture/entries.tsv", stringsAsFactors = FALSE)
+| entry <- function(name) entries[entries$name == name, ]
+| stopifnot(
+|   entry("tryCatch")$calls == 1, entry("tryCatch")$user_binding == 1,
+|   entry("vapply")$calls == 1, entry("vapply")$user_binding == 1,
+|   entry("suppressWarnings")$calls == 1, entry("rev")$user_binding == 1
+| )
+| samples <- read.delim("capture/samples.tsv", stringsAsFactors = FALSE)
+| for (file in samples$file) {
+|   sample <- readRDS(file.path("capture", file))
+|   env <- list2env(sample$variables, parent = globalenv())
+|   for (name in names(sample$imports)) {
+|     assign(name, get(name, envir = asNamespace(sample$imports[[name]])), envir = env)
+|   }
+|   replayed <- tryCatch(list(value = eval(sample$call, env)), error = function(e) "threw")
+|   stopifnot(sample$value_kept, identical(replayed$value, sample$value))
+|   cat(sample$name, " reads [", paste(sort(names(sample$variables)), collapse = ","), "]",
+|       " imports [", paste(names(sample$imports), sample$imports, sep = "=", collapse = ","), "]\n",
+|       sep = "")
+| }
+run ry run replay.R
+expect exit 0
+expect stdout "tryCatch reads []"
+expect stdout "vapply reads [v]"
+expect stdout "suppressWarnings reads []"
+expect stdout "$average reads [tools]"
+expect stdout "sd reads [] imports [sd=stats]"
