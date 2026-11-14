@@ -113,7 +113,7 @@ Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rs
                             [--breakdown] [--instructions] [--save-instructions FILE]
                             [--baseline-instructions FILE] [--functions N]
 """
-import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
+import argparse, atexit, concurrent.futures, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
 import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
@@ -150,6 +150,8 @@ CODEBASE_TIMEOUT = 7200
 HOT_SHORT = 0.001
 # One process runs every program of the suite, and under callgrind ry runs about 50 times slower.
 HOT_TIMEOUT = 3600
+# The harness processes one instruction pass deals the suite's programs over (`instructions_of`).
+INSTRUCTION_SHARDS = 4
 # The same floor for the typed suite. Both of its harnesses time a warm run inside the process, so
 # start-up is not in the time, and both print it to the microsecond: 0.1 ms is 100 of those steps.
 RUST_SHORT = 0.0001
@@ -1134,11 +1136,12 @@ class HotRunner:
     def run(self, program, engine):
         return self.run_batch([program], engine)[program["id"]]
 
-    def run_batch(self, programs, engine, mode="time", env=None, wrapper=(), timeout=HOT_TIMEOUT):
+    def run_batch(self, programs, engine, mode="time", env=None, wrapper=(), timeout=HOT_TIMEOUT, shard=""):
         """Each program's result from one harness process on `engine`. A process that ends early
         keeps the lines it printed, but one that timed out or started without its images counts
-        for nothing."""
-        table = self.work / "programs.tsv"
+        for nothing. Processes that run at the same time each name a `shard` of their own, which
+        keeps their program tables apart."""
+        table = self.work / f"programs{shard}.tsv"
         table.write_text(hot_program_table(programs))
         variables = dict(engine.env, RY_HOT_SUITE=str(self.directory), RY_HOT_PROGRAMS=str(table), RY_HOT_MODE=mode,
                          RY_HOT_SESSION=self.session, **(env or {}))
@@ -1342,15 +1345,29 @@ def instructions_of(runner, programs, engine, functions=False):
     """Each program's instructions in one batch on `engine`, counted by callgrind in the region
     the harness opens around it, which dumps each time the region ends; a region entered more
     than once has its dumps summed. With `functions`, also each program's instructions per
-    function (`parse_callgrind_functions`); otherwise that is empty."""
+    function (`parse_callgrind_functions`); otherwise that is empty.
+
+    The programs are dealt over `INSTRUCTION_SHARDS` harness processes that run side by side,
+    because callgrind runs a process some fifty times slower. A program's count depends a little
+    on the programs its process ran before it (what the collector has to trace, what is compiled),
+    so the deal is by position in the suite and not by the number of cores: the same selection
+    of programs counts the same on every machine."""
     if shutil.which("valgrind") is None:
         sys.exit("error: --instructions runs ry under callgrind, and valgrind is not on the PATH")
     prefix = runner.work / f"callgrind.{engine.key}"
     for old in runner.work.glob(f"{prefix.name}*"):
         old.unlink()
-    wrapper = ["valgrind", "--tool=callgrind", "--instr-atstart=no", "--smc-check=all-non-file",
-               f"--callgrind-out-file={prefix}"]
-    measured = runner.run_batch(programs, engine, mode="instructions", wrapper=wrapper, timeout=CODEBASE_TIMEOUT)
+
+    def count(shard):
+        wrapper = ["valgrind", "--tool=callgrind", "--instr-atstart=no", "--smc-check=all-non-file",
+                   f"--callgrind-out-file={prefix}.{shard}"]
+        return runner.run_batch(programs[shard::INSTRUCTION_SHARDS], engine, mode="instructions", wrapper=wrapper,
+                                timeout=CODEBASE_TIMEOUT, shard=f".{shard}")
+
+    measured = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
+        for part in pool.map(count, range(min(INSTRUCTION_SHARDS, len(programs)))):
+            measured.update(part)
     dumps, by_function = {}, {}
     for path in sorted(runner.work.glob(f"{prefix.name}.*")):
         text = path.read_text(errors="replace")
