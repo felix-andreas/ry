@@ -23,7 +23,9 @@
 //! active binding, because either would move the program's side effects and conditions in front
 //! of the call, outside the handlers the callee establishes. A variable bound to an unforced
 //! promise is deferred instead: the promise is read again when the call ends, and its value then
-//! completes the sample and decides whether the call was capturable after all.
+//! completes the sample and decides whether the call was capturable after all. The one promise
+//! it forces is a package definition bound lazily, which builds the definition and runs none of
+//! the program's code.
 //!
 //! Recording runs from the end of start-up to the end of the session. The work it does for a
 //! call (serializing, reading a sample back) runs suspended, so the calls that work makes are
@@ -1156,6 +1158,20 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
             return Ok(Inspection::Uncapturable(Reason::UserBinding));
         }
         let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise
+            && value.car() == unbound()
+            && is_lazy_definition(value)
+        {
+            // A package definition bound lazily only builds the definition, a function or a
+            // constant, and runs none of the program's code, so it is forced now: deferring it
+            // would let a call that reads a user function look capturable until it ends, and
+            // cover the user code it runs as if it were the call's own.
+            match eval::force_promise(value) {
+                Ok(forced) => value = forced,
+                Err(Unwind::Interrupt) => return Err(Unwind::Interrupt),
+                Err(unwind) => note_failure(&unwind),
+            }
+        }
         if value.kind() == SexpType::Promise {
             if value.car() == unbound() {
                 deferred.push(Deferred {
@@ -1184,6 +1200,21 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
         imports,
         deferred,
     })
+}
+
+/// Whether `promise` is a package definition bound lazily: by ry's package loader, whose
+/// promises call its `ryLoaderForce` internal, or by an installed package's lazy-load database.
+unsafe fn is_lazy_definition(promise: Sexp) -> bool {
+    let code = promise.cdr();
+    if code.kind() != SexpType::Language {
+        return false;
+    }
+    let head = code.car();
+    match head.kind() {
+        SexpType::Builtin | SexpType::Special => values::primitive_name(head) == "ryLoaderForce",
+        SexpType::Symbol => symbol_name(head) == "lazyLoadDBfetch",
+        _ => false,
+    }
 }
 
 /// What a replay needs for `value`, bound at `place`, or why no replay without the user's code

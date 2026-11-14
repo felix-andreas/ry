@@ -1,7 +1,8 @@
 # Code that runs in a user environment is user code however package code enters it, by forcing
 # a promise or by evaluating an expression there. A block of user code a package wrapper runs is
 # user code, so the package calls in it are boundary calls of their own and their time is not
-# the wrapper's. Below a capturable call nothing changes: the call covers its own arguments.
+# the wrapper's. Below a capturable call nothing changes: the call covers its own arguments. A
+# function the loader binds lazily counts as the user function it is from the call's entry.
 
 requires ry-runtime
 
@@ -60,3 +61,39 @@ file check.R
 run ry run check.R
 expect exit 0
 expect stdout "checked"
+
+file DESCRIPTION
+| Package: blocks
+| Version: 0.1.0
+file NAMESPACE
+| export(run)
+file R/book.R
+| book <- function() data.frame(a = 1:3)
+file R/run.R
+| run <- function(kinds) suppressWarnings({
+|   b <- book()
+|   nrow(b)
+| }, classes = kinds)
+file driver.R
+| cat("rows:", run("warning"), "\n")
+
+env RY_CAPTURE_PACKAGE blocks
+env RY_CAPTURE_DIR loaded
+run ry load --runtime ry --file driver.R
+expect exit 0
+expect stdout "rows: 3"
+
+unset RY_CAPTURE_PACKAGE
+unset RY_CAPTURE_DIR
+file check-loaded.R
+| entries <- read.delim("loaded/entries.tsv", stringsAsFactors = FALSE)
+| entry <- function(name) entries[entries$name == name, ]
+| stopifnot(
+|   entry("suppressWarnings")$uncapturable_calls == 1,
+|   entry("suppressWarnings")$user_binding == 1,
+|   entry("data.frame")$calls == 1
+| )
+| cat("checked loaded\n")
+run ry run check-loaded.R
+expect exit 0
+expect stdout "checked loaded"
