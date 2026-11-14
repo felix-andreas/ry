@@ -228,6 +228,9 @@ class PublicSuite(unittest.TestCase):
 spec = importlib.util.spec_from_file_location("hot", here / "tooling/hot.py")
 hot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hot)
+spec = importlib.util.spec_from_file_location("mechanisms", here / "tooling/mechanisms.py")
+mechanisms = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mechanisms)
 
 
 class HotSuite(unittest.TestCase):
@@ -394,6 +397,18 @@ class HotSuite(unittest.TestCase):
         self.assertEqual(changes[0]["change"], 50.0)
         self.assertEqual(changes[0]["effect"], {"finbench": 25.0})
         self.assertEqual(changes[1]["effect"], {"finbench": 0.0})
+
+
+class Mechanisms(unittest.TestCase):
+    def test_operation_names_are_unique_because_a_baseline_is_keyed_by_them(self):
+        names = [name for name, _ in mechanisms.OPERATIONS]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertNotIn(mechanisms.EMPTY, names)
+
+    def test_the_loop_runs_inside_a_closure_and_takes_its_count_from_the_command_line(self):
+        script = mechanisms.program("k1(i)")
+        self.assertIn("for (i in seq_len(n)) result <- k1(i)\n", script)
+        self.assertIn("run(as.integer(commandArgs(TRUE)[1]))", script)
 
 
 class HotSelection(unittest.TestCase):
