@@ -69,6 +69,9 @@ pub struct Activation {
     pub children: *mut Child,
     /// Where tier 0 continues after a deoptimization.
     pub resume_pc: usize,
+    /// Where the compiled body's own register window ends in the register file, which the
+    /// windows of its inlined calls are placed from ([`Inlined::header`]).
+    pub root_top: usize,
 }
 
 /// What a helper holds until compiled code hands the activation back.
@@ -82,10 +85,18 @@ pub struct Parked {
 /// The activation of an inlined closure call while it runs without a frame of its own: its
 /// registers sit above its caller's in the register file, and the interpreter state a real
 /// call would have saved in its frame is saved here.
+///
+/// Everything here but the three fields a call saves is the same for every start of the call
+/// during one entry of the compiled body, because the call's register window sits at a fixed
+/// place above the body's ([`Inlined::header`]). So the record is written once, by the first
+/// start in an entry, which finds `activation.compiled` null.
 #[repr(C)]
 pub struct Child {
     pub activation: Activation,
     pub machine: Machine<'static>,
+    inlined: *const Inlined,
+    /// The closure's own srcref, which is current while the call runs.
+    function_srcref: Sexp,
     assignment_call: Option<(Sexp, Sexp, usize)>,
     srcref: Sexp,
 }
@@ -189,6 +200,9 @@ pub struct Compiled {
     pub rooted: Box<[bool]>,
     /// The body's frame, then one frame per closure call inlined in it.
     pub frames: Box<[Layout]>,
+    /// How many registers above the body's own window its inlined calls need at most
+    /// ([`Layout::top`]). An entry of the body reserves them once.
+    pub extent: usize,
     pub loops: usize,
     pub speculations: Vec<Speculation>,
     /// The binding epoch the speculations were last checked against.
@@ -226,13 +240,36 @@ pub struct Layout {
     /// By slot, a bitset of the variables the code loads at every read because a read called
     /// an active binding.
     pub volatile: Box<[u64]>,
+    /// By slot, where the frame that binds a free variable held it at the last load, which
+    /// [`heap::Heap::frame_cell_hinted`] tries first.
+    pub hints: Box<[Cell<u32>]>,
     /// The call the frame belongs to, or `None` for the compiled body's own frame.
     pub inlined: Option<Inlined>,
+}
+
+impl Layout {
+    /// Where the register window of this frame ends, counted from the end of the compiled
+    /// body's own window, which is where a call inlined in this frame puts its header.
+    pub fn top(&self) -> usize {
+        match &self.inlined {
+            Some(inlined) => {
+                inlined.header + 1 + inlined.frame_slots + self.registers + self.slots.len()
+            }
+            None => 0,
+        }
+    }
 }
 
 /// The closure call an inlined frame stands for, which is what building its real frame needs.
 pub struct Inlined {
     pub function: Sexp,
+    /// The call's header register, counted from the end of the compiled body's own window:
+    /// the end of the calling frame's window ([`Layout::top`]). The frame's slots follow the
+    /// header, then tier 0's registers and the slot root cells, as in a frame tier 0 enters.
+    /// Calls inlined in one frame share the place, because only one of them runs at a time.
+    pub header: usize,
+    /// How many slots the closure's frame has ([`bytecode::slot_count`]).
+    pub frame_slots: usize,
     /// The closure's compiled body when it was inlined.
     pub code: Sexp,
     pub call: Sexp,
@@ -1354,6 +1391,13 @@ unsafe fn materialize(
             );
         }
         write_back(root, body, scratch);
+        // The windows of the body's other inlined calls lie above the innermost call's, and
+        // tier 0 puts the next call's window at the end of the file.
+        let window = compiled
+            .frames
+            .get(innermost.frame as usize)
+            .map_or(0, Layout::top);
+        bytecode::release_registers((*root).root_top + window);
         let srcref = state.srcref;
         state.assignment_call = (*child_of(outermost)).assignment_call;
         // A speculation on the callee's own feedback failed, so the recompile needs the type
@@ -1634,111 +1678,150 @@ unsafe fn count_declined_frame(compiled: &Compiled) {
     }
 }
 
-/// Starts the inlined call of frame `frame`, made from `parent`, without a frame of its own:
-/// it reserves the call's register window above the caller's and returns the call's
-/// activation. Until [`jit_leave_frame`] or a deoptimization, the call is visible to R code
-/// only as the current call of warnings, so compiled code hands every instruction that could
-/// run R code to tier 0, which gives the call its frame first.
+/// Starts the inlined call of frame `frame`, made from `parent`, without a frame of its own,
+/// and returns the call's activation. Until [`jit_leave_frame`] or a deoptimization, the call
+/// is visible to R code only as the current call of warnings, so compiled code hands every
+/// instruction that could run R code to tier 0, which gives the call its frame first.
 ///
 /// Returns null when the call needs its frame from the start, as tier 0's own frame entry
 /// decides, or when a calling handler could look at the stack. Compiled code then hands the
 /// call instruction to tier 0.
+///
+/// A hot loop runs this once per iteration for each call it inlines, so the path that starts
+/// the call only tests what can change between two starts and saves what the call replaces.
+/// It cannot panic, which is why it runs outside [`guarded`].
 pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) -> *mut Activation {
     unsafe {
-        checked(parent, std::ptr::null_mut(), |parent| {
-            let compiled = compiled(parent);
-            let Some((layout, inlined)) = compiled
-                .frames
-                .get(frame as usize)
-                .and_then(|layout| Some((layout, layout.inlined.as_ref()?)))
-            else {
-                panic!("compiled code entered an inlined call it does not have");
-            };
-            let state = interp::interp();
-            let function = inlined.function;
-            let header = bytecode::register_top();
-            let slots = bytecode::slot_count(inlined.code);
-            let base = header + 1 + slots;
-            inlined.entries.set(inlined.entries.get().saturating_add(1));
-            if function == state.namespace_loader
-                || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
-                || function.cdr() != inlined.code
-                || function.tag().has_gp(gp::PENDING_FRAME)
-            {
-                count_handoff(compiled, inlined);
-                return std::ptr::null_mut();
-            }
-            // The frames an exit would push all fit under the depth limit, so pushing them
-            // cannot fail there.
-            if activity::enabled()
-                || !state.object_systems
-                || state.debugger.is_some()
-                || moves::tracking()
-                || calling_handler_established()
-                || state.frames.len() + compiled.frames.len() > state.max_depth as usize
-                || bytecode::reserve_registers(base + layout.registers + layout.slots.len())
-                    .is_err()
-            {
-                count_declined_frame(compiled);
-                return std::ptr::null_mut();
-            }
-            // New registers hold `NULL`, which is what the header and the slot root cells
-            // start as. The frame's slots stay unbound for as long as the call has no frame.
-            std::slice::from_raw_parts_mut(bytecode::register_address(header + 1), slots)
-                .fill(values::unbound());
-            let child = parent.children.add(frame as usize - 1);
-            child.write(Child {
-                activation: Activation {
-                    registers: bytecode::register_address(base),
-                    loops: std::ptr::null_mut(),
-                    visible: parent.visible,
-                    entry_pc: 0,
-                    header: bytecode::register_address(header),
-                    hints: bytecode::lookup_hints(inlined.code),
-                    enclosure: function.tag(),
-                    machine: std::ptr::null_mut(),
-                    compiled: parent.compiled,
-                    layout,
-                    parked: parent.parked,
-                    children: parent.children,
-                    resume_pc: 0,
-                },
-                machine: Machine {
-                    function,
-                    code: inlined.code,
-                    header,
-                    base,
-                    mark: heap().handle_mark(),
-                    loops: &mut [],
-                },
-                // Warnings and errors raised while the call has no frame name it as their
-                // call through this marker, as they do for a builtin called without one.
-                assignment_call: state.assignment_call.replace((
-                    values::unbound(),
-                    inlined.call,
-                    state.frames.len(),
-                )),
-                srcref: std::mem::replace(
-                    &mut state.srcref,
-                    values::get_attr(function, values::symbols().srcref),
-                ),
+        let child = (*parent).children.add(frame as usize - 1);
+        if (*child).activation.compiled.is_null()
+            && !guarded(parent, false, |parent| prepare(parent, frame))
+        {
+            return std::ptr::null_mut();
+        }
+        let inlined = &*(*child).inlined;
+        let state = interp::interp();
+        let function = inlined.function;
+        inlined.entries.set(inlined.entries.get().saturating_add(1));
+        let depth = state.frames.len();
+        // The frames an exit would push all fit under the depth limit, so pushing them
+        // cannot fail there.
+        let compiled: &Compiled = &*(*child).activation.compiled;
+        let frames = compiled.frames.len();
+        // The activation was written for the environment the closure had at the first start,
+        // which `environment<-` can replace between two starts.
+        let enclosure = function.tag();
+        let needs_frame = function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+            || function.cdr() != inlined.code
+            || enclosure != (*child).activation.enclosure
+            || enclosure.has_gp(gp::PENDING_FRAME);
+        if needs_frame
+            || (*(*parent).parked).pending.is_some()
+            || activity::enabled()
+            || !state.object_systems
+            || state.debugger.is_some()
+            || moves::tracking()
+            || calling_handler_established()
+            || depth + frames > state.max_depth as usize
+        {
+            return guarded(parent, std::ptr::null_mut(), |parent| {
+                if needs_frame {
+                    count_handoff(compiled, inlined);
+                } else if (*parent.parked).pending.is_none() {
+                    count_declined_frame(compiled);
+                }
+                std::ptr::null_mut()
             });
-            (*child).activation.machine = (&raw mut (*child).machine).cast();
-            &raw mut (*child).activation
-        })
+        }
+        (*child).machine.mark = heap().handle_mark();
+        // Warnings and errors raised while the call has no frame name it as their call
+        // through this marker, as they do for a builtin called without one.
+        (*child).assignment_call =
+            state
+                .assignment_call
+                .replace((values::unbound(), inlined.call, depth));
+        (*child).srcref = std::mem::replace(&mut state.srcref, (*child).function_srcref);
+        &raw mut (*child).activation
     }
 }
 
-/// Ends the inlined call `activation` ran without a frame: its registers go back to the file,
-/// and the caller's call and srcref are current again. Nothing was bound in the frame's slots,
-/// so there is nothing to release.
+/// Writes the activation of the inlined call of frame `frame` for this entry of the compiled
+/// body, before the call's first start in it. `false` when the call never runs without its
+/// frame.
+unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
+    unsafe {
+        let compiled = compiled(parent);
+        let Some((layout, inlined)) = compiled
+            .frames
+            .get(frame as usize)
+            .and_then(|layout| Some((layout, layout.inlined.as_ref()?)))
+        else {
+            panic!("compiled code entered an inlined call it does not have");
+        };
+        let function = inlined.function;
+        if function == interp::interp().namespace_loader {
+            inlined.entries.set(inlined.entries.get().saturating_add(1));
+            count_handoff(compiled, inlined);
+            return false;
+        }
+        let header = parent.root_top + inlined.header;
+        let base = header + 1 + inlined.frame_slots;
+        // The window holds `NULL` from the entry of the compiled body, which is what the
+        // header and the slot root cells start as. The frame's slots stay unbound for as
+        // long as the call has no frame.
+        std::slice::from_raw_parts_mut(bytecode::register_address(header + 1), inlined.frame_slots)
+            .fill(values::unbound());
+        let child = parent.children.add(frame as usize - 1);
+        child.write(Child {
+            activation: Activation {
+                registers: bytecode::register_address(base),
+                loops: std::ptr::null_mut(),
+                visible: parent.visible,
+                entry_pc: 0,
+                header: bytecode::register_address(header),
+                hints: bytecode::lookup_hints(inlined.code),
+                enclosure: function.tag(),
+                machine: std::ptr::null_mut(),
+                compiled: parent.compiled,
+                layout,
+                parked: parent.parked,
+                children: parent.children,
+                resume_pc: 0,
+                root_top: parent.root_top,
+            },
+            machine: Machine {
+                function,
+                code: inlined.code,
+                header,
+                base,
+                mark: heap().handle_mark(),
+                loops: &mut [],
+            },
+            inlined,
+            function_srcref: values::get_attr(function, values::symbols().srcref),
+            assignment_call: None,
+            srcref: values::nil(),
+        });
+        (*child).activation.machine = (&raw mut (*child).machine).cast();
+        true
+    }
+}
+
+/// Ends the inlined call `activation` ran without a frame: the caller's call and srcref are
+/// current again, and the call's registers and slot root cells hold `NULL` again, so that a
+/// collection frees what the call left in them, as it does for a frame tier 0 returned from.
+/// Nothing was bound in the frame's slots, so there is nothing to release.
 pub unsafe extern "C" fn jit_leave_frame(activation: *mut Activation) {
     unsafe {
         let child = &*activation.cast::<Child>();
         let state = interp::interp();
         state.assignment_call = child.assignment_call;
         state.srcref = child.srcref;
-        bytecode::release_registers(child.machine.header);
+        let layout = &*child.activation.layout;
+        std::slice::from_raw_parts_mut(
+            child.activation.registers,
+            layout.registers + layout.slots.len(),
+        )
+        .fill(values::nil());
     }
 }
 
@@ -1750,14 +1833,20 @@ pub unsafe extern "C" fn jit_leave_frame(activation: *mut Activation) {
 pub unsafe extern "C" fn jit_load_free(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {
         let activation = &*activation;
-        let Some(&symbol) = layout(activation).slots.get(slot as usize) else {
+        let layout = layout(activation);
+        let (Some(&symbol), Some(hint)) = (
+            layout.slots.get(slot as usize),
+            layout.hints.get(slot as usize),
+        ) else {
             return outcome::LOAD_FAILED;
         };
         let heap = heap();
         let empty = heap.known().empty_env;
         let mut env = activation.enclosure;
+        let mut position = hint.get();
         while env != empty {
-            if let Some(cell) = heap.frame_cell(env, symbol) {
+            if let Some(cell) = heap.frame_cell_hinted(env, symbol, &mut position) {
+                hint.set(position);
                 if cell.has_gp(gp::ACTIVE_BINDING) {
                     return outcome::LOAD_FAILED;
                 }
@@ -2456,42 +2545,6 @@ fn collection_kind(set: i32) -> NativeKind {
         NativeKind::Set
     } else {
         NativeKind::Dict
-    }
-}
-
-/// The row count of `vector` when it is an ordinary matrix whose elements compiled code may
-/// store into: a double, integer or logical vector that is neither ALTREP, an Array nor an
-/// object, whose only attribute is a `dim` of two counts. -1 for anything else, whose element
-/// assignment tier 0 runs.
-pub unsafe extern "C" fn jit_matrix_rows(vector: *mut Header) -> i64 {
-    unsafe {
-        let Some(vector) = Sexp::from_raw(vector) else {
-            return -1;
-        };
-        if !matches!(
-            vector.kind(),
-            SexpType::Real | SexpType::Integer | SexpType::Logical
-        ) || vector.is_altrep()
-            || vector.is_array()
-            || vector.is_object()
-        {
-            return -1;
-        }
-        let attributes = vector.attrib();
-        if attributes.kind() != SexpType::Pairlist
-            || attributes.tag() != values::symbols().dim
-            || attributes.cdr().kind() != SexpType::Nil
-        {
-            return -1;
-        }
-        let dim = attributes.car();
-        if dim.kind() != SexpType::Integer || dim.is_altrep() {
-            return -1;
-        }
-        match dim.slice::<i32>() {
-            &[rows, _] if rows >= 0 => i64::from(rows),
-            _ => -1,
-        }
     }
 }
 

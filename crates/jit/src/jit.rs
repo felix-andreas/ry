@@ -658,6 +658,7 @@ unsafe fn compile_in<'a>(
             portable,
             checked: Cell::new(values::nil()),
             rooted,
+            extent: frames.iter().map(runtime::Layout::top).max().unwrap_or(0),
             frames,
             loops: plan.loops,
             // No epoch or stamp matches, so the first run checks the compiling activation's own
@@ -840,10 +841,15 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         let body = compiled.frames.first()?;
         let cells = machine.base + body.registers;
-        if bytecode::reserve_registers(cells + body.slots.len()).is_err() {
+        // The slot root cells, then the windows of the inlined calls, which start as `NULL`
+        // like any register. Growing the file clears what it adds, so only registers the
+        // file already held need clearing.
+        let root_top = cells + body.slots.len();
+        let held = bytecode::register_top().clamp(cells, root_top + compiled.extent);
+        if bytecode::reserve_registers(root_top + compiled.extent).is_err() {
             return None;
         }
-        std::slice::from_raw_parts_mut(bytecode::register_address(cells), body.slots.len())
+        std::slice::from_raw_parts_mut(bytecode::register_address(cells), held - cells)
             .fill(values::nil());
         // Most compiled bodies have at most a few loops, so their state lives in a stack array.
         // A `SmallVec` here would be built by value and moved, copying its whole inline buffer
@@ -876,17 +882,21 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             panic: None,
         };
         let parked: *mut Parked = &mut parked;
-        // An inlined call's activation is written when the call starts, so the storage costs a
-        // body that inlines nothing only the stack space.
+        // An inlined call's activation is written by the call's first start in this entry,
+        // which a null `compiled` asks for, so the storage costs a body that inlines nothing
+        // only the stack space.
         let mut inline_children = [const { MaybeUninit::<Child>::uninit() }; 4];
         let mut spilled_children: Vec<MaybeUninit<Child>>;
-        let children = match compiled.frames.len() - 1 {
-            count if count <= inline_children.len() => inline_children.as_mut_ptr(),
-            count => {
-                spilled_children = Vec::with_capacity(count);
-                spilled_children.as_mut_ptr()
-            }
+        let count = compiled.frames.len() - 1;
+        let children: *mut Child = if count <= inline_children.len() {
+            inline_children.as_mut_ptr().cast()
+        } else {
+            spilled_children = Vec::with_capacity(count);
+            spilled_children.as_mut_ptr().cast()
         };
+        for index in 0..count {
+            (&raw mut (*children.add(index)).activation.compiled).write(std::ptr::null());
+        }
         let mut activation = Activation {
             registers: bytecode::register_address(machine.base),
             loops: loops.as_mut_ptr(),
@@ -899,8 +909,9 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             compiled,
             layout: body,
             parked,
-            children: children.cast(),
+            children,
             resume_pc: 0,
+            root_top,
         };
         activity::count(Counter::JitEntries);
         let running = activity::enter(Activity::Compiled, 0);
@@ -916,8 +927,12 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         let pending = (*parked).pending.take();
         match result as usize {
-            runtime::DECLINED => return None,
+            runtime::DECLINED => {
+                bytecode::release_registers(machine.base + body.registers);
+                return None;
+            }
             runtime::DEOPTIMIZED => {
+                bytecode::release_registers(machine.base + body.registers);
                 activity::count(Counter::JitDeoptimizations);
                 return Some(TierExit::Resume {
                     pc: activation.resume_pc,

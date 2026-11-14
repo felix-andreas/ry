@@ -26,10 +26,15 @@ use {
             reason, representation,
         },
     },
-    heap::object::{
-        INTEGER_PREFIX, LAZY_RECORD, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
-        RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS,
-        VECTOR_DATA_OFFSET, header_layout,
+    heap::{
+        Probe,
+        env::layout as frame_layout,
+        object::{
+            ENVIRONMENT_ENCLOSURE_OFFSET, ENVIRONMENT_FRAME_OFFSET, INTEGER_PREFIX, LAZY_RECORD,
+            LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET, RECORD_LAYOUT_OFFSET,
+            RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS, VECTOR_DATA_OFFSET,
+            gp, header_layout,
+        },
     },
     interp::{
         annotations,
@@ -58,6 +63,7 @@ const ATTRIB: i32 = 8;
 pub(crate) const LENGTH: i32 = 16;
 /// An ALTREP instance's first data slot and its class.
 const CAR: i32 = 16;
+const CDR: i32 = 24;
 const TAG: i32 = 32;
 pub(crate) const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
@@ -463,6 +469,7 @@ impl<'p> Translator<'p> {
                 })
                 .collect(),
             volatile: plan.volatile.iter().copied().collect(),
+            hints: plan.slots.iter().map(|_| Cell::new(0)).collect(),
             inlined,
         }
     }
@@ -1915,8 +1922,15 @@ impl<'p> Translator<'p> {
             result: dst.1,
         });
         let parent = std::mem::replace(&mut self.frame, child);
+        let header = self
+            .layouts
+            .get(parent.index as usize)
+            .map(Layout::top)
+            .ok_or(Refusal("an inlined call from a frame without a layout"))?;
         let layout = self.layout(Some(Inlined {
             function,
+            header,
+            frame_slots: bytecode::slot_count(function.cdr()),
             code: function.cdr(),
             call,
             parent: parent.index,
@@ -3864,7 +3878,7 @@ impl<'p> Translator<'p> {
     }
 
     /// The zero-based position of element `[row, column]` of `vector` and whether `vector` is
-    /// an ordinary matrix (see [`runtime::jit_matrix_rows`]) with that element in range.
+    /// an ordinary matrix (see [`Self::matrix_rows`]) with that element in range.
     fn matrix_offset(
         &mut self,
         vector: Value,
@@ -3874,14 +3888,7 @@ impl<'p> Translator<'p> {
         column_ty: Ty,
     ) -> Result<(Value, Value), Refusal> {
         let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
-        let rows = self
-            .call(
-                runtime::jit_matrix_rows as *const () as usize,
-                &[I64],
-                Some(I64),
-                &[vector],
-            )
-            .ok_or(Refusal("a helper without a result"))?;
+        let rows = self.matrix_rows(vector);
         let (row_value, row_in_range) = self.subscript_position(row_ty, row, rows, false);
         let (column_value, column_in_range) =
             self.subscript_position(column_ty, column, length, false);
@@ -3895,6 +3902,95 @@ impl<'p> Translator<'p> {
             .icmp(IntCC::SignedLessThan, offset, length);
         let in_range = self.builder.ins().band(row_in_range, column_in_range);
         Ok((offset, self.builder.ins().band(in_range, within)))
+    }
+
+    /// The row count of `vector` when it is an ordinary matrix whose elements compiled code may
+    /// read and store: a double, integer or logical vector that is neither ALTREP, an Array nor
+    /// an object, whose only attribute is a `dim` of two counts. -1 for anything else, whose
+    /// element access tier 0 runs.
+    fn matrix_rows(&mut self, vector: Value) -> Value {
+        let done = self.builder.create_block();
+        let rows = self.builder.append_block_param(done, I64);
+        let other = self.builder.ins().iconst(I64, -1);
+
+        let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
+        let logical = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Logical as i64);
+        let integer = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
+        let real = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64);
+        let numeric = self.builder.ins().bor(logical, integer);
+        let numeric = self.builder.ins().bor(numeric, real);
+        let bits = self.builder.ins().uload8(I32, flags(), vector, FLAGS);
+        let bits = self
+            .builder
+            .ins()
+            .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG | OBJECT_FLAG);
+        let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, bits, 0);
+        let plain = self.builder.ins().band(numeric, ordinary);
+        let attributed = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(plain, attributed, &[], done, &[other]);
+
+        // Every object starts with a header, so the kind of the attribute list reads safely
+        // when the list is nil, and only a pairlist's fields are read after it.
+        self.builder.switch_to_block(attributed);
+        let attributes = self.builder.ins().load(I64, flags(), vector, ATTRIB);
+        let kind = self.builder.ins().uload8(I32, flags(), attributes, KIND);
+        let listed = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Pairlist as i64);
+        let single = self.builder.create_block();
+        self.builder.ins().brif(listed, single, &[], done, &[other]);
+
+        self.builder.switch_to_block(single);
+        let tag = self.builder.ins().load(I64, flags(), attributes, TAG);
+        let named =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, tag, values::symbols().dim.as_ptr() as i64);
+        let rest = self.builder.ins().load(I64, flags(), attributes, CDR);
+        let last = self.builder.ins().icmp_imm_s(IntCC::Equal, rest, self.nil);
+        let only = self.builder.ins().band(named, last);
+        let dim = self.builder.ins().load(I64, flags(), attributes, CAR);
+        let sized = self.builder.create_block();
+        self.builder.ins().brif(only, sized, &[], done, &[other]);
+
+        self.builder.switch_to_block(sized);
+        let kind = self.builder.ins().uload8(I32, flags(), dim, KIND);
+        let integer = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
+        let bits = self.builder.ins().uload8(I32, flags(), dim, FLAGS);
+        let bits = self.builder.ins().band_imm_u(bits, ALTREP_FLAG);
+        let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, bits, 0);
+        let counts = self.builder.ins().load(I64, flags(), dim, LENGTH);
+        let pair = self.builder.ins().icmp_imm_s(IntCC::Equal, counts, 2);
+        let matrix = self.builder.ins().band(integer, ordinary);
+        let matrix = self.builder.ins().band(matrix, pair);
+        let counted = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(matrix, counted, &[], done, &[other]);
+
+        // A negative count never holds an element, since every subscript is at least one.
+        self.builder.switch_to_block(counted);
+        let count = self.builder.ins().load(I32, flags(), dim, DATA);
+        let count = self.builder.ins().sextend(I64, count);
+        self.builder.ins().jump(done, &[count]);
+
+        self.builder.switch_to_block(done);
+        rows
     }
 
     // Variables.
@@ -4200,6 +4296,18 @@ impl<'p> Translator<'p> {
                 None
             }
             None => {
+                let merged = self.builder.create_block();
+                let merged_status = self.builder.append_block_param(merged, I32);
+                let outline = self.builder.create_block();
+                self.builder.set_cold_block(outline);
+                if let Some(value) = self.probe_free(slot, outline) {
+                    self.store_slot_cell(slot, value);
+                    let enclosing = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
+                    self.builder.ins().jump(merged, &[enclosing]);
+                } else {
+                    self.builder.ins().jump(outline, &[]);
+                }
+                self.builder.switch_to_block(outline);
                 let slot_constant = iconst(&mut self.builder, slot);
                 let result = self
                     .call(
@@ -4215,7 +4323,9 @@ impl<'p> Translator<'p> {
                     outcome::LOAD_FAILED as i64,
                 );
                 self.hand_off_unless(position, before, found);
-                Some((self.load_slot_cell(slot), result))
+                self.builder.ins().jump(merged, &[result]);
+                self.builder.switch_to_block(merged);
+                Some((self.load_slot_cell(slot), merged_status))
             }
         };
         match loaded {
@@ -4332,6 +4442,206 @@ impl<'p> Translator<'p> {
             .imul_imm_s(enclosing, status::RUNTIME_ENCLOSING - status::RUNTIME_LOCAL);
         let status = self.builder.ins().iadd_imm_s(step, status::RUNTIME_LOCAL);
         self.builder.ins().jump(merged, &[value, status]);
+    }
+
+    /// Reads the free variable of `slot` in an inlined call that runs without a frame, as
+    /// [`runtime::jit_load_free`] does, when the lookup goes as it does now: through the same
+    /// environments, each of which rules the symbol out by its filter, to the one that binds
+    /// it in the same slot or on the symbol. Anything else branches to `outline`, which calls
+    /// the helper. `None` when the lookup has no such shape, and then nothing is emitted.
+    ///
+    /// An environment is compared with the one found now before its frame is read, and only
+    /// the frames of environments reached at run time are read, so the code holds on to none
+    /// of them.
+    unsafe fn probe_free(&mut self, slot: usize, outline: Label) -> Option<Value> {
+        const LEVELS: usize = 4;
+        let symbol = *self.frame.plan.slots.get(slot)?;
+        let function = self
+            .layouts
+            .get(self.frame.index as usize)?
+            .inlined
+            .as_ref()?
+            .function;
+        let heap = interp::heap();
+        let mut walk: SmallVec<[(Sexp, Probe); LEVELS]> = SmallVec::new();
+        let mut env = function.tag();
+        loop {
+            if walk.len() == LEVELS {
+                return None;
+            }
+            let probe = heap.probe(env, symbol);
+            walk.push((env, probe));
+            match probe {
+                Probe::Absent => env = env.enclosure(),
+                Probe::Slot(_) | Probe::OnSymbol => break,
+                Probe::Unknown => return None,
+            }
+        }
+
+        let frame = ENVIRONMENT_FRAME_OFFSET as i32;
+        let mut env =
+            self.builder
+                .ins()
+                .load(I64, flags(), self.frame.activation, offset::ENCLOSURE);
+        let mut cell = None;
+        for (expected, probe) in walk {
+            let same = self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::Equal, env, expected.as_ptr() as i64);
+            self.unless(same, outline);
+            if probe == Probe::OnSymbol {
+                let symbol = self.builder.ins().iconst(I64, symbol.as_ptr() as i64);
+                let bound =
+                    self.builder
+                        .ins()
+                        .load(I64, flags(), symbol, header_layout::SECOND as i32);
+                let kind =
+                    self.builder
+                        .ins()
+                        .uload8(I32, flags(), bound, header_layout::KIND as i32);
+                let binding =
+                    self.builder
+                        .ins()
+                        .icmp_imm_u(IntCC::Equal, kind, SexpType::Binding as i64);
+                self.unless(binding, outline);
+                cell = Some(bound);
+                break;
+            }
+            let bits = self
+                .builder
+                .ins()
+                .uload16(I32, flags(), env, header_layout::GP as i32);
+            let pending = self
+                .builder
+                .ins()
+                .band_imm_u(bits, i64::from(gp::PENDING_FRAME));
+            let settled = self.builder.ins().icmp_imm_u(IntCC::Equal, pending, 0);
+            self.unless(settled, outline);
+            let Probe::Slot(position) = probe else {
+                let filter =
+                    self.builder
+                        .ins()
+                        .load(I64, flags(), env, frame + frame_layout::FILTER as i32);
+                let bit = self
+                    .builder
+                    .ins()
+                    .iconst(I64, frame_layout::filter_bit(symbol) as i64);
+                let hit = self.builder.ins().band(filter, bit);
+                let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, hit, 0);
+                self.unless(absent, outline);
+                env =
+                    self.builder
+                        .ins()
+                        .load(I64, flags(), env, ENVIRONMENT_ENCLOSURE_OFFSET as i32);
+                continue;
+            };
+            let length =
+                self.builder
+                    .ins()
+                    .load(I32, flags(), env, frame + frame_layout::LENGTH as i32);
+            let held = self.builder.ins().icmp_imm_u(
+                IntCC::UnsignedGreaterThan,
+                length,
+                i64::from(position),
+            );
+            self.unless(held, outline);
+            let capacity =
+                self.builder
+                    .ins()
+                    .load(I32, flags(), env, frame + frame_layout::CAPACITY as i32);
+            let inline = self.builder.ins().icmp_imm_u(
+                IntCC::UnsignedLessThanOrEqual,
+                capacity,
+                i64::from(frame_layout::INLINE),
+            );
+            let storage = frame + frame_layout::STORAGE as i32;
+            let moved = self.builder.ins().load(I64, flags(), env, storage);
+            let within = self.builder.ins().iadd_imm_s(env, i64::from(storage));
+            let slots = self.builder.ins().select(inline, within, moved);
+            let at = position as usize * frame_layout::SLOT;
+            let bound = self.builder.ins().load(
+                I64,
+                flags(),
+                slots,
+                (at + frame_layout::SLOT_SYMBOL) as i32,
+            );
+            let named = self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::Equal, bound, symbol.as_ptr() as i64);
+            self.unless(named, outline);
+            let formals =
+                self.builder
+                    .ins()
+                    .load(I32, flags(), env, frame + frame_layout::FORMALS as i32);
+            let hinted = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, formals, 0);
+            self.unless(hinted, outline);
+            cell = Some(self.builder.ins().load(
+                I64,
+                flags(),
+                slots,
+                (at + frame_layout::SLOT_CELL) as i32,
+            ));
+            break;
+        }
+        let cell = cell?;
+
+        let bits = self
+            .builder
+            .ins()
+            .uload16(I32, flags(), cell, header_layout::GP as i32);
+        let active = self
+            .builder
+            .ins()
+            .band_imm_u(bits, i64::from(gp::ACTIVE_BINDING));
+        let plain = self.builder.ins().icmp_imm_u(IntCC::Equal, active, 0);
+        self.unless(plain, outline);
+        let bound = self
+            .builder
+            .ins()
+            .load(I64, flags(), cell, header_layout::SECOND as i32);
+        let kind = self
+            .builder
+            .ins()
+            .uload8(I32, flags(), bound, header_layout::KIND as i32);
+        let promise = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, SexpType::Promise as i64);
+        let forced = self.builder.create_block();
+        let found = self.builder.create_block();
+        let value = self.builder.append_block_param(found, I64);
+        self.builder
+            .ins()
+            .brif(promise, forced, &[], found, &[bound]);
+        self.builder.switch_to_block(forced);
+        let promised = self
+            .builder
+            .ins()
+            .load(I64, flags(), bound, header_layout::FIRST as i32);
+        self.builder.ins().jump(found, &[promised]);
+        self.builder.switch_to_block(found);
+        for marker in [values::missing_arg(), values::unbound()] {
+            let differs =
+                self.builder
+                    .ins()
+                    .icmp_imm_u(IntCC::NotEqual, value, marker.as_ptr() as i64);
+            self.unless(differs, outline);
+        }
+        Some(value)
+    }
+
+    /// Goes on in a new block when `condition` holds, and at `otherwise` when it does not.
+    fn unless(&mut self, condition: Value, otherwise: Label) {
+        let next = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(condition, next, &[], otherwise, &[]);
+        self.builder.switch_to_block(next);
     }
 
     /// Loads a slot for an inlined call without forcing anything, handing the call back to

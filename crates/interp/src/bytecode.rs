@@ -7364,7 +7364,10 @@ unsafe fn count_entry(state: &mut Activation<'_, '_>) -> usize {
 /// [`run_scheduled_entry`] for a body entered in place.
 #[inline(never)]
 unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32) -> usize {
-    let event = entry_event(state.machine, entries);
+    // Compiled code runs on the native stack, and a call it hands to this loop may enter the
+    // next compiled body in place, so a deep recursion nests here without passing through a
+    // closure call's own stack check.
+    let event = eval::on_large_stack(|| entry_event(state.machine, entries));
     // The tier may have started or stopped the body's recording.
     reload(state);
     match event {
