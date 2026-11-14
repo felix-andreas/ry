@@ -98,11 +98,15 @@ unsafe fn bindings(env: Sexp) -> *mut Frame {
 }
 
 /// `env`'s own frame for a lookup of `symbol` alone. A slot frame's environment that has no
-/// cell for a name its frame may keep in a slot asks the interpreter for that one variable.
+/// cell for a name its frame keeps in a slot asks the interpreter for that one variable.
 #[inline(always)]
 unsafe fn bindings_for(env: Sexp, symbol: Sexp) -> *mut Frame {
     let frame = env.frame_ptr();
-    if env.has_gp(gp::SLOT_FRAME) && (*frame).may_bind(symbol) && (*frame).find(symbol).is_none() {
+    if env.has_gp(gp::SLOT_FRAME)
+        && (*frame).may_bind(symbol)
+        && (*frame).find(symbol).is_none()
+        && (*frame).expects(symbol)
+    {
         resolve_pending(env, PendingAccess::Symbol(symbol));
     }
     frame
@@ -2386,8 +2390,9 @@ impl Heap {
     }
 
     /// Whether `env`'s own frame may bind `symbol`: `false` only when it never has, and, for a
-    /// slot frame's environment, its frame keeps no slot of that name
-    /// ([`Heap::expect_bindings`]).
+    /// slot frame's environment, its frame keeps no slot of that name either
+    /// ([`Heap::set_slot_owner`]). It tests the symbol filter alone, because every caller
+    /// searches the frame's slot names next anyway.
     #[inline(always)]
     pub unsafe fn may_bind(&self, env: Sexp, symbol: Sexp) -> bool {
         (*env.frame_ptr()).may_bind(symbol)
@@ -2405,16 +2410,28 @@ impl Heap {
         (*env.frame_ptr()).slot_owner()
     }
 
-    /// Records which live slot frame `env` stands for ([`Heap::slot_owner`]).
-    pub unsafe fn set_slot_owner(&mut self, env: Sexp, owner: Option<usize>) {
+    /// Records which live slot frame `env` stands for ([`Heap::slot_owner`]) and `names`, the
+    /// list of symbols that frame keeps in slots, or with `None` that it stands for none any
+    /// more. A lookup through `env` asks the interpreter to move a variable out of the frame
+    /// only for one of those names or a dispatch variable it expects
+    /// ([`Heap::expect_dispatch_variables`]), and passes `env` for any other. The frame's
+    /// function must hold `names`, which keeps the list alive while the frame runs.
+    pub unsafe fn set_slot_owner(&mut self, env: Sexp, owner: Option<(usize, Sexp)>) {
         (*env.frame_ptr()).set_slot_owner(owner);
     }
 
-    /// Tells a slot frame's environment which names its frame may bind, so a lookup of any
-    /// other name passes the environment without asking the interpreter.
-    pub unsafe fn expect_bindings(&mut self, env: Sexp, symbols: impl Iterator<Item = Sexp>) {
+    /// Tells a method's slot frame environment the names of its dispatch variables, which it
+    /// binds when a lookup first asks for one.
+    pub unsafe fn expect_dispatch_variables(
+        &mut self,
+        env: Sexp,
+        symbols: impl Iterator<Item = Sexp>,
+    ) {
         let frame = &mut *env.frame_ptr();
         for symbol in symbols {
+            if !symbol.has_gp(gp::DISPATCH_VARIABLE) {
+                symbol.set_gp_bits(gp::DISPATCH_VARIABLE, true);
+            }
             frame.expect(symbol);
         }
     }

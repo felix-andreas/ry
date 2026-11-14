@@ -395,6 +395,10 @@ pub mod gp {
     /// resolves from any attached environment to its base binding, which is what lets a compiled
     /// guard for a base function check one bit and the base value instead of walking the chain.
     pub const BOUND_ELSEWHERE: u16 = 1 << 11;
+    /// A symbol that names a method's dispatch variable (`.Generic`, `.Class` and the rest),
+    /// which the environment of a method's live slot frame binds when a lookup first asks for
+    /// it ([`crate::Heap::expect_dispatch_variables`]).
+    pub const DISPATCH_VARIABLE: u16 = 1 << 12;
     /// An environment whose chain of enclosures may reach the empty environment without passing
     /// a base frame, so a lookup from it need not end at a base binding. The empty environment
     /// carries it, and a new environment inherits it from its enclosure (see

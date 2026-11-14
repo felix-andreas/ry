@@ -155,8 +155,11 @@ The environment goes through up to three states, and most frames stop before the
   closure's environment. Everything that only names the frame is served by that object: a promise
   or a closure made in the frame, `parent.frame()`, `sys.function`, a builtin that dispatches, a
   condition handler, exit code registered from a callee. The heap knows which names the frame may
-  bind (`expect_bindings`: the slot table's names and a method's dispatch variables), so a lookup
-  of any other name passes on to the enclosure without asking the frame.
+  bind: the frame record keeps the slot table's list of names (`set_slot_owner`), and the symbol
+  of each S3 dispatch variable carries `gp::DISPATCH_VARIABLE` (`expect_dispatch_variables`). A
+  lookup of any other name passes on to the enclosure without asking the frame. The symbol filter
+  only rules names out, so a name whose filter bit collides with a slot name's is checked against
+  the list too; without that check, every lookup of the colliding name would call the resolver.
 - **Partial.** A lookup of a name the frame may bind, for which the environment has no cell, calls
   the resolver the interpreter installs in the heap (`eval::resolve_pending_access`, from
   `bindings_for` in `heap.rs`). `box_variable` moves that one variable from its slot into a cell

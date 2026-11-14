@@ -1439,14 +1439,19 @@ pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
         true,
     );
     // A lookup of any other name passes the environment without asking the frame.
-    heap.expect_bindings(env, bytecode::frame_slot_names(function).iter().copied());
-    heap.expect_bindings(
+    heap.set_slot_owner(
+        env,
+        Some((
+            owner,
+            function.cdr().cdr().element(bytecode::SLOTS).element(1),
+        )),
+    );
+    heap.expect_dispatch_variables(
         env,
         crate::method_vars(interp(), owner)
             .iter()
             .map(|&(symbol, _)| symbol),
     );
-    heap.set_slot_owner(env, Some(owner));
     interp().frames[owner].pending = env;
     activity::count(Counter::FrameEnvironments);
     Ok(env)
