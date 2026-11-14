@@ -497,14 +497,17 @@ unsafe fn compiled_for<'a>(
                         counters[profile::TIER_STATE] = state + runtime::RARE_REFUSAL;
                     }
                 } else if reason == analysis::COLD
-                    && values::ints(constants.element(FEEDBACK))
-                        .iter()
-                        .any(|&bits| bits != 0)
+                    && (bytecode::tier().is_some_and(|tier| tier.entry_threshold < 2)
+                        || values::ints(constants.element(FEEDBACK))
+                            .iter()
+                            .any(|&bits| bits != 0))
                 {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing. A body whose
                     // window recorded nothing at all does not run its instructions (a native
-                    // prologue finishes every call), so waiting would only repeat the plan.
+                    // prologue finishes every call), so waiting would only repeat the plan. At a
+                    // threshold of one entry the attempt comes before the body has run at all, so
+                    // an empty window says nothing there.
                     counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
                     counters[profile::ENTRIES] = 0;
                     counters[profile::BACK_EDGES] = 0;
