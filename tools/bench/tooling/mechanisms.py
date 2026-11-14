@@ -34,6 +34,8 @@ holder <- new.env()
 holder$value <- 1L
 holder$method <- function(x) x + holder$value
 k0 <- function() 1L + 1L
+kconstant <- function() NULL
+kidentity <- function(x) x
 k1 <- function(x) x + 1L
 kif <- function(x) if (is.null(x)) 0L else x + 1L
 k2 <- function(x, y = 2L) x + y
@@ -51,13 +53,13 @@ ksyscall <- function(x) sys.call()
 kinvisible <- function(x) invisible(x)
 kreturn <- function(x) { if (x > 0L) return(x); 0L }
 describe <- function(x, ...) UseMethod("describe")
-describe.default <- function(x, ...) 0L
-describe.widget <- function(x, ...) 1L
+describe.default <- function(x, ...) if (is.null(x)) 0L else 1L
+describe.widget <- function(x, ...) if (is.null(x)) 0L else 2L
 describe.gadget <- function(x, ...) NextMethod()
-length.widget <- function(x) 7L
-"[.widget" <- function(x, i) 1L
-"$.gadget" <- function(x, name) 1L
-format.widget <- function(x, ...) "widget"
+length.widget <- function(x) if (is.null(x)) 0L else 7L
+"[.widget" <- function(x, i) if (is.null(x)) 0L else i
+"$.gadget" <- function(x, name) if (is.null(x)) 0L else name
+format.widget <- function(x, ...) if (is.null(x)) "" else "widget"
 quoted <- quote(i + 1L)
 """
 
@@ -65,6 +67,8 @@ quoted <- quote(i + 1L)
 # one assignment to a local, as the empty loop's does.
 OPERATIONS = [
     ("call: no arguments", "k0()"),
+    ("call: body is a constant", "kconstant()"),
+    ("call: body is its argument", "kidentity(i)"),
     ("call: one argument, body is one builtin call", "k1(i)"),
     ("call: one argument, body branches", "kif(i)"),
     ("call: default argument used", "k2(i)"),
