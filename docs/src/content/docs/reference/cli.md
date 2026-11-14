@@ -294,6 +294,14 @@ about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1
 of three runs of the `timeseries` application workload, 7% on the median). Without the
 option, the hooks cost one predictable branch each.
 
+Setting `RY_PROFILE_STACKS=FILE` as well writes every sampled call stack to FILE, one line per
+distinct stack and activity: the sample count, the activity (such as `builtin:c` or
+`native:data.table`) and the closures from outermost to innermost as `owner::function`, joined
+by `;`, where the owner is a namespace, `R_GlobalEnv` or `other`. Unlike the summary, these lines name your functions. `tools/bench/compare_profiles.py`
+reads them beside a GNU R `Rprof()` file of the same run (the benchmark driver writes one when
+`RY_BENCH_RPROF=FILE` is set) and compares the two engines closure by closure;
+`development/design/codebase-gap.md` shows what it reports.
+
 `ry repl` still works. It is the earlier name of `ry R`'s console (`ry run`'s with `--runtime ry`),
 and it keeps its `-f FILE`, which is `ry R -i FILE`.
 

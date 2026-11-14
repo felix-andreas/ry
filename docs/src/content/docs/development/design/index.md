@@ -127,3 +127,9 @@ environment's bindings without a call frame, and what compiling loops in `eval()
 A review of ry's architecture and code quality from outside the tracks that build it: twelve ranked
 findings with file and line evidence, what a greenfield start would build differently, where ry is
 below the state of the art, a measured cold build, and the order in which to act.
+
+### [Why the code bases run at 1.5x](/development/design/codebase-gap/)
+
+A profile of the three real-world code bases against GNU R, closure by closure: where ry is slower
+than GNU R, why package code gains less than the other suites, an Amdahl table of the causes, the
+ceiling with all of them fixed, and the order to fix them in.
