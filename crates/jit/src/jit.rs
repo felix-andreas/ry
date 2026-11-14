@@ -78,12 +78,23 @@ const ENTRY_THRESHOLD: i32 = 3000;
 /// Such a body saves a bounded amount per call, so it compiles only when its expected calls
 /// times that saving exceed the compilation's cost. Calibrated with callgrind on the benchmark
 /// workloads: compiling costs about 2M instructions plus 50k per bytecode word (a 50-word body
-/// costs 4.5M, `isTRUE`'s 188 words 11M), and compiled code saves at least 100 instructions per
-/// call for each instruction it runs natively (delaying the functional workload's callbacks from
-/// 3000 to 10,000 calls cost 19M instructions).
+/// costs 4.5M, `isTRUE`'s 188 words 11M).
 const COMPILE_FIXED: u64 = 2_000_000;
 const COMPILE_PER_WORD: u64 = 50_000;
-const SAVING_PER_NATIVE: u64 = 100;
+/// What one call of a loop-free body saves in compiled code, in instructions. Entering
+/// compiled code from tier 0 costs about [`ENTRY_COST`] more than starting the same body in
+/// the dispatch loop: the tier's entry checks, the activation record, the register window of
+/// the root cells, and a boxed result. Against that, an instruction compiled code runs
+/// natively saves about [`SAVING_PER_NATIVE`] (tier 0 runs a scalar `+` in about 90
+/// instructions and compiled code in about 20), and a call it inlines or enters directly
+/// saves about [`SAVING_PER_CALL`]. Measured on closures called 400,000 times from `vapply`: with
+/// one native instruction (`x^2`) compiled code cost 325 instructions more per call than tier
+/// 0, with two (`x * 2 + 1`) 309 more, and a body that only builds a list from its arguments
+/// 1646 more. A body whose saving does not exceed the entry cost therefore never compiles on
+/// its own, however hot it is; its calls from compiled code can still be inlined there.
+const ENTRY_COST: u64 = 450;
+const SAVING_PER_NATIVE: u64 = 70;
+const SAVING_PER_CALL: u64 = 1000;
 /// A body's expected calls are its share of the closure calls the session made over its
 /// recording window, times this many calls. The session's call count measures how much
 /// interpreted work ran between two calls of the body: it is deterministic and does not move
@@ -219,6 +230,13 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
     }
 }
 
+/// What one call of a loop-free body is expected to save in compiled code, by the model at
+/// [`ENTRY_COST`]: zero when entering compiled code costs more than the body's native work
+/// saves.
+fn saving_per_call(native: usize, calls: usize) -> u64 {
+    (SAVING_PER_NATIVE * native as u64 + SAVING_PER_CALL * calls as u64).saturating_sub(ENTRY_COST)
+}
+
 /// Whether a loop-free body that just turned hot is expected to repay its compilation, by the
 /// model at [`COMPILE_FIXED`]. A body that compiled before passed this once already.
 unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
@@ -234,7 +252,7 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
         let calls = window_entries * HORIZON_CALLS / window_calls;
         let words = values::ints(machine.code.car()).len() as u64;
         let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
-        let saving = calls * SAVING_PER_NATIVE * shape.native as u64;
+        let saving = calls * saving_per_call(shape.native, shape.calls);
         if logging() {
             eprintln!(
                 "jit: {} expects {calls} calls ({window_entries} of {window_calls} calls) saving {saving} against a compile of {cost}",
@@ -546,8 +564,13 @@ unsafe fn compile_in<'a>(
         {
             return Err(Refusal(analysis::NATIVE_ENTRY));
         }
-        if !forced && trigger == Trigger::HotEntry && !shape.loops && !repays(machine, shape) {
-            return Err(Refusal(analysis::RARE));
+        if !forced && trigger == Trigger::HotEntry && !shape.loops {
+            if saving_per_call(shape.native, shape.calls) == 0 {
+                return Err(Refusal(analysis::SMALL));
+            }
+            if !repays(machine, shape) {
+                return Err(Refusal(analysis::RARE));
+            }
         }
         let started = Instant::now();
         let state = values::ints(machine.code.cdr().element(PROFILE))[profile::TIER_STATE];
@@ -570,6 +593,14 @@ unsafe fn compile_in<'a>(
             } else if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions()
             {
                 Some(analysis::MOSTLY_TIER0)
+            } else if trigger == Trigger::HotEntry
+                && plan.loop_headers.is_empty()
+                && saving_per_call(
+                    plan.native_actions() - plan.direct_calls(),
+                    plan.direct_calls(),
+                ) == 0
+            {
+                Some(analysis::SMALL)
             } else {
                 None
             };
@@ -854,11 +885,14 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         // Most compiled bodies have at most a few loops, so their state lives in a stack array.
         // A `SmallVec` here would be built by value and moved, copying its whole inline buffer
         // on every call, which costs a body without loops more than the loop state itself.
-        let mut inline = [0i64; 4 * runtime::LOOP_WORDS];
+        let mut inline = [const { MaybeUninit::<i64>::uninit() }; 4 * runtime::LOOP_WORDS];
         let mut spilled: Vec<i64>;
         let words = runtime::LOOP_WORDS * compiled.loops;
         let loops: &mut [i64] = match inline.get_mut(..words) {
-            Some(loops) => loops,
+            Some(loops) => {
+                loops.fill(MaybeUninit::new(0));
+                std::slice::from_raw_parts_mut(loops.as_mut_ptr().cast(), words)
+            }
             None => {
                 spilled = vec![0i64; words];
                 &mut spilled

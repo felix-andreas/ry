@@ -1845,8 +1845,11 @@ fn formal_shadows_enclosing_function() {
 fn a_body_that_could_run_nothing_natively_never_records() {
     // The closures take `...` so that they are not wrappers, which compiled code, a top-level
     // loop's included, runs without entering. `is.null` has no native form, so whatever its
-    // profile, compiled code for `wrap` would hand its only call back to tier 0. It is refused when its recording window would open, and
-    // never records; `twice` does arithmetic, so it records and then compiles.
+    // profile, compiled code for `wrap` would hand its only call back to tier 0. It is refused
+    // when its recording window would open, and never records. `twice` and `sum_of` do
+    // arithmetic, so they record. `sum_of` then compiles, but one multiplication saves less
+    // than entering compiled code costs, so `twice` is refused for good once it is hot and
+    // keeps the feedback a compiled caller needs to inline it.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
         jit::install_mode(Mode::On);
@@ -1864,13 +1867,23 @@ fn a_body_that_could_run_nothing_natively_never_records() {
             );
             values::ints(code.cdr().element(PROFILE)).to_vec()
         };
-        run("wrap <- function(x, ...) is.null(x)\ntwice <- function(x, ...) x * 2");
+        run(concat!(
+            "wrap <- function(x, ...) is.null(x)\n",
+            "twice <- function(x, ...) x * 2\n",
+            "sum_of <- function(x, ...) {\n",
+            "  y <- x * 2 + 1; z <- y * y - x; (z - y) * (y + x) + z\n",
+            "}",
+        ));
         let ran = run(&format!(
-            "for (i in 1:{}) {{ wrap(i); twice(i) }}",
+            "for (i in 1:{}) {{ wrap(i); twice(i); sum_of(i) }}",
             window + 1
         ));
         assert_eq!(ran, "NULL");
-        let (wrap, twice) = (profile_of("wrap"), profile_of("twice"));
+        let (wrap, twice, sum_of) = (
+            profile_of("wrap"),
+            profile_of("twice"),
+            profile_of("sum_of"),
+        );
         assert_eq!(
             wrap[profile::TIER_STATE],
             -1,
@@ -1878,9 +1891,18 @@ fn a_body_that_could_run_nothing_natively_never_records() {
         );
         assert_eq!(wrap[profile::RECORDING], 0, "wrap records");
         assert_eq!(twice[profile::RECORDING], 1, "twice does not record");
-        run(&format!("for (i in 1:{threshold}) {{ wrap(i); twice(i) }}"));
-        assert!(has_compiled_code("twice"), "twice did not compile");
+        assert_eq!(sum_of[profile::RECORDING], 1, "sum_of does not record");
+        run(&format!(
+            "for (i in 1:{threshold}) {{ wrap(i); twice(i); sum_of(i) }}"
+        ));
+        assert!(has_compiled_code("sum_of"), "sum_of did not compile");
         assert!(!has_compiled_code("wrap"), "wrap compiled");
+        assert!(!has_compiled_code("twice"), "twice compiled");
+        let twice = profile_of("twice");
+        assert!(
+            twice[profile::TIER_STATE] < 0 && twice[profile::RECORDING] == 0,
+            "twice was not refused for good: {twice:?}"
+        );
         jit::install_mode(Mode::Off);
     });
 }
@@ -1901,7 +1923,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
                 .unwrap_or_else(|_| panic!("rare is not defined"));
             values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
         };
-        run("rare <- function(x, ...) x * 3");
+        run("rare <- function(x, ...) { y <- x * 3 + 1; z <- y * y - x; (z - y) * (y + x) + z }");
         run("other <- function(x) { y <- x + 1; y }");
         run(&format!(
             "for (i in 1:{}) {{ for (j in 1:200) other(j); rare(i) }}",

@@ -6914,10 +6914,11 @@ pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
 /// Whether the instruction at `pc` is an [`Op::Argument`] whose formal is missing, which the
 /// optimizing tier leaves to tier 0: no compiled load yields the empty argument.
 pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
-    let state = activation(machine, true);
-    if op_of(*state.code.add(pc) as u32) != Some(Op::Argument) {
+    let word = values::ints(machine.code.car()).get(pc).copied();
+    if word.and_then(|word| op_of(word as u32)) != Some(Op::Argument) {
         return Ok(false);
     }
+    let state = activation(machine, true);
     let missing = argument_missing(&state, pc)?;
     if missing {
         state.record_kind(pc, feedback::MISSING);
@@ -6932,7 +6933,18 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
     let symbol = constants.element(words[pc + 2] as usize);
     let cache = words[pc + 3] as usize;
     let in_slots = machine.env() == nil();
-    let (value, local) = match machine.slot_of(symbol) {
+    // The slot table numbers each lookup cache whose symbol the frame can bind, which finds
+    // the slot without searching the table's names.
+    let slots = constants.element(SLOTS);
+    let slot = if in_slots && slots != nil() {
+        values::ints(slots.element(0))
+            .get(cache)
+            .and_then(|&position| usize::try_from(position).ok())
+            .map(|position| register_address(machine.header + 1 + position))
+    } else {
+        None
+    };
+    let (value, local) = match slot {
         None if in_slots => {
             let start = machine.function.tag();
             (

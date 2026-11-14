@@ -1962,6 +1962,25 @@ pub unsafe extern "C" fn jit_load_passed(
     }
 }
 
+/// Whether anything may read the activation's frame after its body returns, as a flag. A slot
+/// frame without an environment dies with the return unless exit code runs on its slots or
+/// promises and closures made over it are still pending, which are the cases tier 0 finishes
+/// a frame for ([`interp::eval`]'s `finish_frame`). Compiled code asks at a return and writes
+/// its dirty slots back only then.
+pub unsafe extern "C" fn jit_frame_read_later(activation: *mut Activation) -> i32 {
+    unsafe {
+        let machine = machine(&*activation);
+        let dies = machine.env() == values::nil()
+            && interp::interp().frames.last().is_some_and(|frame| {
+                frame.slots as usize == machine.header
+                    && frame.env == values::nil()
+                    && frame.pending == values::nil()
+                    && frame.on_exit.is_empty()
+            });
+        i32::from(!dies)
+    }
+}
+
 /// Writes a dirty slot back to the environment. A boxed value hands the reference compiled
 /// code held over to the binding. Returns 1 on success.
 pub unsafe extern "C" fn jit_flush(

@@ -1324,22 +1324,32 @@ pub const NATIVE_ENTRY: &str = "the closure's calls run natively";
 /// threshold of entries, with its call rate measured afresh.
 pub const RARE: &str = "the body runs too rarely to repay compiling it";
 
+/// The refusal for a loop-free body whose native work saves less per call than entering
+/// compiled code from tier 0 costs, such as `function(x) x^2`. It is final: the body's
+/// instructions decide it, or the calls its plan could not inline. The body keeps the type
+/// feedback it recorded, so compiled callers can still inline it.
+pub const SMALL: &str = "the body does too little natively to repay entering compiled code";
+
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shape {
     /// The body loops, or holds bytecode the scan cannot read, which counts as a loop because
     /// nothing bounds what it runs.
     pub loops: bool,
-    /// The instructions the plan may turn into native work. A call of a builtin counts when it
-    /// names one the plan has a native form for; a builtin reached through another name is
-    /// missed, which costs only the compiled code, not correctness.
+    /// The instructions the plan may turn into native work, other than [`Shape::calls`]. A
+    /// call of a builtin counts when it names one the plan has a native form for; a builtin
+    /// reached through another name is missed, which costs only the compiled code, not
+    /// correctness.
     pub native: usize,
+    /// The calls the plan may make itself: closure calls it may inline or enter directly, and
+    /// calls of a builtin it may run as a loop over its argument.
+    pub calls: usize,
 }
 
 impl Shape {
     /// Whether some profile could make [`Plan::runs_natively`] true.
     pub fn may_run_natively(self) -> bool {
-        self.loops || self.native > 0
+        self.loops || self.native > 0 || self.calls > 0
     }
 }
 
@@ -1349,11 +1359,13 @@ pub unsafe fn shape(code: Sexp) -> Shape {
     let unbounded = Shape {
         loops: true,
         native: 0,
+        calls: 0,
     };
     if values::length(constants.element(bytecode::LOOPS)) > 0 {
         return unbounded;
     }
     let mut native = 0;
+    let mut calls = 0;
     let mut pc = 0;
     while pc < words.len() {
         let Some(op) = bytecode::op_of(words[pc] as u32) else {
@@ -1370,8 +1382,6 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::LogicRight
             | Op::SubAssign
             | Op::SubAssignMatrix
-            | Op::CallGeneric
-            | Op::CallRebinding
             | Op::CallBuiltinRebinding
             | Op::Field
             | Op::Item
@@ -1380,13 +1390,22 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::ForStep
             | Op::ForEnd
             | Op::Internal => true,
+            Op::CallGeneric | Op::CallRebinding => {
+                calls += 1;
+                false
+            }
             Op::Jump if operand(0) <= pc => return unbounded,
             Op::Jump => false,
             Op::CallBuiltin => {
                 let function = constants.element(operand(2)).car();
                 function.kind() != SexpType::Symbol || {
                     let name = values::symbol_name(function);
-                    name == "[" || Traversal::of(&name).is_some() || has_intrinsic(&name)
+                    if Traversal::of(&name).is_some() {
+                        calls += 1;
+                        false
+                    } else {
+                        name == "[" || has_intrinsic(&name)
+                    }
                 }
             }
             Op::Constant
@@ -1432,6 +1451,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
     Shape {
         loops: false,
         native,
+        calls,
     }
 }
 
@@ -1456,6 +1476,24 @@ impl Plan<'_> {
     /// How many actions compiled code does itself, and how many it hands to tier 0.
     pub fn native_actions(&self) -> usize {
         self.actions.iter().filter(|action| native(action)).count()
+    }
+
+    /// How many calls compiled code makes itself: closure calls it inlines or enters directly,
+    /// and builtin calls it runs as a loop over their argument.
+    pub fn direct_calls(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Action::Inline { .. }
+                        | Action::Frame { .. }
+                        | Action::Traverse { .. }
+                        | Action::Call { .. }
+                        | Action::NativeCall { .. }
+                )
+            })
+            .count()
     }
 
     pub fn tier0_actions(&self) -> usize {

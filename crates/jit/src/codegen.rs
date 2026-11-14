@@ -98,6 +98,10 @@ pub struct Generated {
     pub size: u32,
 }
 
+/// The instruction count above which a loop-free body compiles with the single-pass register
+/// allocator.
+const SINGLE_PASS_FROM: usize = 2000;
+
 /// Compiles `plan`, which was made for `code`.
 pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Generated, Refusal> {
     let mut signature = Signature::new(CallConv::Host);
@@ -113,10 +117,13 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Generated, Refusal> {
         eprintln!("{function}");
     }
     // Keeping values in registers pays where code repeats, so a body with a loop gets the
-    // backtracking allocator: on loop kernels its code runs 1.5 to 2.4 times faster. Code
-    // without a loop is mostly helper calls, where single-pass code runs as fast, and that
-    // allocator compiles in about two thirds of the time.
-    let allocator = if plan.loops > 0 {
+    // backtracking allocator: on loop kernels its code runs 1.5 to 2.4 times faster. A small
+    // body without a loop gets it too, because single-pass code spills every value it defines
+    // (`x^2` ran 100 instructions of it), and what a call of such a body can save is small
+    // enough for that to decide whether compiling it pays. A large loop-free body is mostly
+    // helper calls, where single-pass code runs as fast, and the backtracking allocator's
+    // compile time grows faster than the body.
+    let allocator = if plan.loops > 0 || function.instructions() <= SINGLE_PASS_FROM {
         Allocator::Backtracking
     } else {
         Allocator::SinglePass
@@ -1167,7 +1174,7 @@ impl<'p> Translator<'p> {
             }
             Action::Return { src } => {
                 let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
-                self.flush_all(&before, failed);
+                self.finish_slots(&before, failed);
                 let ty = before.registers[src];
                 let value = if ty.is_unboxed() {
                     let unboxed = self.use_register(src, ty);
@@ -4769,6 +4776,52 @@ impl<'p> Translator<'p> {
         }
         let dirty = self.builder.ins().iconst(I32, status::RUNTIME_DIRTY);
         self.set_status(slot, dirty);
+    }
+
+    /// Ends the body's use of its slots at its return. Writing a dirty slot back costs a helper
+    /// call and, for an unboxed value, an allocation, and a frame that dies with the return
+    /// has no reader for it, so the write-back runs only where [`runtime::jit_frame_read_later`]
+    /// says something may still read the frame. Otherwise the slots only give up the
+    /// references that the write-back would have handed to the frame.
+    unsafe fn finish_slots(&mut self, state: &StateRef<'p>, failed: Label) {
+        if !state.slots.iter().any(|slot| slot.may_be(status::DIRTY)) {
+            return;
+        }
+        let read_later = self
+            .call(
+                runtime::jit_frame_read_later as *const () as usize,
+                &[I64],
+                Some(I32),
+                &[self.frame.activation],
+            )
+            .unwrap_or(self.frame.activation);
+        let flush = self.builder.create_block();
+        let release = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(read_later, flush, &[], release, &[]);
+        self.builder.switch_to_block(flush);
+        self.flush_all(state, failed);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(release);
+        for slot in 0..state.slots.len() {
+            let current = state.slots[slot];
+            if !current.may_be(status::DIRTY)
+                || matches!(current.ty, Ty::Int | Ty::Lgl | Ty::Dbl | Ty::Num)
+            {
+                continue;
+            }
+            let status = self.status(slot);
+            let dirty = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+            let value = self.load_slot_cell(slot);
+            self.decrement_if(value, dirty);
+        }
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
     }
 
     /// Writes every dirty slot back to the environment.
