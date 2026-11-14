@@ -5,7 +5,8 @@
 #
 # Environment: RY_BENCH_PACKAGE (the package name), RY_BENCH_TESTS (its tests/testthat
 # directory), RY_BENCH_REPORT (the JSON-lines file to write) and RY_BENCH_FILTER (an optional
-# regular expression a test file's name must match).
+# regular expression a test file's name must match). RY_BENCH_RPROF names a file for GNU R's
+# `Rprof()` samples of the run.
 #
 # The driver replaces testthat's runner, not its expectations: `test_that` is a local function
 # that evaluates the block as the body of a fresh closure (so `withr::local_*` cleanups run when
@@ -57,6 +58,11 @@ local({
   # `gc.time()` measures the same way under both runtimes.
   gc.time(TRUE)
   collecting <- gc.time()[[3L]]
+  # GNU R's side of a function-by-function profile (`tools/bench/compare_profiles.py`); ry's side
+  # is the `RY_PROFILE_STACKS` file. Both sample wall time: `Rprof()`'s default event on Linux is
+  # CPU time, which misses I/O waits and counts every thread of multithreaded native code.
+  rprof <- Sys.getenv("RY_BENCH_RPROF")
+  if (nzchar(rprof)) utils::Rprof(rprof, interval = 0.01, event = "elapsed")
   started <- proc.time()[["elapsed"]]
   status <- tryCatch(
     {
@@ -68,6 +74,7 @@ local({
   )
   if (!is.null(status)) {
     emit("<setup>", "<setup>", "error", 0L, status, "", proc.time()[["elapsed"]] - started)
+    if (nzchar(rprof)) utils::Rprof(NULL)
     close(connection)
     return(invisible())
   }
@@ -156,6 +163,7 @@ local({
     )
     if (!is.null(outcome)) emit(file, "<file>", "error", 0L, paste("error:", outcome), "", proc.time()[["elapsed"]] - began)
   }
+  if (nzchar(rprof)) utils::Rprof(NULL)
   emit("<total>", "<total>", "pass", 0L, character(), sprintf("%.6f", gc.time()[[3L]] - collecting), proc.time()[["elapsed"]] - started)
   close(connection)
 })

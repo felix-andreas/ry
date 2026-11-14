@@ -696,7 +696,10 @@ pub unsafe fn register_routine_entries() -> R<()> {
 /// ([`eval::settled_without_code`]), so nothing runs that could see the missing frame
 /// (`sys.calls()`, a handler, a traceback). A closure being debugged or traced runs as usual.
 pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+    // The boundary-call recorder sees closure calls only where their frames start.
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || activity::hooks() & activity::CAPTURE != 0
+    {
         return Ok(None);
     }
     enter(function, registered(function), args)
@@ -748,7 +751,10 @@ pub unsafe fn native_entry_by_value(
     compiled: bool,
     lookup: impl Fn(Sexp) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+    // The boundary-call recorder sees closure calls only where their frames start.
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || activity::hooks() & activity::CAPTURE != 0
+    {
         return Ok(None);
     }
     let mut tagged = false;

@@ -6,10 +6,15 @@
 //! those samples together with the event counters the hooks keep. The only names it prints are
 //! base R's builtins and the packages that own native code; a package outside the public list
 //! below is printed as a hash of its name.
+//!
+//! The same sampler measures benchmark regions: `.ry_bench_region(name)` marks where a region
+//! starts (and the one before it ends), and `RY_PROFILE_REGIONS` names a file that gets one JSON
+//! line per region with its wall time, its samples by activity and its event counts.
 
 use {
     crate::{
-        interp,
+        builtins::{BuiltinDef, Call, builtin},
+        callgrind, interp,
         unwind::{R, error},
         values,
     },
@@ -20,11 +25,12 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{
+        ffi::CString,
         fmt::Write as _,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{
             Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         },
         thread::JoinHandle,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -39,10 +45,28 @@ pub const VARIABLE: &str = "RY_PROFILE_SUMMARY";
 /// per worker.
 pub const DIRECTORY_VARIABLE: &str = "RY_PROFILE_SUMMARY_DIR";
 
-const INTERVAL: Duration = Duration::from_millis(1);
+/// The environment variable that names the file the benchmark regions are written to.
+pub const REGIONS_VARIABLE: &str = "RY_PROFILE_REGIONS";
+
+/// The environment variable that names a file for every sampled call stack with its function
+/// names, for comparing a run function by function against GNU R's `Rprof` output
+/// (`tools/bench/compare_profiles.py`). Unlike the summary, this file names private code, so it is
+/// written only when asked for, and only together with a summary.
+pub const STACKS_VARIABLE: &str = "RY_PROFILE_STACKS";
+
+/// The environment variable that sets the sampling interval in microseconds (default 1000).
+pub const INTERVAL_VARIABLE: &str = "RY_PROFILE_INTERVAL_US";
+
+/// The sampling interval in microseconds, fixed when sampling starts.
+static INTERVAL_MICROS: AtomicU64 = AtomicU64::new(1000);
 
 struct Sampler {
-    path: PathBuf,
+    /// The summary file, when a summary is collected.
+    path: Option<PathBuf>,
+    /// The regions file, when regions are measured.
+    regions: Option<PathBuf>,
+    /// The stacks file, when stacks are kept.
+    stacks: Option<PathBuf>,
     /// The process that started sampling. A forked child inherits this record but not the
     /// sampling thread, so it writes nothing.
     process: u32,
@@ -63,6 +87,11 @@ struct Samples {
     /// Samples by the body of the innermost closure and by category; body 0 is time outside any
     /// closure. The entry count that decides a body's bucket is known only when the run ends.
     bodies: FxHashMap<usize, [u64; Activity::ALL.len()]>,
+    /// Samples by activity word for each benchmark region, indexed like [`Regions::names`].
+    regions: Vec<FxHashMap<u32, u64>>,
+    /// Samples by whole stack (owner and name per frame, outermost first) and activity word,
+    /// kept only when [`STACKS_VARIABLE`] names a file.
+    stacks: Option<FxHashMap<(Vec<(u32, usize)>, u32), u64>>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -97,6 +126,10 @@ impl Samples {
         global: u32,
     ) {
         *self.words.entry(word).or_insert(0) += 1;
+        if let Some(stacks) = &mut self.stacks {
+            let frames = owners.iter().copied().zip(names.iter().copied()).collect();
+            *stacks.entry((frames, word)).or_insert(0) += 1;
+        }
         self.bodies
             .entry(bodies.last().copied().unwrap_or(0))
             .or_insert([0; Activity::ALL.len()])[category(word) as usize] += 1;
@@ -160,15 +193,39 @@ static SAMPLER: Mutex<Option<Sampler>> = Mutex::new(None);
 static STOP: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// Whether closure calls publish their frames, which only the summary reads.
+static PUBLISHING: AtomicBool = AtomicBool::new(false);
+/// The benchmark region running now, as its index in [`Regions::names`] plus one; zero outside
+/// any region. The sampler reads it to file each sample under its region.
+static REGION: AtomicU32 = AtomicU32::new(0);
 
-/// Starts collecting a summary when [`VARIABLE`] names a file.
+/// The benchmark regions marked by `.ry_bench_region`, in the order they first started.
+struct Regions {
+    names: Vec<String>,
+    /// Wall time spent in each region, summed over its entries.
+    seconds: Vec<Duration>,
+    /// Each region's event counts, summed over its entries.
+    counters: Vec<[u64; Counter::ALL.len()]>,
+    /// The open region: its index, when it started and the event counts at that point.
+    open: Option<(usize, Instant, [u64; Counter::ALL.len()])>,
+}
+
+static REGIONS: Mutex<Regions> = Mutex::new(Regions {
+    names: Vec::new(),
+    seconds: Vec::new(),
+    counters: Vec::new(),
+    open: None,
+});
+
+/// Starts sampling when [`VARIABLE`] or [`DIRECTORY_VARIABLE`] asks for a summary or
+/// [`REGIONS_VARIABLE`] for benchmark regions.
 pub fn start_from_environment() {
     let path = if let Some(path) = std::env::var_os(VARIABLE).filter(|path| !path.is_empty()) {
         // Subprocesses (callr, parallel's socket clusters) would overwrite the file with a
         // summary of themselves, so only this process profiles.
         // SAFETY: the session starts before R code can start threads that read the environment.
         unsafe { std::env::remove_var(VARIABLE) };
-        PathBuf::from(path)
+        Some(PathBuf::from(path))
     } else if let Some(directory) =
         std::env::var_os(DIRECTORY_VARIABLE).filter(|directory| !directory.is_empty())
     {
@@ -176,14 +233,48 @@ pub fn start_from_environment() {
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_millis());
-        PathBuf::from(directory).join(format!("ry-profile-{started}-{}.md", std::process::id()))
+        Some(
+            PathBuf::from(directory)
+                .join(format!("ry-profile-{started}-{}.md", std::process::id())),
+        )
     } else {
-        return;
+        None
     };
-    // The summary is written when the session ends, after R code may have changed the
-    // working directory (into `tempdir()`, which the session then deletes), so a relative
-    // path is fixed against the directory the session started in.
-    let path = std::path::absolute(&path).unwrap_or(path);
+    let regions = std::env::var_os(REGIONS_VARIABLE)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    if regions.is_some() {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(REGIONS_VARIABLE) };
+    }
+    if path.is_none() && regions.is_none() {
+        return;
+    }
+    if let Some(micros) = std::env::var(INTERVAL_VARIABLE)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .filter(|&micros| micros > 0)
+    {
+        INTERVAL_MICROS.store(micros, Ordering::Relaxed);
+    }
+    let interval = Duration::from_micros(INTERVAL_MICROS.load(Ordering::Relaxed));
+    // Both files are written when the session ends, after R code may have changed the working
+    // directory (into `tempdir()`, which the session then deletes), so a relative path is fixed
+    // against the directory the session started in.
+    let path = path.map(|path| std::path::absolute(&path).unwrap_or(path));
+    let regions = regions.map(|path| std::path::absolute(&path).unwrap_or(path));
+    let stacks = std::env::var_os(STACKS_VARIABLE)
+        .filter(|stacks| !stacks.is_empty())
+        .map(|stacks| {
+            // SAFETY: as above, no R code has started a thread yet.
+            unsafe { std::env::remove_var(STACKS_VARIABLE) };
+            let stacks = PathBuf::from(stacks);
+            std::path::absolute(&stacks).unwrap_or(stacks)
+        })
+        .filter(|_| path.is_some());
+    let keep_stacks = stacks.is_some();
+    let publishing = path.is_some();
+    PUBLISHING.store(publishing, Ordering::Relaxed);
     if let Some(period) = std::env::var("RY_ALLOC_SITES")
         .ok()
         .and_then(|period| period.parse::<u64>().ok())
@@ -193,39 +284,166 @@ pub fn start_from_environment() {
     activity::set_enabled(true);
     let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {
-        let mut samples = Samples::default();
+        let mut samples = Samples {
+            stacks: keep_stacks.then(FxHashMap::default),
+            ..Samples::default()
+        };
         let mut owners = Vec::with_capacity(activity::FRAME_SLOTS);
         let mut names = Vec::with_capacity(activity::FRAME_SLOTS);
         let mut bodies = Vec::with_capacity(activity::FRAME_SLOTS);
         while !STOP.load(Ordering::Relaxed) {
-            std::thread::sleep(INTERVAL);
-            if READY.load(Ordering::Relaxed) {
-                let word = activity::current();
+            std::thread::sleep(interval);
+            if !READY.load(Ordering::Relaxed) {
+                samples.startup += 1;
+                continue;
+            }
+            let word = activity::current();
+            if publishing {
                 activity::read_frames(&mut owners, &mut names, &mut bodies);
                 samples.record(word, &owners, &names, &bodies, global);
-            } else {
-                samples.startup += 1;
+            }
+            if let Some(region) = (REGION.load(Ordering::Relaxed) as usize).checked_sub(1) {
+                if samples.regions.len() <= region {
+                    samples.regions.resize_with(region + 1, FxHashMap::default);
+                }
+                *samples.regions[region].entry(word).or_insert(0) += 1;
             }
         }
         samples
     });
     *lock(&SAMPLER) = Some(Sampler {
         path,
+        regions,
+        stacks,
         process: std::process::id(),
         started: Instant::now(),
         thread,
     });
 }
 
+/// Whether the sampler runs, which needs every closure call to pass the profiling hooks.
+pub fn sampling() -> bool {
+    lock(&SAMPLER).is_some()
+}
+
+/// The builtin that marks benchmark regions.
+pub const BUILTINS: &[BuiltinDef] =
+    &[builtin(".ry_bench_region", 1, do_ry_bench_region).invisible()];
+
+/// `.ry_bench_region(name)`: ends the open benchmark region and starts the one called `name`;
+/// an empty name starts none. Starting a region again adds to its totals.
+unsafe fn do_ry_bench_region(call: &Call<'_>) -> R<Sexp> {
+    let name = unsafe { values::require_str(call.arg(0), "name")? };
+    switch_region(&name);
+    Ok(values::nil())
+}
+
+/// Closes the open region and opens the one called `name`, unless `name` is empty. Under
+/// callgrind each region also becomes its own dump, named after the region.
+fn switch_region(name: &str) {
+    let mut regions = lock(&REGIONS);
+    if let Some((index, started, before)) = regions.open.take() {
+        REGION.store(0, Ordering::Relaxed);
+        let elapsed = started.elapsed();
+        regions.seconds[index] += elapsed;
+        for ((total, after), before) in regions.counters[index]
+            .iter_mut()
+            .zip(counters())
+            .zip(before)
+        {
+            *total += after.saturating_sub(before);
+        }
+        // A name with a NUL byte cannot reach callgrind whole, so the dump drops those bytes.
+        let dump = CString::new(regions.names[index].replace('\0', "")).unwrap_or_default();
+        callgrind::end_region(&dump);
+    }
+    if name.is_empty() {
+        return;
+    }
+    let index = match regions.names.iter().position(|known| known == name) {
+        Some(index) => index,
+        None => {
+            regions.names.push(name.to_owned());
+            regions.seconds.push(Duration::ZERO);
+            regions.counters.push([0; Counter::ALL.len()]);
+            regions.names.len() - 1
+        }
+    };
+    regions.open = Some((index, Instant::now(), counters()));
+    REGION.store(index as u32 + 1, Ordering::Relaxed);
+    callgrind::start_region();
+}
+
+fn counters() -> [u64; Counter::ALL.len()] {
+    Counter::ALL.map(activity::counter)
+}
+
 /// The label of code whose top level is the global environment: scripts and the console.
 const GLOBAL_LABEL: &str = "R_GlobalEnv";
 
-/// Publishes a call of the closure `function` through `call` for the sampler, until the scope
-/// drops.
-pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope {
-    if !activity::enabled() {
-        return activity::no_frame();
+/// What a closure call holds while it runs: nothing while the profiling hooks are off, and
+/// otherwise its published frame and its boundary-call record.
+pub struct ClosureScope(Option<HookedScope>);
+
+struct HookedScope {
+    _frame: activity::FrameScope,
+    capture: crate::capture::Scope,
+}
+
+impl ClosureScope {
+    /// Hands the call's result to the boundary-call recorder before the scope drops.
+    #[inline(always)]
+    pub unsafe fn returned(&mut self, result: &R<Sexp>) {
+        if let Some(hooked) = &mut self.0 {
+            unsafe { hooked.capture.returned(result) };
+        }
     }
+}
+
+/// Runs the profiling hooks for a call of the closure `function` through `call` whose caller's
+/// frame is `sys_parent`, with the dispatch variables of a method in `method_vars` or bound in
+/// its frame environment `env` (`NULL` for a slot frame): publishes the frame for the sampler
+/// and records boundary calls, until the scope drops. Every closure call passes here, so with
+/// the hooks off it costs one test of the hook flags, and the rest is out of line.
+#[inline(always)]
+pub unsafe fn enter_closure(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> ClosureScope {
+    if !activity::enabled() {
+        return ClosureScope(None);
+    }
+    unsafe { enter_closure_hooked(call, function, sys_parent, method_vars, env) }
+}
+
+#[inline(never)]
+unsafe fn enter_closure_hooked(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> ClosureScope {
+    let capture = if activity::hooks() & activity::CAPTURE != 0 {
+        unsafe { crate::capture::enter(call, function, sys_parent, method_vars, env) }
+    } else {
+        crate::capture::Scope::none()
+    };
+    let frame = if PUBLISHING.load(Ordering::Relaxed) {
+        unsafe { publish_frame(call, function) }
+    } else {
+        activity::no_frame()
+    };
+    ClosureScope(Some(HookedScope {
+        _frame: frame,
+        capture,
+    }))
+}
+
+unsafe fn publish_frame(call: Sexp, function: Sexp) -> activity::FrameScope {
     let owner = crate::dispatch::top_env(function.tag());
     let body = crate::bytecode::closure_body(function).as_ptr() as usize;
     let owner = {
@@ -245,10 +463,13 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope 
             }
         }
     };
+    // `pkg::f()`, `obj$f()` and `obj@f()` take the name `f`; GNU R's `Rprof()` writes these as
+    // `pkg::f`, `obj$f` and `obj@f`, and `tools/bench/compare_profiles.py` reduces those to `f` so
+    // the two engines' rows match.
     let mut head = call.car();
     if head.kind() == SexpType::Language
         && head.car().kind() == SexpType::Symbol
-        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::" | "$" | "@")
     {
         head = head.cdr().cdr().car();
     }
@@ -285,8 +506,10 @@ pub fn mark_ready() {
     }
 }
 
-/// Stops sampling and writes the summary, if one was being collected.
+/// Closes the open benchmark region, stops sampling, and writes the summary and the regions file
+/// that were asked for.
 pub fn finish() -> R<()> {
+    switch_region("");
     let Some(sampler) = lock(&SAMPLER).take() else {
         return Ok(());
     };
@@ -296,26 +519,138 @@ pub fn finish() -> R<()> {
     }
     STOP.store(true, Ordering::Relaxed);
     activity::set_enabled(false);
+    PUBLISHING.store(false, Ordering::Relaxed);
     let elapsed = sampler.started.elapsed();
     let samples = sampler
         .thread
         .join()
         .map_err(|_| error("the profile summary's sampling thread panicked"))?;
+    if let Some(path) = &sampler.regions {
+        write_file(path, &regions_report(&samples), "the benchmark regions")?;
+    }
+    let Some(path) = &sampler.path else {
+        return Ok(());
+    };
     let ready = lock(&READY_AT).map(|ready| ready.duration_since(sampler.started));
     let text =
         report(&samples, elapsed, ready).map_err(|_| error("cannot format the profile summary"))?;
-    let written = match sampler.path.parent() {
+    write_file(path, &text, "the profile summary")?;
+    if let (Some(path), Some(stacks)) = (&sampler.stacks, &samples.stacks) {
+        write_file(path, &stack_lines(stacks), "the profile stacks")?;
+    }
+    Ok(())
+}
+
+fn write_file(path: &Path, text: &str, what: &str) -> R<()> {
+    let written = match path.parent() {
         Some(directory) if !directory.as_os_str().is_empty() => {
-            std::fs::create_dir_all(directory).and_then(|()| std::fs::write(&sampler.path, text))
+            std::fs::create_dir_all(directory).and_then(|()| std::fs::write(path, text))
         }
-        _ => std::fs::write(&sampler.path, text),
+        _ => std::fs::write(path, text),
     };
     written.map_err(|failure| {
         error(format!(
-            "cannot write the profile summary to '{}': {failure}",
-            sampler.path.display()
+            "cannot write {what} to '{}': {failure}",
+            path.display()
         ))
     })
+}
+
+/// One line per distinct stack and activity: the sample count, the activity (`builtin:NAME` for
+/// a builtin, `native:PACKAGE` for native code), and the frames outermost first as
+/// `owner::function`, separated by `;`. The owner is a namespace, `R_GlobalEnv` or `other`.
+fn stack_lines(stacks: &FxHashMap<(Vec<(u32, usize)>, u32), u64>) -> String {
+    let mut owners: FxHashMap<u32, String> = FxHashMap::default();
+    let mut functions: FxHashMap<usize, String> = FxHashMap::default();
+    let mut lines: Vec<String> = stacks
+        .iter()
+        .map(|((frames, word), count)| {
+            let activity = Activity::from_word(*word);
+            let activity = match activity {
+                Activity::Builtin => format!(
+                    "builtin:{}",
+                    builtin_name((word >> 8) as usize).unwrap_or("?")
+                ),
+                Activity::Native => format!(
+                    "native:{}",
+                    activity::label_name(word >> 8).unwrap_or_else(|| "unknown".to_owned())
+                ),
+                _ => activity.describe().to_owned(),
+            };
+            let frames: Vec<String> = frames
+                .iter()
+                .map(|&(owner, name)| {
+                    let owner = owners.entry(owner).or_insert_with(|| {
+                        activity::label_name(owner).unwrap_or_else(|| "unknown".to_owned())
+                    });
+                    let function = functions.entry(name).or_insert_with(|| {
+                        // SAFETY: a nonzero `name` is the address of a symbol, and symbols are
+                        // never freed.
+                        match unsafe { Sexp::from_raw(name as *mut Header) } {
+                            Some(symbol) => unsafe { values::symbol_name(symbol).into_owned() },
+                            None => "(anonymous)".to_owned(),
+                        }
+                    });
+                    format!("{owner}::{function}")
+                })
+                .collect();
+            format!("{count}\t{activity}\t{}\n", frames.join(";"))
+        })
+        .collect();
+    lines.sort();
+    lines.concat()
+}
+
+/// One JSON object per line for each benchmark region, in the order the regions first started.
+fn regions_report(samples: &Samples) -> String {
+    let regions = lock(&REGIONS);
+    let mut out = String::new();
+    for (index, name) in regions.names.iter().enumerate() {
+        let mut categories = [0u64; Activity::ALL.len()];
+        if let Some(words) = samples.regions.get(index) {
+            for (&word, &count) in words {
+                categories[category(word) as usize] += count;
+            }
+        }
+        let activities: Vec<String> = Activity::ALL
+            .iter()
+            .map(|&activity| format!("\"{}\":{}", activity.key(), categories[activity as usize]))
+            .collect();
+        let counters: Vec<String> = Counter::ALL
+            .iter()
+            .zip(&regions.counters[index])
+            .map(|(counter, count)| format!("\"{}\":{count}", counter.key()))
+            .collect();
+        out.push_str(&format!(
+            "{{\"region\":{},\"seconds\":{:.6},\"samples\":{},\"activities\":{{{}}},\"counters\":{{{}}}}}\n",
+            json_string(name),
+            regions.seconds[index].as_secs_f64(),
+            categories.iter().sum::<u64>(),
+            activities.join(","),
+            counters.join(","),
+        ));
+    }
+    out
+}
+
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if (character as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -629,7 +964,7 @@ fn report(
     writeln!(
         out,
         "Samples after start-up: {total} (one per {} ms)\n",
-        INTERVAL.as_millis()
+        INTERVAL_MICROS.load(Ordering::Relaxed) as f64 / 1000.0
     )?;
 
     writeln!(out, "## Time split\n")?;

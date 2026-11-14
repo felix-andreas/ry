@@ -16,7 +16,10 @@
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
 use {
-    crate::object::{Sexp, gp},
+    crate::{
+        Probe,
+        object::{Sexp, gp},
+    },
     rustc_hash::FxHashSet,
     std::{
         alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
@@ -138,6 +141,7 @@ pub mod layout {
     pub const INLINE: u32 = super::INLINE_BINDINGS as u32;
     /// A slot is a symbol and its cell, each a pointer.
     pub const SLOT: usize = size_of::<Binding>();
+    pub const SLOT_SYMBOL: usize = std::mem::offset_of!(Binding, symbol);
     pub const SLOT_CELL: usize = std::mem::offset_of!(Binding, cell);
 
     /// The [`FILTER`] bit of `symbol`.
@@ -462,6 +466,17 @@ impl Frame {
         let position = self.find_position(symbol)?;
         *hint = position as u32;
         self.bindings.get(position).map(|binding| binding.cell)
+    }
+
+    /// [`crate::Heap::probe`] for this frame.
+    pub fn probe(&self, symbol: Sexp) -> Probe {
+        if self.filter & filter_bit(symbol) == 0 {
+            return Probe::Absent;
+        }
+        match self.find_position(symbol) {
+            Some(position) if self.formals & SHADOWED == 0 => Probe::Slot(position as u32),
+            _ => Probe::Unknown,
+        }
     }
 
     #[inline]

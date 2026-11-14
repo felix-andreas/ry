@@ -127,8 +127,24 @@ per-item and per-file tables after the type store".
 
 ## Open: JIT on against JIT off
 
-The baseline tier was deleted (`decisions.md`, "No baseline tier, and code images hold bytecode only"). JIT on runs about 1% more instructions than JIT off on `just bench applications` and is not faster in wall time. What is left, in order of expected gain:
+With the JIT on, thirteen of the fifteen `just bench applications` programs run 0.01% to 0.55% more instructions than with it off, and `orders` and `bond_book` run 37% and 23% fewer (callgrind). The remainder is the entry and back-edge counters, one recording window per hot body and the compiles themselves. Tier 1 compiles a body only when its native work covers what compiled code costs (`decisions.md`, "A body compiles only when its native work covers what compiled code costs"), so most application bodies stay in tier 0: their instructions are builtin calls on boxed values, which compiled code can only step through tier 0. What is left, in order of expected gain:
 
+- The benchmark code bases gain nothing from tier 1. On every tenth test file of each code base JIT on runs slightly more instructions than JIT off: 0.28% more on finbench (64,500M instructions), 0.36% on biobench (38,100M) and 0.22% on dsbench (36,200M). On the dsbench sample (50 files) cache misses and branch mispredictions agree within 0.7% (callgrind with cache and branch simulation), and the wall times agree within the noise of six alternating runs. One body compiles there (`tryCatch`), about 200 are planned and refused: 129 run too rarely to repay a compile, 34 have no instruction that could run natively, 26 do too little natively. Their work is calls of builtins and of small closures tier 1 cannot inline yet, so the levers are the ones below (wider frames, native forms for builtins on boxed values) and the call path itself. Measure with `RY_JIT_LOG=1` on a sample of test files and group the refusal lines.
+- Compare JIT on against JIT off by instruction counts, not wall time. Two alternating wall-time runs of a whole code base showed JIT on 2% slower on all three, and six alternating runs of a 50-file sample on a quiet machine showed no difference; the instruction counts differ by 0.2%.
+- **Next for tier 1, in order: frames in shared code, the inline back-edge count, wider frames.** Each item below has its design. None is built, except the planner half of the first, which is on the branch `perf/tier1-shared-frames`.
+- *Frames in shared code.* A body shared by several enclosures inlines no callee it finds in a short-lived enclosure. `spectralnorm_alt_3` defines `eval_A` and its callers inside `execute`: the first `execute(250)` of a process runs in 0.11 s, and every later one in 0.56 to 0.70 s, the tier-0 time. The second `execute` enters the compiled loops from a new enclosure, which invalidates them, and the shared recompile drops the speculation on `eval_A` (`Planner::portable`, `analysis.rs`), so the call is a step and the loop is refused (`STEPPING_LOOP`). Local helpers and function factories have this shape. Repro: `source` the program and call `execute()` five times with `RY_JIT_LOG=1`; done means every call runs near 0.1 s. The design guards the callee's code instead of the closure:
+  - *Planner (written, on the branch, never compiled).* In a shared plan a `GetFun` whose lookup is not portable becomes `Action::GetFunFree { dst, symbol }`, and its register gets the hint type `Ty::Callee(example)`: any boxed value that is probably a closure with the example's formals and code. A call through such a register becomes `Action::Frame` with `loaded: Some(Loaded { register, levels })`, where `levels` counts the enclosures from the caller's enclosure to the callee's environment (`Planner::levels_to`, at most `MAX_CALLEE_LEVELS`). The callee is planned as a shared plan of its code (`plan_callee(function, loaded)`), and `Planner::adopt` turns each function lookup the callee roots at its own environment into a rooted speculation of the caller. That is sound because the callee's environment is an enclosure of the caller's, so `valid` and `prove` (`runtime.rs`) re-resolve it for whichever closure runs.
+  - *`GetFunFree` in `codegen.rs`.* Generalize `probe_free` into a walk that starts at the activation's enclosure. For a level that is a function frame, replace the identity comparison of the environment by a test of its flags, `gp & (FUNCTION_FRAME | PENDING_FRAME) == FUNCTION_FRAME`, and keep the structural checks (filter bit, length, slot symbol, formals hint). Keep the identity comparison only for long-lived environments and for a level whose bindings live on the symbols. The root body must first test that its own frame has no environment, as `get_fun_fast` does. The value found must be a closure: an active binding or an unforced promise leaves the fast path. The slow path is a new helper `jit_get_fun(activation, symbol)` that does the same lookup without running code and returns null where tier 0 must run the instruction (`hand_off`). Store the result in the `dst` register, which also roots the function during the frameless call. `refine` and `check` read `Ty::Callee` as any boxed value, and `known_object` treats `GetFunFree` like `GetFun`.
+  - *A loaded `Action::Frame`.* `jit_enter_frame` takes the function as a third argument: a constant for a callee the plan knows, the register for a loaded one. Its fast path adds `function != child.machine.function` to the "needs a frame start" test, and for a loaded frame it also checks at every start that `function.tag()` is still the `levels`-th enclosure of the parent's enclosure, because `environment(f) <-` can change the chain. `prepare` checks kind, formals (`car`) and code (`cdr`) against the plan, counts a hand-off on a mismatch (`count_handoff`) and returns null. `runtime::Inlined` drops `function` and keeps the formals, the code and `levels`; `enter_inlined` and `eval::enter` take the function from the child machine. `probe_free` must take its example enclosure from a field that exists only while compiling, so shared code never embeds the address of a short-lived environment.
+  - *Rooting in `jit.rs`.* For a loaded frame keep only the callee's formals, code and slot table alive, never the example closure or its environment. Skip the callee's speculations whose environment is not long-lived, because the caller adopted them.
+  - *A live slot frame as the callee's environment.* A closure made in a slot frame has an environment flagged `PENDING_FRAME` for as long as that frame runs on its slots, and `plan_callee` refuses such a callee. When slot frames stop turning into environments early, `eval_A` is in that state during the whole loop, so this refusal has to go for the benchmark to keep its time: read the callee's free variables from the owner frame's slots (`eval::slot_binding`, `Heap::slot_owner`) instead of the environment's cells. Check `spectralnorm_alt_3` with `RY_JIT_LOG=1` after any change to when a slot frame gets its environment.
+  - *Tests.* An oracle case and a `test_tiers` case each for: a factory called twice (two enclosures, one body, a sibling callee); the callee rebound or shadowed between and during entries; `environment(f) <-`; another closure with the same code; the callee replaced by a builtin or by a closure with other code. Extend the cross-tier fuzz generator with shared bodies.
+- *The inline back-edge count.* A tier-0 loop pays for an installed tier at every backward jump. `jump_fast` hands each backward jump to the out-of-line `jump` while a tier is installed, which counts the back edge there (`crates/interp/src/bytecode.rs`). `mandelbrot_ascii` (public suite) compiles nothing, because its loops are refused for good, and runs about 10% slower with the JIT on than off (0.65 against 0.59 s), and `jump` is the largest single item of the JIT-on excess on the dsbench sample (13.5M of about 80M instructions). That the jump explains the whole 10% is unverified. Design: `jump_fast` runs `back_edge_due` itself when a tier is installed (one increment and two comparisons on the profile words, no call) and returns `None` only when the count is due or an interrupt is requested. A body refused for good already parks its count at `i32::MIN` (`back_edge`), so it never leaves the fast path again. Done means `mandelbrot_ascii` costs the same instructions with the JIT on and off (callgrind), and the JIT-on excess on a code-base sample drops by the `jump` share.
+- *Wider frames.* An inlined frame is refused for a callee without type feedback, one that takes or is passed `...`, and one with an instruction only tier 0 runs; on the code bases these are the hot small closures (`plan_callee` in `analysis.rs` lists every refusal, and `RY_JIT_LOG=1` prints them per call site). By expected gain:
+  - *No type feedback.* Tier 0 records only near a body's thresholds and never in a small closure it runs without an activation, so a hot one-line callee can have none. Plan such a callee from its caller's argument types instead of refusing: every instruction without feedback gets a guarded generic form whose failure hands off, and the first hand-off storm retires the code through the existing `count_handoff` path, after which the callee has run in tier 0 with recording on. The alternative, opening a recording window for the callee when the caller's plan refuses it and retrying the caller, needs a tier-0 change and a second compile.
+  - *`...`.* Two cases. A callee that only forwards `...` to a call the plan steps can bind it as tier 0 does: the frame's `...` slot holds the caller's argument references (`eval::direct_sources` already plans named and omitted arguments). A caller that passes its own `...` needs the length and names at compile time, which a shared plan does not have, so guard the `...` length at the frame start and hand off on a mismatch.
+  - *Tier-0-only instructions in the callee.* A callee whose plan contains a step is refused when the step needs the frame. Let the step build the frame through the frame state (`enter_inlined` does this for a deoptimization) and continue in tier 0 to the callee's return, then resume compiled code in the caller through the resume record a stepped call already leaves. The cost model must charge such a frame as a call that is not removed.
+- After those, native forms for the hot builtins on boxed values ("Cheaper steps" below).
 - Take a speedup ceiling from plain callgrind self cost, never from a run with `RY_PROFILE_SUMMARY`. The summary hooks call `top_env` from `profile_summary::enter_closure`, about 1.1% of `validation_full`, which rescaling the shares by the total does not remove.
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
   (it cost 227M instructions on `functional`), and the trivial predicates through
@@ -136,12 +152,21 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
 - Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
   `jit_step` (158,500 times in one `functional` body). Loads probe the frame inline
   (`decisions.md`, "Tier 1 probes the frame inline for a variable load").
-- JIT on above JIT off on `testthat_full`: 7.134G against 7.047G (callgrind, bench profile,
-  `RY_BENCH_REPEAT=2`). Of the 87M, compiled code and compiling are under 10M; tier 0's own
-  functions run more with the JIT on (`run` +30M, `execute_code` +12M, `run_get_var` +8M,
-  `run_call_builtin` +8M, `run_call_generic` +5M). The likely cause is tier 0's type-feedback
-  recording and entry and back-edge counting (unconfirmed; compare against
-  `RY_JIT_THRESHOLDS=0,0`).
+- Cheaper steps. An instruction compiled code hands to tier 0 costs about 300 machine
+  instructions more than tier 0 running it (`STEP_COST`, `crates/jit/src/jit.rs`), so a loop
+  that mostly steps is refused (`STEPPING_LOOP`): the `vasicek` kernel's loop (`stats::rnorm`,
+  `rates[t, ]`, six vector operators), and the loops of `team_scores`, `records`, `report`
+  and `objects`. Two levers: native forms for the hot builtins on boxed values, and a step
+  that does not synchronise the whole frame before and after the instruction.
+- A refused plan is wasted work. Planning a body that ends as `NOTHING_NATIVE` or `SMALL`
+  after the plan costs 0.5M to 1.4M instructions, and a body can ask up to three times.
+  Decide more of those from `analysis::shape` before planning.
+- A loop whose compiled code deoptimized is compiled again from the same feedback on
+  `team_scores` (the loop is refused today, so the path is idle; check it when cheaper steps
+  let the loop compile).
+- Native recursion is bounded by the depth budget only, not by the native stack
+  (`decisions.md`, "A native recursive function's depth budget shrinks with the interpreter
+  depth").
 - The JIT's first compile costs about 4 MB of peak RSS (code generator start-up). On
   `testthat_full` one compile of `isTRUE`'s body (3 KB of code) makes JIT on 4 MB above JIT off;
   a compile that saves microseconds should not cost megabytes (`decisions.md`, "withr's
@@ -157,22 +182,32 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
 - Inlined closure calls without a frame are built (`decisions.md`, "Tier 1 leaves compiled code
-  through frame states"). On `just bench applications` they move one program, `orders` (85 ms
-  against 154 ms, 1.82x), because a call is only inlined into a caller tier 1 compiles, and tier 1
-  compiles 0 to 4 bodies per program (11 on `functional`). Three of those bodies get a frame:
-  one in `orders`, one in `conditions` and one in `timeseries`. In order of expected gain on the
-  applications:
-  - Compile the callers. Most application bodies are refused as "would hand most instructions
-    to tier 0" or "would run nothing natively": their instructions are builtin calls, vector
-    operators and calls of closures with `...` or defaults. Each of those needs a native form
+  through frame states", "An inlined call starts with one leaf helper call"). They pay where a
+  compiled loop calls a small closure (`spectralnorm_alt_3`, `orders`), and nowhere else yet,
+  because a call is only inlined into a caller tier 1 compiles. In order of expected gain:
+  - A lean entry from the dispatch loop into compiled code. An entry costs about 570 machine
+    instructions more than starting the body in tier 0 (`count_entry`, `entry_event`,
+    `jit::enter`, `compiled_for`, `jit::run`, the register file, the boxed result), which is why
+    a loop-free body under five native instructions is refused (`decisions.md`, "A body
+    compiles only when its native work covers what compiled code costs"). The end
+    shape jumps from the call instruction to a code pointer in the code header. Recalibrate
+    `ENTRY_COST` (`crates/jit/src/jit.rs`) when it lands.
+  - Evaluate more arguments before an inlined call. An argument is computed eagerly only when
+    `lower_expression` can produce it as an unboxed scalar without a failure; anything else stays
+    a promise, and the frame is refused when the callee reads it ("an argument the callee reads
+    that may have an effect"). A pure expression that can fail (`x[[i]]`, `a / b` on vectors) or
+    yields a boxed value can still run before the call, with an exit at the call instruction
+    when it fails. An argument that mentions one of the callee's formals under a condition stays
+    a promise too (`analysis.rs`, `Lowering.conditional`); tracking which formals are already
+    forced at the call would allow it.
+  - Compile the callers. Most application and code-base bodies are refused as `SMALL`,
+    `STEPPING_LOOP` or "would run nothing natively": their instructions are builtin calls on
+    boxed values, vector operators and calls of closures with `...`. Each needs a native form
     in tier 1 before removing the calls between them can pay.
-  - Widen what gets an inlined frame. `RY_JIT_LOG=1` over the 15 applications prints 709
-    refusals: 445 "the call does not pass each formal one argument" (defaults), 115 "the callee
-    has no type feedback yet", 58 "a named, missing or `...` argument", 44 "the callee runs an
-    instruction only tier 0 has", 24 recursive calls, 8 callees too long, 8 callees that needed
-    their frame, 5 arguments with a possible effect that the callee reads, and 2 callees without
-    tier-0 code. Defaults and named arguments are 71% of them, so matching arguments at compile
-    time and binding a default as an unforced formal comes first.
+  - Callees tier 1 cannot inline yet: one with `...`, a loop, a default that is code and is
+    read, a recursive call, a call that needs its own frame, and a callee without type feedback
+    (tier 0 runs the smallest closures without an activation and records nothing for them;
+    plan those from the argument types at the call).
   - A direct call from compiled code when an inlined frame cannot start. `jit_enter_frame`
     declines while a calling handler is established, the call instruction then deoptimizes the
     whole root activation, and a root where that is frequent is recompiled without frames
@@ -180,22 +215,16 @@ The baseline tier was deleted (`decisions.md`, "No baseline tier, and code image
     which includes every testthat expectation, therefore calls for real. Calling the callee
     through the direct-call path instead keeps the root compiled with frames and makes
     `NO_FRAMES` unnecessary.
-  - Evaluate more arguments before the call. An argument of an inlined callee that mentions one
-    of the callee's formals under a condition stays a promise, which costs the frame when the
-    inner callee reads it (`analysis.rs`, `Lowering.conditional`). Tracking which formals are
-    already forced at the call would allow it.
-  - Enter an inlined frame without the two helper calls (`jit_enter_frame`, `jit_leave_frame`),
-    then delete `Action::Inline` and `effects::effect_free_lookups`, which exist only because
-    the frame path costs those calls.
-  - Plan a callee that has no type feedback from the argument types at the call. Tier 0 runs
-    small closures without an activation and records no feedback for them, so the smallest
-    callees get a frame only through `Action::Inline`.
+  - Start an inlined frame without the one remaining helper call (`jit_enter_frame`, a leaf of
+    about 50 instructions), then delete `Action::Inline` and `effects::effect_free_lookups`,
+    which exist only because the frame path costs that call.
   - R-level value nodes and passes in `crates/ssa`. The IR carries frame states, but its
     instructions are still Cranelift's, and inlining is decided by the planner in
     `analysis.rs`. Value numbering across an inlined call, guard removal and scalar
     replacement need typed R-level nodes above the lowering.
-- `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
-  once per call.
+- `conditions` leaves compiled code 4438 times at one call site, once per call: the compiled
+  `tryCatch` body calls `doTryCatch`, the R error raised under it unwinds through the compiled
+  frame, and the exit (`reason::PENDING`) rebuilds the frame for tier 0 to handle it.
 
 - **Tier 1 costs more wall time than its instruction count suggests**, because it adds mispredicted branches that callgrind's instruction count does not show. Closing the gap needs cheaper tier-1 compiles, not a change of the entry threshold (`decisions.md`, "Tier 1 keeps the 3000-entry threshold"). With the inline frame probe, `functional` runs 1.8% fewer instructions with the JIT on than off, and `testthat_full` runs 1.2% more, mostly in tier 0's own functions.
 
@@ -431,6 +460,19 @@ Each item removes a reason a function is not in the file or not compiled by `ry 
 - **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. The compiled packages of the Posit snapshot are built for an older R, and xts 0.14.1's binary truncates `ATTRIB`'s result to an `int` (GNU R 4.6.2 aborts on `x[2:4]` of an xts object the same way), so the installer reinstalls xts from source.
 - **Next.** Re-measure on the release archive (`--write`), then run `ry check` over the generated code and treat every finding as a possible false report.
 
+### Why the code bases run at 1.5x, ranked
+
+`development/design/codebase-gap.md` has the measurements, the Amdahl table and the ceiling (2.7x to 2.8x with everything but native code at 3x). About 60% of each code base's time is in interpreter-bound package closures that run at 1.4x to 1.5x, because a closure call, an S3 dispatch and a `tryCatch` each cost about what they cost in GNU R. `compare_profiles.py run --no-profile`, then `run`, then `report --times` reproduces the per-closure comparison (`tools/bench/compare_profiles.py`'s docstring).
+
+1. **Closure calls 3x to 5x cheaper.** Call setup is 12% of each code base at 310 to 330 ns per call, and a plain `f0()` takes 126 ns against GNU R's 96. This is the frame and promise representation redesign; it lifts the interpreter-bound majority, so nothing else moves the total as much (about +10% from setup alone, 2.0x to 2.4x with interpreter-bound closures at 3x).
+2. **S3 dispatch at the cost of one call.** Lookup costs 1.1 to 1.6 µs per dispatch (4.5M dispatches, 3.3% of finbench). For each candidate name, `resolve_s3` reads every frame between the caller and its top environment before the per-name cached row. Revive "Parked: S3 method resolution without a scope walk", then profile the rest.
+3. **`compiler::compile` without the R compiler.** ry's `mkCode` keeps only the source expression, so `compiler::compile(e)` runs the whole R-level compiler to return `e`. listcomp's `gen_list` (ompr models) makes it 3.9% of finbench; an identity `compile` saved 4.4 s (3.0%) in a measured run with every test passing.
+4. **Native `tryCatch`.** `tryCatchOne`, `withCallingHandlers` and `withRestarts` hold 1.3% to 2.8% at 0.22x to 0.94x, mostly call setup for the R-level helper closures and AST evaluation of the test block's promise.
+5. **Run-once code in the AST evaluator.** Test bodies run uncompiled on both engines (GNU R compiles a closure outside the global environment only on its second call), and ry's AST evaluator is 1.5x to 3x slower there: 0.9% to 1.8% of the time.
+6. **`dir.create`.** A recursive `dir.create` calls `mkdir` on every ancestor from the root (`system.rs`), 3.5 times GNU R's system calls; check ancestors first as GNU R does. 0.5% to 0.7% of dsbench and biobench.
+
+A wider tier 1 is not first: JIT-compiled code is 1.3% of finbench and 0.1% to 0.4% of the others, and the closures it would compile spend their time in calls, dispatch and builtins. ry defers S4 definitions from load to first use (`.ry_force_s4`), which puts 1.1 to 1.5 s (1% to 2%) of GNU R's load-time work inside ry's test blocks; that is a measurement asymmetry, not a gap.
+
 ## Open: the CRAN package corpus
 
 `just bench-packages install` then `run` (`tools/bench/packages/`, 59 pinned packages). `fs` needs `USE_BUNDLED_LIBUV=1` where libuv's headers are absent. First run (one repeat, with a build competing for the cores): 17 packages pass on both engines at a geometric mean of 0.99x GNU R's speed (lgr 0.60x, cli 0.89x the slowest); foreach and snakecase fail on both.
@@ -494,6 +536,20 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   paths, after its class definitions have run.
 
 - **Measured state.** There is no S4 metadata cache: per-generic units bring a cold first `new()` on `target/s4heavy` to 80 to 100 ms. An eager load of the synthetic package (`just bench-s4-load`: 583 classes, 1,899 methods, a third of them with extra formals) spends about 0.2 s in S4 definitions, against about 1 s with `setClass`'s subclass bookkeeping and `setMethod`'s `.local` wrapper in R, and about 5 s on GNU R. `RY_LOAD_VERBOSE=true` names every definition that runs the R code and why, and `RY_METHODS_NATIVE=0` turns the native paths off.
+
+## Open: the hot suite
+
+`just bench hot` is the fast stand-in for the three code bases (`decisions.md`, "The hot suite replays the package entries the code bases spend their time in"; `testing.md`, "The hot suite"). Regenerate it with `just bench-hot-capture DIR` after the generator's templates change or when `hot.py track` stops agreeing with the code bases.
+
+- **The suite predicts a lower speed-up than the code bases show** (1.34x, 1.39x, 1.47x against 1.62x, 1.68x, 1.62x), so some of a code base's time behaves unlike a replay loop. Leads, none verified: per sampled call, the capture's time on ry is 1.3 to 1.5 times the replay's JIT-off time overall, but the two were measured hours apart on a machine whose speed drifts by 15 to 20%, so only the differences between entries are solid. Short calls stand out (`testthat::expect_true` 2 to 3 times, `base::data.frame` 1.9 to 3.7, `base::vapply` 2 to 4.7, `base::mean` 1.8, `openxlsx::write.xlsx` 1.9) while long ones match (`PerformanceAnalytics::table.AnnualizedReturns` 0.97, `stats::nls` 0.99). The code bases' runner does not use testthat's reporter, so that is not the cause. A replay that takes one call of every program in turn, counted in instructions against the loop's count, would separate work that depends on what ran before (inline cache misses, collections) from cache coldness, which instructions do not see.
+- **`hot.py track` runs each code base once per configuration, one configuration after the other**, so the machine's drift over the two hours lands on whichever configuration ran then: an identical second copy of the reference build read 14 to 16% slower. Interleaving the configurations over several rounds would let it resolve changes under 20%, at several hours per study.
+- **Programs slower than GNU R in every round of a three-round run** (release build, JIT on; median and range of GNU R's time over ry's): `base::rank` 0.64x (0.64 to 0.71), `stats::glm` 0.74x (0.69 to 0.82), `RcppSimdJson::fparse` 0.81x (0.64 to 0.98), ``lubridate::`%/%` `` 0.89x (0.67 to 0.96), `PerformanceAnalytics::Return.calculate` 0.91x (0.61 to 0.95). Another fourteen have a median between 0.80x and 1.05x with a range that crosses 1, among them `stats::lm`, `zoo::rollapply`, `base::table`, `base::do.call` and `rlang::error_cnd`. `--breakdown` and `--instructions --filter NAME` say where each one's time goes.
+- **Recorder limits.** A name lookup does not know the name is used as a function, so a variable that shadows a function is captured as the variable. A deferred promise forced inside an error stays unbound in the sample. Lazy S3 registration's `get` and namespace hooks appear as boundary calls. Every distinct recorded call object stays a collector root until the run ends (`capture::free_names`): one per call site, plus one per generic a dispatched method was entered through, and one per evaluation for a call object built at run time (`do.call`, `eval(parse(...))`), so a recording's memory grows with the number of such calls. `cli::format_inline` is never its own key. `R_GlobalEnv::test_that` appears as a key because the oracle's runner defines its own `test_that`. Package-built code that a package evaluates in a user environment counts as user code. An environment chain that ends at the empty environment counts as global.
+- **Time the suite does not hold** (25 to 30% of each run). Keys (a key is one package entry: the owning namespace plus the name the call was made by) with no replayable sample: `NlcOptim::solnl` (its arguments are local closures), `openxlsx::saveWorkbook`, `readxl::read_excel`, `readr::read_csv` and `brio::read_lines` (they read a file an earlier call wrote, which a replay does not have), `testthat::expect_error`, `rlang::cnd_signal`, `base::tryCatch`, `tryCatchLog::tryCatchLog`, `withr::with_tempdir` (their arguments name user code). Capturing an argument promise's value when the call exits, in place of its expression, would make the last group replayable.
+- **A captured directory the code base created is not recreated.** Relocation (`replay.R`, `relocate`) moves a path under a capture's `Rtmp` directory to the replay's `tempdir()` and creates its parent, but it cannot tell a directory the user code made with `dir.create` from a file name, so `writeLines("hello", file.path(directory, "README.md"))` with `directory` a captured `tempfile()` fails ("cannot open the connection") and the validator drops it. Recording whether each captured path existed, and as what, would fix it.
+- **`pt(ncp =)` differs from GNU R by a few ulp** (`pt(qt(0.037/2, 23, lower.tail = FALSE), 23, ncp = 1.25, lower.tail = FALSE)` is 0.18560522334244556 on GNU R and 0.18560522334244578 on ry), which `uniroot` in `power.t.test` carries to the thirteenth digit of `n`. The suite's checksum tolerates it; nmath's noncentral t should match exactly.
+- **The instruction pass takes about 80 s for the whole suite**, dealt over four harness processes. Every region toggles callgrind's instrumentation, which flushes its translation cache; counting whole processes per program would avoid that and would include the session load.
+- **No published results yet.** `--write` records a tagged release archive, and the breakdown needs a release that has `.ry_bench_region`. The benchmarks page's hot section renders once `tools/bench/hot/results.json` exists.
 
 ## Open: collector throughput on the benchmark suites
 

@@ -262,6 +262,19 @@ pub struct Heap {
     namespace_loads: u32,
 }
 
+/// What [`Heap::probe`] finds in an environment's own frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Probe {
+    /// The frame's symbol filter rules the symbol out.
+    Absent,
+    /// The frame binds the symbol in this slot, which a position hint finds.
+    Slot(u32),
+    /// The environment keeps its bindings on the symbols, and the symbol has one.
+    OnSymbol,
+    /// Anything else, which only the lookup itself answers.
+    Unknown,
+}
+
 /// A returned call's frame that waits for a reconcile to be released ([`Heap::release_frame`]).
 struct Returned {
     env: Sexp,
@@ -2430,6 +2443,26 @@ impl Heap {
             return self.frame_cell(env, symbol);
         }
         (*bindings_for(env, symbol)).find_hinted(symbol, hint)
+    }
+
+    /// How a lookup of `symbol` in `env`'s own frame goes, for machine code that repeats it
+    /// inline against the frame's fields ([`crate::env::layout`]).
+    pub unsafe fn probe(&self, env: Sexp, symbol: Sexp) -> Probe {
+        if env == self.known.empty_env {
+            return Probe::Unknown;
+        }
+        if self.is_symbol_frame(env) {
+            return if symbol.cdr().kind() == SexpType::Binding {
+                Probe::OnSymbol
+            } else {
+                Probe::Unknown
+            };
+        }
+        // A live slot frame's environment does not hold the variables still in the frame's slots.
+        if env.has_gp(gp::SLOT_FRAME) {
+            return Probe::Unknown;
+        }
+        (*env.frame_ptr()).probe(symbol)
     }
 
     /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,

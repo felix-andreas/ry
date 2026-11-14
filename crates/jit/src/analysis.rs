@@ -33,7 +33,9 @@ use {
     interp::{
         annotations::{self, Declared, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, Op, PROFILE, feedback, operand_count, profile},
-        effects, values,
+        effects,
+        eval::{DOTS_SOURCE, LITERAL_DEFAULT, MATCH_PER_CALL, direct_sources},
+        values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
     smallvec::{SmallVec, smallvec},
@@ -312,18 +314,17 @@ impl Slot {
         } else {
             self.ty.join(other.ty)
         };
-        // An unboxed local boxed on the way into a join is a fresh object the frame does not
-        // hold, so from there on it is a value to write back, not the frame's own (see
-        // `box_slot` in codegen).
-        let boxed = |side: Slot| {
+        // An unboxed local that the join needs as an object is forgotten on the way in, and
+        // the next read loads the frame's own object again (see `box_slot` in codegen).
+        let forgotten = |side: Slot| {
             side.ty.in_variables()
                 && side.may_be(status::LOCAL)
                 && ty != Ty::Bottom
                 && !ty.in_variables()
         };
         let mut status = self.status | other.status;
-        if boxed(self) || boxed(other) {
-            status |= status::DIRTY;
+        if forgotten(self) || forgotten(other) {
+            status |= status::NOT_LOADED;
         }
         Slot { status, ty }
     }
@@ -669,6 +670,13 @@ pub enum Passing {
     /// Nothing: the callee has never read the formal, and a read hands the call to tier 0,
     /// which binds the formal to a promise.
     Promise,
+    /// The formal's default, a literal, because the call leaves the formal out. Nothing
+    /// evaluates a literal, so the callee's load reads the object itself.
+    Default(Sexp),
+    /// Nothing, because the call leaves the formal out and it has no default or one that is
+    /// code. The callee has never read the formal, and a read hands the call to tier 0, which
+    /// binds the default as a promise or reports the missing argument.
+    Omitted,
 }
 
 /// A callback-taking library function compiled code runs as a loop of its own.
@@ -951,6 +959,10 @@ pub enum Action<'a> {
     /// the call to tier 0 through a frame state, which gives the call its real frame first.
     /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
     ///
+    /// `args[i]` is what formal `i` gets, and `positions[i]` the position of its argument in
+    /// the call, as tier 0 matches them (`interp::eval::direct_sources`), or a negative
+    /// number when the call leaves the formal out.
+    ///
     /// `forces[i]` is a bitset, by position, of the planning body's own formals whose promises
     /// the callee's first read of its formal `i` forces: the argument is that formal, or an
     /// expression that always reads it. Only a body that is itself inlined records them,
@@ -961,6 +973,7 @@ pub enum Action<'a> {
         function: Sexp,
         call: Sexp,
         args: &'a [Passing],
+        positions: &'a [i32],
         forces: &'a [u64],
         dst: (usize, Ty),
     },
@@ -1152,12 +1165,16 @@ impl fmt::Debug for Plan<'_> {
     }
 }
 
-/// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
-/// runs itself. Each instruction it hands back costs a call into tier 0 on top of the work, and
-/// such bodies are mostly large ones (`[.data.frame`, S4 dispatch) whose compilation costs as
-/// much as tens of thousands of interpreted calls. A loop in the body still compiles once it is
-/// hot, because there the compiled loop control and the native instructions repeat.
+/// The refusal at entry for a body with a loop whose work outside the loops would save nothing
+/// in compiled code: there it hands instructions back to tier 0, each of which costs a call
+/// into tier 0 on top of the work, and runs too little natively to make up for them. The loops
+/// still gain, so the body compiles once a loop is hot, and only the loop enters compiled code.
 pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
+
+/// The refusal for a body whose loops would hand so many instructions back to tier 0 that an
+/// iteration in compiled code costs more than one in tier 0. It is final, and like [`SMALL`]
+/// it leaves the recorded type feedback in place.
+pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to tier 0";
 
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run
 /// long: the body has no loop and calls no closure or native function directly, so the
@@ -1311,22 +1328,54 @@ pub const NATIVE_ENTRY: &str = "the closure's calls run natively";
 /// threshold of entries, with its call rate measured afresh.
 pub const RARE: &str = "the body runs too rarely to repay compiling it";
 
+/// The refusal for a loop-free body whose native work saves less per call than entering
+/// compiled code from tier 0 and handing instructions back to it cost, such as
+/// `function(x) x^2`. It is final: the body's instructions decide it, or what its plan had to
+/// leave to tier 0. The body keeps the type feedback it recorded, so compiled callers can
+/// still inline it.
+pub const SMALL: &str = "the body does too little natively to repay entering compiled code";
+
+/// What compiled code does itself and what it hands to tier 0, as instruction counts.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Work {
+    /// The instructions compiled code runs itself, other than [`Work::calls`].
+    pub native: usize,
+    /// The calls compiled code makes itself: closure calls it inlines or enters directly, and
+    /// calls of a builtin it runs as a loop over their argument.
+    pub calls: usize,
+    /// The instructions compiled code hands to tier 0 one at a time.
+    pub steps: usize,
+}
+
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shape {
     /// The body loops, or holds bytecode the scan cannot read, which counts as a loop because
     /// nothing bounds what it runs.
     pub loops: bool,
-    /// The instructions the plan may turn into native work. A call of a builtin counts when it
-    /// names one the plan has a native form for; a builtin reached through another name is
-    /// missed, which costs only the compiled code, not correctness.
+    /// The instructions the plan may turn into native work, other than [`Shape::calls`]. A
+    /// call of a builtin counts when it names one the plan has a native form for; a builtin
+    /// reached through another name is missed, which costs only the compiled code, not
+    /// correctness.
     pub native: usize,
+    /// The calls the plan may make itself: closure calls it may inline or enter directly, and
+    /// calls of a builtin it may run as a loop over its argument.
+    pub calls: usize,
 }
 
 impl Shape {
     /// Whether some profile could make [`Plan::runs_natively`] true.
     pub fn may_run_natively(self) -> bool {
-        self.loops || self.native > 0
+        self.loops || self.native > 0 || self.calls > 0
+    }
+
+    /// The most a plan of the body could run itself, with nothing handed to tier 0.
+    pub fn work(self) -> Work {
+        Work {
+            native: self.native,
+            calls: self.calls,
+            steps: 0,
+        }
     }
 }
 
@@ -1336,11 +1385,13 @@ pub unsafe fn shape(code: Sexp) -> Shape {
     let unbounded = Shape {
         loops: true,
         native: 0,
+        calls: 0,
     };
     if values::length(constants.element(bytecode::LOOPS)) > 0 {
         return unbounded;
     }
     let mut native = 0;
+    let mut calls = 0;
     let mut pc = 0;
     while pc < words.len() {
         let Some(op) = bytecode::op_of(words[pc] as u32) else {
@@ -1357,8 +1408,6 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::LogicRight
             | Op::SubAssign
             | Op::SubAssignMatrix
-            | Op::CallGeneric
-            | Op::CallRebinding
             | Op::CallBuiltinRebinding
             | Op::Field
             | Op::Item
@@ -1367,17 +1416,27 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::ForStep
             | Op::ForEnd
             | Op::Internal => true,
+            Op::CallGeneric | Op::CallRebinding => {
+                calls += 1;
+                false
+            }
             Op::Jump if operand(0) <= pc => return unbounded,
             Op::Jump => false,
             Op::CallBuiltin => {
                 let function = constants.element(operand(2)).car();
                 function.kind() != SexpType::Symbol || {
                     let name = values::symbol_name(function);
-                    name == "[" || Traversal::of(&name).is_some() || has_intrinsic(&name)
+                    if Traversal::of(&name).is_some() {
+                        calls += 1;
+                        false
+                    } else {
+                        name == "[" || has_intrinsic(&name)
+                    }
                 }
             }
             Op::Constant
             | Op::GetVar
+            | Op::Argument
             | Op::SetVar
             | Op::GetFun
             | Op::BranchUnlessBuiltin
@@ -1418,6 +1477,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
     Shape {
         loops: false,
         native,
+        calls,
     }
 }
 
@@ -1426,7 +1486,7 @@ impl Plan<'_> {
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
-        !self.loop_headers.is_empty() || self.native_actions() > 0
+        !self.loop_headers.is_empty() || self.actions.iter().any(native)
     }
 
     /// Whether one activation of the body can run long: it has a loop, or it calls a closure
@@ -1439,18 +1499,65 @@ impl Plan<'_> {
                 .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
     }
 
-    /// How many actions compiled code does itself, and how many it hands to tier 0.
-    pub fn native_actions(&self) -> usize {
-        self.actions.iter().filter(|action| native(action)).count()
-    }
-
-    pub fn tier0_actions(&self) -> usize {
-        self.actions
+    /// The work of the whole body, split into the instructions outside its loops and those
+    /// inside. An instruction is inside a loop when it lies between a backward jump and the
+    /// jump's target, and it counts [`LOOP_WEIGHT`] times per loop around the innermost one,
+    /// the usual static estimate of how much more often a nested loop's body runs: one
+    /// instruction handed to tier 0 in an outer loop must not outweigh an inner loop that runs
+    /// natively. A backward jump counts as native work, because a compiled loop's own control
+    /// costs no dispatch.
+    pub fn work(&self) -> BodyWork {
+        let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
+        let loops: SmallVec<[(usize, usize); 4]> = self
+            .insts
             .iter()
-            .filter(|action| matches!(action, Action::Step { .. }))
-            .count()
+            .filter(|inst| backward(inst))
+            .map(|inst| (inst.operand(0), inst.pc))
+            .collect();
+        let mut work = BodyWork::default();
+        for (inst, action) in self.insts.iter().zip(self.actions.iter()) {
+            let (native, calls, steps) = match action {
+                Action::Inline { .. }
+                | Action::Frame { .. }
+                | Action::Traverse { .. }
+                | Action::Call { .. }
+                | Action::NativeCall { .. } => (0, 1, 0),
+                Action::Step { .. } => (0, 0, 1),
+                action if native(action) || backward(inst) => (1, 0, 0),
+                _ => continue,
+            };
+            let depth = loops
+                .iter()
+                .filter(|&&(first, last)| first <= inst.pc && inst.pc <= last)
+                .count();
+            let (part, weight) = match depth.checked_sub(1) {
+                None => (&mut work.outside, 1),
+                Some(around) => (
+                    &mut work.looped,
+                    LOOP_WEIGHT.pow(around.min(MAX_WEIGHTED_DEPTH) as u32),
+                ),
+            };
+            for (part, weight) in [(part, weight), (&mut work.whole, 1)] {
+                part.native += weight * native;
+                part.calls += weight * calls;
+                part.steps += weight * steps;
+            }
+        }
+        work
     }
 }
+
+/// [`Plan::work`]: the plain counts of the whole body, the counts outside its loops, and the
+/// nesting-weighted counts inside them.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct BodyWork {
+    pub whole: Work,
+    pub outside: Work,
+    pub looped: Work,
+}
+
+const LOOP_WEIGHT: usize = 8;
+const MAX_WEIGHTED_DEPTH: usize = 4;
 
 fn native(action: &Action<'_>) -> bool {
     matches!(
@@ -1670,7 +1777,7 @@ unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<Sm
         .collect();
     let mut hints: SmallVec<[Ty; 4]> = smallvec![Ty::Bottom; symbols.len()];
     for inst in decode(arena, code).ok()? {
-        if inst.op != Op::GetVar {
+        if !matches!(inst.op, Op::GetVar | Op::Argument) {
             continue;
         }
         let symbol = constants.element(inst.operand(1));
@@ -1868,7 +1975,7 @@ impl<'a> Builder<'a> {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
-                Op::GetVar => Some(inst.operand(1)),
+                Op::GetVar | Op::Argument => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
                 Op::SubAssign | Op::SubAssignMatrix | Op::Replace => Some(inst.operand(1)),
@@ -1902,8 +2009,8 @@ impl<'a> Builder<'a> {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32)
-                & !feedback::ACTIVE_BINDING;
-            if inst.op == Op::GetVar && bits != 0 {
+                & !(feedback::ACTIVE_BINDING | feedback::MISSING);
+            if matches!(inst.op, Op::GetVar | Op::Argument) && bits != 0 {
                 let slot = self.slot_of[&self.constant(inst.operand(1))];
                 self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
             }
@@ -1969,6 +2076,10 @@ impl<'a> Builder<'a> {
         Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
     }
 
+    fn feedback_bits(&self, pc: usize) -> u32 {
+        self.feedback.get(pc).map_or(0, |&bits| bits as u32)
+    }
+
     fn feedback_at(&self, pc: usize) -> Ty {
         from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u32))
     }
@@ -1997,7 +2108,7 @@ impl<'a> Builder<'a> {
         // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
         // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
         // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u32) & !feedback::ACTIVE_BINDING;
+        let bits = self.feedback_bits(pc) & !feedback::ACTIVE_BINDING;
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
@@ -2239,7 +2350,7 @@ impl<'a> Builder<'a> {
         let action = match inst.op {
             // The global frame's variables are its environment's bindings, which an active
             // binding or code the loop calls may read or rebind.
-            Op::GetVar if self.global => self.opaque_step(
+            Op::GetVar | Op::Argument if self.global => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -2266,7 +2377,11 @@ impl<'a> Builder<'a> {
                     ty,
                 }
             }
-            Op::GetVar => {
+            // The formal has been missing here, and no compiled load yields the empty argument.
+            Op::Argument if self.feedback_bits(inst.pc) & feedback::MISSING != 0 => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
+            }
+            Op::GetVar | Op::Argument => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
                 let volatile = bit(&self.volatile, slot);
@@ -3581,16 +3696,17 @@ impl<'a> Builder<'a> {
         }
         let formals = values::pairlist_items(function.car());
         let arguments = values::pairlist_items(call.cdr());
-        if arguments.len() != formals.len() {
-            return Err("the call does not pass each formal one argument");
-        }
-        let positional = arguments.iter().all(|&(tag, expression)| {
-            tag == values::nil()
-                && expression != values::missing_arg()
-                && expression != values::symbols().dots
-        });
-        if !positional {
-            return Err("a named, missing or `...` argument");
+        // Tier 0's own plan for the call says which argument each formal gets, so the frame
+        // a deoptimization builds is bound exactly as tier 0 binds it.
+        let Ok(Some((_, positions))) = direct_sources(function, call) else {
+            return Err("arguments tier 0 does not bind straight to the formals");
+        };
+        if positions.len() != formals.len()
+            || positions
+                .iter()
+                .any(|&position| position == DOTS_SOURCE || position == MATCH_PER_CALL)
+        {
+            return Err("a call that passes or collects `...`");
         }
         let (callee, result) = self.callee(function)?;
         let mut lowering = Lowering {
@@ -3605,14 +3721,44 @@ impl<'a> Builder<'a> {
         };
         let mut args = List::new_in(self.arena);
         let mut forces = List::new_in(self.arena);
-        for (&(_, expression), &(formal, _)) in arguments.iter().zip(&formals) {
+        for (&(formal, default), &position) in formals.iter().zip(&positions) {
+            let expression = match arguments.get(position as usize) {
+                Some(&(_, expression)) if position >= 0 => expression,
+                _ if position == LITERAL_DEFAULT => {
+                    args.push(Passing::Default(default));
+                    forces.push(0);
+                    continue;
+                }
+                _ => {
+                    if has_read(callee, function, formal) {
+                        return Err("a formal the call leaves out whose default is code");
+                    }
+                    args.push(Passing::Omitted);
+                    forces.push(0);
+                    continue;
+                }
+            };
             // An argument that is one of this body's formals forces that formal's promise
             // where the callee first reads it. A body with a frame has a real promise there,
             // which records the force itself.
-            let own = self
+            let mut own = self
                 .formal(expression)
                 .filter(|_| self.depth > 0)
                 .map_or(0, |position| 1 << position);
+            // A formal the body has assigned is a local, and reading it forces nothing. The
+            // forces of an argument are fixed with the code, so a formal assigned on some
+            // paths only cannot be passed on.
+            if own != 0
+                && let Some(&slot) = self.slot_of.get(&expression)
+            {
+                match lowering.state.slots[slot].status {
+                    status::DIRTY => own = 0,
+                    assigned if assigned & status::DIRTY != 0 => {
+                        return Err("an argument that is a formal assigned on some paths");
+                    }
+                    _ => {}
+                }
+            }
             // Reading the variable before the call would have to leave a promise unforced,
             // and a formal the caller passes on before it reads it is exactly that.
             if !self.lazy_formals
@@ -3695,6 +3841,7 @@ impl<'a> Builder<'a> {
             function,
             call,
             args: args.leak(),
+            positions: self.arena.0.alloc_slice_copy(&positions),
             forces: forces.leak(),
             dst: (dst, result),
         })
@@ -3726,9 +3873,9 @@ impl<'a> Builder<'a> {
         if code == self.code {
             return Err("the call is recursive");
         }
-        // An environment that is still pending belongs to a running slot frame, which a real
-        // call of the closure would give its environment.
-        if enclosure.has_gp(gp::PENDING_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
+        // An environment that stands for a running slot frame holds some or none of the frame's
+        // variables, and a real call of the closure reads the rest through the frame.
+        if enclosure.has_gp(gp::SLOT_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
             return Err("the callee's environment may not outlive the code");
         }
         let constants = code.cdr();
@@ -3791,15 +3938,13 @@ impl<'a> Builder<'a> {
         let mut result = Ty::Bottom;
         for (position, action) in plan.actions.iter().enumerate() {
             let frameless = match *action {
-                // The first load of a formal reads the argument, so it can neither evaluate a
-                // default nor call an active binding, and the frame the call may get later
-                // binds a formal to what the caller passed, not to a value assigned since.
-                Action::GetVar {
-                    forcing, volatile, ..
-                } => !forcing && !volatile,
-                Action::SetVar { slot, .. } => parameters
-                    .iter()
-                    .all(|&(symbol, _)| symbol != plan.slots[slot]),
+                // The first load of a formal reads the argument, and where the call leaves the
+                // formal out it reads a literal default or hands the call to tier 0, so it
+                // never evaluates a default. A binding that runs code on a read needs the
+                // frame. An assigned formal is a dirty slot like any local: the frame the call
+                // may get later binds the formal to what the caller passed, and the write-back
+                // of the dirty slots then replaces that binding.
+                Action::GetVar { volatile, .. } => !volatile,
                 Action::Step {
                     effect: Effect::Pure | Effect::PureUnlessObserved,
                     fast,
@@ -3849,7 +3994,6 @@ impl<'a> Builder<'a> {
                 }
                 return Err(match *action {
                     Action::GetVar { .. } => "the callee reads a variable that may run code",
-                    Action::SetVar { .. } => "the callee assigns a formal",
                     Action::Step { .. } if plan.insts[position].op == Op::Closure => {
                         "the callee creates a closure"
                     }
@@ -3998,10 +4142,16 @@ impl<'a> Builder<'a> {
                 // which is right only while the read tells nobody. In an inlined body a read
                 // of a formal is what forces its promise, so the formal must be one R reads on
                 // every path too.
+                // A formal the body has assigned is a local, which no read forces.
+                let assigned = self
+                    .slot_of
+                    .get(&expression)
+                    .map_or(0, |&slot| lowering.state.slots[slot].status);
                 if self.depth > 0
+                    && assigned != status::DIRTY
                     && let Some(position) = self.formal(expression)
                 {
-                    if lowering.conditional {
+                    if lowering.conditional || assigned & status::DIRTY != 0 {
                         return None;
                     }
                     lowering.forces |= 1 << position;
@@ -5103,6 +5253,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     match inst.op {
         Op::Constant
         | Op::GetVar
+        | Op::Argument
         | Op::GetFun
         | Op::Ast
         | Op::Closure

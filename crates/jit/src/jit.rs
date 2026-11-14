@@ -22,7 +22,7 @@ pub use native::has_native;
 mod runtime;
 
 use {
-    analysis::{Plan, Refusal, Speculation},
+    analysis::{Plan, Refusal, Speculation, Work},
     bumpalo::Bump,
     codegen::Generated,
     heap::{
@@ -31,7 +31,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{self, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
+        bytecode::{self, FEEDBACK, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
         heap, interp,
         unwind::{R, error},
         values,
@@ -78,12 +78,31 @@ const ENTRY_THRESHOLD: i32 = 3000;
 /// Such a body saves a bounded amount per call, so it compiles only when its expected calls
 /// times that saving exceed the compilation's cost. Calibrated with callgrind on the benchmark
 /// workloads: compiling costs about 2M instructions plus 50k per bytecode word (a 50-word body
-/// costs 4.5M, `isTRUE`'s 188 words 11M), and compiled code saves at least 100 instructions per
-/// call for each instruction it runs natively (delaying the functional workload's callbacks from
-/// 3000 to 10,000 calls cost 19M instructions).
+/// costs 4.5M, `isTRUE`'s 188 words 11M).
 const COMPILE_FIXED: u64 = 2_000_000;
 const COMPILE_PER_WORD: u64 = 50_000;
-const SAVING_PER_NATIVE: u64 = 100;
+/// What one call of a loop-free body saves in compiled code, in instructions. Entering
+/// compiled code from tier 0 costs about [`ENTRY_COST`] more than starting the same body in
+/// the dispatch loop: the tier's entry checks, the activation record, the register window of
+/// the root cells, and a boxed result. Against that, an instruction compiled code runs
+/// natively saves about [`SAVING_PER_NATIVE`], which includes the variable loads and stores
+/// around it that stay in machine registers, and a call it inlines or enters directly saves
+/// about [`SAVING_PER_CALL`]. Measured on closures called 400,000 times from `vapply`, in
+/// instructions per call against tier 0: a body of one native instruction (`x^2`) lost 325
+/// and one of two (`x * 2 + 1`) lost 309, one of four without a local lost 27, and with
+/// locals one of seven saved 575 and one of twelve saved 1393. A body whose saving does not
+/// exceed the entry cost therefore never compiles on its own, however hot it is; its calls
+/// from compiled code can still be inlined there.
+///
+/// An instruction compiled code hands back to tier 0 costs about [`STEP_COST`] more than the
+/// same instruction in the dispatch loop: the helper call with its panic guard, the dirty
+/// slots written back before it, the activation state built for one instruction, and the
+/// feedback a step always records. On an application loop of 3 native instructions among 20
+/// such steps, 480,000 steps cost 143M instructions more than tier 0 ran for the same loop.
+const ENTRY_COST: u64 = 570;
+const SAVING_PER_NATIVE: u64 = 130;
+const SAVING_PER_CALL: u64 = 1000;
+const STEP_COST: u64 = 300;
 /// A body's expected calls are its share of the closure calls the session made over its
 /// recording window, times this many calls. The session's call count measures how much
 /// interpreted work ran between two calls of the body: it is deterministic and does not move
@@ -219,6 +238,20 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
     }
 }
 
+/// What running `work` once in compiled code is expected to save over tier 0, by the model
+/// at [`ENTRY_COST`]: zero when handing instructions back costs more than the native work
+/// saves.
+fn saving(work: Work) -> u64 {
+    (SAVING_PER_NATIVE * work.native as u64 + SAVING_PER_CALL * work.calls as u64)
+        .saturating_sub(STEP_COST * work.steps as u64)
+}
+
+/// What one call of a body is expected to save when tier 0 enters its compiled code: zero when
+/// entering costs more than the body's work saves.
+fn saving_per_call(work: Work) -> u64 {
+    saving(work).saturating_sub(ENTRY_COST)
+}
+
 /// Whether a loop-free body that just turned hot is expected to repay its compilation, by the
 /// model at [`COMPILE_FIXED`]. A body that compiled before passed this once already.
 unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
@@ -234,7 +267,7 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
         let calls = window_entries * HORIZON_CALLS / window_calls;
         let words = values::ints(machine.code.car()).len() as u64;
         let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
-        let saving = calls * SAVING_PER_NATIVE * shape.native as u64;
+        let saving = calls * saving_per_call(shape.work());
         if logging() {
             eprintln!(
                 "jit: {} expects {calls} calls ({window_entries} of {window_calls} calls) saving {saving} against a compile of {cost}",
@@ -292,6 +325,8 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                 if reason != analysis::COLD
                     && reason != analysis::NOTHING_NATIVE
                     && reason != analysis::MOSTLY_TIER0
+                    && reason != analysis::SMALL
+                    && reason != analysis::STEPPING_LOOP
                     && reason != analysis::BRIEF
                 {
                     counters[profile::TIER_STATE] = runtime::refused(counters[profile::TIER_STATE]);
@@ -461,9 +496,18 @@ unsafe fn compiled_for<'a>(
                     if refusals < 0xf {
                         counters[profile::TIER_STATE] = state + runtime::RARE_REFUSAL;
                     }
-                } else if reason == analysis::COLD {
+                } else if reason == analysis::COLD
+                    && (bytecode::tier().is_some_and(|tier| tier.entry_threshold < 2)
+                        || values::ints(constants.element(FEEDBACK))
+                            .iter()
+                            .any(|&bits| bits != 0))
+                {
                     // The next attempt waits for as many entries or backward jumps as this one did,
-                    // so the body runs long enough to record the types it is missing.
+                    // so the body runs long enough to record the types it is missing. A body whose
+                    // window recorded nothing at all does not run its instructions (a native
+                    // prologue finishes every call), so waiting would only repeat the plan. At a
+                    // threshold of one entry the attempt comes before the body has run at all, so
+                    // an empty window says nothing there.
                     counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
                     counters[profile::ENTRIES] = 0;
                     counters[profile::BACK_EDGES] = 0;
@@ -546,8 +590,13 @@ unsafe fn compile_in<'a>(
         {
             return Err(Refusal(analysis::NATIVE_ENTRY));
         }
-        if !forced && trigger == Trigger::HotEntry && !shape.loops && !repays(machine, shape) {
-            return Err(Refusal(analysis::RARE));
+        if !forced && trigger == Trigger::HotEntry && !shape.loops {
+            if saving_per_call(shape.work()) == 0 {
+                return Err(Refusal(analysis::SMALL));
+            }
+            if !repays(machine, shape) {
+                return Err(Refusal(analysis::RARE));
+            }
         }
         let started = Instant::now();
         let state = values::ints(machine.code.cdr().element(PROFILE))[profile::TIER_STATE];
@@ -564,12 +613,34 @@ unsafe fn compile_in<'a>(
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
+        // Entering a body with loops at the top or at a loop costs about the same, so what
+        // decides between the two is the work around the loops alone.
+        let work = plan.work();
         if !forced {
-            if !plan.runs_natively() {
-                return Err(Refusal(analysis::NOTHING_NATIVE));
-            }
-            if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions() {
-                return Err(Refusal(analysis::MOSTLY_TIER0));
+            let reason = if !plan.runs_natively() {
+                Some(analysis::NOTHING_NATIVE)
+            } else if plan.loop_headers.is_empty() {
+                (trigger == Trigger::HotEntry && saving_per_call(work.whole) == 0)
+                    .then_some(analysis::SMALL)
+            } else if saving(work.looped) == 0 {
+                Some(analysis::STEPPING_LOOP)
+            } else if trigger != Trigger::HotLoop
+                && work.outside.steps > 0
+                && saving(work.outside) == 0
+            {
+                Some(analysis::MOSTLY_TIER0)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if logging() {
+                    eprintln!(
+                        "jit: {} would leave to tier 0: {}",
+                        describe(machine.code),
+                        tier0_steps(&plan, machine.code)
+                    );
+                }
+                return Err(Refusal(reason));
             }
             if trigger == Trigger::FirstCall && !plan.may_run_long() {
                 return Err(Refusal(analysis::BRIEF));
@@ -614,30 +685,9 @@ unsafe fn compile_in<'a>(
                     && owner(speculation).is_some_and(|env| long_lived(env))
             });
         if logging() {
-            // The instructions left to tier 0 are where compiled code is slow.
-            // A builtin call lists its argument types, which say why it was not an intrinsic.
-            let steps: Vec<String> = plan
-                .insts
-                .iter()
-                .zip(&plan.actions)
-                .enumerate()
-                .filter(|(_, (_, action))| matches!(action, analysis::Action::Step { .. }))
-                .map(|(position, (inst, _))| {
-                    let arguments = match (inst.op, plan.before(position)) {
-                        (Op::CallBuiltin, Some(before)) => {
-                            let first = inst.operand(3);
-                            let types: Vec<String> = (first..first + inst.operand(4))
-                                .map(|register| format!("{:?}", before.registers[register]))
-                                .collect();
-                            format!("({})", types.join(", "))
-                        }
-                        _ => String::new(),
-                    };
-                    format!("{:?}@{}{arguments}", inst.op, inst.pc)
-                })
-                .collect();
+            let steps = tier0_steps(&plan, machine.code);
             eprintln!(
-                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} frames, {} loops; tier 0 runs: {})",
+                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} calls, {} steps, {} inlined, {} frames, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 values::ints(machine.code.car()).len(),
                 (planned + generated).as_micros(),
@@ -645,18 +695,16 @@ unsafe fn compile_in<'a>(
                 generated.as_micros(),
                 speculations.len(),
                 if portable { ", portable" } else { "" },
-                plan.native_actions(),
+                work.whole.native,
+                work.whole.calls,
+                work.whole.steps,
                 plan.actions
                     .iter()
                     .filter(|action| matches!(action, analysis::Action::Inline { .. }))
                     .count(),
                 frames.len() - 1,
                 plan.loop_headers.len(),
-                if steps.is_empty() {
-                    "nothing".to_string()
-                } else {
-                    steps.join(", ")
-                }
+                steps
             );
         }
         let osr = plan
@@ -671,6 +719,7 @@ unsafe fn compile_in<'a>(
             portable,
             checked: Cell::new(values::nil()),
             rooted,
+            extent: frames.iter().map(runtime::Layout::top).max().unwrap_or(0),
             frames,
             loops: plan.loops,
             // No epoch or stamp matches, so the first run checks the compiling activation's own
@@ -739,6 +788,48 @@ unsafe fn compile_in<'a>(
         counters[profile::RECORDING] = 0;
         counters[profile::NEXT] = i32::MIN;
         Ok(&*(pointer.external_address() as *const Compiled))
+    }
+}
+
+/// The instructions a plan leaves to tier 0, which are where compiled code is slow. Each lists
+/// the types of the registers it reads, which say why it has no native form, and a call names
+/// the function its source calls.
+unsafe fn tier0_steps(plan: &analysis::Plan<'_>, code: Sexp) -> String {
+    let steps: Vec<String> = plan
+        .insts
+        .iter()
+        .zip(&plan.actions)
+        .enumerate()
+        .filter(|(_, (_, action))| matches!(action, analysis::Action::Step { .. }))
+        .map(|(position, (inst, _))| {
+            let arguments = match plan.before(position) {
+                Some(before) => {
+                    let types: Vec<String> = analysis::reads(inst)
+                        .iter()
+                        .filter_map(|&register| before.registers.get(register))
+                        .map(|ty| format!("{ty:?}"))
+                        .collect();
+                    format!("({})", types.join(", "))
+                }
+                None => String::new(),
+            };
+            let call = match inst.op {
+                Op::CallBuiltin | Op::CallGeneric | Op::DispatchSubject => Some(inst.operand(2)),
+                Op::Internal => Some(inst.operand(1)),
+                _ => None,
+            };
+            let head = call
+                .map(|constant| unsafe { code.cdr().element(constant).car() })
+                .filter(|head| head.kind() == SexpType::Symbol)
+                .map(|head| format!(" {}", unsafe { values::symbol_name(head) }))
+                .unwrap_or_default();
+            format!("{:?}{head}@{}{arguments}", inst.op, inst.pc)
+        })
+        .collect();
+    if steps.is_empty() {
+        "nothing".to_string()
+    } else {
+        steps.join(", ")
     }
 }
 
@@ -811,19 +902,27 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         let body = compiled.frames.first()?;
         let cells = machine.base + body.registers;
-        if bytecode::reserve_registers(cells + body.slots.len()).is_err() {
+        // The slot root cells, then the windows of the inlined calls, which start as `NULL`
+        // like any register. Growing the file clears what it adds, so only registers the
+        // file already held need clearing.
+        let root_top = cells + body.slots.len();
+        let held = bytecode::register_top().clamp(cells, root_top + compiled.extent);
+        if bytecode::reserve_registers(root_top + compiled.extent).is_err() {
             return None;
         }
-        std::slice::from_raw_parts_mut(bytecode::register_address(cells), body.slots.len())
+        std::slice::from_raw_parts_mut(bytecode::register_address(cells), held - cells)
             .fill(values::nil());
         // Most compiled bodies have at most a few loops, so their state lives in a stack array.
         // A `SmallVec` here would be built by value and moved, copying its whole inline buffer
         // on every call, which costs a body without loops more than the loop state itself.
-        let mut inline = [0i64; 4 * runtime::LOOP_WORDS];
+        let mut inline = [const { MaybeUninit::<i64>::uninit() }; 4 * runtime::LOOP_WORDS];
         let mut spilled: Vec<i64>;
         let words = runtime::LOOP_WORDS * compiled.loops;
         let loops: &mut [i64] = match inline.get_mut(..words) {
-            Some(loops) => loops,
+            Some(loops) => {
+                loops.fill(MaybeUninit::new(0));
+                std::slice::from_raw_parts_mut(loops.as_mut_ptr().cast(), words)
+            }
             None => {
                 spilled = vec![0i64; words];
                 &mut spilled
@@ -847,17 +946,21 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             panic: None,
         };
         let parked: *mut Parked = &mut parked;
-        // An inlined call's activation is written when the call starts, so the storage costs a
-        // body that inlines nothing only the stack space.
+        // An inlined call's activation is written by the call's first start in this entry,
+        // which a null `compiled` asks for, so the storage costs a body that inlines nothing
+        // only the stack space.
         let mut inline_children = [const { MaybeUninit::<Child>::uninit() }; 4];
         let mut spilled_children: Vec<MaybeUninit<Child>>;
-        let children = match compiled.frames.len() - 1 {
-            count if count <= inline_children.len() => inline_children.as_mut_ptr(),
-            count => {
-                spilled_children = Vec::with_capacity(count);
-                spilled_children.as_mut_ptr()
-            }
+        let count = compiled.frames.len() - 1;
+        let children: *mut Child = if count <= inline_children.len() {
+            inline_children.as_mut_ptr().cast()
+        } else {
+            spilled_children = Vec::with_capacity(count);
+            spilled_children.as_mut_ptr().cast()
         };
+        for index in 0..count {
+            (&raw mut (*children.add(index)).activation.compiled).write(std::ptr::null());
+        }
         let mut activation = Activation {
             registers: bytecode::register_address(machine.base),
             loops: loops.as_mut_ptr(),
@@ -870,8 +973,9 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             compiled,
             layout: body,
             parked,
-            children: children.cast(),
+            children,
             resume_pc: 0,
+            root_top,
         };
         activity::count(Counter::JitEntries);
         let running = activity::enter(Activity::Compiled, 0);
@@ -887,8 +991,12 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         let pending = (*parked).pending.take();
         match result as usize {
-            runtime::DECLINED => return None,
+            runtime::DECLINED => {
+                bytecode::release_registers(machine.base + body.registers);
+                return None;
+            }
             runtime::DEOPTIMIZED => {
+                bytecode::release_registers(machine.base + body.registers);
                 activity::count(Counter::JitDeoptimizations);
                 return Some(TierExit::Resume {
                     pc: activation.resume_pc,

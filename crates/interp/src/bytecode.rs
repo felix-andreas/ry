@@ -1906,6 +1906,11 @@ pub enum Op {
     /// internal's arguments, evaluated in the caller, are in registers `first..first + count`,
     /// and the builtin `internal` runs on them with `call` as the call its errors name.
     Internal,
+    /// `dst symbol cache`: a formal as an argument of a subset primitive (`i` in `x[i]`), which
+    /// passes on a missing argument instead of reporting it. `dst` gets the empty argument when
+    /// the formal is missing, as when the caller passed on its own missing formal, and what
+    /// [`Op::GetVar`] reads otherwise.
+    Argument,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -1920,7 +1925,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 52] = [
+pub const OPS: [Op; 53] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -1973,6 +1978,7 @@ pub const OPS: [Op; 52] = [
     Op::SuperAssign,
     Op::Prologue,
     Op::Internal,
+    Op::Argument,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2034,6 +2040,9 @@ pub mod feedback {
     /// A `GetVar` read an active binding, so every read there must call the binding again.
     /// Compiled code records it, and the bit says nothing about the value's type.
     pub const ACTIVE_BINDING: u32 = 1 << 13;
+    /// An `Argument` read a missing formal, so its value may be the empty argument, which no
+    /// compiled load yields.
+    pub const MISSING: u32 = 1 << 14;
     /// An attribute-free compact integer sequence.
     pub const INTEGER_SEQUENCE: u32 = 1 << 15;
     /// An attribute-free compact double sequence, such as `as.double(1:n)`.
@@ -3182,7 +3191,9 @@ impl Compiler {
             let op =
                 op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
             let symbol_and_cache = match op {
-                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], Some(self.code[pc + 3]))),
+                Op::GetVar | Op::GetFun | Op::Argument => {
+                    Some((self.code[pc + 2], Some(self.code[pc + 3])))
+                }
                 Op::SetVar => Some((self.code[pc + 1], Some(self.code[pc + 3]))),
                 // A loop variable the body never reads still needs a slot, or the first step
                 // would give the frame an environment.
@@ -5359,28 +5370,25 @@ impl Compiler {
         } else {
             None
         };
-        let formal = args[1..]
-            .iter()
-            .any(|(_, value)| self.formals.contains(value));
-        if formal {
-            self.emit(Op::DispatchSubject, &[dst, function, call_constant, base]);
-            let dispatched = self.emit_patchable(Op::Jump, &[0]);
-            self.patch(generic);
-            self.emit(Op::CallGeneric, &[dst, function, call_constant]);
-            self.patch(dispatched);
-            if let Some(read) = read {
-                self.patch(read);
-            }
-            self.release_to(mark);
-            return Ok(());
-        }
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
+            let register = base + index as u32;
             if *value == missing_arg() {
                 let constant = self.constant(missing_arg());
-                self.emit(Op::Constant, &[base + index as u32, constant]);
+                self.emit(Op::Constant, &[register, constant]);
+            } else if self.formals.contains(value)
+                && self
+                    .bound
+                    .as_ref()
+                    .is_none_or(|bound| !bound.names.contains(value))
+            {
+                // A formal may itself be missing, which the primitive takes as an empty
+                // argument (`i` in `g <- function(i) f(x, i); g()`).
+                let constant = self.constant(*value);
+                let cache = self.cache();
+                self.emit(Op::Argument, &[register, constant, cache]);
             } else {
-                self.expression(*value, base + index as u32)?;
+                self.expression(*value, register)?;
             }
         }
         self.emit(
@@ -5751,7 +5759,7 @@ const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 pub const fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
-        Op::GetVar => 3,
+        Op::GetVar | Op::Argument => 3,
         Op::GetFun => 4,
         Op::SetVar => 3,
         Op::BranchUnlessBuiltin => 2,
@@ -5982,7 +5990,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
     use Operand::*;
     Some(match op {
         Op::Constant | Op::Ast => &[Register, Constant],
-        Op::GetVar => &[Register, Symbol, Cache],
+        Op::GetVar | Op::Argument => &[Register, Symbol, Cache],
         Op::SetVar => &[Symbol, Register, Cache],
         Op::GetFun => &[Register, Symbol, Cache, Call],
         Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
@@ -6666,7 +6674,16 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     };
     let profile = values::ints_mut(constants.element(PROFILE));
     let optimized = constants.element(TIER1) != nil();
-    if !optimized {
+    if optimized {
+        // A body with optimized code asks at every entry, and goes on asking for as long as
+        // it has the code, so only an entry that lost the code reschedules.
+        let entered = (tier.enter)(machine);
+        if constants.element(TIER1) != nil() {
+            return entered;
+        }
+        return reschedule(tier, constants, entered);
+    }
+    {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
             let worth = (tier.worth_recording)(machine);
             values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
@@ -6676,15 +6693,19 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     }
     // Most bodies never compile, and asking the tier about every call of every body cost more
     // than the compiled code saved on a test suite.
-    let entered = if optimized
-        || ((entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0)
-    {
-        (tier.enter)(machine)
-    } else {
-        None
-    };
-    // The tier may have compiled, refused, or moved the counters, so the schedule is derived
-    // from what they hold now.
+    let entered =
+        if (entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
+            (tier.enter)(machine)
+        } else {
+            None
+        };
+    reschedule(tier, constants, entered)
+}
+
+/// Sets the entry at which the tiers next look at the body with `constants`, after the tier
+/// may have compiled, refused, or moved the counters: the schedule is derived from what they
+/// hold now. Passes `entered` through.
+unsafe fn reschedule(tier: &Tier, constants: Sexp, entered: Option<TierExit>) -> Option<TierExit> {
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES];
     let state = profile[profile::TIER_STATE];
@@ -6758,8 +6779,30 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction. Answers
 /// the value the activation returns when the instruction returns from it, as a finished
 /// [`Op::Prologue`] does.
+///
+/// A closure call that [`call_fast`] takes enters its callee in place: the dispatch loop runs
+/// the body here and stops when it returns to the stepped call ([`Activation::stepping`]), so
+/// a call out of compiled code costs what a call between two interpreted bodies costs.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> {
-    match interpret::<true>(machine, pc) {
+    let mut state = activation(machine, true);
+    if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
+        state.resume_base = (*state.interp).bytecode.resumes.len();
+        state.stepping = true;
+        match call_fast(&mut state, pc) {
+            Some(STOP) => {}
+            Some(next) => {
+                (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
+            }
+            None => {
+                state.resume_base = NO_RESUMES;
+                state.stepping = false;
+                (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+            }
+        }
+    } else {
+        (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+    }
+    match (state.exit, state.stepped) {
         (Ok(value), STOP) => Ok(Some(value)),
         (result, _) => result.map(|_| None),
     }
@@ -6880,6 +6923,21 @@ pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
+/// Whether the instruction at `pc` is an [`Op::Argument`] whose formal is missing, which the
+/// optimizing tier leaves to tier 0: no compiled load yields the empty argument.
+pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+    let word = values::ints(machine.code.car()).get(pc).copied();
+    if word.and_then(|word| op_of(word as u32)) != Some(Op::Argument) {
+        return Ok(false);
+    }
+    let state = activation(machine, true);
+    let missing = argument_missing(&state, pc)?;
+    if missing {
+        state.record_kind(pc, feedback::MISSING);
+    }
+    Ok(missing)
+}
+
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -6887,7 +6945,18 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
     let symbol = constants.element(words[pc + 2] as usize);
     let cache = words[pc + 3] as usize;
     let in_slots = machine.env() == nil();
-    let (value, local) = match machine.slot_of(symbol) {
+    // The slot table numbers each lookup cache whose symbol the frame can bind, which finds
+    // the slot without searching the table's names.
+    let slots = constants.element(SLOTS);
+    let slot = if in_slots && slots != nil() {
+        values::ints(slots.element(0))
+            .get(cache)
+            .and_then(|&position| usize::try_from(position).ok())
+            .map(|position| register_address(machine.header + 1 + position))
+    } else {
+        None
+    };
+    let (value, local) = match slot {
         None if in_slots => {
             let start = machine.function.tag();
             (
@@ -6980,6 +7049,10 @@ struct Activation<'m, 'a> {
     /// the records above it are the callers of bodies this loop entered in place.
     /// [`NO_RESUMES`] for an activation that runs single instructions, whose calls nest.
     resume_base: usize,
+    /// Whether the activation the loop started with runs one call instruction for the
+    /// optimizing tier, with the callee entered in place: the loop then stops when the callee
+    /// returns to it, where an interpreted caller would go on.
+    stepping: bool,
 }
 
 impl Activation<'_, '_> {
@@ -7178,6 +7251,7 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
         exit: Ok(nil()),
         stepped: STOP,
         resume_base: NO_RESUMES,
+        stepping: false,
         machine,
     }
 }
@@ -7327,7 +7401,10 @@ unsafe fn count_entry(state: &mut Activation<'_, '_>) -> usize {
 /// [`run_scheduled_entry`] for a body entered in place.
 #[inline(never)]
 unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32) -> usize {
-    let event = entry_event(state.machine, entries);
+    // Compiled code runs on the native stack, and a call it hands to this loop may enter the
+    // next compiled body in place, so a deep recursion nests here without passing through a
+    // closure call's own stack check.
+    let event = eval::on_large_stack(|| entry_event(state.machine, entries));
     // The tier may have started or stopped the body's recording.
     reload(state);
     match event {
@@ -7394,6 +7471,25 @@ unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> 
             eval::release_references(resume.references);
         }
         let at = resume.call_at;
+        if state.stepping && interp.bytecode.resumes.len() == state.resume_base {
+            // The stepped call's result is what a failed speculation on it saw, so it is
+            // recorded whether or not the body is recording, as every stepped instruction's is.
+            state.feedback = pool_ints(state.constants, FEEDBACK);
+            match returned {
+                Ok(value) => {
+                    state.record(at, value);
+                    *state.registers.add(*state.code.add(at + 1) as usize) = value;
+                    release(state);
+                    state.exit = Ok(nil());
+                    state.stepped = after_instruction(state.code, at);
+                }
+                Err(unwind) => {
+                    state.exit = Err(unwind);
+                    state.stepped = at;
+                }
+            }
+            return STOP;
+        }
         match returned {
             Ok(value) => {
                 state.record(at, value);
@@ -7510,7 +7606,11 @@ unsafe fn failed<const SINGLE: bool>(
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if SINGLE {
+    // A stepped call that fails before its callee is entered fails as any stepped instruction
+    // does: the optimizing tier finds the loop target itself.
+    let stepped =
+        SINGLE || (state.stepping && (*state.interp).bytecode.resumes.len() == state.resume_base);
+    let resumed = if stepped {
         Err(unwind)
     } else {
         continue_after(state.machine, at, unwind)
@@ -7577,6 +7677,7 @@ handlers! {
     run_unfused: Unfused, false, op_unfused;
     run_super_assign: SuperAssign, true, op_super_assign;
     run_internal: Internal, true, op_internal;
+    run_argument: Argument, true, op_argument;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -7653,6 +7754,7 @@ macro_rules! fast_paths {
 
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
+    fast_argument: Argument, get_var_fast;
     fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
@@ -7982,7 +8084,11 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     let heap = &mut *state.heap;
     let nil = heap.known().nil;
     let count = interp.bytecode.resumes.len();
-    if count <= state.resume_base || *state.header != nil || activity::hooks() != 0 {
+    // A stepped call's callee returns to the optimizing tier, not to the caller's code.
+    if count <= state.resume_base + usize::from(state.stepping)
+        || *state.header != nil
+        || activity::hooks() != 0
+    {
         return None;
     }
     let depth = interp.bytecode.resumes.get_unchecked(count - 1).depth as usize;
@@ -8810,6 +8916,31 @@ unsafe fn op_get_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// [`Op::Argument`]: the empty argument for a missing formal, and the variable's value
+/// otherwise. The question is GNU R's `R_isMissing` for an argument of a subset primitive, so a
+/// formal that took its default is not missing.
+unsafe fn op_argument(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if argument_missing(state, instruction.at)? {
+        state.record_kind(instruction.at, feedback::MISSING);
+        (*state.interp).visible = true;
+        instruction.output(0, missing_arg());
+        return Ok(Flow::Next);
+    }
+    op_get_var(state, instruction)
+}
+
+/// Whether the formal the [`Op::Argument`] at `pc` reads is missing.
+unsafe fn argument_missing(state: &Activation<'_, '_>, pc: usize) -> R<bool> {
+    if state.in_slots() {
+        return match state.slot(*state.code.add(pc + 3) as usize) {
+            Some(slot) => eval::value_is_missing(*slot),
+            None => Ok(false),
+        };
+    }
+    let symbol = pool_constant(state, *state.code.add(pc + 2) as usize);
+    eval::argument_is_missing(symbol, *state.header)
 }
 
 #[inline(always)]
@@ -12441,8 +12572,12 @@ unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-    if profile[profile::TIER_STATE] == profile::TIER_OFF {
-        profile[profile::BACK_EDGES] = 0;
+    // A negative state is final: the body is off the tiers or refused for good. Its loops then
+    // count up from a value that reaches no threshold, because a recording window opened here
+    // would stay open with no compile to close it, and every instruction of the loop would
+    // record its types for nothing.
+    if profile[profile::TIER_STATE] < 0 {
+        profile[profile::BACK_EDGES] = i32::MIN;
         return BackEdge::Continue(pc);
     }
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2

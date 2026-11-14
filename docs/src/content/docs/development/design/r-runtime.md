@@ -883,6 +883,16 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   double vectors a double vector), checked after the call like any fed-back type. When an
   operand's type is still unknown (the result of an untyped closure, say), the first-call compile
   is declined without counting against the body, which then follows the thresholds.
+- **What it compiles.** A hot body compiles only when compiled code would save work. The planner
+  counts three kinds of work in the body: instructions it runs natively, calls it removes or
+  makes direct, and instructions it hands back to tier 0 one at a time. A native instruction
+  saves about 130 machine instructions and a removed call about 1000. A step back to tier 0 costs
+  about 300 more than tier 0 running the instruction itself, and entering compiled code costs
+  about 570 more than starting the body in tier 0. A loop-free body whose balance is not positive
+  stays in tier 0 for good, `function(x) x^2` for one, and so does a loop whose iterations would
+  mostly step, where an instruction in an inner loop weighs eight times one in the loop around
+  it. A refused body keeps its type feedback, so a compiled caller can still inline it, and its
+  loops stop counting and recording. `RY_JIT_LOG=1` prints each decision with its counts.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. The translator builds the
@@ -907,7 +917,18 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   after something that could change it. A scalar written back goes into the box the variable
   holds when that box is a plain scalar of the same type that nothing else references, so a loop
   that calls a closure on every iteration does not allocate for its counters.
-- **Calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
+- **Calls without a frame.** A call of a known closure runs inside the caller's compiled code
+  with no interpreter frame, environment or promises, behind a guard on the callee's code. The
+  call must bind as tier 0 would bind it without code running: positional, named and omitted
+  arguments and literal defaults qualify, and `...`, a default that is code and is read, a loop
+  in the callee, a recursive call and a callee without type feedback do not. Every argument the
+  callee reads is computed before the call as an unboxed scalar, and the callee's free variables
+  are read from its enclosing frames inline. The callee's frame exists only in the frame states
+  of its exits: when one is taken, the runtime builds the interpreter frames of the inlined
+  calls from the saved values and tier 0 continues inside the callee. The start of such a call
+  is one leaf helper that checks what would make a real frame necessary (a calling handler, the
+  debugger, a changed closure), and when it declines, tier 0 runs the call instruction.
+- **Other calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
   effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
   position without the general matcher. Evaluating early is invisible only if nothing can assign
   what an argument reads before the callee forces it, so the callee must be effect-free (the fact
@@ -928,7 +949,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   failure status before anything visible happens, so tier 0 reruns the call. A typed closure's
   checks are decided when its native function compiles. Function bindings are speculated
   against one global binding epoch, which the heap bumps whenever a watched binding changes or a
-  watched name is defined in a function frame.
+  watched name is defined in a function frame. Any other closure call is a step: tier 0 enters
+  the callee in its own dispatch loop and hands the result back to the compiled code.
+- **Returns.** A compiled return writes the assigned locals back to the frame only when something
+  can still read it: the frame has an environment, registered exit code, or a promise or closure
+  that captured it. Otherwise the locals are dropped with the frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
   speculated against the binding epoch. A failed guard boxes the live values, writes back the dirty
   variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
