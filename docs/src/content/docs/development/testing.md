@@ -1049,10 +1049,27 @@ finbench: 9592 tests, 9592 passing in 143.8 s of test blocks
 ```
 
 A call cannot be captured when a replay could not rebuild it: it passes its caller's `...`, an
-argument names a user function or a local closure, the call reads its caller's frame, or its
-arguments serialize to more than the size limit. Its time counts for its entry all the same. The validator then drops the samples that depend
-on the world outside the call (files, a git repository, external pointers, options) or that print.
-`select` reports what the suite loses to both:
+argument names a user function or a local closure, the call reads its caller's frame, or the
+recorder failed to inspect it (the reason `uninspectable`, for example when forcing a lazily bound
+package definition throws). The recorder's failure never reaches the program, which carries on.
+Such a call's time counts for its entry all the same, in the `uncapturable_*` columns.
+
+The samples of an entry are a reservoir of `RY_CAPTURE_SAMPLES` slots drawn uniformly from all of
+its capturable calls. The recorder serializes only the calls the draw selects. A selected call
+whose arguments or result serialize to more than `RY_CAPTURE_MAX_BYTES` empties its slot rather
+than leave the earlier sample there, because keeping it would bias the draw toward small calls,
+and the `oversize` column counts these calls. A slot a later draw refills holds a sample again,
+so `samples` counts the slots holding one at the end.
+
+The recorder writes every time as an integer number of nanoseconds, with the unit in the column
+name: `nanoseconds` and `uncapturable_nanoseconds` in `entries.tsv`, `nanoseconds` in
+`samples.tsv`, and `total_nanoseconds`, `user_nanoseconds`, `covered_nanoseconds`,
+`uncapturable_nanoseconds` and `outside_nanoseconds` in `summary.tsv`. Its own work (inspecting a
+call, serializing a sample, writing a file) is left out of every record's time and of the total.
+
+The validator then drops the samples that depend on the world outside the call (files, a git
+repository, external pointers, options) or that print. `select` reports what the suite loses to
+both:
 
 ```
 finbench: the programs hold 75.2% of the run's time on ry (70.3% in calls the recorder could capture) and 81.0% of the package time
@@ -1062,7 +1079,7 @@ finbench: the programs hold 75.2% of the run's time on ry (70.3% in calls the re
 A program's weight comes from a ratio estimate, because the capture measures ry's time and the
 weight needs GNU R's. The time a code base spent in an entry is scaled by GNU R's seconds over the
 capture's seconds for the same sampled calls. The samples are a uniform draw of the entry's calls,
-so what the recorder and the switched-off JIT add to the entry's time cancels in that ratio.
+so what the switched-off JIT adds to the entry's time cancels in that ratio.
 
 #### What a replay controls
 
