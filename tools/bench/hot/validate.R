@@ -1,22 +1,35 @@
 # Decides, under GNU R and after replay.R, which samples of one capture directory are sound
 # benchmark programs, and calibrates them. `hot.py validate` runs it once per directory
 # (RY_HOT_CAPTURE), in a process whose library path holds the corpus library but not the code
-# bases, so a sample that needs the code base's own namespace fails here.
+# bases, so a sample that needs the code base's own namespace fails here. hot.py also points
+# TMPDIR and R's user directories at a directory of the process's own, which this script watches.
 #
-# A sample is valid when it replays as it ran (an error when it threw, a value otherwise), prints
-# at most a couple of lines, opens no connection, creates no file, leaves the global environment,
-# the options and the search path as they were (apart from `.Random.seed`), and takes at most
-# 250 ms a call. Its result must be the value the capture kept. The exception is a result that
-# differs between two replays in a row (it holds a counter or a generated id): the sample stays
-# valid with the comparison `varies`, and the harness prints `varies` in place of its checksum.
+# A sample is read as the harness reads it (replay.R, `relocate`), and it is valid when it
+# replays as it ran (an error when it threw, a value otherwise), prints at most a couple of lines,
+# opens no connection and no graphics device, leaves the global environment, the options and the
+# search path as they were (apart from `.Random.seed`), and takes at most 250 ms a call. Its
+# result must be the value the capture kept. The exception is a result that differs between two
+# replays in a row (it holds a counter or a generated id): the sample stays valid with the
+# comparison `varies`, and the harness prints `varies` in place of its checksum.
+#
+# Files: a call may create, change and remove files only under the session's temporary
+# directory, and a second call must leave the same paths as the first, so that thousands of
+# calls in a batch replay the same work. A sample that touches a path anywhere else under the
+# watched directory, or whose second call leaves other paths, is dropped.
+#
+# A sample whose call changes its own variables, such as data.table's `:=`, an R6 object's fields
+# or a logger's appenders, is `fresh`: the harness gives it a copy of its variables for every call.
+# The check serializes the variables, replays once and serializes them again, with GNU R's JIT
+# off so that compiling a closure does not count as a change.
 #
 # Every package the code base imports (<capture>/session.txt) is loaded before the first sample,
 # as the harness loads them, so a sample is judged in the session it will be replayed in.
 #
 # It writes <capture>/validated.tsv, one row per sample, and for each valid sample a compact copy
 # of its replay inputs in <capture>/validated/, with the result's checksum (replay.R) in place of
-# the result unless the result is small. The copy leaves out the capture's timing, so the same
-# call captured in two code bases gives the same file, which `hot.py select` keeps once.
+# the result. The copy holds the call and variables as captured and leaves out the capture's
+# timing, so the same call captured in two code bases gives the same file, which `hot.py select`
+# keeps once.
 local({
   capture <- Sys.getenv("RY_HOT_CAPTURE")
   slowest <- 0.25
@@ -24,9 +37,15 @@ local({
   give_up <- 5
   # Calibration repeats a call until this long has passed, and a timed batch lasts about as long.
   batch_seconds <- 0.02
+  # The harness's figure for a program is the median of this many batches.
+  batches <- 5L
   allowed_lines <- 2L
-  kept_value_bytes <- 4096
 
+  home <- tempdir()
+  watched <- dirname(home)
+  if (!nzchar(Sys.getenv("TMPDIR")) || normalizePath(Sys.getenv("TMPDIR")) != normalizePath(watched)) {
+    stop("validate.R watches the directory TMPDIR names, which must be its own; run it through `hot.py validate`")
+  }
   skipped <- .hot$enter_session(readLines(file.path(capture, "session.txt")))
   if (length(skipped)) cat("the session runs without", paste(skipped, collapse = ", "), "\n")
   samples <- read.delim(file.path(capture, "samples.tsv"), colClasses = "character", quote = "",
@@ -34,7 +53,8 @@ local({
   out <- file.path(capture, "validated")
   unlink(out, recursive = TRUE)
   dir.create(out)
-  # Samples run in an empty working directory, so a file one writes there is seen.
+  # Samples run in a working directory under the temporary directory, as in the harness, so a
+  # file one writes to a relative path is seen and allowed.
   scratch <- tempfile("hot-validate-")
   dir.create(scratch)
   setwd(scratch)
@@ -43,6 +63,10 @@ local({
 
   one_line <- function(text) substr(gsub("[[:space:]]+", " ", paste(text, collapse = " ")), 1L, 200L)
   invalid <- function(reason) list(valid = FALSE, reason = one_line(reason))
+  paths <- function() {
+    sort(list.files(watched, recursive = TRUE, all.files = TRUE, include.dirs = TRUE, full.names = TRUE, no.. = TRUE))
+  }
+  inside_home <- function(path) startsWith(path, paste0(home, "/"))
 
   # The namespaces a replay needs: the entry's package, the packages it imports names from, every
   # `pkg::name` in the call, and every namespace a captured closure or environment refers to.
@@ -116,22 +140,27 @@ local({
     FALSE
   }
 
-  global_state <- function() {
-    names <- setdiff(ls(globalenv(), all.names = TRUE), ".Random.seed")
-    list(values = mget(names, envir = globalenv()), options = options(), search = search())
-  }
+  # The variables of a sample's environment as bytes, to tell whether a call changed them.
+  snapshot <- function(env) serialize(mget(sort(ls(env, all.names = TRUE)), envir = env), NULL)
 
   # One call of the sample in `env`, with its effects observed: the value or the error, what it
-  # printed, the connections and files it left, whether it drew random numbers and how long it took.
+  # printed, the connections and graphics devices it left open, the paths it created or removed,
+  # whether it drew random numbers and how long it took. It undoes what it can of the effects on
+  # the session (connections, devices, global variables, options), so a dropped sample does not
+  # change how a later one replays, but it leaves the files for the next call to find.
   observe <- function(sample, env) {
     if (!is.null(sample$seed)) assign(".Random.seed", sample$seed, envir = globalenv())
     seed_before <- get0(".Random.seed", envir = globalenv(), inherits = FALSE)
     output <- file(output_path, open = "w")
     messages <- file(messages_path, open = "w")
-    state <- global_state()
+    globals <- setdiff(ls(globalenv(), all.names = TRUE), ".Random.seed")
+    values <- mget(globals, envir = globalenv())
+    options_before <- options()
+    search_before <- search()
     # Not showConnections(), which collects garbage on every call.
     connections <- getAllConnections()
-    files <- c(dir(tempdir(), recursive = TRUE, all.files = TRUE), dir(scratch, recursive = TRUE, all.files = TRUE))
+    devices <- dev.list()
+    before <- paths()
     sink(output)
     sink(messages, type = "message")
     started <- as.numeric(Sys.time())
@@ -154,14 +183,19 @@ local({
     opened <- setdiff(getAllConnections(), connections)
     for (number in opened) try(close(getConnection(number)), silent = TRUE)
     outcome$connections <- length(opened)
-    after <- c(dir(tempdir(), recursive = TRUE, all.files = TRUE), dir(scratch, recursive = TRUE, all.files = TRUE))
-    created <- setdiff(after, files)
-    unlink(c(file.path(tempdir(), created), file.path(scratch, created)), recursive = TRUE)
-    outcome$files <- created
-    after_state <- global_state()
-    outcome$global <- !identical(after_state$values, state$values) || !identical(after_state$search, state$search)
-    outcome$options <- !identical(after_state$options, state$options)
-    if (outcome$options) options(state$options)
+    new_devices <- setdiff(dev.list(), devices)
+    for (device in new_devices) dev.off(device)
+    outcome$devices <- length(new_devices)
+    outcome$paths <- paths()
+    changed <- c(setdiff(outcome$paths, before), setdiff(before, outcome$paths))
+    outcome$elsewhere <- changed[!inside_home(changed)]
+    names_after <- setdiff(ls(globalenv(), all.names = TRUE), ".Random.seed")
+    outcome$global <- !identical(names_after, globals) || !identical(mget(names_after, envir = globalenv()), values) ||
+      !identical(search(), search_before)
+    rm(list = setdiff(names_after, globals), envir = globalenv())
+    for (name in globals) assign(name, values[[name]], envir = globalenv())
+    outcome$options <- !identical(options(), options_before)
+    if (outcome$options) options(options_before)
     outcome$rng <- !identical(seed_before, get0(".Random.seed", envir = globalenv(), inherits = FALSE))
     outcome
   }
@@ -170,21 +204,23 @@ local({
     if (isTRUE(grepl("time limit", outcome$message))) return(sprintf("runs longer than %g s", give_up))
     if (length(outcome$printed) > allowed_lines) return(sprintf("prints %d lines", length(outcome$printed)))
     if (outcome$connections) return("opens a connection")
-    if (length(outcome$files)) return(paste("creates the file", outcome$files[[1L]]))
+    if (outcome$devices) return("opens a graphics device")
+    if (length(outcome$elsewhere)) return(paste("touches a path outside its temporary directory:", outcome$elsewhere[[1L]]))
     if (outcome$global) return("changes the global environment or the search path")
     if (outcome$options) return("changes the options")
     NULL
   }
 
-  # The seconds one call takes in a batch, the least of three batches of a size that lasts at
-  # least `batch_seconds`.
-  calibrate <- function(prepared) {
+  # The seconds one call takes, as the harness measures it: batches prepared as the harness
+  # prepares them, of a size that lasts at least `batch_seconds`, and the median of `batches`.
+  calibrate <- function(ready) {
     sink(nullfile())
     on.exit(sink())
     timed <- function(count) {
-      prepared$iterations <- count
+      ready$iterations <- count
+      prepared <- .hot$prepare(list(ready))
       started <- as.numeric(Sys.time())
-      .hot$run(list(prepared))
+      .hot$run(prepared)
       as.numeric(Sys.time()) - started
     }
     count <- 1L
@@ -193,11 +229,11 @@ local({
       if (elapsed >= batch_seconds || count >= 1e6) break
       count <- count * 2L
     }
-    min(elapsed, timed(count), timed(count)) / count
+    stats::median(vapply(seq_len(batches), function(batch) timed(count), 0)) / count
   }
 
   check <- function(path, row) {
-    sample <- tryCatch(withCallingHandlers(readRDS(path), warning = function(condition) stop(condition)),
+    sample <- tryCatch(withCallingHandlers(.hot$relocate(readRDS(path)), warning = function(condition) stop(condition)),
                        error = function(error) error)
     if (inherits(sample, "error")) return(invalid(paste("does not load:", conditionMessage(sample))))
     namespaces <- namespaces_of(sample)
@@ -208,18 +244,33 @@ local({
       }, error = function(error) conditionMessage(error))
       if (!is.null(problem)) return(invalid(paste("namespace", namespace, "does not load:", problem)))
     }
-    env <- tryCatch(.hot$environment_of(sample), error = function(error) error)
+    # A call that changes its variables in place changes the objects `sample` holds too, so every
+    # later replay starts from these bytes.
+    bytes <- serialize(sample$variables, NULL)
+    pristine <- function() {
+      sample$variables <- unserialize(bytes)
+      sample
+    }
+    env <- tryCatch(.hot$environment_of(pristine()), error = function(error) error)
     if (inherits(env, "error")) return(invalid(paste("an import does not resolve:", conditionMessage(env))))
+    level <- compiler::enableJIT(0L)
+    before <- snapshot(env)
     first <- observe(sample, env)
+    fresh <- !identical(snapshot(env), before)
+    compiler::enableJIT(level)
     problem <- effects(first)
     if (!is.null(problem)) return(invalid(problem))
     if (first$threw != isTRUE(sample$threw)) {
       return(invalid(if (first$threw) paste("fails:", first$message) else "returns where the capture ended in an error"))
     }
     if (first$seconds > slowest) return(invalid(sprintf("takes %.3f s a call", first$seconds)))
-    second <- observe(sample, env)
+    second <- observe(sample, if (fresh) .hot$environment_of(pristine()) else env)
     problem <- effects(second)
     if (!is.null(problem)) return(invalid(problem))
+    if (!identical(second$paths, first$paths)) {
+      differing <- c(setdiff(second$paths, first$paths), setdiff(first$paths, second$paths))
+      return(invalid(paste("a second call leaves other paths than the first:", differing[[1L]])))
+    }
     if (second$threw != first$threw) return(invalid("fails on one replay and not the other"))
     comparison <- "error"
     if (!first$threw) {
@@ -244,17 +295,16 @@ local({
       }
     }
     rng <- first$rng
-    prepared <- list(call = sample$call, env = env, seed = if (rng) sample$seed, threw = first$threw, iterations = 1L)
     if (rng && is.null(sample$seed)) return(invalid("draws random numbers without a captured seed"))
-    seconds <- calibrate(prepared)
+    seconds <- calibrate(.hot$ready(pristine(), 1L, rng, first$threw, fresh))
     varies <- comparison == "varies"
     checksum <- if (varies) "varies" else .hot$checksum(if (first$threw) .hot$failed else first$value)
-    small <- !first$threw && !varies && as.numeric(object.size(first$value)) <= kept_value_bytes
-    saveRDS(list(package = sample$package, name = sample$name, call = sample$call, variables = sample$variables,
-                 imports = sample$imports, seed = if (rng) sample$seed, threw = first$threw,
-                 value = if (small) first$value, value_kept = small, varies = varies, checksum = checksum),
+    captured <- readRDS(path)
+    saveRDS(list(package = captured$package, name = captured$name, call = captured$call, variables = captured$variables,
+                 imports = captured$imports, seed = if (rng) captured$seed, threw = first$threw, varies = varies,
+                 checksum = checksum),
             file.path(out, basename(path)), compress = "xz")
-    list(valid = TRUE, reason = "", comparison = comparison, rng = rng, threw = first$threw,
+    list(valid = TRUE, reason = "", comparison = comparison, rng = rng, threw = first$threw, fresh = fresh,
          namespaces = namespaces, seconds = seconds, iterations = max(1L, as.integer(round(batch_seconds / seconds))),
          checksum = checksum)
   }
@@ -264,11 +314,14 @@ local({
     row <- samples[i, ]
     path <- file.path(capture, row$file)
     if (!file.exists(path)) path <- file.path(capture, "samples", row$file)
+    # The files a sample leaves, and the directories its relocation made, go before the next.
+    existing <- paths()
     verdict <- tryCatch(check(path, row), error = function(error) invalid(paste("the validator failed:", conditionMessage(error))))
+    unlink(setdiff(paths(), existing), recursive = TRUE)
     rows[[i]] <- data.frame(
       file = row$file, package = row$package, name = row$name, valid = verdict$valid, reason = verdict$reason,
       comparison = if (is.null(verdict$comparison)) "" else verdict$comparison,
-      rng = isTRUE(verdict$rng), threw = isTRUE(verdict$threw),
+      rng = isTRUE(verdict$rng), threw = isTRUE(verdict$threw), fresh = isTRUE(verdict$fresh),
       namespaces = paste(verdict$namespaces, collapse = ","),
       gnu_seconds_per_call = if (is.null(verdict$seconds)) NA_real_ else signif(verdict$seconds, 6),
       iterations = if (is.null(verdict$iterations)) NA_integer_ else verdict$iterations,
@@ -278,7 +331,8 @@ local({
       stringsAsFactors = FALSE
     )
     cat(sprintf("%s %s::%s %s\n", row$file, row$package, row$name,
-                if (verdict$valid) sprintf("valid (%s, %.3g ms a call)", rows[[i]]$comparison, verdict$seconds * 1000)
+                if (verdict$valid) sprintf("valid (%s%s, %.3g ms a call)", rows[[i]]$comparison,
+                                           if (verdict$fresh) ", fresh" else "", verdict$seconds * 1000)
                 else paste("invalid:", verdict$reason)))
   }
   table <- do.call(rbind, rows)

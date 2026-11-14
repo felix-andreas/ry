@@ -1022,7 +1022,7 @@ what the code base's own speed-up would be if it ran only these calls.
 | Step | Runs | Writes |
 | --- | --- | --- |
 | `capture` | each code base's tests on ry with the recorder on and the JIT off | per code base, the time in every package entry (`entries.tsv`, `summary.tsv`), up to eight calls of each with their arguments (`samples.tsv`, `samples/N.rds`), and the packages the code base imports (`session.txt`) |
-| `validate` | every sample under GNU R (`validate.R`) | the samples that replay with the result they had and no side effect, with GNU R's seconds per call (`validated.tsv`) |
+| `validate` | every sample under GNU R (`validate.R`) | the samples that replay with the result they had and no side effect outside their temporary directory, with GNU R's seconds per call and whether each call needs a fresh copy of the arguments (`validated.tsv`) |
 | `select` | nothing | the 100 entries that hold the most time, the three most typical valid samples of each, and their weights |
 
 The recorder is part of the runtime (`crates/interp/src/capture.rs`) and is off unless
@@ -1067,9 +1067,9 @@ name: `nanoseconds` and `uncapturable_nanoseconds` in `entries.tsv`, `nanosecond
 `uncapturable_nanoseconds` and `outside_nanoseconds` in `summary.tsv`. Its own work (inspecting a
 call, serializing a sample, writing a file) is left out of every record's time and of the total.
 
-The validator then drops the samples that depend on the world outside the call (files, a git
-repository, external pointers, options) or that print. `select` reports what the suite loses to
-both:
+The validator then drops the samples that depend on the world outside the call (a file the capture
+read, a git repository, external pointers, options, a graphics device) or that print. `select`
+reports what the suite loses to both:
 
 ```
 finbench: the programs hold 75.2% of the run's time on ry (70.3% in calls the recorder could capture) and 81.0% of the package time
@@ -1091,10 +1091,35 @@ so what the switched-off JIT adds to the entry's time cancels in that ratio.
 - **Conditions.** A call runs under handlers that continue a testthat expectation and muffle
   messages and warnings, so an expectation replays outside a `test_that()` block.
 - **Random numbers.** A sample that draws random numbers gets its seed restored before each call.
+- **Temporary paths.** A path the capture made under its session's temporary directory
+  (`/tmp/RtmpXXXXXX/...`) is rewritten to lie under the replay's own `tempdir()` by `replay.R`'s
+  `relocate`, which the validator and the harness both call, and the parent directory of each
+  such path in the call's arguments is created. The calls run in a directory under `tempdir()`,
+  so a relative path lands there too. A sample may create files only under its temporary
+  directory, and a second call must leave the same set of paths as the first; the validator drops
+  any other sample with its reason, and drops a sample that opens a graphics device.
+- **Fresh arguments.** The validator replays each sample once with the JIT off and compares its
+  variables before and after. A sample whose call changed them is marked `fresh`: data.table's
+  `:=` modifies its table in place, an R6 setter such as lgr's `$set_appenders` its object,
+  `foreach(i = ...) %do%` assigns `i` in the calling environment, and httr2's `resp_body_json`
+  fills the response's cache. The harness rebuilds a fresh sample's environment from a
+  serialized copy for every call. It builds them before each batch, outside the timing and
+  outside the program's region, so a batch times only the calls.
 - **Checksums.** Each engine prints a checksum of every sample's last result, and the run fails
-  when ry's differs from GNU R's. Numbers fold to twelve significant digits, so a root that
-  `uniroot` finds one part in 1e13 away agrees. A sample whose result differs on every call
-  under GNU R (a temporary file name, a timestamp) is recorded as `varies` and not compared.
+  when ry's differs from GNU R's. The checksum is `<kind>:<length>:<hash>:<magnitude>:<balance>`.
+  The hash covers what must match exactly: every type and length, the attributes (all but
+  data.table's `.internal.selfref`, at any depth), the text, the logical values, and how many NA,
+  NaN, Inf and -Inf each numeric vector holds. Every numeric vector at any depth adds the
+  logarithm of its weighted size and its weighted sum over that size to the last two fields,
+  which must agree to an absolute 1e-10 (or a relative 1e-13), so a root that `uniroot` finds one
+  part in 1e13 away agrees and a change of one part in 1e10 does not. A sample whose result
+  differs on every call under GNU R (a temporary file name, a timestamp) is recorded as `varies`
+  and not compared. A result of another type fails even when its values agree:
+
+  ```
+  FAILED hot/base-seq on ry: checksum dbl:18:32x252214378:2.131601681765849e+01:1.618033988749895e+00,...,
+    GNU R printed int:18:33x270404436:2.131601681765849e+01:1.618033988749895e+00,...
+  ```
 
 #### Where a program's time goes
 
@@ -1109,8 +1134,12 @@ program and weighted per code base, the share of ry's time in each activity:
 | program | samples | interpreter | builtin | call_setup | native | evaluator | s3_dispatch | compiled | jit_compile | ...
 | testthat::expect_equal | 440 | 45% | 28% | 17% | 4% | 3% | 2% | 0% | 0% | ...
 | base::mean | 666 | 11% | 23% | 12% | 0% | 6% | 9% | 13% | 26% | ...
-| weighted, finbench | | 42% | 31% | 12% | 7% | 2% | 4% | 0% | 0% | ...
+| finbench, weighted by ry time | | 42% | 31% | 12% | 7% | 2% | 4% | 0% | 0% | ...
 ```
+
+Each program weighs by its share of the code base's ry time. A run that times nothing
+(`--rounds 0`) has no speed-ups to derive that share from, so it weighs by the GNU R weight and
+the row says `weighted by GNU R time`.
 
 `interpreter` is the bytecode interpreter, `builtin` base R's builtins, `call_setup` a closure
 call's argument matching, promises and frame, `native` code reached through `.Call`, `.External`
@@ -1119,7 +1148,8 @@ large `builtin` share gains only from a faster builtin, so the breakdown bounds 
 optimization of one activity can give.
 
 `--instructions` runs one batch of each program under callgrind, with instrumentation on only
-inside the program's region, and prints each program's instruction count per call.
+inside the program's region, and prints each program's instruction count per call. Callgrind
+writes a dump each time a region ends, and the dumps of one region are summed.
 `--save-instructions FILE` keeps the counts, and a later run with `--baseline-instructions FILE`
 prints each program's change and its effect on each code base's weighted total. The counts are
 deterministic, so they show a change of 1% that wall time on a shared machine hides. The pass takes
