@@ -3,7 +3,7 @@
 # namespace loads, through a script, `ry load` and `requireNamespace()` alike, and only for the
 # exact code of the release it was ported from: a changed copy of the function keeps its R body.
 # The first check fails when the installed rlang is another release, so an update that drops the
-# fast path shows up here.
+# fast path shows up here. `compiler::compile` and `cmpfun` are native in the same way.
 
 requires ry-runtime r-package:rlang>=1.3.0
 
@@ -26,6 +26,10 @@ file check.R
 | g <- function() rlang::trace_back()
 | trace <- f()
 | cat("calls:", vapply(trace$call, function(call) deparse(call), ""), "\n")
+| compiled <- compiler::cmpfun(function(x) x + 1)
+| compile_native <- identical(body(compiler::compile)[[2]], quote(.Internal(ryCompilerCompile())))
+| cmpfun_native <- identical(body(compiler::cmpfun)[[2]], quote(.Internal(ryCompilerCmpfun())))
+| cat("native compiler:", compile_native, cmpfun_native, compiled(1), "\n")
 file DESCRIPTION
 | Package: ledger
 | Version: 0.1.0
@@ -40,6 +44,7 @@ expect exit 0
 expect stdout "rlang 1.3.0 native trace_back: TRUE"
 expect stdout "exact copy: TRUE changed copy: FALSE"
 expect stdout "calls: f() g()"
+expect stdout "native compiler: TRUE TRUE 2"
 
 run ry load --runtime ry -e "cat('loaded:', identical(body(rlang:::trace_back)[[2]], quote(.Internal(ryTraceBack()))), '\\n')"
 expect exit 0

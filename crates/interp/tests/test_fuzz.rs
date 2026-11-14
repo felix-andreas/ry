@@ -28,8 +28,8 @@ use {
             check_code_image_load, check_code_image_round_trip, check_element_access_agreement,
             check_environment_agreement, check_frame_stack, check_fused_agreement,
             check_image_bodies_round_trip, check_lowering_input, check_quickening_agreement,
-            check_resume_at_every_pc, check_shadowing_agreement, check_unserialize_input,
-            with_interpreter,
+            check_resume_at_every_pc, check_s3_lookup_agreement, check_shadowing_agreement,
+            check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -350,6 +350,11 @@ fn fuzz_frame_stack_agrees_with_a_vector_model() {
 #[test]
 fn fuzz_shadowed_guards_agree_with_the_ast_evaluator() {
     for_each_seed(600, |seed| check_shadowing_agreement(&mut SplitMix64(seed)));
+}
+
+#[test]
+fn fuzz_s3_method_lookups_agree_with_a_full_walk() {
+    for_each_seed(300, |seed| check_s3_lookup_agreement(&mut SplitMix64(seed)));
 }
 
 #[test]

@@ -3110,14 +3110,32 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
         }
         scalar_bool(false)
     };
-    // GNU R makes each parent in turn and then the path itself, so `dir.create("a/.",
-    // recursive = TRUE)` makes `a` and still reports that `a/.` exists.
-    if recursive {
+    // GNU R makes each missing parent in turn and then the path itself, so `dir.create("a/.",
+    // recursive = TRUE)` makes `a` and still reports that `a/.` exists. A parent that is already
+    // a directory is not made again: callers such as openxlsx's `saveWorkbook` create deep paths
+    // whose ancestors exist, and one `stat` of the nearest parent settles them all.
+    let separator = |character: char| character == '/' || (cfg!(windows) && character == '\\');
+    let parent_exists = || {
+        path.rfind(separator)
+            .filter(|&index| index > 0)
+            .is_none_or(|index| {
+                std::fs::metadata(&path[..index]).is_ok_and(|metadata| metadata.is_dir())
+            })
+    };
+    if recursive && !parent_exists() {
         for (index, _) in path
-            .match_indices(|character| character == '/' || (cfg!(windows) && character == '\\'))
+            .match_indices(separator)
             .filter(|(index, _)| *index > 0)
         {
             let parent = &path[..index];
+            match std::fs::metadata(parent) {
+                Ok(metadata) if metadata.is_dir() => continue,
+                Ok(_) => return cannot_create(parent, not_a_directory()),
+                Err(failure) if failure.kind() != std::io::ErrorKind::NotFound => {
+                    return cannot_create(parent, failure);
+                }
+                Err(_) => {}
+            }
             match std::fs::create_dir(parent) {
                 Err(failure) if failure.kind() != std::io::ErrorKind::AlreadyExists => {
                     return cannot_create(parent, failure);
@@ -3136,6 +3154,15 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
         }
         Err(failure) => cannot_create(path, failure),
     }
+}
+
+/// The error `stat` reports for a path component that is a file: what GNU R's `dir.create`
+/// warns with when a parent it would make is one.
+fn not_a_directory() -> std::io::Error {
+    #[cfg(not(windows))]
+    return std::io::Error::from_raw_os_error(libc::ENOTDIR);
+    #[cfg(windows)]
+    return std::io::Error::from(std::io::ErrorKind::NotADirectory);
 }
 
 unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
