@@ -17,6 +17,8 @@ file workload.R
 | e <- tryCatch(bad(), error = function(e) "caught")
 | set.seed(42)
 | r <- stats::rnorm(5)
+| pick <- function(type = c("fast", "slow")) match.arg(type)
+| p <- pick()
 | cat("done\n")
 
 env RY_CAPTURE_PACKAGE R_GlobalEnv
@@ -37,7 +39,8 @@ file replay.R
 |   entry("vapply")$calls == 1, entry("vapply")$samples == 1,
 |   entry("sapply")$user_binding == 1, entry("sapply")$samples == 0,
 |   entry("paste")$dots == 1, entry("tryCatch")$user_binding == 1,
-|   entry("stopifnot")$calls == 1, entry("rnorm")$calls == 1
+|   entry("stopifnot")$calls == 1, entry("rnorm")$calls == 1,
+|   entry("match.arg")$caller_frame == 1, entry("match.arg")$samples == 0
 | )
 | samples <- read.delim("capture/samples.tsv", stringsAsFactors = FALSE)
 | for (file in samples$file) {

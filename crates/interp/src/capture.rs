@@ -164,6 +164,9 @@ enum Reason {
     Dots,
     LocalClosure,
     UserBinding,
+    /// The callee reads its caller's frame (`match.arg`, `match.call`, `sys.function`): a
+    /// replay calls it from a different frame.
+    CallerFrame,
 }
 
 struct KeyStats {
@@ -176,6 +179,7 @@ struct KeyStats {
     dots: u64,
     local_closure: u64,
     user_binding: u64,
+    caller_frame: u64,
     oversize: u64,
     /// Capturable calls that ran user code below them: a method the user defined, or a closure
     /// reached through a value. Their replay without the user's code may differ.
@@ -356,6 +360,8 @@ unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
     let mark = crate::heap().handle_mark();
     let inspected = if free.dots {
         Inspection::Uncapturable(Reason::Dots)
+    } else if reads_caller_frame(&owner, &name, call) {
+        Inspection::Uncapturable(Reason::CallerFrame)
     } else {
         match inspect(&free, sys_parent) {
             Ok(inspected) => inspected,
@@ -493,6 +499,7 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
                     Reason::Dots => stats.dots += 1,
                     Reason::LocalClosure => stats.local_closure += 1,
                     Reason::UserBinding => stats.user_binding += 1,
+                    Reason::CallerFrame => stats.caller_frame += 1,
                 }
             }
         }
@@ -600,6 +607,31 @@ unsafe fn head_symbol(call: Sexp) -> Option<Sexp> {
     (head.kind() == SexpType::Symbol).then_some(head)
 }
 
+/// Base functions whose result depends on the frame that called them, not only on their
+/// arguments. A replay evaluates the recorded call in a fresh environment with no calling
+/// closure, so these would answer about the wrong frame. `match.arg(arg)` with no `choices`
+/// reads the caller's formals the same way; with explicit choices it is an ordinary call.
+unsafe fn reads_caller_frame(owner: &str, name: &str, call: Sexp) -> bool {
+    if owner != "base" {
+        return false;
+    }
+    match name {
+        "match.call" | "sys.call" | "sys.function" | "sys.frame" | "sys.nframe" | "sys.calls"
+        | "sys.frames" | "sys.parent" | "sys.parents" | "sys.on.exit" | "parent.frame"
+        | "environment" | "Recall" | "missing" | "nargs" => true,
+        "match.arg" => {
+            let mut arguments = 0;
+            let mut rest = call.cdr();
+            while rest.kind() == SexpType::Pairlist {
+                arguments += 1;
+                rest = rest.cdr();
+            }
+            arguments <= 1
+        }
+        _ => false,
+    }
+}
+
 fn key_of(owner: &Rc<str>, name: &Rc<str>) -> usize {
     STATE.with_borrow_mut(|state| {
         let Some(state) = state.as_mut() else {
@@ -620,6 +652,7 @@ fn key_of(owner: &Rc<str>, name: &Rc<str>) -> usize {
             dots: 0,
             local_closure: 0,
             user_binding: 0,
+            caller_frame: 0,
             oversize: 0,
             reentered: 0,
             seen: 0,
@@ -1063,12 +1096,12 @@ fn write_outputs(state: &Capture, total: Duration) -> std::io::Result<()> {
             .then_with(|| left.name.cmp(&right.name))
     });
     let mut entries = String::from(
-        "package\tname\tcalls\tseconds\tsamples\tuncapturable_calls\tuncapturable_seconds\tdots\tlocal_closure\tuser_binding\toversize\treentered\n",
+        "package\tname\tcalls\tseconds\tsamples\tuncapturable_calls\tuncapturable_seconds\tdots\tlocal_closure\tuser_binding\toversize\treentered\tcaller_frame\n",
     );
     for stats in keys {
         let samples = stats.slots.iter().filter(|slot| slot.is_some()).count();
         entries.push_str(&format!(
-            "{}\t{}\t{}\t{:.6}\t{samples}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{:.6}\t{samples}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             stats.package,
             stats.name,
             stats.calls,
@@ -1080,6 +1113,7 @@ fn write_outputs(state: &Capture, total: Duration) -> std::io::Result<()> {
             stats.user_binding,
             stats.oversize,
             stats.reentered,
+            stats.caller_frame,
         ));
     }
     std::fs::write(state.directory.join("entries.tsv"), entries)?;
