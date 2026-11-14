@@ -3479,7 +3479,7 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     eval::define(names.classes, classes, frame)?;
     eval::define(
         names.parentenv,
-        eval::frame_sys_parent_pending(index)?,
+        eval::frame_sys_parent(index, eval::Reify::Site("parent.frame"))?,
         frame,
     )?;
     if length(classes) != forced.len() {
@@ -3515,7 +3515,7 @@ unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
     let classes = values::get_attr(handlers, names.names);
     eval::define(names.handlers, handlers, frame)?;
     eval::define(names.classes, classes, frame)?;
-    let parent_env = eval::frame_sys_parent_pending(index)?;
+    let parent_env = eval::frame_sys_parent(index, eval::Reify::Site("parent.frame"))?;
     eval::define(names.parentenv, parent_env, frame)?;
     if length(classes) != forced.len() {
         // `stop("condition handlers must be specified with a condition class")`

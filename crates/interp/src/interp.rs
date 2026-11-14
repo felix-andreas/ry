@@ -136,9 +136,10 @@ pub struct Frame {
     /// The call as written, which `sys.call` returns.
     pub call: Sexp,
     pub function: Sexp,
-    /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) has none
-    /// until something asks for it, and holds `NULL` until then: read it through
-    /// [`eval::frame_env`], which makes it, wherever the environment is handed on.
+    /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) runs in
+    /// its slots and holds `NULL` here until one of its variables moves into a binding cell of
+    /// [`Frame::pending`], which is its environment from then on. Read it through
+    /// [`eval::frame_env`] wherever the environment is handed on.
     pub env: Sexp,
     /// The environment the call was evaluated in, which `parent.frame` returns, or `NULL` when
     /// the caller is a slot frame that had no environment when it made the call: the caller is
@@ -154,22 +155,19 @@ pub struct Frame {
     /// Promise code runs in its caller's slots while deeper frames are live, so the caller is
     /// not always the frame just below.
     pub caller: u32,
-    /// For a slot frame that passed promises over its slots, the environment those promises
-    /// name: it has no bindings and carries [`heap::object::gp::PENDING_FRAME`] until the frame reifies into
-    /// it, so a forced promise finds the frame by it and runs on the slots.
+    /// The environment that stands for a slot frame, made the first time anything asks for it:
+    /// promises and closures of the frame name it, and `environment()`, `parent.frame()` and
+    /// `sys.frame()` return it. It binds nothing while every variable is in its slot
+    /// ([`heap::object::gp::PENDING_FRAME`]), takes a variable into a binding cell when
+    /// something reads that variable through it ([`heap::object::gp::PARTIAL_FRAME`], from when
+    /// it is [`Frame::env`] too), and takes them all if it outlives the frame.
     pub pending: Sexp,
-    /// How many promises over [`Frame::pending`] may still be unforced, plus the closures made
-    /// over it ([`Interp::pending_closures`]). When none of them can outlive the frame as it
-    /// returns, the environment is never made.
-    pub unforced: u32,
-    /// Whether `parent.frame` handed out [`Frame::pending`] in place of the environment, so a
-    /// read of its bindings counts as code observing the frame.
-    pub pending_shared: bool,
     /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
-    /// that the generic path would have bound as promises, so a reify wraps them.
+    /// that the generic path would have bound as promises, so a variable that moves into a
+    /// binding cell is wrapped as one.
     pub inlined: bool,
-    /// The [`heap::activity::label`] of what gave the slot frame its environment, while a
-    /// profile summary is collected; [`NOT_REIFIED`] otherwise.
+    /// The [`heap::activity::label`] of what last asked for the slot frame's environment, while
+    /// a profile summary is collected; [`NOT_REIFIED`] otherwise.
     pub reified_by: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
@@ -193,12 +191,15 @@ pub struct Frame {
     pub handle_mark: u32,
     /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
     pub previous_owner: u32,
+    /// [`Interp::references_used`] when the frame was pushed: the argument references a slot
+    /// frame makes for its own defaults sit from here up, and go back to the pool when the
+    /// frame returns.
+    pub references: u32,
 }
 
 impl Frame {
-    /// Whether `env` is this frame's environment, or the pending environment that stands for
-    /// it while a slot frame has none: `parent.frame` hands that one out, and it becomes the
-    /// environment itself if the frame reifies.
+    /// Whether `env` is this frame's environment, which for a slot frame is the one that
+    /// stands for it whether or not it binds anything yet.
     pub unsafe fn owns(&self, env: Sexp) -> bool {
         self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
     }
@@ -245,9 +246,19 @@ pub fn set_object_systems(allowed: bool) {
 /// what the word must hold, apart from the profiling bits.
 pub fn observer_bits() -> u8 {
     let state = interp();
-    (if state.debugger.is_some() { activity::DEBUGGER } else { 0 })
-        | (if moves::tracking() { activity::MOVES } else { 0 })
-        | (if state.object_systems { 0 } else { activity::NO_OBJECT_SYSTEMS })
+    (if state.debugger.is_some() {
+        activity::DEBUGGER
+    } else {
+        0
+    }) | (if moves::tracking() {
+        activity::MOVES
+    } else {
+        0
+    }) | (if state.object_systems {
+        0
+    } else {
+        activity::NO_OBJECT_SYSTEMS
+    })
 }
 
 // A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
@@ -380,7 +391,7 @@ impl<'a> IntoIterator for &'a mut FrameStack {
 /// [`Frame::slots`] of a frame that keeps its variables in an environment.
 pub const NO_SLOTS: u32 = u32::MAX;
 
-/// [`Frame::reified_by`] of a frame no reason was recorded for.
+/// [`Frame::reified_by`] of a frame nothing asked the environment of.
 pub const NOT_REIFIED: u32 = u32::MAX;
 
 /// The arguments of the frame at `index` (zero-based), as the call passed them.
@@ -414,17 +425,43 @@ pub fn method_vars(state: &Interp, index: usize) -> &[(Sexp, Sexp)] {
         .unwrap_or(&[])
 }
 
+/// Where the closures that the slot frame at `owner` made over its environment sit in
+/// [`Interp::pending_closures`]. The list is ordered by frame, and the frame that asks is
+/// nearly always the innermost one with any, so the search runs from the end.
+pub fn pending_closures_of(closures: &[(u32, Sexp)], owner: usize) -> std::ops::Range<usize> {
+    let end = closures.len()
+        - closures
+            .iter()
+            .rev()
+            .take_while(|&&(frame, _)| frame as usize > owner)
+            .count();
+    let start = end
+        - closures[..end]
+            .iter()
+            .rev()
+            .take_while(|&&(frame, _)| frame as usize == owner)
+            .count();
+    start..end
+}
+
+/// Forgets the closures over the environments of the slot frames at `depth` and above
+/// ([`Interp::pending_closures`]), which are popping.
+#[inline(always)]
+pub fn forget_pending_closures(state: &mut Interp, depth: usize) {
+    while let Some(&(owner, _)) = state.pending_closures.last()
+        && owner as usize >= depth
+    {
+        state.pending_closures.pop();
+    }
+}
+
 /// Keeps the first `depth` frames and drops the rest with their arguments.
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if let Some(frame) = state.frames.get(depth) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if !state.pending_closures.is_empty() {
-        state
-            .pending_closures
-            .retain(|&(owner, _)| (owner as usize) < depth);
-    }
+    forget_pending_closures(state, depth);
     state.frames.truncate(depth);
     // An unwind to top level skips the releases of the calls it leaves, so their argument
     // references go back to the pool here, cleared, or the pool would keep what they held.
@@ -563,9 +600,12 @@ pub struct Interp {
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
     pub frame_closures: Vec<Sexp>,
-    /// The closures slot frames made over their pending environments, each with the index of
-    /// its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without its
-    /// environment checks that none outlives it (`eval::finish_frame`).
+    /// The closures slot frames made over the environments that stand for them, each with the
+    /// index of its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without
+    /// its environment checks that none outlives it (`eval::finish_frame`). The entries are
+    /// ordered by frame, so a frame's own are together ([`pending_closures_of`]) and the frames
+    /// that pop give up theirs from the end ([`forget_pending_closures`]): a return never
+    /// searches the list for the closures of the frames below it.
     pub pending_closures: Vec<(u32, Sexp)>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
@@ -832,7 +872,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         return;
     }
     state.heap = heap_pointer;
-    heap::set_pending_resolver(crate::eval::resolve_pending_read);
+    heap::set_pending_resolver(crate::eval::resolve_pending_access);
     system::provide_emulated_r();
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();

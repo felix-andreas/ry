@@ -144,7 +144,10 @@ pub enum Counter {
     JitDeoptimizations,
     JitEntries,
     LookupMisses,
+    FrameEnvironments,
     FramesReified,
+    VariablesBoxed,
+    FramesLifted,
     PackageCalls,
     PackageCallsDirect,
     PackageCallsObserved,
@@ -153,7 +156,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 23] = [
+    pub const ALL: [Counter; 26] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -171,7 +174,10 @@ impl Counter {
         Counter::JitDeoptimizations,
         Counter::JitEntries,
         Counter::LookupMisses,
+        Counter::FrameEnvironments,
         Counter::FramesReified,
+        Counter::VariablesBoxed,
+        Counter::FramesLifted,
         Counter::PackageCalls,
         Counter::PackageCallsDirect,
         Counter::PackageCallsObserved,
@@ -198,13 +204,20 @@ impl Counter {
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
-            Counter::FramesReified => "slot frames turned into environments",
+            Counter::FrameEnvironments => "slot frames that made an environment to stand for them",
+            Counter::FramesReified => {
+                "slot frames that switched to reading their variables by name"
+            }
+            Counter::VariablesBoxed => "variables moved from a slot into a binding cell",
+            Counter::FramesLifted => {
+                "slot frames whose environment took every variable, to be listed or to outlive them"
+            }
             Counter::PackageCalls => "calls to closures of package namespaces",
             Counter::PackageCallsDirect => {
                 "package calls that ran in slots, with no argument promise and no environment"
             }
             Counter::PackageCallsObserved => {
-                "package calls whose frame was reified because code observed its environment"
+                "package calls that read variables by name because code observed the environment"
             }
             Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
             Counter::DoCallsInlined => "do.call calls run without its body",
@@ -231,7 +244,10 @@ impl Counter {
             Counter::JitDeoptimizations => "jit_deoptimizations",
             Counter::JitEntries => "jit_entries",
             Counter::LookupMisses => "lookup_misses",
+            Counter::FrameEnvironments => "frame_environments",
             Counter::FramesReified => "frames_reified",
+            Counter::VariablesBoxed => "variables_boxed",
+            Counter::FramesLifted => "frames_lifted",
             Counter::PackageCalls => "package_calls",
             Counter::PackageCallsDirect => "package_calls_direct",
             Counter::PackageCallsObserved => "package_calls_observed",
@@ -377,6 +393,14 @@ impl Drop for Scope {
 pub fn count(counter: Counter) {
     if enabled() {
         bump(&COUNTERS[counter as usize]);
+    }
+}
+
+/// [`count`] for `events` events at once.
+pub fn count_by(counter: Counter, events: u64) {
+    if enabled() {
+        let slot = &COUNTERS[counter as usize];
+        slot.store(slot.load(Ordering::Relaxed) + events, Ordering::Relaxed);
     }
 }
 
@@ -533,5 +557,79 @@ pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>, bodies: &mut V
         owners.push(FRAME_OWNERS[index].load(Ordering::Relaxed));
         names.push(FRAME_NAMES[index].load(Ordering::Relaxed));
         bodies.push(FRAME_BODIES[index].load(Ordering::Relaxed));
+    }
+}
+
+/// Exact allocation counts by object kind, and the call paths of a sample of them, while a
+/// profile summary is collected with `RY_ALLOC_SITES` set to the sampling period.
+static ALLOCATED: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+static ALLOCATION_PERIOD: AtomicU64 = AtomicU64::new(0);
+static ALLOCATION_SITES: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+pub fn set_allocation_period(period: u64) {
+    ALLOCATION_PERIOD.store(period, Ordering::Relaxed);
+}
+
+#[inline(always)]
+pub fn allocated(kind: u32) {
+    if enabled() {
+        allocated_slow(kind);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn allocated_slow(kind: u32) {
+    let Some(counter) = ALLOCATED.get(kind as usize) else {
+        return;
+    };
+    let count = counter.load(Ordering::Relaxed) + 1;
+    counter.store(count, Ordering::Relaxed);
+    let period = ALLOCATION_PERIOD.load(Ordering::Relaxed);
+    if period == 0 || count % period != 0 {
+        return;
+    }
+    let trace = std::backtrace::Backtrace::force_capture().to_string();
+    let mut frames: Vec<&str> = Vec::new();
+    for line in trace.lines() {
+        let line = line.trim_start();
+        let Some((index, name)) = line.split_once(": ") else {
+            continue;
+        };
+        if index.parse::<u32>().is_err() {
+            continue;
+        }
+        if name.contains("activity::")
+            || name.contains("backtrace")
+            || name.contains("Heap>::alloc")
+            || name.contains("Heap>::init_small")
+            || name.contains("heap::heap::Heap")
+        {
+            continue;
+        }
+        frames.push(name);
+        if frames.len() == 10 {
+            break;
+        }
+    }
+    let key = format!("{kind}\t{}", frames.join(" < "));
+    let mut sites = match ALLOCATION_SITES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match sites.iter_mut().find(|(site, _)| *site == key) {
+        Some((_, count)) => *count += 1,
+        None => sites.push((key, 1)),
+    }
+}
+
+pub fn allocation_counts() -> [u64; 32] {
+    std::array::from_fn(|kind| ALLOCATED[kind].load(Ordering::Relaxed))
+}
+
+pub fn allocation_sites() -> Vec<(String, u64)> {
+    match ALLOCATION_SITES.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }

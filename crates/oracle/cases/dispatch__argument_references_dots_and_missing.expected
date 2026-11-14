@@ -1,0 +1,20 @@
+[stdout]
+| [1] 12
+| [1] 12
+| attr(,"class")
+| [1] "foo"
+| [1] 7
+| structure(z, class = "sub")
+| [1] 1 2
+| [1] 1 1
+| [1] 16 17 18
+| [1] 13 14 15
+| [1]  8 27
+|     a     b 
+| "a-z" "b-z" 
+| [1] 101 102
+[messages]
+[warnings]
+[errors]
+- 'missing(b)' did not find an argument (in g())
+[value]

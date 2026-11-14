@@ -373,9 +373,18 @@ pub mod gp {
     /// that do not count as references, which code running on the environment from elsewhere
     /// must respect before it updates a value in place.
     pub const COMPILED_FRAME: u16 = 1 << 9;
-    /// The environment a slot frame's promises name before the frame has made it: it has no
-    /// bindings yet, and forcing such a promise runs on the frame's slots instead.
+    /// The environment that stands for a live slot frame while every variable of the frame
+    /// sits in its slot: it has no bindings, and forcing a promise over it runs on the slots
+    /// instead. Reading a binding moves that one variable into a cell
+    /// (`Heap::set_pending_resolver`) and makes the environment a [`PARTIAL_FRAME`].
     pub const PENDING_FRAME: u16 = 1 << 7;
+    /// A live slot frame's environment that binds some of the frame's variables in cells while
+    /// the rest still sit in slots. The frame's own code reads every variable by name from
+    /// then on, and a name the environment has no cell for is moved out of its slot on first
+    /// use. The frame clears the bit when it returns.
+    pub const PARTIAL_FRAME: u16 = 1 << 6;
+    /// Either state of an environment whose bindings a live slot frame still partly holds.
+    pub const SLOT_FRAME: u16 = PENDING_FRAME | PARTIAL_FRAME;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
     /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
@@ -1296,7 +1305,9 @@ impl Sexp {
             let payload = self.payload::<RecordObject>();
             payload.layout.set(layout | LAZY_RECORD);
             payload.slot_count.set(slot_count as u32);
-            payload.unboxed.set(u64::MAX >> (UNBOXED_SLOTS - slot_count));
+            payload
+                .unboxed
+                .set(u64::MAX >> (UNBOXED_SLOTS - slot_count));
             *(self.record_slots() as *mut u64) = value;
         }
     }

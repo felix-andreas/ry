@@ -1045,10 +1045,13 @@ fn declined_typed_calls_keep_slot_frames() {
         return;
     };
     assert_eq!(stdout, "[1] 4000\n");
-    let reified = summary_count(&summary, "slot frames turned into environments");
+    let reified = summary_count(
+        &summary,
+        "slot frames that switched to reading their variables by name",
+    );
     assert!(
         reified < CALLS / 10,
-        "{reified} slot frames got an environment in {CALLS} calls of `taxed`"
+        "{reified} slot frames read their variables by name in {CALLS} calls of `taxed`"
     );
 }
 
@@ -1080,10 +1083,13 @@ fn native_typed_calls_keep_slot_frames() {
     };
     // Each iteration adds 4 * (k + 0.5).
     assert_eq!(stdout, "[1] 800080000\n");
-    let reified = summary_count(&summary, "slot frames turned into environments");
+    let reified = summary_count(
+        &summary,
+        "slot frames that switched to reading their variables by name",
+    );
     assert!(
         reified < CALLS / 10,
-        "{reified} slot frames got an environment in {CALLS} calls of each wrapper"
+        "{reified} slot frames read their variables by name in {CALLS} calls of each wrapper"
     );
 }
 
