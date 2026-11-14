@@ -1397,9 +1397,9 @@ are bitsets. Left: give `precious` the dense layout of row 11 (B2).
 **The call path after slot frames bind on demand: what still allocates.** A slot frame's
 environment binds a variable only when a lookup asks for it (`decisions.md`, "A slot frame's
 environment binds a variable only when a lookup asks for it"; `development/design/slot-frames.md`).
-On finbench's tests (JIT on, 53.0 million closure calls) the run frees 261 million objects: 62.8
-million pairlist cells, 22.5 million binding cells, 20.8 million promises, 18.5 million language
-objects, 14.0 million environments and 5.9 million `...` objects. 81.5% of package calls run in
+On finbench's tests (JIT on, 53.0 million closure calls) the run frees 264 million objects: 63.4
+million pairlist cells, 22.8 million binding cells, 21.1 million promises, 18.7 million language
+objects, 14.1 million environments and 6.0 million `...` objects. 81.5% of package calls run in
 slots with no argument promise and no environment. 10.1 million slot frames make an environment
 that binds nothing, 3.4 million go on to read their variables by name, 7.7 million variables move
 into a cell, and 1.26 million frames take every variable. Sampled allocation call paths

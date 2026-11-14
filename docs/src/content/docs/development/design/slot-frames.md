@@ -501,7 +501,42 @@ One run of the finance code base's test suite (53 million closure calls), counte
 `--profile-summary` with the JIT on. The first column is the design this page replaced, where the
 first promise, closure or reflective read built the whole environment.
 
-MEASURED_TABLE
+| | Replaced design | This design |
+|---|---:|---:|
+| objects freed | 348.2 million | 264.0 million |
+| binding cells | 65.9 million | 22.8 million |
+| promises | 41.1 million | 21.1 million |
+| environments | 19.5 million | 14.1 million |
+| pairlist cells | 63.1 million | 63.4 million |
+| language objects | 18.6 million | 18.7 million |
+| promises created for arguments | 23.0 million | 8.5 million |
+| package calls with no argument promise and no environment | 59.7% | 81.5% |
+| slot frames whose own code reads by name | 10.2 million | 3.4 million |
+| slot frames whose environment holds every variable | 10.2 million | 1.3 million |
+| collections (minor + major) | 128 + 1 | 110 + 2 |
+| time in the collector | 2.41 s | 1.86 s |
+| time in closure call setup | 16.9 s (11.2%) | 17.3 s (10.9%) |
+
+The two runs were taken back to back on one machine. Wall time differs by more than 10% between
+runs of one binary there, so the two call setup times are equal within the noise.
+
+The objects went away, and the time did not follow. Three measurements agree on that:
+
+- **The three code bases** (`just bench codebases`, one round, JIT on): the geometric mean of
+  GNU R's time over ry's is 1.55x with this design and 1.57x with the replaced one in the same
+  round, with every test passing on both. One round is good to about 5%.
+- **Instructions** (callgrind, a 225-test slice of the finance suite): 27.46 billion against
+  27.88 billion, 1.5% fewer. Outside the collector the count is 2.5% lower; the slice happens to
+  run one more major collection.
+- **The time split** above: call setup takes the same seconds, and the collector, which was 1.6%
+  of the run, takes a quarter less.
+
+The reason is that the objects were cheap. A binding cell, a promise or an environment is a
+small allocation, and the collector was 1.6% of the run, so 43 million fewer cells and 20 million
+fewer promises save little. What a call still pays for is matching its arguments, pushing and
+popping the frame record, and the bookkeeping this design adds in the objects' place (the
+reference pool, the escape check at return). The sources of the objects
+that are left are in `backlog.md`, "The call path after slot frames bind on demand".
 
 ## Prior decision
 
