@@ -361,9 +361,16 @@ impl ClosureScope {
 }
 
 /// Runs the profiling hooks for a call of the closure `function` through `call` whose caller's
-/// frame is `sys_parent`: publishes the frame for the sampler and records boundary calls, until
-/// the scope drops.
-pub unsafe fn enter_closure(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<ClosureScope> {
+/// frame is `sys_parent`, with the dispatch variables of a method in `method_vars` or bound in
+/// its frame environment `env` (`NULL` for a slot frame): publishes the frame for the sampler
+/// and records boundary calls, until the scope drops.
+pub unsafe fn enter_closure(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> R<ClosureScope> {
     if !activity::enabled() {
         return Ok(ClosureScope {
             _frame: activity::no_frame(),
@@ -371,7 +378,7 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<C
         });
     }
     let capture = if activity::hooks() & activity::CAPTURE != 0 {
-        unsafe { crate::capture::enter(call, function, sys_parent)? }
+        unsafe { crate::capture::enter(call, function, sys_parent, method_vars, env)? }
     } else {
         crate::capture::Scope::none()
     };

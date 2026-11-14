@@ -123,6 +123,14 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
         find_native_symbol: |name| unsafe { crate::dynload::find_symbol(name, "") },
+        serialize: |object| unsafe {
+            crate::serialize::serialize_to_bytes(
+                object,
+                crate::serialize::Format::Xdr,
+                3,
+                interp::values::nil(),
+            )
+        },
     };
     interp::install(&mut runtime.heap, hooks);
     heap::object::install_altrep_elements(heap::object::AltrepElements {
