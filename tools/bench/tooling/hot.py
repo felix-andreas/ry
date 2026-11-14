@@ -430,7 +430,8 @@ def print_selection(programs, captures):
 
 def reasons_of(entry):
     """Why the recorder could not capture an entry's calls, by how many calls each reason took."""
-    reasons = [(entry[field], field.replace("_", " ")) for field in ("dots", "local_closure", "user_binding", "caller_frame", "oversize")
+    reasons = [(entry[field], field.replace("_", " "))
+               for field in ("dots", "local_closure", "user_binding", "caller_frame", "uninspectable", "oversize")
                if entry[field]]
     return ", ".join(f"{count:.0f} {reason}" for count, reason in sorted(reasons, key=lambda item: -item[0])) or "no reason"
 
@@ -616,33 +617,47 @@ def capture_directories(captures):
 
 
 def read_summary(directory):
+    """The recorder's `summary.tsv`, with each `*_nanoseconds` key read as `*_seconds`."""
     summary = {}
     for line in (directory / "summary.tsv").read_text().splitlines()[1:]:
         if line.strip():
             key, value = line.split("\t")
-            summary[key] = float(value)
+            summary[seconds_field(key)] = int(value) / 1e9 if key.endswith("nanoseconds") else float(value)
     return summary
 
 
-NUMBER_FIELDS = {"calls", "seconds", "samples", "uncapturable_calls", "uncapturable_seconds", "dots", "local_closure",
-                 "user_binding", "caller_frame", "oversize", "reentered", "gnu_seconds_per_call", "iterations", "bytes"}
+NUMBER_FIELDS = {"calls", "samples", "uncapturable_calls", "dots", "local_closure", "user_binding", "caller_frame",
+                 "uninspectable", "oversize", "reentered", "gnu_seconds_per_call", "iterations", "bytes"}
+NANOSECOND_FIELDS = {"nanoseconds", "uncapturable_nanoseconds"}
 FLAG_FIELDS = {"valid", "rng", "threw"}
 
 
+def seconds_field(name):
+    """The name a recorder column in integer nanoseconds is read under, as seconds."""
+    return name.removesuffix("nanoseconds") + "seconds" if name.endswith("nanoseconds") else name
+
+
 def read_tsv(path):
-    """A recorder or validator table, with numbers as floats, the flags as booleans and the list of
-    namespaces split."""
+    """A recorder or validator table, with numbers as floats, the recorder's times (integer
+    nanoseconds, in the columns `nanoseconds` and `uncapturable_nanoseconds`) as seconds under the
+    names `seconds` and `uncapturable_seconds`, the flags as booleans and the list of namespaces
+    split."""
     rows = []
     with path.open(newline="") as handle:
         for row in csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE):
+            parsed = {}
             for key, value in row.items():
                 if key in NUMBER_FIELDS:
-                    row[key] = float(value) if value not in ("", "NA") else math.nan
+                    parsed[key] = float(value) if value not in ("", "NA") else math.nan
+                elif key in NANOSECOND_FIELDS:
+                    parsed[seconds_field(key)] = int(value) / 1e9
                 elif key in FLAG_FIELDS:
-                    row[key] = value in ("TRUE", "true", "1")
+                    parsed[key] = value in ("TRUE", "true", "1")
                 elif key == "namespaces":
-                    row[key] = [name for name in value.split(",") if name]
-            rows.append(row)
+                    parsed[key] = [name for name in value.split(",") if name]
+                else:
+                    parsed[key] = value
+            rows.append(parsed)
     return rows
 
 

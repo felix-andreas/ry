@@ -49,10 +49,10 @@ file check.R
 | stopifnot(
 |   entry("tryCatch")$uncapturable_calls == 2, entry("tryCatch")$user_binding == 2,
 |   entry("sort")$calls == 1, sampled("sort") == 1,
-|   entry("tryCatch")$uncapturable_seconds < entry("sort")$seconds,
+|   entry("tryCatch")$uncapturable_nanoseconds < entry("sort")$nanoseconds,
 |   entry("local")$uncapturable_calls == 1, entry("local")$user_binding == 1,
 |   entry("order")$calls == 1, sampled("order") == 1,
-|   entry("local")$uncapturable_seconds < entry("order")$seconds,
+|   entry("local")$uncapturable_nanoseconds < entry("order")$nanoseconds,
 |   entry("nchar")$calls == 1, entry("nchar")$reentered == 0, sampled("nchar") == 1,
 |   nrow(entry("toupper")) == 0,
 |   entry("rev")$calls == 2, entry("mean")$calls == 1
