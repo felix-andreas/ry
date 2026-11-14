@@ -863,7 +863,9 @@ pub(crate) unsafe fn use_method_in_slots(
         Some(_) => nil(),
         None => eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?,
     };
-    eval::materialize_references(position)?;
+    // The argument references the generic was called with go to the method as they are: the
+    // calling instruction releases them only after the generic's call returns, and a method
+    // that gets a heap frame turns them into promises itself (`eval::run_on_heap_frame`).
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let value = if first.is_null() { nil() } else { *first };
     // As in `dispatch_object`: a missing first formal dispatches on the first supplied argument.
@@ -1136,7 +1138,10 @@ unsafe fn apply_method(
             }
             Ok(result)
         }
-        _ => eval::apply(call, method, args, sys_parent),
+        _ => crate::scope(|| {
+            eval::detach_references(args)?;
+            eval::apply(call, method, args, sys_parent)
+        }),
     }
 }
 
