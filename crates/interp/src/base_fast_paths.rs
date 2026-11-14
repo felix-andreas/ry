@@ -3463,7 +3463,7 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     eval::define(names.classes, classes, frame)?;
     eval::define(
         names.parentenv,
-        eval::frame_sys_parent_pending(index)?,
+        eval::frame_sys_parent(index, eval::Reify::Site("parent.frame"))?,
         frame,
     )?;
     if length(classes) != forced.len() {

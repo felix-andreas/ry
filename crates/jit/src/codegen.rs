@@ -4569,7 +4569,7 @@ impl<'p> Translator<'p> {
             let pending = self
                 .builder
                 .ins()
-                .band_imm_u(bits, i64::from(gp::PENDING_FRAME));
+                .band_imm_u(bits, i64::from(gp::SLOT_FRAME));
             let settled = self.builder.ins().icmp_imm_u(IntCC::Equal, pending, 0);
             self.unless(settled, outline);
             let Probe::Slot(position) = probe else {

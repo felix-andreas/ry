@@ -863,7 +863,9 @@ pub(crate) unsafe fn use_method_in_slots(
         Some(_) => nil(),
         None => eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?,
     };
-    eval::materialize_references(position)?;
+    // The argument references the generic was called with go to the method as they are: the
+    // calling instruction releases them only after the generic's call returns, and a method
+    // that gets a heap frame turns them into promises itself (`eval::run_on_heap_frame`).
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let value = if first.is_null() { nil() } else { *first };
     // As in `dispatch_object`: a missing first formal dispatches on the first supplied argument.
@@ -894,10 +896,10 @@ pub(crate) unsafe fn use_method_in_slots(
     };
     // The caller is a slot frame without an environment. Methods are looked up from its
     // enclosure (`lazy_caller` checked that its own slots bind none of the names probed), the
-    // method finds it as its caller by position, and `.GenericCallEnv` holds its pending
-    // environment, which whoever reads the variable makes real.
-    let pending = eval::pending_env(owner)?;
-    let found = generic_method(generic, object, function.tag(), enclosure, pending)?;
+    // method finds it as its caller by position, and `.GenericCallEnv` is recorded as unbound:
+    // whoever reads the variable asks the caller for its environment
+    // (`eval::method_var_value`).
+    let found = generic_method(generic, object, function.tag(), enclosure, unbound())?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
@@ -1136,7 +1138,10 @@ unsafe fn apply_method(
             }
             Ok(result)
         }
-        _ => eval::apply(call, method, args, sys_parent),
+        _ => crate::scope(|| {
+            eval::detach_references(args)?;
+            eval::apply(call, method, args, sys_parent)
+        }),
     }
 }
 
@@ -1243,23 +1248,20 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     // would when no slot is named like a method of the generic or group, and the next method
     // gets the pending environment, so the caller keeps its slots.
     let (call_env, lookup_env) = {
-        let value = read(symbols.dot_generic_call_env)?;
-        if value == unbound() {
-            let env = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
-            (env, env)
-        } else {
-            let mut prefixes: SmallVec<[&[u8]; 2]> = SmallVec::new();
-            prefixes.push(generic_string.bytes());
-            if let Some(group) = group_symbol {
-                prefixes.push(group.car().bytes());
+        let value = match read(symbols.dot_generic_call_env)? {
+            value if value == unbound() => {
+                eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?
             }
-            match pending_enclosure(value, &prefixes) {
-                Some(enclosure) => (value, enclosure),
-                None => {
-                    let env = eval::resolved_value(value)?;
-                    (env, env)
-                }
-            }
+            value => value,
+        };
+        let mut prefixes: SmallVec<[&[u8]; 2]> = SmallVec::new();
+        prefixes.push(generic_string.bytes());
+        if let Some(group) = group_symbol {
+            prefixes.push(group.car().bytes());
+        }
+        match pending_enclosure(value, &prefixes) {
+            Some(enclosure) => (value, enclosure),
+            None => (value, value),
         }
     };
     let def_env = {
@@ -1351,7 +1353,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             }
             if let Some(arg) = args.iter_mut().find(|arg| arg.value == *value) {
                 arg.value = eval::make_promise(symbol, method_env)?;
-                if method_env.has_gp(gp::PENDING_FRAME) {
+                if method_env.has_gp(gp::SLOT_FRAME) {
                     arg.value.increment_refcount();
                     made.0.push(arg.value);
                 }
@@ -1429,44 +1431,16 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         _ => apply_next_primitive(method, &args, frame_call, generic_symbol, sys_parent),
     };
     interp().slot_owner = previous_owner;
-    if let Ok(value) = result
-        && interp().frames[position].env == nil()
-    {
-        let dead = made.dead(value);
-        let frame = &mut interp().frames[position];
-        frame.unforced = frame.unforced.saturating_sub(dead);
-    }
     result
 }
 
-/// The promises NextMethod made over the pending environment of a method that runs in slots,
-/// each held by one counted reference of its own for the length of the next method's call.
-/// The method's frame counts them among the promises that may still be forced, and as it
-/// returns it makes its environment for any such promise that outlives it. A promise the next
-/// method neither forced nor kept dies with the call, which only this reference shows: once
-/// the callee's slots let it go, a promise nothing else holds gives up its environment and
-/// looks like a forced one.
+/// The promises NextMethod made over the environment of a method that runs in slots, each held
+/// by one counted reference of its own for the length of the next method's call. Every such
+/// promise counts a reference on the environment until it is forced or released, and the
+/// method's frame keeps its environment past its return while a count it cannot explain
+/// remains. A next method that binds the promise nowhere (a primitive) would leave it
+/// unreleased, so this list releases the ones nothing else holds when the call is over.
 struct MadePromises(SmallVec<[Sexp; 4]>);
-
-impl MadePromises {
-    /// How many of the promises the next method left unforced and nothing but this list holds,
-    /// as it returns `value`: a preserved promise, one a global calling handler holds and the
-    /// value itself count as held, since the counts do not see those roots.
-    unsafe fn dead(&self, value: Sexp) -> u32 {
-        let heap = crate::heap();
-        let handlers = &interp().global_handlers;
-        self.0
-            .iter()
-            .filter(|&&promise| {
-                promise.refcount() == 1
-                    && promise.car() == unbound()
-                    && promise != value
-                    && !heap.is_preserved(promise)
-                    && !crate::conditions::handlers_hold(handlers, promise)
-            })
-            .count() as u32
-    }
-}
 
 impl Drop for MadePromises {
     fn drop(&mut self) {
@@ -1967,12 +1941,11 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         missing: 0,
         caller: crate::NO_SLOTS,
         pending: nil(),
-        unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
-        pending_shared: false,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
+        references: state.references_used,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);

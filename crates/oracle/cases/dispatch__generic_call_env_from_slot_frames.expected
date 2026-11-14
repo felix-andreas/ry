@@ -1,0 +1,55 @@
+[stdout]
+| default: TRUE 
+| the caller's environment: TRUE 
+| the caller's variables: env local_variable value 
+| inner, then default: TRUE 
+| the caller's environment: TRUE 
+| the caller's variables: env local_variable value 
+| get: TRUE TRUE 
+| eval: TRUE 
+| the caller's environment: TRUE 
+| the caller's variables: env local_variable value 
+| names: .Generic .GenericCallEnv .GenericDefEnv 
+| listed: TRUE 
+| the caller's environment: TRUE 
+| the caller's variables: env local_variable value 
+| inner, then get: TRUE TRUE 
+| eval: TRUE 
+| the caller's environment: TRUE 
+| the caller's variables: env local_variable value 
+| inner, then names: .Generic .GenericCallEnv .GenericDefEnv 
+| listed: TRUE 
+| the caller's environment: TRUE 
+| the caller's variables: env local_variable value 
+| kept: the caller of the generic 
+| inner, then kept through NextMethod: the caller of the generic 
+| get: TRUE TRUE 
+| eval: TRUE 
+| top level: R_GlobalEnv 
+| inner, then names: .Generic .GenericCallEnv .GenericDefEnv 
+| listed: TRUE 
+| top level: R_GlobalEnv 
+| local outer, then inner, then local last: TRUE 
+| inner, then enclosed: TRUE 
+| inner, then get: TRUE TRUE 
+| eval: TRUE 
+| inner, then get: TRUE TRUE 
+| eval: TRUE 
+| lapply: 2 
+| inner, then names: .Generic .GenericCallEnv .GenericDefEnv 
+| listed: TRUE 
+| inner, then names: .Generic .GenericCallEnv .GenericDefEnv 
+| listed: TRUE 
+| lapply: 2 
+| inner, then get: TRUE TRUE 
+| eval: TRUE 
+| promise: TRUE 
+| Ops: + TRUE 
+| length: TRUE 
+| [1] 10 99
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(10, 99)

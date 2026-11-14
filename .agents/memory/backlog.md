@@ -1435,10 +1435,7 @@ type feedback are the design and are not listed.
 | # | Site | real | tt | Data-oriented replacement | Owner |
 | -: | --- | -: | -: | --- | --- |
 | 6 | GC entered from the allocation slow path (`Heap::maybe_collect`; `trace` 1.6 self, `Space::refill` 0.8). Escalation prediction is done (`decisions.md`, "Escalation prediction and the dense precious set"): `records` 7,028M to 6,366M instructions. Per-object marking is down to about 50 instructions (`decisions.md`, "Marking a traced object costs a few table loads"), and no marking source reaches 2% of testthat_full (`decisions.md`, "Minor-collection cost by source") | 3.36 | 2.91 | none in marking; see the after-marking line under "Open: collector throughput" | B2 |
-| 7 | Formals copied into the frame's `Bindings` vector on reify (`bind_slots` 1.44 / 0.60, `define_formals_uncollected` 0.94 / 0.61) | 2.38 | 1.21 | the reified frame's bindings alias the call's slot array instead of copying it | AOT |
 | 8 | Variable lookup by scanning `Frame` bindings (`Heap::frame_cell`, self 2.1 / 1.9), from `find_var`, `find_called_fun`, `define` and `resolve_s3` | 2.35 | 2.04 | lexical addressing: compile a closure's local reads to slot indices and global or base reads to the symbol's binding cell behind a binding epoch, so only `get()`, `assign()` and `eval()` on an arbitrary environment scan | T0 |
-| 9 | Argument references detached when a frame becomes an environment (`materialize_references`, `detach_reference`), inside `reify` (4.9 / 3.4 inclusive) | 2.26 | 1.94 | a per-frame bitset of slots whose reference escaped, so reify detaches only those; better, let the effect analysis prove a body never reifies, so references stay in the `frame_args` arena | AOT |
-| 10 | A promise per argument at every generic call (`slot_promises_into`, `alloc_compiled_promise` 0.4) | 1.94 | 3.53 | keep an unforced argument as a (code index, environment) pair in the `frame_args` arena and allocate the `PROMSXP` only when it escapes | AOT |
 | 11 | Frame teardown (`release_frame` 0.89 / 0.61, `release_slots` 0.67 / 0.77, `truncate_frames` 0.27), with an `FxHashMap` probe of `Roots.precious` per release | 1.83 | 1.65 | frames on a bump stack reset to a watermark, with a bitset of the slots that need a release; `precious` as a dense vector whose index lives in the object header | AOT, B2 for `precious` |
 | 12 | The callee looked up by name at each tier-0 call (`bytecode::lookup_function`) | 1.56 | 1.47 | the binding cell at the call site, checked against the binding epoch, as in row 8 | T0 |
 | 13 | S3 dispatch (`resolve_s3`) through `MethodCache`'s three `FxHashMap`s (`entries` keyed by a 4-tuple, `names`, `sites: FxHashMap<Sexp, Vec<SiteEntry>>`) plus `implicit_class`. Hashing itself is only 0.03 | 1.20 | 1.78 | one monomorphic entry per call site (class vector, epoch, method) in a dense array indexed by site id | AOT |
@@ -1453,55 +1450,66 @@ The rest of the inventory measured cold. The largest hash maps are the large-fra
 `subset::resolve` 0.06. `primitive_formals` is indexed by builtin index and both `Vec<bool>`s
 are bitsets. Left: give `precious` the dense layout of row 11 (B2).
 
-**Making detach cheaper does not clear the bar; detaching less often does (row 9).** Callgrind,
-profiling build, JIT off, `RY_BENCH_REPEAT=2`, whole process. Everything under
-`materialize_references` is the ceiling: conditions 4.43%, timeseries 3.72%, records 3.23%,
-validation 2.72%, testthat 2.61% (80,860 `detach_reference` calls from 32,455 materializations),
-objects 2.11%, team_scores 1.69%, functional 0.98%, strings 0.95%, tables 0.52%, the other five 0.
-About half of it is the conversion every detach needs (the four field writes, `reference_promise`,
-`pending_env`, the frame walk), which only fewer reifies remove (AOT). A cheaper detach removes the
-linear pool search and the per-detach refill (a fresh promise and a 3-int target vector): self
-cost plus refill is at most testthat 0.88%, conditions 1.99%, timeseries 1.71%, validation 1.16%,
-records 3.06%. Records' figure is two collections that happen to trip inside the refill's
-`values::alloc` and would run at the next allocation anyway; without collections the refill is
-about 120 instructions per detach. Realistic gain: testthat 0.5 to 0.8%, every workload under
-1.5%. A dense target array (no target vector) and a pool index stored with the reference would
-take about 0.3 to 0.6%; lazy refill only moves the promise allocation to the next
-`pooled_reference` at that depth.
+**The call path after slot frames bind on demand: what still allocates.** A slot frame's
+environment binds a variable only when a lookup asks for it (`decisions.md`, "A slot frame's
+environment binds a variable only when a lookup asks for it"; `development/design/slot-frames.md`).
+On finbench's tests (JIT on, 53.0 million closure calls) the run frees 264 million objects: 63.4
+million pairlist cells, 22.8 million binding cells, 21.1 million promises, 18.7 million language
+objects, 14.1 million environments and 6.0 million `...` objects. 81.5% of package calls run in
+slots with no argument promise and no environment. 10.1 million slot frames make an environment
+that binds nothing, 3.4 million go on to read their variables by name, 7.7 million variables move
+into a cell, and 1.26 million frames take every variable. Sampled allocation call paths
+(`RY_ALLOC_SITES=2048` beside a profile summary) name the sources, as a share of each kind:
 
-**Fewer reified slot frames: what was measured, and what is left (B).** A slot frame reifies when
-something needs its environment. Callgrind Ir, cold plus 5 warm runs, each change switched off in
-one binary, against main with compile-time binding:
+| Kind | Sources |
+| --- | --- |
+| pairlist | `complex_assign` 26%, `Rf_setAttrib` 8%, `copy_attributes` and `attributes` 7%, `ElementCalls::new` (`lapply`, `vapply`) 5%, `Rf_shallow_duplicate` 5%, `call_with_srcref` (`sys.call`) 3% |
+| language | the renamed call of an S3 dispatch (`use_method_in_slots`) 17%, `complex_assign` 15%, `ElementCalls::new` 9%, `Rf_shallow_duplicate` 8%, `apply_internal_method` 8% |
+| promise | `complex_assign` 27%, `detach_reference` 20%, `closure_args_into` 16%, `slot_promises_into` 10%, `promised_args` 6%, `evaluated_arguments` 5% |
+| environment | `pending_env` 73%, heap frames (`frame_environment`) 14%, `apply_internal_method` 10% |
+| binding cell | `define_formals_uncollected` 61%, `define_unbound` 39% |
+| `...` | `bind_plan` 75% |
 
-| Change | validation | testthat_full | conditions |
-|---|---|---|---|
-| A: a builtin that may dispatch reifies only when a method is found and called | 1.57% | 2.04% | 0.95% |
-| C1+C2+C3 together | 0.33% | 0.35% | -0.85% |
-| A + C1 + C2 (no C3) | | 1.69% | |
+The frames that go on to read by name do so for these reasons (share of the 3.4 million): a
+promise or environment outliving the frame 19%, `vapply` 14%, `lapply` 12%, subassignment 11%, a
+closure outliving the frame 11%, a replacement call 11%, a special called through the generic
+protocol 9%, `parent.frame` 5%, `standardGeneric` 3%.
 
-JIT on gives the same figures to within 0.05 points. C1 keeps an error return from holding the
-pending environment; C2 reads `..N` from a slot frame's dots (`inherits(..1, "condition")` in
-`stop` compiles `..1` to an uncompiled expression). C3 answered reads, called functions and
-promise code through a live frame's pending environment from its slots. None of it reached the bar
-(3% on a workload, or 2% on testthat_full), so it did not land; the oracle cases
-`dispatch__methods_from_slot_frames`, `conditions__handlers_over_slot_frames` and
-`control_flow__jumps_and_dots_through_frames` pin the semantics.
+What is open, largest first. Each is worth 0.1 to 0.5% of run time on its own, because call
+setup is about a tenth of the run, so take them for the objects they remove:
 
-- C3 loses on conditions because the frames it serves reify anyway: reify counts are identical
-  with and without it (136.7k), so each lookup pays a frame-stack scan and a slot-name scan on top
-  of the reify. It pays off only once B stops those reifies. It also broke three behaviors, each
-  pinned in `control_flow__jumps_and_dots_through_frames`: a `break` evaluated in
-  `parent.frame()` named the unreified frame's pending environment, which the loop did not take;
-  `..2` evaluated through `match.call` and `eval.parent` missed a forwarded `...`; a `break` in a
-  promise argument escaped its loop. First fixes (let the loop accept the pending environment, find
-  formals by position) did not fix the cases, so the cause was not understood. Redo C3 after B,
-  with the owner frame stored in the pending environment instead of scanned for.
-- B, the causes left after A: tryCatchOne's `return(expr)` promise, whose forcing ends in a
-  Return jump, still counts as an unforced promise outliving the frame (64k reifies on
-  conditions, 18k on validation), and vapply's reified frame keeps `FUN` referenced, so a closure
-  made by `FUN`'s caller outlives its frame (18k on validation, through `settings_key`). At about
-  3k Ir per reify, removing them is worth about 1.4% on conditions and 1.4% on validation, before
-  C3.
+- **Replacement calls.** `complex_assign` builds the getter call, the setter call, their argument
+  cells and a promise per value for every `f(x) <- v`: about nine objects for a one-level call,
+  roughly 25 million objects on finbench, and a tenth of the frames that switch to by-name
+  reads. Run the getter and the setter on the slot window with argument references, as an
+  ordinary call does, and build the call object only when `sys.call` or `match.call` asks.
+- **Environments that only stand for a frame.** Three quarters of all environments come from
+  `pending_env`, and most are never looked into. Its callers in a 225-test slice of finbench
+  (667k calls): the generic call protocol 100k, `slot_promises_into` 105k, a builtin that
+  receives the calling environment 74k, a closure made in the frame 55k, `Call::env` 52k, a
+  promise whose code the compiler did not compile 46k, `parent.frame` 38k, `$` 34k, a detached
+  reference 25k. A caller that only passes the environment on (the generic protocol, `$`, a
+  builtin that dispatches) could pass the frame's index and make the object when the callee
+  reads it.
+- **`lapply` and `vapply`.** A quarter of the by-name frames are the frames of the two
+  functions themselves, because their `.Internal` evaluates `FUN(X[[i]], ...)`
+  (`ElementCalls::new`) in that frame. Calling `FUN` with the element as a value and the frame's
+  `...` as argument references keeps the frame in slots.
+- **Detached references.** `detach_reference` makes a fifth of the promises left: an argument
+  reference becomes a promise object when the callee keeps the argument past the call or hands
+  it on as a promise (S4 dispatch, `NextMethod`, a method that does not take the generic's slots).
+- **The renamed call of an S3 dispatch.** `use_method_in_slots` copies the call with the
+  method's name for `sys.call()`, one language object and its cells per dispatch. Keep the
+  generic's call and the method's name in the frame record, and build the renamed call when
+  something reads it.
+- **A frame reads every variable by name after one by-name lookup.** The header register is the
+  single switch, so one `parent.frame()$x` from a callee moves the frame's own code to name
+  lookups for the rest of the call, although every other variable is still in its slot. A
+  per-slot moved bit would keep the slot reads, at the cost of a check in tier 0 and in tier 1's
+  variable probes (`jit/src/analysis.rs`, `runtime.rs`, `native.rs` test `gp::PENDING_FRAME`).
+- **In-place reads from a closure.** A closure made in a slot frame reads its maker's variables
+  through `eval::slot_binding` on every read (1.76 million calls in the slice), because the
+  inline cache holds binding cells and a slot is not one.
 
 **Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,

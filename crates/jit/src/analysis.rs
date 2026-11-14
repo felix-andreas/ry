@@ -3873,9 +3873,9 @@ impl<'a> Builder<'a> {
         if code == self.code {
             return Err("the call is recursive");
         }
-        // An environment that is still pending belongs to a running slot frame, which a real
-        // call of the closure would give its environment.
-        if enclosure.has_gp(gp::PENDING_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
+        // An environment that stands for a running slot frame holds some or none of the frame's
+        // variables, and a real call of the closure reads the rest through the frame.
+        if enclosure.has_gp(gp::SLOT_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
             return Err("the callee's environment may not outlive the code");
         }
         let constants = code.cdr();

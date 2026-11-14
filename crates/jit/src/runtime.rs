@@ -1742,7 +1742,7 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
         let needs_frame = function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
             || function.cdr() != inlined.code
             || enclosure != (*child).activation.enclosure
-            || enclosure.has_gp(gp::PENDING_FRAME);
+            || enclosure.has_gp(gp::SLOT_FRAME);
         if needs_frame
             || (*(*parent).parked).pending.is_some()
             || activity::enabled()

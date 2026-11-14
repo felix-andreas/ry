@@ -969,6 +969,25 @@ SEXP rytest_run_callback(void)
     return value;
 }
 
+/* A promise native state takes from a variable of `env` and keeps past the call whose frame
+   that environment stands for, then forces. */
+static SEXP kept_promise = NULL;
+
+SEXP rytest_keep_promise(SEXP env, SEXP name)
+{
+    SEXP value = Rf_findVarInFrame(env, Rf_installChar(STRING_ELT(name, 0)));
+    if (kept_promise != NULL)
+        R_ReleaseObject(kept_promise);
+    R_PreserveObject(value);
+    kept_promise = value;
+    return Rf_ScalarInteger(TYPEOF(value));
+}
+
+SEXP rytest_force_promise(void)
+{
+    return kept_promise == NULL ? R_NilValue : Rf_eval(kept_promise, R_GlobalEnv);
+}
+
 /* The hot API entry points, one per operation code, for the fuzz that runs each of them on its
    direct path and on its slow path and compares what they leave behind. */
 
@@ -1508,6 +1527,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_closure_lookup", (DL_FUNC) &rytest_closure_lookup, 2},
     {"rytest_keep_callback", (DL_FUNC) &rytest_keep_callback, 1},
     {"rytest_run_callback", (DL_FUNC) &rytest_run_callback, 0},
+    {"rytest_keep_promise", (DL_FUNC) &rytest_keep_promise, 2},
+    {"rytest_force_promise", (DL_FUNC) &rytest_force_promise, 0},
     {"rytest_api_op", (DL_FUNC) &rytest_api_op, 4},
     {"rytest_api_bench", (DL_FUNC) &rytest_api_bench, 2},
     {NULL, NULL, 0}
