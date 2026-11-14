@@ -4266,7 +4266,9 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(call.error("argument is not a matrix")),
     };
-    let result = permuted_copy(object, &[rows, cols], &[1, 0])?;
+    let Some(result) = permuted_copy(object, &[rows, cols], &[1, 0])? else {
+        return Err(call.error("argument is not a matrix"));
+    };
     let dim = values::integer_vector(&[cols as i32, rows as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
     if dimnames != nil() {
@@ -4350,60 +4352,63 @@ unsafe fn do_asplit(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// A fresh vector of `object`'s elements with the dimensions `dims` permuted into the order
-/// `order` (result dimension `k` is source dimension `order[k]`), without attributes. Typed
-/// kinds are copied straight from their slices.
-unsafe fn permuted_copy(object: Sexp, dims: &[usize], order: &[usize]) -> R<Sexp> {
-    let total: usize = dims.iter().product();
+/// `order` (result dimension `k` is source dimension `order[k]`), without attributes, or `None`
+/// for a type that has no array layout to permute (GNU R permutes only atomic vectors and lists).
+unsafe fn permuted_copy(object: Sexp, dims: &[usize], order: &[usize]) -> R<Option<Sexp>> {
     // C code can set a `dim` that disagrees with the length, which would index out of bounds.
-    if total > length(object) {
-        return Err(error("dims do not match the length of object"));
-    }
+    // Within the length, no stride or offset can overflow.
+    let total = dims
+        .iter()
+        .try_fold(1usize, |product, &extent| product.checked_mul(extent))
+        .filter(|&total| total <= length(object))
+        .ok_or_else(|| error("dims do not match the length of object"))?;
     match object.kind() {
         SexpType::Real => {
             let result = values::alloc_uninit(SexpType::Real, total)?;
             let source = &values::reals(object)[..total];
             permute(source, values::reals_mut(result), dims, order);
-            Ok(result)
+            Ok(Some(result))
         }
         SexpType::Integer | SexpType::Logical => {
             let result = values::alloc_uninit(object.kind(), total)?;
             let source = &values::ints(object)[..total];
             permute(source, values::ints_mut(result), dims, order);
-            Ok(result)
+            Ok(Some(result))
         }
         SexpType::Complex => {
             let result = alloc(SexpType::Complex, total)?;
             let source = &values::complexes(object)[..total];
             permute(source, values::complexes_mut(result), dims, order);
-            Ok(result)
+            Ok(Some(result))
         }
         SexpType::Raw => {
             let result = alloc(SexpType::Raw, total)?;
             let source = &values::raws(object)[..total];
             permute(source, values::raws_mut(result), dims, order);
-            Ok(result)
+            Ok(Some(result))
         }
-        SexpType::String | SexpType::List | SexpType::Expression => {
+        SexpType::String | SexpType::List => {
             let source = values::materialize(object)?;
-            let mut moved = vec![nil(); total];
-            permute(&source.slice::<Sexp>()[..total], &mut moved, dims, order);
             let result = alloc(object.kind(), total)?;
-            for (index, &element) in moved.iter().enumerate() {
-                values::set_elt(result, index, element);
-            }
-            Ok(result)
+            permute(
+                &source.slice::<Sexp>()[..total],
+                result.slice_mut::<Sexp>(),
+                dims,
+                order,
+            );
+            crate::heap().count_written_elements(result);
+            Ok(Some(result))
         }
-        _ => {
-            let result = alloc(object.kind(), total)?;
-            for position in 0..total {
-                copy_element(object, position, result, position)?;
-            }
-            Ok(result)
-        }
+        _ => Ok(None),
     }
 }
 
-const TILE: usize = 32;
+/// A tile is 32 source rows by 256 columns. One row of it reads one cache line from each column
+/// (16 KiB for doubles), and the next seven rows hit the same lines in L1. Long column runs
+/// amortize the loop overhead that square 32 by 32 tiles pay, which made transposes 15 to 30%
+/// slower.
+const ROW_TILE: usize = 32;
+const COLUMN_TILE: usize = 256;
 
 /// Writes `source`, a column-major array with extents `dims`, into `target` with the dimensions
 /// permuted by `order`. The source's first dimension is contiguous in `source` and the result's
@@ -4416,69 +4421,87 @@ fn permute<T: Copy>(source: &[T], target: &mut [T], dims: &[usize], order: &[usi
     if total == 0 {
         return;
     }
-    let rank = dims.len();
-    let mut source_stride: SmallVec<[usize; 4]> = SmallVec::with_capacity(rank);
+    let mut target_stride: SmallVec<[usize; 6]> = smallvec![0; dims.len()];
     let mut stride = 1usize;
-    for &extent in dims {
-        source_stride.push(stride);
-        stride *= extent;
-    }
-    let mut target_stride: SmallVec<[usize; 4]> = smallvec![0; rank];
-    stride = 1;
     for &dimension in order {
         target_stride[dimension] = stride;
         stride *= dims[dimension];
     }
     let fast = order[0];
     let rows = dims[0];
-    let columns = dims[fast];
-    let others: SmallVec<[usize; 4]> = (0..rank)
-        .filter(|&dimension| dimension != 0 && dimension != fast)
-        .collect();
-    let mut counters: SmallVec<[usize; 4]> = smallvec![0; others.len()];
+    let row_stride = target_stride[0];
+    let columns = if fast == 0 { 1 } else { dims[fast] };
+    let mut column_stride = 0;
+    let mut outer: SmallVec<[OuterDimension; 4]> = SmallVec::new();
+    stride = 1;
+    for (dimension, (&extent, &target_step)) in dims.iter().zip(&target_stride).enumerate() {
+        if dimension == fast {
+            column_stride = stride;
+        } else if dimension != 0 {
+            outer.push(OuterDimension {
+                extent,
+                source_step: stride,
+                target_step,
+                counter: 0,
+            });
+        }
+        stride *= extent;
+    }
     let (mut from, mut to) = (0usize, 0usize);
-    let tile_count = total / (rows * if fast == 0 { 1 } else { columns });
-    for _ in 0..tile_count {
+    for _ in 0..total / (rows * columns) {
         if fast == 0 {
             target[to..to + rows].copy_from_slice(&source[from..from + rows]);
         } else {
-            let column_stride = source_stride[fast];
-            let row_stride = target_stride[0];
-            for row_block in (0..rows).step_by(TILE) {
-                let row_end = (row_block + TILE).min(rows);
-                for column_block in (0..columns).step_by(TILE) {
-                    let column_end = (column_block + TILE).min(columns);
+            // Plain loops rather than `step_by`, whose setup costs more than copying a small
+            // array.
+            let mut row_block = 0;
+            while row_block < rows {
+                let row_end = rows.min(row_block + ROW_TILE);
+                let mut column_block = 0;
+                while column_block < columns {
+                    let width = COLUMN_TILE.min(columns - column_block);
                     for row in row_block..row_end {
-                        let start = from + row + column_block * column_stride;
-                        let strided = &source[start..];
-                        let destination = &mut target[to + row * row_stride + column_block..]
-                            [..column_end - column_block];
+                        let strided = &source[from + row + column_block * column_stride..];
+                        let destination =
+                            &mut target[to + row * row_stride + column_block..][..width];
                         for (step, slot) in destination.iter_mut().enumerate() {
                             *slot = strided[step * column_stride];
                         }
                     }
+                    column_block += COLUMN_TILE;
                 }
+                row_block += ROW_TILE;
             }
         }
-        for (slot, &dimension) in others.iter().enumerate() {
-            counters[slot] += 1;
-            from += source_stride[dimension];
-            to += target_stride[dimension];
-            if counters[slot] < dims[dimension] {
+        for dimension in &mut outer {
+            dimension.counter += 1;
+            from += dimension.source_step;
+            to += dimension.target_step;
+            if dimension.counter < dimension.extent {
                 break;
             }
-            from -= source_stride[dimension] * dims[dimension];
-            to -= target_stride[dimension] * dims[dimension];
-            counters[slot] = 0;
+            from -= dimension.source_step * dimension.extent;
+            to -= dimension.target_step * dimension.extent;
+            dimension.counter = 0;
         }
     }
+}
+
+/// A dimension of [`permute`] other than the two a tile spans, stepped as one digit of an
+/// odometer: each step moves the source and target offsets by its strides.
+struct OuterDimension {
+    extent: usize,
+    source_step: usize,
+    target_step: usize,
+    counter: usize,
 }
 
 unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let permutation = call.arg(1);
     let resize = values::as_logical_scalar(call.arg(2)) != 0;
-    let Some(dims) = values::dims(object) else {
+    // C code can set an empty `dim`, which leaves nothing to permute.
+    let Some(dims) = values::dims(object).filter(|dims| !dims.is_empty()) else {
         return Err(call.error("invalid first argument, must be an array"));
     };
     let rank = dims.len();
@@ -4525,7 +4548,12 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
         order
     };
     let new_dims: Vec<usize> = order.iter().map(|&dimension| dims[dimension]).collect();
-    let result = permuted_copy(object, &dims, &order)?;
+    let result = permuted_copy(object, &dims, &order)?.ok_or_else(|| {
+        call.error(format!(
+            "unimplemented type '{}' in 'aperm'\n",
+            object.kind().name()
+        ))
+    })?;
     if resize {
         let dim_values: Vec<i32> = new_dims.iter().map(|&extent| extent as i32).collect();
         let dim = values::integer_vector(&dim_values)?;

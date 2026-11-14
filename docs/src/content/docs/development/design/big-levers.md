@@ -162,45 +162,56 @@ current tree ("Blind spots" below).
 `tools/bench/codebases/` times the three 300,000-line code bases as a suite (`just bench codebases`):
 per code base the sum of the test blocks' times on GNU R, on ry and on ry with `RY_JIT=off`, and per
 block the geometric mean of GNU R's time over ry's. `oracle bench --ry-only` with `RY_PROFILE_SUMMARY`
-gives one profile per code base. The runs used a library without 37 of the 72 dependencies (finbench
-lacks `httr`, `rugarch`, `rmgarch` and others; the generator moves them to `Suggests`), so the shares
-are indicative, and the profiler's sampling costs about 2% of the time.
+gives one profile per code base. The library holds the dependency closure except `polars`, `Rblpapi`
+and `esgtoolkit` (the generator moves them to `Suggests`), so each code base runs 8,900 to 9,600 tests
+and every one passes on both engines. The profiler's sampling costs about 2% of the time.
+
+One round, release build, 4 cores, GNU R 4.6.2:
+
+| Suite time | finbench | dsbench | biobench |
+| --- | ---: | ---: | ---: |
+| GNU R | 199.6 s | 99.9 s | 113.2 s |
+| ry | 135.3 s | 63.0 s | 73.8 s |
+| ry, JIT off | 131.5 s | 62.6 s | 73.5 s |
+| GNU R over ry | 1.48x | 1.59x | 1.53x |
+| per-test geometric mean of GNU R over ry | 1.44x | 1.59x | 1.57x |
 
 | Share of ry's time | finbench | dsbench | biobench |
 | --- | ---: | ---: | ---: |
 | **By namespace (self time)** | | | |
-| base | 47.6% | 42.9% | 48.6% |
-| rlang | 7.5% | 13.5% | 11.4% |
-| the code base itself | 3.9% | 5.5% | 7.4% |
-| stats | 2.6% | 8.4% | 2.5% |
-| xts | 16.1% | | |
-| data.table | 2.9% | 7.0% | 2.5% |
-| testthat and waldo | 5.6% | 8.0% | 7.9% |
-| methods and utils | 2.5% | 2.7% | 2.5% |
+| base | 44.5% | 43.2% | 49.5% |
+| rlang | 5.5% | 11.9% | 8.8% |
+| the code base itself | 2.8% | 7.0% | 5.7% |
+| stats | 7.6% | 7.3% | 1.7% |
+| xts | 9.5% | | |
+| data.table | 1.7% | 6.1% | 1.7% |
+| testthat and waldo | 4.4% | 7.0% | 6.5% |
+| methods and utils | 3.1% | 4.2% | 3.8% |
 | **By activity** | | | |
-| tier 0 bytecode | 35.4% | 36.8% | 35.4% |
-| builtins | 33.3% | 29.8% | 32.3% |
-| closure call setup | 12.4% | 13.5% | 13.5% |
-| native code | 6.2% | 8.8% | 5.0% |
-| S3 method lookup | 3.4% | 2.1% | 3.0% |
-| AST evaluator | 2.6% | 3.2% | 4.3% |
-| garbage collection | 1.9% | 2.0% | 2.6% |
-| tier 1 (JIT code) | 1.2% | 0.1% | 0.1% |
+| tier 0 bytecode | 35.8% | 36.1% | 32.8% |
+| builtins | 31.3% | 31.5% | 34.6% |
+| closure call setup | 11.9% | 12.3% | 12.0% |
+| native code | 9.1% | 10.0% | 8.6% |
+| S3 method lookup | 3.4% | 2.2% | 2.5% |
+| AST evaluator | 2.3% | 3.0% | 3.6% |
+| garbage collection | 1.6% | 1.5% | 2.3% |
+| tier 1 (JIT code) | 0.9% | 0.1% | 0.1% |
 | **By entries of the innermost closure body** | | | |
-| under 10 | 4.4% | 6.4% | 7.5% |
-| 10 to 99 | 0.6% | 0.2% | 0.4% |
-| 100 to 2,999 | 6.4% | 11.8% | 11.1% |
-| 3,000 or more (the tier-up threshold) | 88.6% | 81.6% | 80.9% |
+| under 10 | 2.9% | 5.5% | 5.9% |
+| 10 to 99 | 0.6% | 1.2% | 1.0% |
+| 100 to 2,999 | 12.8% | 16.5% | 16.9% |
+| 3,000 or more (the tier-up threshold) | 83.7% | 76.8% | 76.1% |
 
 Cold bodies hold little of the time: bodies entered fewer than 100 times, the ones an install-time
-optimizer would compile ahead of use, hold 5% to 8%, and every body below the threshold together
-11% to 19%. The hot bodies (500 to 580 per code base) hold 81% to 89%, but their time stays in
-tier 0 (28% to 31% of all time), builtins (23% to 29%) and call setup (12%), and tier 1 runs 0.1%
-to 1.2% of the total, because the profitability gates leave nearly all of those bodies in tier 0
-(`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). More
-compilation of hot bodies is therefore where the time is, and it needs call setup and builtin
-dispatch to get cheaper, since bodies full of calls into `base` are what is hot. Counting entries
-per body is `--profile-summary`'s "Time by how often the innermost closure body was entered".
+optimizer would compile ahead of use, hold 3% to 7%, and every body below the threshold together
+16% to 24%. The hot bodies (620 to 860 per code base) hold 76% to 84%, but their time stays in
+tier 0, builtins and call setup, and tier 1 runs 0.1% to 0.9% of the total, because the
+profitability gates leave nearly all of those bodies in tier 0 (`decisions.md`, "Bodies that would
+mostly hand back to tier 0 compile only for loops"). More compilation of hot bodies is therefore
+where the time is, and it needs call setup and builtin dispatch to get cheaper, since bodies full of
+calls into `base` are what is hot. Counting entries per body is `--profile-summary`'s "Time by how
+often the innermost closure body was entered". The JIT changes the suite time by less than 3%
+either way, which agrees with that split.
 
 ### Typed ry against Rust
 

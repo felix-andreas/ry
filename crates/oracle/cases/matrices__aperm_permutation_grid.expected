@@ -1,0 +1,24 @@
+[stdout]
+| 5          TRUE 
+| 3x4        TRUE 
+| 2x3x4      TRUE 
+| 3x1x2x2    TRUE 
+| 0x3x2      TRUE 
+| 2x2x2x2x3  TRUE 
+| [1] TRUE
+|      [,1] [,2]
+| [1,]    1    2
+| [2,]    3    4
+| [3,]    5    6
+|      [,1] [,2]
+| [1,] "a"  "b" 
+| [2,] "c"  "d" 
+| [3,] "e"  "f" 
+| [1] "unimplemented type 'expression' in 'aperm'\n"
+| [1] "argument is not a matrix"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "argument is not a matrix"
