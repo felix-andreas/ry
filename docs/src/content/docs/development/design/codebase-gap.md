@@ -191,22 +191,26 @@ to reach 2x alone.
    table above, and aim below 50 ns for a call that needs no environment.
 2. **Make S3 dispatch cost one closure call.** A dispatch costs 0.94 µs in a micro-benchmark and
    1.1 to 1.6 µs of lookup in the suites. `resolve_s3` (`dispatch.rs`) builds the method scope once
-   per dispatch, then for each candidate name (one per class, then the default) reads every frame
-   between the caller and its top environment before it consults the name's cached row for the part
-   from the top environment on. The parked branch `perf/s3-resolution` (`backlog.md`) replaces that
-   frame walk with one frame read in the common case. Land it, then profile where the rest of the
-   time goes (building method names, the `.Class` vector, the method's frame).
-3. **Make `compiler::compile` and `cmpfun` native on ry.** They run GNU R's compiler in R only for
-   `mkCode` to keep the source expression. A native `compile` that returns its argument (and a
-   `cmpfun` that compiles through ry's own path) saves 3% of finbench and is a small change.
-4. **Conditions.** `tryCatch` costs 4.9 µs against GNU R's 4.7 µs, and the condition helpers run
-   below 1x in context. A native `tryCatch` that establishes its handlers without the R-level
-   `tryCatchList`, `tryCatchOne` and `doTryCatch` closures removes three closure calls and their
-   promises per call.
+   per dispatch, then for each candidate name (one per class, then the default) consults the name's
+   cached row. A name that no environment except base binds resolves with one frame read instead of
+   a walk over every frame between the caller and its top environment. With that in place the lookup
+   share fell from 3.3% to 2.8% (finbench), 2.2% to 1.6% (dsbench) and 2.6% to 1.6% (biobench).
+   Profile where the rest goes next: building method names, the `.Class` vector, the method's frame.
+3. **`compiler::compile` and `cmpfun` run natively.** `compile` returns its argument and `cmpfun`
+   compiles through ry's own path, so a call costs 0.3 µs against GNU R's 517 µs, and the 3.9% row
+   in finbench is gone.
+4. **Conditions.** `withCallingHandlers`, `tryCatchList` and `tryCatchOne` run as native prologues,
+   so `tryCatch(expr, error = ...)` costs 3.8 µs against GNU R's 5.2 µs and a caught `stop` 11.1 µs
+   against 18.5 µs. Each prologue runs inside its closure's frame and calls the next helper as a
+   closure, because `sys.calls()` and `sys.function()` inside a handler or the protected expression
+   observe all four frames (`tryCatch`, `tryCatchList`, `tryCatchOne`, `doTryCatch`). The helpers' self time in the code bases barely moved: their cost in context is the
+   test block they evaluate, which is item 5.
 5. **Run-once code.** Test bodies and the promises they pass down run in the AST evaluator on both
    engines, and ry's is 1.5x to 3x slower there. Make the AST evaluator's calls as cheap as tier 0's,
    or compile a body on its first call when it is large.
-6. **`dir.create`.** Check ancestors before making them in a recursive `dir.create`, as GNU R does.
+6. **`dir.create`.** A recursive `dir.create` checks the nearest parent with `stat` and makes only
+   the missing ancestors. An existing path costs 3.8 µs against GNU R's 10.3 µs, and the biobench
+   row fell from 2.5% at 0.80x to 1.1% at 1.25x.
 
 A tier-1 JIT that compiles more package bodies is not first on this list. Tier-1 code runs 0.1% to
 1.3% of the time, and the bodies it would compile are full of the calls and dispatches in items 1
