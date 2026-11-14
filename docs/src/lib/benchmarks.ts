@@ -13,7 +13,7 @@ const sourceFiles = import.meta.glob(['../../../tools/bench/**/*.R', '../../../t
 export const repository = 'https://github.com/felix-andreas/ry/blob/main';
 
 // The order of the summary, the page and the README.
-const suiteOrder = ['public', 'packages', 'kernels', 'applications', 'typed'];
+const suiteOrder = ['public', 'packages', 'kernels', 'applications', 'hot', 'typed'];
 
 export type Interval = { median: number; low?: number; high?: number };
 export type Flag = { kind: string; engine?: string; reason?: string };
