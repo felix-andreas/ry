@@ -49,7 +49,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryWarning", 0, do_warning).prologue(),
     internal("rySignalCondition", 0, do_signal_condition).prologue(),
     internal("ryTryCatch", 0, do_try_catch).prologue(),
+    internal("ryWithCallingHandlers", 0, do_with_calling_handlers).prologue(),
     internal("ryTryCatchList", 0, do_try_catch_list).prologue(),
+    internal("ryTryCatchOne", 0, do_try_catch_one).prologue(),
     internal("ryDoTryCatch", 0, do_do_try_catch).prologue(),
     internal("ryWithRestarts", 0, do_with_restarts).prologue(),
     internal("ryWithOneRestart", 0, do_with_one_restart).prologue(),
@@ -83,6 +85,11 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
     ("tryCatch", "ryTryCatch", 0xd94c74ab7d1c9df2),
+    (
+        "withCallingHandlers",
+        "ryWithCallingHandlers",
+        0x0c246a7f0b9c191b,
+    ),
     ("withRestarts", "ryWithRestarts", 0xcebb374dbd62409d),
     ("tryInvokeRestart", "ryTryInvokeRestart", 0xe95eb95ec8453f49),
     ("invokeRestart", "ryInvokeRestart", 0x76da20c2e48ae6a6),
@@ -103,6 +110,12 @@ const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
         "tryCatchList",
         "ryTryCatchList",
         0x2e065bb04214d605,
+    ),
+    (
+        "tryCatch",
+        "tryCatchOne",
+        "ryTryCatchOne",
+        0x3a4260755fd37942,
     ),
     ("tryCatch", "doTryCatch", "ryDoTryCatch", 0xacf47eb5e4bfc044),
     (
@@ -171,7 +184,9 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
             "ryTraceBack",
             "rySignalCondition",
             "ryTryCatch",
+            "ryWithCallingHandlers",
             "ryTryCatchList",
+            "ryTryCatchOne",
             "ryDoTryCatch",
             "ryWithRestarts",
             "ryWithOneRestart",
@@ -3467,6 +3482,48 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     finish(ClosureFrame::Env(frame), value, interp().visible)
 }
 
+/// `withCallingHandlers(expr, ...)`. The prologue runs the R body's statements before `expr`:
+/// it forces the handlers in order as `list(...)` does, binds `handlers`, `classes` and
+/// `parentenv` in the frame, and establishes the handlers. Then it evaluates `expr` in the
+/// frame, as the R body's last statement does, so the frame and its contents read as in GNU R.
+unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let Some(items) = dots(ClosureFrame::Env(frame))? else {
+        return decline();
+    };
+    let names = symbols();
+    let mut forced: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    for &(tag, item) in &items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        forced.push((tag, value));
+    }
+    let handlers = tagged_list(&forced)?;
+    let classes = values::get_attr(handlers, names.names);
+    let parent_env = eval::frame_sys_parent_pending(index)?;
+    eval::define(names.handlers, handlers, frame)?;
+    eval::define(names.classes, classes, frame)?;
+    eval::define(names.parentenv, parent_env, frame)?;
+    if length(classes) != forced.len() {
+        // `stop("condition handlers must be specified with a condition class")`
+        eval::eval(nth(original_statements(index), 3), frame)?;
+    }
+    let calling = values::scalar_logical(1)?;
+    kernel(
+        crate::conditions::do_add_cond_hands,
+        &[classes, handlers, parent_env, nil(), calling],
+        ClosureFrame::Env(frame),
+    )?;
+    let value = eval::eval(names.expr, frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
 /// `tryCatchList(expr, names, parentenv, handlers)` with one handler, which calls `tryCatchOne`
 /// through the R body's own call so its frame reads as in GNU R.
 unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
@@ -3483,12 +3540,97 @@ unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
     if classes.is_object() || length(classes) != 1 {
         return decline();
     }
-    eval::define(symbols().nh, values::scalar_integer(1)?, frame)?;
+    let names = symbols();
+    eval::define(names.nh, values::scalar_integer(1)?, frame)?;
     // `if (nh > 1L) ... else if (nh == 1L) tryCatchOne(...) else expr`
     let branches = nth(original_statements(index), 1);
     let one = nth(nth(branches, 3), 2);
-    let value = eval::eval(one, frame)?;
+    let (Some(parent_env), Some(handlers)) = (
+        argument(ClosureFrame::Env(frame), names.parentenv)?,
+        argument(ClosureFrame::Env(frame), names.handlers)?,
+    ) else {
+        return decline_eval(one, frame);
+    };
+    let try_catch_one = eval::find_fun(install("tryCatchOne")?, frame)?;
+    if handlers.kind() != SexpType::List
+        || handlers.is_object()
+        || length(handlers) != 1
+        || try_catch_one.kind() != SexpType::Closure
+    {
+        return decline_eval(one, frame);
+    }
+    // `tryCatchOne(expr, names, parentenv, handlers[[1L]])`, applied without evaluating the
+    // call: the arguments other than `expr` are values already, so their promises are made
+    // forced, and the frame and its call read as in GNU R.
+    let args = [
+        Arg {
+            tag: nil(),
+            value: eval::make_promise(names.expr, frame)?,
+        },
+        Arg {
+            tag: nil(),
+            value: eval::forced_promise(names.names, classes)?,
+        },
+        Arg {
+            tag: nil(),
+            value: eval::forced_promise(names.parentenv, parent_env)?,
+        },
+        Arg {
+            tag: nil(),
+            value: eval::forced_promise(nth(one, 4), handlers.element(0))?,
+        },
+    ];
+    for arg in &args {
+        crate::heap().root(arg.value);
+    }
+    let value = eval::apply_closure(one, try_catch_one, &args, frame, None)?;
     finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// Evaluates the R body's `call` in `frame` and finishes the call with its value, for a fast
+/// path that has done everything before that call exactly as the R body would.
+unsafe fn decline_eval(call: Sexp, frame: Sexp) -> R<Sexp> {
+    let value = eval::eval(call, frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `tryCatchOne(expr, name, parentenv, handler)`: defines `doTryCatch` and applies it as the
+/// R body's `doTryCatch(return(expr), name, parentenv, handler)` does, with the arguments other
+/// than `return(expr)` passed as forced promises. That `return(expr)` returns from this frame
+/// unless a handler catches a condition, and then the rest of the R body runs as written.
+unsafe fn do_try_catch_one(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let names = symbols();
+    let statements = original_statements(index);
+    define_inner_closure(index, nth(statements, 0), frame)?;
+    // `value <- doTryCatch(return(expr), name, parentenv, handler)`
+    let assignment = nth(statements, 1);
+    let do_call = nth(assignment, 2);
+    let do_try_catch = eval::find_fun(install("doTryCatch")?, frame)?;
+    let mut args: [Arg; 4] = [Arg {
+        tag: nil(),
+        value: eval::make_promise(nth(do_call, 1), frame)?,
+    }; 4];
+    crate::heap().root(args[0].value);
+    // In the order `doTryCatch`'s `.addCondHands(name, list(handler), parentenv, ...)` forces
+    // them.
+    for (position, symbol) in [(1, names.name), (3, names.handler), (2, names.parentenv)] {
+        let Some(value) = argument(ClosureFrame::Env(frame), symbol)? else {
+            return decline_after(statements, 1, frame);
+        };
+        args[position].value = eval::forced_promise(symbol, value)?;
+        crate::heap().root(args[position].value);
+    }
+    let value = eval::apply_closure(do_call, do_try_catch, &args, frame, None)?;
+    crate::heap().root(value);
+    eval::define(nth(assignment, 1), value, frame)?;
+    decline_after(statements, 2, frame)
 }
 
 /// `doTryCatch(expr, name, parentenv, handler)`: establishes the exiting handler with the
