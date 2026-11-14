@@ -106,12 +106,14 @@ program's instructions under callgrind, which `--save-instructions FILE` keeps a
 `--baseline-instructions FILE` (or a `--baseline` build) compares against. `--functions N` adds
 the N functions of the runtime and the packages' compiled code that hold the most of each code
 base's instructions, which needs a build with symbols (`cargo build --profile profiling`).
+`--save-dumps DIR` keeps each program's callgrind dumps as `DIR/<program>.<n>.callgrind`, for
+`callgrind_annotate` and for a function's inclusive cost and call count.
 
 Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial] [--any-build]
                             [--breakdown] [--instructions] [--save-instructions FILE]
-                            [--baseline-instructions FILE] [--functions N]
+                            [--baseline-instructions FILE] [--functions N] [--save-dumps DIR]
 """
 import argparse, atexit, concurrent.futures, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
 import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
@@ -203,6 +205,8 @@ def main():
     parser.add_argument("--save-instructions", metavar="FILE", help="hot suite: keep the instruction counts in FILE")
     parser.add_argument("--functions", metavar="N", type=int, default=0,
                         help="hot suite: with --instructions, the N functions holding the most of each code base's instructions")
+    parser.add_argument("--save-dumps", metavar="DIR",
+                        help="hot suite: with --instructions, keep ry's callgrind dumps in DIR, one or more per program")
     parser.add_argument("--baseline-instructions", metavar="FILE",
                         help="hot suite: compare the instruction counts with those of an earlier --save-instructions")
     args = parser.parse_args()
@@ -214,8 +218,8 @@ def main():
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
-    if (args.save_instructions or args.baseline_instructions or args.functions) and not args.instructions:
-        sys.exit("error: --save-instructions, --baseline-instructions and --functions go with --instructions")
+    if (args.save_instructions or args.baseline_instructions or args.functions or args.save_dumps) and not args.instructions:
+        sys.exit("error: --save-instructions, --baseline-instructions, --functions and --save-dumps go with --instructions")
     if (args.breakdown or args.instructions) and suites != [HOT_SUITE]:
         sys.exit(f"error: --breakdown and --instructions measure the {HOT_SUITE} suite alone")
     if args.rounds < 0 or (args.rounds == 0 and not (args.breakdown or args.instructions)):
@@ -1266,7 +1270,7 @@ def hot_passes(runner, programs, table, args, results):
                 print(f"warning: no region profile for {name}: {measured[name].get('reason', 'the profile has no such region')}")
         results["breakdown_weighting"], results["breakdown"] = weighted_breakdown(results["programs"])
     if args.instructions:
-        found, functions = instructions_of(runner, programs, ry, functions=args.functions > 0)
+        found, functions = instructions_of(runner, programs, ry, functions=args.functions > 0, keep=args.save_dumps)
         counts = {"ry": found}
         if functions:
             results["functions"] = weighted_functions(programs, found, functions, args.functions)
@@ -1341,11 +1345,12 @@ def weighted_breakdown(rows):
     return weighting, found
 
 
-def instructions_of(runner, programs, engine, functions=False):
+def instructions_of(runner, programs, engine, functions=False, keep=None):
     """Each program's instructions in one batch on `engine`, counted by callgrind in the region
     the harness opens around it, which dumps each time the region ends; a region entered more
     than once has its dumps summed. With `functions`, also each program's instructions per
-    function (`parse_callgrind_functions`); otherwise that is empty.
+    function (`parse_callgrind_functions`); otherwise that is empty. With `keep`, each region's
+    dumps are copied to that directory under the region's name.
 
     The programs are dealt over `INSTRUCTION_SHARDS` harness processes that run side by side,
     because callgrind runs a process some fifty times slower. A program's count depends a little
@@ -1373,11 +1378,16 @@ def instructions_of(runner, programs, engine, functions=False):
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
         for part in pool.map(count, range(min(INSTRUCTION_SHARDS, len(programs)))):
             measured.update(part)
-    dumps, by_function = {}, {}
+    dumps, by_function, kept = {}, {}, {}
+    if keep:
+        os.makedirs(keep, exist_ok=True)
     for path in sorted(runner.work.glob(f"{prefix.name}.*")):
         text = path.read_text(errors="replace")
         if found := parse_callgrind_dump(text):
             dumps[found[0]] = dumps.get(found[0], 0) + found[1]
+            if keep:
+                kept[found[0]] = kept.get(found[0], 0) + 1
+                shutil.copyfile(path, os.path.join(keep, f"{found[0]}.{kept[found[0]]}.callgrind"))
             if functions:
                 summed = by_function.setdefault(found[0], {})
                 for key, count in parse_callgrind_functions(text).items():

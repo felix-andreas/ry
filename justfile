@@ -202,6 +202,11 @@ bench-hot-track dir +configurations:
     cargo build --release -p oracle
     python3 -I tools/bench/tooling/hot.py track --codebases {{ dir }} --out target/hot-track.json {{ configurations }}
 
+# Prints what each R-level mechanism costs on ry in instructions (a closure call, an S3 dispatch, a `tryCatch`, a builtin call),
+# counted under callgrind, e.g. `just bench-mechanisms --ry target/profiling/ry --filter dispatch`.
+bench-mechanisms *args:
+    python3 -I tools/bench/tooling/mechanisms.py {{ args }}
+
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench-check *args:
     cargo build --release -p ry-lang
