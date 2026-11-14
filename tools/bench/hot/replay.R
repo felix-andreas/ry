@@ -15,7 +15,8 @@
   # moved under this session's. A test writes its files under `tempdir()`, so a captured call
   # names directories that ended with the capture; replayed as captured, it would write into
   # the real /tmp outside any session, or fail because the directory is gone. The parent of
-  # each moved path is created, as the test had created it before the call.
+  # each moved path in the call or its variables is created, as the test had created it before
+  # the call.
   relocate <- function(sample) {
     if (!length(grepRaw("Rtmp", serialize(list(sample$variables, sample$call, sample$value), NULL)))) {
       return(sample)
@@ -82,8 +83,12 @@
     }
     sample$variables <- walk(sample$variables)
     sample$call <- walk(sample$call)
+    # Only the arguments' paths get their parents: the validator reads the captured value, which
+    # the suite's samples do not keep, so a directory made for a path in it would let a call pass
+    # the validator that fails in the harness.
+    created <- parents
     sample$value <- walk(sample$value)
-    for (parent in unique(parents)) dir.create(parent, recursive = TRUE, showWarnings = FALSE)
+    for (parent in unique(created)) dir.create(parent, recursive = TRUE, showWarnings = FALSE)
     sample
   }
 
