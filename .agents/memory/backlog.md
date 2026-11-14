@@ -431,6 +431,19 @@ Each item removes a reason a function is not in the file or not compiled by `ry 
 - **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. The compiled packages of the Posit snapshot are built for an older R, and xts 0.14.1's binary truncates `ATTRIB`'s result to an `int` (GNU R 4.6.2 aborts on `x[2:4]` of an xts object the same way), so the installer reinstalls xts from source.
 - **Next.** Re-measure on the release archive (`--write`), then run `ry check` over the generated code and treat every finding as a possible false report.
 
+### Why the code bases run at 1.5x, ranked
+
+`development/design/codebase-gap.md` has the measurements, the Amdahl table and the ceiling (2.7x to 2.8x with everything but native code at 3x). About 60% of each code base's time is in interpreter-bound package closures that run at 1.4x to 1.5x, because a closure call, an S3 dispatch and a `tryCatch` each cost about what they cost in GNU R. `compare_profiles.py run --no-profile`, then `run`, then `report --times` reproduces the per-closure comparison (`tools/bench/compare_profiles.py`'s docstring).
+
+1. **Closure calls 3x to 5x cheaper.** Call setup is 12% of each code base at 310 to 330 ns per call, and a plain `f0()` takes 126 ns against GNU R's 96. This is the frame and promise representation redesign; it lifts the interpreter-bound majority, so nothing else moves the total as much (about +10% from setup alone, 2.0x to 2.4x with interpreter-bound closures at 3x).
+2. **S3 dispatch at the cost of one call.** Lookup costs 1.1 to 1.6 µs per dispatch (4.5M dispatches, 3.3% of finbench). For each candidate name, `resolve_s3` reads every frame between the caller and its top environment before the per-name cached row. Revive "Parked: S3 method resolution without a scope walk", then profile the rest.
+3. **`compiler::compile` without the R compiler.** ry's `mkCode` keeps only the source expression, so `compiler::compile(e)` runs the whole R-level compiler to return `e`. listcomp's `gen_list` (ompr models) makes it 3.9% of finbench; an identity `compile` saved 4.4 s (3.0%) in a measured run with every test passing.
+4. **Native `tryCatch`.** `tryCatchOne`, `withCallingHandlers` and `withRestarts` hold 1.3% to 2.8% at 0.22x to 0.94x, mostly call setup for the R-level helper closures and AST evaluation of the test block's promise.
+5. **Run-once code in the AST evaluator.** Test bodies run uncompiled on both engines (GNU R compiles a closure outside the global environment only on its second call), and ry's AST evaluator is 1.5x to 3x slower there: 0.9% to 1.8% of the time.
+6. **`dir.create`.** A recursive `dir.create` calls `mkdir` on every ancestor from the root (`system.rs`), 3.5 times GNU R's system calls; check ancestors first as GNU R does. 0.5% to 0.7% of dsbench and biobench.
+
+A wider tier 1 is not first: JIT-compiled code is 1.3% of finbench and 0.1% to 0.4% of the others, and the closures it would compile spend their time in calls, dispatch and builtins. ry defers S4 definitions from load to first use (`.ry_force_s4`), which puts 1.1 to 1.5 s (1% to 2%) of GNU R's load-time work inside ry's test blocks; that is a measurement asymmetry, not a gap.
+
 ## Open: the CRAN package corpus
 
 `just bench-packages install` then `run` (`tools/bench/packages/`, 59 pinned packages). `fs` needs `USE_BUNDLED_LIBUV=1` where libuv's headers are absent. First run (one repeat, with a build competing for the cores): 17 packages pass on both engines at a geometric mean of 0.99x GNU R's speed (lgr 0.60x, cli 0.89x the slowest); foreach and snakecase fail on both.
