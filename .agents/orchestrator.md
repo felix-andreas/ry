@@ -104,6 +104,7 @@ Nightly (user ask, 2026-11-05): nightly.20261105.1146.82f7b6 published 12:07 UTC
 | session_0111kWqC9p7Z4Q3UQY2orCbx (Fable high, structure) | analysis core after single lookup path: u32 SoA type store, delete 3 caches, item_links residual; ry check <0.70 s, RSS <237 MB | working |
 | in-session Sonnet (release prep) | bump 0.4.5, news entry, release dry run publish=false on all platforms | running; publish awaits user approval |
 | session_0111kWqE88Ddi6iEmcmZiJRz (Sonnet, bench) | measure all suites incl. codebases on the 0.4.5 archive | idle until 0.4.5 is published |
+| session_0111kWqAuPv8qtBGBMuFArqo (Fable high, fast perf suite; Opus implementers) | user ask 2026-11-14: representative fast-iteration suite derived from code-base profiles (<30 s, instruction counts, proven correlation with code bases), then squeeze builtins/tier 0/call setup/promises/GC; coordinates with tier-1 session | started 00:29Z |
 | Opus AOT implementation (not started) | typed-code-file.md steps 1-4 | starts after 0.4.5 ships (user) |
 
 Queued on the user: (user: wait for #557) publish 0.4.5 (execstack, Windows, crash reports, aperm, call loop, DataFrame); dry run green 21:1xZ; then start an Opus AOT implementation session from the Fable design (user: "Start opus after 0.4.5 ships"). Unanswered older asks: deploy the docs site, pre-release the nightly, data.table name arms in check.rs.
