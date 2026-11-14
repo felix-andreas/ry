@@ -1256,9 +1256,9 @@ def hot_passes(runner, programs, table, args, results):
         counts = {"ry": found}
         if functions:
             results["functions"] = weighted_functions(programs, found, functions, args.functions)
-        baseline = next((engine for engine in table if engine.key == "baseline"), None)
-        if baseline is not None:
-            counts["baseline"], _ = instructions_of(runner, programs, baseline)
+        for engine in table:
+            if engine.key in ("baseline", "ry_nojit"):
+                counts[engine.key], _ = instructions_of(runner, programs, engine)
         for key, measured in counts.items():
             for name, found in measured.items():
                 rows[name].setdefault("instructions", {})[key] = found
@@ -1273,6 +1273,8 @@ def hot_passes(runner, programs, table, args, results):
             changes[args.baseline_instructions] = compare_instructions(programs, saved["programs"], counts["ry"])
         if "baseline" in counts:
             changes[args.baseline] = compare_instructions(programs, counts["baseline"], counts["ry"])
+        if "ry_nojit" in counts:
+            changes["the JIT off"] = compare_instructions(programs, counts["ry_nojit"], counts["ry"])
         if changes:
             results["instruction_changes"] = changes
 
