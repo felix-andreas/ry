@@ -1572,8 +1572,6 @@ pub fn check_frame_stack(entropy: &mut impl Entropy) {
             missing: 0,
             caller: 0,
             pending: nil,
-            unforced: 0,
-            pending_shared: false,
             inlined: false,
             reified_by: crate::NOT_REIFIED,
             args: id,

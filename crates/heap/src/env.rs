@@ -465,6 +465,44 @@ impl Frame {
         self.formals = self.formals & SHADOWED | self.bindings.len() as u32;
     }
 
+    /// Whether the frame may bind `symbol`: `false` only when it certainly does not.
+    #[inline(always)]
+    pub(crate) fn may_bind(&self, symbol: Sexp) -> bool {
+        self.filter & filter_bit(symbol) != 0
+    }
+
+    /// Makes [`Frame::may_bind`] answer `true` for `symbol` before the frame binds it. A slot
+    /// frame's environment expects the names its frame keeps in slots, so a lookup of any other
+    /// name passes it without asking the interpreter.
+    pub(crate) fn expect(&mut self, symbol: Sexp) {
+        self.filter |= filter_bit(symbol);
+    }
+
+    /// Puts the bindings in the order a closure call binds them: ascending `rank`, with the
+    /// first `formals` ranks being the closure's formals, and the symbols `rank` leaves out
+    /// after them in the order they were bound. A hashed frame lists by its table and keeps
+    /// its order.
+    pub(crate) fn order_by(&mut self, rank: impl Fn(Sexp) -> Option<u32>, formals: u32) {
+        if self.table.is_some() {
+            return;
+        }
+        if self.removed > 0 {
+            self.compact();
+        }
+        self.bindings
+            .sort_by_key(|binding| rank(binding.symbol).unwrap_or(u32::MAX));
+        self.bindings.set_scanned(0);
+        let leading = self
+            .bindings
+            .iter()
+            .take_while(|binding| rank(binding.symbol).is_some_and(|rank| rank < formals))
+            .count();
+        self.formals = self.formals & SHADOWED | leading as u32;
+        if self.index.is_some() {
+            self.index = Some(SlotIndex::of(&self.bindings));
+        }
+    }
+
     /// The cells in the order GNU R lists the frame in.
     ///
     /// # Safety

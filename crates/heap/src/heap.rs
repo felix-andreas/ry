@@ -59,37 +59,63 @@ use {
     },
 };
 
-/// What reading the bindings of a slot frame's pending environment (`gp::PENDING_FRAME`) runs
-/// first. A slot frame keeps its variables in registers, and the environment it hands to
-/// promises and closures it makes stays bare until something needs its bindings; the
-/// interpreter installs a resolver that gives the environment the frame's bindings in place.
-/// Routing every bindings read through [`bindings`] means no reader can see the bare frame.
-static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp)> = std::sync::OnceLock::new();
+/// How the bindings of a live slot frame's environment (`gp::SLOT_FRAME`) are about to be used,
+/// which tells the interpreter how much of the frame to move from its slots into cells first.
+#[derive(Clone, Copy)]
+pub enum PendingAccess {
+    /// A lookup of one symbol that the environment has no cell for.
+    Symbol(Sexp),
+    /// A cell is about to be added for a symbol the frame does not bind.
+    Insert,
+    /// Every binding is read, as listing the environment does.
+    All,
+}
 
-/// Installs the interpreter's resolver for pending environments ([`PENDING_RESOLVER`]).
-pub fn set_pending_resolver(resolver: unsafe fn(Sexp)) {
+/// What using the bindings of a slot frame's environment runs first. A slot frame keeps its
+/// variables in registers, and the environment that stands for it binds only what something
+/// has read by name; the interpreter installs a resolver that moves a variable from its slot
+/// into a cell of the environment when a lookup asks for it. Routing every bindings read
+/// through [`bindings`] or [`bindings_for`] means no reader can miss a variable that is still
+/// in a slot.
+static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp, PendingAccess)> =
+    std::sync::OnceLock::new();
+
+/// Installs the interpreter's resolver for slot-frame environments ([`PENDING_RESOLVER`]).
+pub fn set_pending_resolver(resolver: unsafe fn(Sexp, PendingAccess)) {
     if PENDING_RESOLVER.set(resolver).is_err() {
         // Installed already, by an earlier interpreter in this process.
     }
 }
 
-/// `env`'s own frame of bindings, given its bindings first when it is a slot frame's pending
-/// environment. Everything but the collector reads bindings through here.
+/// `env`'s own frame with every binding in it, for a reader of the whole frame: a slot frame's
+/// environment takes all of its frame's variables first.
 #[inline(always)]
 unsafe fn bindings(env: Sexp) -> *mut Frame {
-    if env.has_gp(gp::PENDING_FRAME) {
-        resolve_pending(env);
+    if env.has_gp(gp::SLOT_FRAME) {
+        resolve_pending(env, PendingAccess::All);
     }
     env.frame_ptr()
 }
 
+/// `env`'s own frame for a lookup of `symbol` alone. A slot frame's environment that has no
+/// cell for a name its frame may keep in a slot asks the interpreter for that one variable.
+#[inline(always)]
+unsafe fn bindings_for(env: Sexp, symbol: Sexp) -> *mut Frame {
+    let frame = env.frame_ptr();
+    if env.has_gp(gp::SLOT_FRAME) && (*frame).may_bind(symbol) && (*frame).find(symbol).is_none()
+    {
+        resolve_pending(env, PendingAccess::Symbol(symbol));
+    }
+    frame
+}
+
 #[cold]
 #[inline(never)]
-unsafe fn resolve_pending(env: Sexp) {
+unsafe fn resolve_pending(env: Sexp, access: PendingAccess) {
     let Some(resolver) = PENDING_RESOLVER.get() else {
-        panic!("a pending environment was read without an interpreter to resolve it");
+        panic!("a slot frame's environment was read without an interpreter to resolve it");
     };
-    resolver(env);
+    resolver(env, access);
 }
 
 /// The longest vector R allows, `R_XLEN_T_MAX`.
@@ -2337,7 +2363,40 @@ impl Heap {
         if env == self.known.empty_env {
             return None;
         }
-        (*bindings(env)).find(symbol)
+        (*bindings_for(env, symbol)).find(symbol)
+    }
+
+    /// The cell `env`'s own frame holds for `symbol` as it stands. A slot frame's environment
+    /// answers for its cells alone, so the interpreter, which reads the slots itself, can ask
+    /// without moving a variable.
+    pub unsafe fn own_cell(&self, env: Sexp, symbol: Sexp) -> Option<Sexp> {
+        (*env.frame_ptr()).find(symbol)
+    }
+
+    /// The cells `env`'s own frame holds as it stands ([`Heap::own_cell`]).
+    pub unsafe fn own_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
+        (*env.frame_ptr()).cells()
+    }
+
+    /// Tells a slot frame's environment which names its frame may bind, so a lookup of any
+    /// other name passes the environment without asking the interpreter.
+    pub unsafe fn expect_bindings(&mut self, env: Sexp, symbols: impl Iterator<Item = Sexp>) {
+        let frame = &mut *env.frame_ptr();
+        for symbol in symbols {
+            frame.expect(symbol);
+        }
+    }
+
+    /// Lists a closure frame's bindings as a call binds them: ascending `rank`, the first
+    /// `formals` ranks being the formals, and every other symbol after them
+    /// (`Frame::order_by`).
+    pub unsafe fn order_frame(
+        &mut self,
+        env: Sexp,
+        rank: impl Fn(Sexp) -> Option<u32>,
+        formals: u32,
+    ) {
+        (*env.frame_ptr()).order_by(rank, formals);
     }
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
@@ -2351,7 +2410,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }
-        (*bindings(env)).find_hinted(symbol, hint)
+        (*bindings_for(env, symbol)).find_hinted(symbol, hint)
     }
 
     /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,
@@ -2388,6 +2447,15 @@ impl Heap {
         if env.has_gp(gp::FRAME_LOCKED) {
             return Err(HeapError::LockedEnvironment);
         }
+        if env.has_gp(gp::SLOT_FRAME) {
+            // The probe that found the symbol unbound may not have asked the frame's slots.
+            if let Some(cell) = (*bindings_for(env, symbol)).find(symbol) {
+                self.set_binding_value(cell, value)?;
+                cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+                return Ok(());
+            }
+            resolve_pending(env, PendingAccess::Insert);
+        }
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
         if !env.has_gp(gp::FUNCTION_FRAME) || symbol.has_gp(gp::WATCHED) {
@@ -2399,7 +2467,7 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            let frame = &mut *bindings(env);
+            let frame = &mut *env.frame_ptr();
             let owned = frame.owns_memory();
             frame.insert(symbol, cell, !env.has_gp(gp::DETACHED));
             if !owned && frame.owns_memory() {
@@ -2606,6 +2674,16 @@ impl Heap {
         self.drop_enclosure(env);
     }
 
+    /// Gives up what the environment `env` of a returning slot frame holds, once the frame has
+    /// found that nothing outlives it through the environment: the values of the cells it
+    /// gained and its enclosure, as [`Heap::release_frame`] releases a frame nothing
+    /// references. The enclosure matters most: an environment that kept it would count a
+    /// reference to the frame of the function that defined the callee for as long as it waits
+    /// to be collected, and that frame could not be dropped in turn.
+    pub unsafe fn discard_frame(&mut self, env: Sexp, result: Sexp) {
+        self.clear_frame(env, |_, dots| dots == result);
+    }
+
     /// Stores `value` into a slot of a closure call's slot frame, which counts one reference to
     /// what it holds, as a binding cell does. Slots live in the interpreter's register file, a
     /// root, so the store needs no write barrier.
@@ -2773,7 +2851,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Ok(false);
         }
-        let Some(cell) = (*bindings(env)).remove(symbol) else {
+        let Some(cell) = (*bindings_for(env, symbol)).remove(symbol) else {
             return Ok(false);
         };
         self.clear_removed_cell(cell);
@@ -2969,7 +3047,9 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return;
         }
-        unsafe { (*bindings(env)).count_transient(symbol) }
+        // Only a hashed frame counts, and a slot frame's environment is none, so the count
+        // needs no variable moved out of a slot.
+        unsafe { (*env.frame_ptr()).count_transient(symbol) }
     }
 
     /// Marks the bindings of a closure frame made so far as its formals.

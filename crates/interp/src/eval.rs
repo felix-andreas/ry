@@ -22,7 +22,7 @@ use {
         },
     },
     heap::{
-        ENVIRONMENT_BYTES, Formal, TRIPLE_BYTES,
+        ENVIRONMENT_BYTES, Formal, PendingAccess, TRIPLE_BYTES,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
@@ -345,9 +345,7 @@ pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
 /// A promise to evaluate `code` in `env`.
 pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     activity::count(Counter::PromisesCreated);
-    let promise = triple(SexpType::Promise, unbound(), code, env)?;
-    count_unforced(env);
-    Ok(promise)
+    triple(SexpType::Promise, unbound(), code, env)
 }
 
 /// A promise to run the compiled `code` in `env`, the frame of the code it was compiled with.
@@ -358,19 +356,7 @@ pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
     heap.root(promise);
-    count_unforced(env);
     Ok(promise)
-}
-
-/// Counts a new unforced promise over `env` when that is a slot frame's pending environment.
-/// Forcing or settling the promise takes it off the count again, and a frame that returns with
-/// a count of zero skips the check for promises and closures that outlive it
-/// ([`finish_frame`]), so every promise made over a pending environment, wherever it is made,
-/// must be counted here.
-unsafe fn count_unforced(env: Sexp) {
-    if env.kind() == SexpType::Environment && env.has_gp(gp::PENDING_FRAME) {
-        interp().frames[pending_owner(env)].unforced += 1;
-    }
 }
 
 /// A promise that already holds `value`, whose code is `code` for `substitute` to see.
@@ -411,8 +397,8 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
-    } else if env.has_gp(gp::PENDING_FRAME) {
-        force_slot_promise(promise, env)
+    } else if env.has_gp(gp::SLOT_FRAME) {
+        slot_promise_value(promise, pending_owner(env))
     } else if code.kind() == SexpType::Bytecode {
         bytecode::run_promise(code, env)
     } else {
@@ -429,33 +415,32 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     settled
 }
 
-/// Forces a promise over the slots of the live slot frame whose pending environment is `env`:
-/// compiled code runs on the slots, a name reads its slot, and anything else, or a name whose
-/// slot holds an empty argument, gets the frame's environment and evaluates there.
+/// The value of a promise over the environment of the live slot frame at `owner`. While every
+/// variable is in its slot, code compiled against the frame's slot table runs on the slots and
+/// a name reads its slot. Anything else evaluates in the environment, which takes the
+/// variables the code reads: any code once the environment binds a variable, code compiled to
+/// read by name (an argument of a call that `eval` ran in the environment), `..N`, and a name
+/// whose slot holds an empty argument.
 #[cold]
 #[inline(never)]
-unsafe fn force_slot_promise(promise: Sexp, env: Sexp) -> R<Sexp> {
-    let owner = pending_owner(env);
-    let value = slot_promise_value(promise, owner)?;
-    // A promise whose forcing failed stays unforced, so only a value settles the count.
-    let frame = &mut interp().frames[owner];
-    debug_assert!(
-        frame.unforced > 0,
-        "a frame counts fewer unforced promises than it has"
-    );
-    frame.unforced = frame.unforced.saturating_sub(1);
-    Ok(value)
-}
-
 unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
     let frame = &interp().frames[owner];
-    let (function, header) = (frame.function, frame.slots as usize);
+    let (function, header, env) = (frame.function, frame.slots as usize, frame.env);
     let code = promise.attrib();
     if code.kind() == SexpType::Bytecode {
-        return bytecode::run_promise_on_slots(code, function, owner, header);
+        // Code compiled against the slot table reads by name by itself once the frame's header
+        // register holds the environment.
+        return if code.cdr().element(bytecode::SLOTS) == nil() {
+            bytecode::run_promise(code, frame.pending)
+        } else {
+            bytecode::run_promise_on_slots(code, function, owner, header)
+        };
     }
     let expression = promise.cdr();
-    if expression.kind() == SexpType::Symbol {
+    if env != nil() {
+        return eval(expression, env);
+    }
+    if expression.kind() == SexpType::Symbol && dot_dot_index(expression).is_none() {
         match slot_content(function, header, expression) {
             None => return eval_enclosed_name(expression, function.tag(), owner),
             Some(value) if value.kind() == SexpType::Promise => return force_promise(value),
@@ -477,9 +462,9 @@ pub enum PendingName {
     Enclosure(Sexp),
 }
 
-/// What the name `symbol` reads in the live slot frame whose pending environment is `pending`,
-/// found where forcing a promise of it there finds it ([`slot_promise_value`]), but without
-/// forcing or evaluating anything.
+/// What the name `symbol` reads in the live slot frame whose environment `pending` binds
+/// nothing yet ([`gp::PENDING_FRAME`]), found where forcing a promise of it there finds it
+/// ([`slot_promise_value`]), but without forcing or evaluating anything.
 pub unsafe fn pending_name(pending: Sexp, symbol: Sexp) -> PendingName {
     let frame = &interp().frames[pending_owner(pending)];
     match slot_content(frame.function, frame.slots as usize, symbol) {
@@ -490,8 +475,8 @@ pub unsafe fn pending_name(pending: Sexp, symbol: Sexp) -> PendingName {
 
 /// What the variable `symbol` is bound to from `env`, read without forcing or calling anything:
 /// a value or a promise, or `None` for an unbound name, the empty argument or an active
-/// binding. A slot frame's pending environment binds nothing itself, so its names are read from
-/// the frame's slots.
+/// binding. A slot frame's environment that binds nothing yet has its names read from the
+/// frame's slots.
 pub unsafe fn peek_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
     let env = if env.has_gp(gp::PENDING_FRAME) {
         match pending_name(env, symbol) {
@@ -510,50 +495,44 @@ pub unsafe fn peek_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
 }
 
 /// Settles `promise`, unforced, with the `value` forcing it would give, which the caller found
-/// without forcing it ([`pending_name`]): a promise over a slot frame's pending environment
-/// then leaves the frame's count of promises that may still be unforced, as forcing it does.
+/// without forcing it ([`pending_name`]).
 pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
     // Two arguments can read through the same promise, which only the first settles.
     if promise.car() != unbound() {
         return Ok(promise.car());
     }
-    let env = promise.tag();
-    let counted = !promise.has_gp(gp::ARGUMENT_REFERENCE)
-        && env.kind() == SexpType::Environment
-        && env.has_gp(gp::PENDING_FRAME);
     // A checked promise's annotation check can fail, which leaves the promise unforced.
-    let settled = settle_promise(promise, value)?;
-    if counted {
-        let frame = &mut interp().frames[pending_owner(env)];
-        debug_assert!(
-            frame.unforced > 0,
-            "a frame counts fewer unforced promises than it has"
-        );
-        frame.unforced = frame.unforced.saturating_sub(1);
-    }
-    Ok(settled)
+    settle_promise(promise, value)
 }
 
-/// The position of the live slot frame whose pending environment is `pending`.
+/// The position of the live slot frame whose environment is `pending`
+/// ([`gp::SLOT_FRAME`]).
 unsafe fn pending_owner(pending: Sexp) -> usize {
     let Some(owner) = interp()
         .frames
         .iter()
         .rposition(|frame| frame.pending == pending)
     else {
-        panic!("a promise names the pending environment of a frame that has returned");
+        panic!("the environment of a slot frame was used after the frame returned without it");
     };
     owner
 }
 
-/// What the live slot frame at `owner` binds `symbol` to, read from its slots without giving the
-/// frame an environment, or `None` when the slots leave the name to the enclosure.
+/// What the live slot frame at `owner` binds `symbol` to, read without moving a variable: from
+/// its slot while the frame keeps every variable there, and from the cells its environment
+/// holds and the slots together after. `None` when the frame leaves the name to the enclosure.
 pub unsafe fn frame_slot(owner: usize, symbol: Sexp) -> Option<Sexp> {
     let frame = &interp().frames[owner];
+    if frame.env != nil()
+        && let Some(cell) = crate::heap().own_cell(frame.env, symbol)
+    {
+        let value = cell.cdr();
+        return (value != unbound()).then_some(value);
+    }
     slot_content(frame.function, frame.slots as usize, symbol)
 }
 
-/// [`frame_slot`] for the slot frame whose pending environment is `env`.
+/// [`frame_slot`] for the slot frame whose environment `env` binds nothing yet.
 pub unsafe fn pending_slot(env: Sexp, symbol: Sexp) -> Option<Sexp> {
     frame_slot(pending_owner(env), symbol)
 }
@@ -579,8 +558,8 @@ unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<S
 }
 
 /// A promise of `expression`, compiled code or a name, over the slots of the slot frame at
-/// `owner`. It names the frame's pending environment, which is made bare on the first such
-/// promise and gets its bindings only if the frame reifies.
+/// `owner`. It names the frame's environment, which is made on the first such promise and
+/// binds nothing until something reads a variable through it.
 pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     let env = pending_env(owner)?;
     if expression.kind() == SexpType::Bytecode {
@@ -591,12 +570,13 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
 }
 
 /// A closure of `formals` and `body` defined in the slot frame whose header register is
-/// `header`, which has no environment yet. The closure's environment is the frame's pending
-/// one, so defining it leaves the frame in its slots: anything that reads the environment's
-/// bindings, such as a call of the closure or `environment(f)$x`, reifies the frame into that
-/// same object first ([`resolve_pending_read`]), and a frame that returns with the closure
-/// still reachable reifies then ([`finish_frame`]). A frame that makes more closures than
-/// [`crate::FRAME_CLOSURES`] reifies instead, which bounds the list that tracks them.
+/// `header`, while the frame keeps every variable in its slot. The closure's environment is
+/// the frame's, so defining it leaves the frame in its slots: a call of the closure or
+/// `environment(f)$x` moves the variables it reads into the environment
+/// ([`resolve_pending_access`]), and a frame that returns with the closure still reachable
+/// moves the rest then ([`finish_frame`]). Closures past [`crate::FRAME_CLOSURES`] are not
+/// tracked, which bounds the list that tracks them, and keep the environment as any other
+/// holder of it does.
 pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sexp) -> R<Sexp> {
     let state = interp();
     let Some(owner) = state
@@ -617,36 +597,260 @@ pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sex
     }
     let env = pending_env(owner)?;
     let closure = make_closure(formals, body, srcref, env)?;
-    let state = interp();
-    state.pending_closures.push((owner as u32, closure));
-    state.frames[owner].unforced += 1;
+    interp().pending_closures.push((owner as u32, closure));
     Ok(closure)
 }
 
-/// The heap's resolver for a read of a pending environment's bindings
-/// (`heap::set_pending_resolver`): it reifies the live slot frame the environment belongs to.
-/// The read may come from anywhere, including native code between allocations it has not
-/// protected, so the frame reifies with collection suspended.
-pub unsafe fn resolve_pending_read(env: Sexp) {
-    let Some(owner) = interp()
-        .frames
-        .iter()
-        .rposition(|frame| frame.pending == env)
-    else {
-        panic!("the bindings of a slot frame's environment were read after the frame returned");
-    };
-    // Bindings read through an environment `parent.frame` handed out are the frame observed.
-    let cause = if interp().frames[owner].pending_shared {
-        Reify::Site("parent.frame")
-    } else {
-        Reify::Site("environment read")
-    };
+/// The heap's resolver for a use of the bindings of a live slot frame's environment
+/// (`heap::set_pending_resolver`). A lookup of one symbol moves that variable from its slot
+/// into a binding cell, a new binding only switches the frame's own code to reading by name,
+/// and a read of every binding moves all of them ([`lift_frame`]). The use may come from
+/// anywhere, including native code between allocations it has not protected, so the variables
+/// move with collection suspended.
+pub unsafe fn resolve_pending_access(env: Sexp, access: PendingAccess) {
+    let owner = pending_owner(env);
     let heap = crate::heap();
     heap.inhibit_collection();
-    let result = reify(owner, cause);
+    let result = match access {
+        PendingAccess::Symbol(symbol) => box_variable(owner, symbol),
+        PendingAccess::Insert => {
+            leave_slots(owner);
+            Ok(())
+        }
+        PendingAccess::All => lift_frame(owner, None),
+    };
     crate::heap().allow_collection();
     if let Err(unwind) = result {
-        panic!("a slot frame failed to make its environment: {unwind:?}");
+        panic!("a slot frame failed to move a variable into its environment: {unwind:?}");
+    }
+}
+
+/// Serves a lookup of `symbol` in the environment of the slot frame at `owner`, which holds no
+/// cell for it. A variable in a slot moves into a cell, and a dispatch variable of a method's
+/// frame gets one. A name the frame keeps a slot for but has not bound yet moves nothing, but
+/// the frame's own code reads and writes by name from here on all the same: a lookup that
+/// passed the frame may be remembered by its caller, and only a binding made by name tells it
+/// that the frame binds the name after all.
+unsafe fn box_variable(owner: usize, symbol: Sexp) -> R<()> {
+    let frame = &interp().frames[owner];
+    let names = frame
+        .function
+        .cdr()
+        .cdr()
+        .element(bytecode::SLOTS)
+        .element(1);
+    if let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) {
+        box_slots(owner, slot..slot + 1)?;
+        leave_slots(owner);
+        return Ok(());
+    }
+    let method_var = crate::method_vars(interp(), owner)
+        .iter()
+        .find(|&&(name, _)| name == symbol)
+        .copied();
+    if let Some((symbol, value)) = method_var {
+        let env = interp().frames[owner].pending;
+        crate::heap().define_locals_uncollected(
+            env,
+            &[Formal {
+                symbol,
+                value,
+                missing: false,
+            }],
+        )?;
+        leave_slots(owner);
+    }
+    Ok(())
+}
+
+/// Moves the variables in `slots` of the slot frame at `owner` into binding cells of its
+/// environment, each as [`bind_arguments`] and the assignments since would have bound it: a
+/// formal with its missing flag, an argument reference as the promise it stands for
+/// ([`detach_reference`]), since a cell can be read after the call that made the reference
+/// returns. A slot that binds nothing is skipped. The slots give up their references and read
+/// as unbound from here on. The caller has suspended collection.
+unsafe fn box_slots(owner: usize, slots: std::ops::Range<usize>) -> R<()> {
+    let frame = &interp().frames[owner];
+    let (function, header, missing, env) = (
+        frame.function,
+        frame.slots as usize,
+        frame.missing,
+        frame.pending,
+    );
+    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
+    // generic path would have bound a promise of the variable, forced by the builtin call, and
+    // `substitute` reads the variable from it. Constants bind as themselves either way.
+    let sources = if frame.inlined {
+        direct_sources(function, frame.call)?
+    } else {
+        None
+    };
+    let call = interp().frames[owner].call;
+    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let formals = values::length(function.car());
+    let unbound = unbound();
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
+    for slot in slots.clone() {
+        let register = bytecode::register_address(header + 1 + slot);
+        let value = *register;
+        if value == unbound {
+            continue;
+        }
+        if is_reference(value) {
+            detach_reference(value)?;
+        } else if value.kind() == SexpType::Dots {
+            let mut cell = value;
+            while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
+                if is_reference(cell.car()) {
+                    detach_reference(cell.car())?;
+                }
+                cell = cell.cdr();
+            }
+        } else if let Some((shape, sources)) = &sources
+            && slot < shape.formals as usize
+            && let Some(&source) = sources.get(slot)
+            && source >= 0
+        {
+            let mut argument = call.cdr();
+            for _ in 0..source {
+                argument = argument.cdr();
+            }
+            let expression = argument.car();
+            if expression.kind() == SexpType::Symbol {
+                let promise = forced_promise(expression, value)?;
+                promise.increment_refcount();
+                value.decrement_refcount();
+                *register = promise;
+            }
+        }
+        bindings.push(Formal {
+            symbol: names.element(slot),
+            value: *register,
+            missing: slot < formals.min(64) && missing & (1 << slot) != 0,
+        });
+    }
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    if syntax::testing::invariants_enabled() {
+        for binding in &bindings {
+            assert!(
+                crate::heap().own_cell(env, binding.symbol).is_none(),
+                "frame {owner}: {:?} is bound in a slot and in a cell at once",
+                values::symbol_name(binding.symbol)
+            );
+        }
+    }
+    crate::heap().define_locals_uncollected(env, &bindings)?;
+    activity::count_by(Counter::VariablesBoxed, bindings.len() as u64);
+    for slot in slots {
+        let register = bytecode::register_address(header + 1 + slot);
+        (*register).decrement_refcount();
+        *register = unbound;
+    }
+    Ok(())
+}
+
+/// Switches the slot frame at `owner` from its slots to its environment, once the environment
+/// binds a variable or is about to: the header register and [`Frame::env`] hold the
+/// environment from here on, so the frame's own code reads and writes by name, and each
+/// variable still in a slot moves into a cell the first time something reads it.
+unsafe fn leave_slots(owner: usize) {
+    let frame = &mut interp().frames[owner];
+    if frame.env != nil() {
+        return;
+    }
+    let env = frame.pending;
+    frame.env = env;
+    *bytecode::register_address(frame.slots as usize) = env;
+    env.set_gp_bits(gp::PENDING_FRAME, false);
+    env.set_gp_bits(gp::PARTIAL_FRAME, true);
+    activity::count(Counter::FramesReified);
+    if activity::enabled() {
+        // Whatever asked for the environment last is the likeliest reader of it.
+        if frame.reified_by == crate::NOT_REIFIED {
+            frame.reified_by = activity::label("environment read");
+        }
+        activity::count_reification(frame.reified_by);
+    }
+}
+
+/// Makes the environment of the slot frame at `index` an ordinary one that outlives the frame
+/// or is read as a whole: every variable still in a slot moves into a cell, a method's
+/// dispatch variables are bound, and the bindings are listed as a call that bound them in an
+/// environment from the start would list them, formals first. `cause` names what makes the
+/// environment outlive a frame that is returning, for the profile summary. The caller has
+/// suspended collection.
+unsafe fn lift_frame(index: usize, cause: Option<&'static str>) -> R<()> {
+    let frame = &mut interp().frames[index];
+    if activity::enabled()
+        && frame.env == nil()
+        && let Some(cause) = cause
+    {
+        frame.reified_by = activity::label(cause);
+    }
+    let (function, env) = (frame.function, frame.pending);
+    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let count = values::length(names);
+    box_slots(index, 0..count)?;
+    leave_slots(index);
+    let heap = crate::heap();
+    let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
+    for &(symbol, value) in &method_vars {
+        if heap.own_cell(env, symbol).is_none() {
+            heap.define_locals_uncollected(
+                env,
+                &[Formal {
+                    symbol,
+                    value,
+                    missing: false,
+                }],
+            )?;
+        }
+    }
+    let rank = |symbol: Sexp| {
+        (0..count)
+            .find(|&slot| names.element(slot) == symbol)
+            .map(|slot| slot as u32)
+    };
+    heap.order_frame(env, rank, values::length(function.car()) as u32);
+    env.set_gp_bits(gp::SLOT_FRAME, false);
+    let state = interp();
+    if !state.pending_closures.is_empty() {
+        state
+            .pending_closures
+            .retain(|&(owner, _)| owner as usize != index);
+    }
+    activity::count(Counter::FramesLifted);
+    if syntax::testing::invariants_enabled() {
+        check_lifted(index, env, &method_vars);
+    }
+    Ok(())
+}
+
+/// The cross-check behind `syntax::testing::enable_invariants()`: once a slot frame's
+/// environment has taken every variable, no slot binds one, the frame's own code reads the
+/// environment, and each of a method's dispatch variables is bound.
+unsafe fn check_lifted(index: usize, env: Sexp, method_vars: &[(Sexp, Sexp)]) {
+    let frame = &interp().frames[index];
+    let function = frame.function;
+    let count = values::length(function.cdr().cdr().element(bytecode::SLOTS).element(1));
+    for slot in 0..count {
+        assert!(
+            *bytecode::register_address(frame.slots as usize + 1 + slot) == unbound(),
+            "frame {index}: slot {slot} still binds a variable its environment took"
+        );
+    }
+    assert!(
+        *bytecode::register_address(frame.slots as usize) == env && frame.env == env,
+        "frame {index}: a slot frame's environment took its variables but is not its environment"
+    );
+    for &(symbol, _) in method_vars {
+        assert!(
+            crate::heap().own_cell(env, symbol).is_some(),
+            "frame {index}: a method's environment took its variables without {:?}",
+            values::symbol_name(symbol)
+        );
     }
 }
 
@@ -1091,17 +1295,11 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
         )
     } else {
         let (owner, _) = reference_target(reference);
-        let expression = reference_code(reference).unwrap_or(symbol);
-        let frame = &interp().frames[owner];
-        if frame.env != nil() {
-            (frame.env, expression)
-        } else {
-            (pending_env(owner)?, expression)
-        }
+        (
+            pending_env(owner)?,
+            reference_code(reference).unwrap_or(symbol),
+        )
     };
-    // The reference becomes a promise over `env`, which may be a pending environment however
-    // the reference was made.
-    count_unforced(env);
     activity::count(Counter::PromisesCreated);
     Ok(if expression.kind() == SexpType::Bytecode {
         [unbound(), bytecode::source_of(expression), env, expression]
@@ -1110,34 +1308,44 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
     })
 }
 
-/// The pending environment of the slot frame at `owner`, made bare on first use: the value that
-/// stands for the frame's environment until something reads it, which [`resolved_env`] then
-/// makes real.
+/// The environment that stands for the slot frame at `owner`, made on first use: an environment
+/// enclosed by the closure's that binds nothing, because the frame's variables stay in their
+/// slots. Handing it out, comparing it and naming it in a promise or a closure cost nothing
+/// more. A lookup through it moves the one variable it asks for into a cell
+/// ([`resolve_pending_access`]), and the frame's own code reads by name from then on.
 pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
-    let env = interp().frames[owner].pending;
-    if env != nil() {
-        return Ok(env);
+    let frame = &interp().frames[owner];
+    if frame.pending != nil() {
+        return Ok(frame.pending);
     }
-    let function = interp().frames[owner].function;
-    let env = frame_environment(function, function.car())?;
-    env.set_gp_bits(gp::PENDING_FRAME, true);
+    let function = frame.function;
+    let heap = crate::heap();
+    heap.reserve(ENVIRONMENT_BYTES, &[function]);
+    let env = heap.alloc_environment_uncollected(function.tag(), 0)?;
+    // Compiled code runs on the frame for as long as the environment stands for it.
+    env.set_gp_bits(
+        gp::FUNCTION_FRAME | gp::PENDING_FRAME | gp::COMPILED_FRAME,
+        true,
+    );
+    // A lookup of any other name passes the environment without asking the frame.
+    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    heap.expect_bindings(
+        env,
+        (0..values::length(names)).map(|slot| names.element(slot)),
+    );
+    heap.expect_bindings(
+        env,
+        crate::method_vars(interp(), owner)
+            .iter()
+            .map(|&(symbol, _)| symbol),
+    );
     interp().frames[owner].pending = env;
+    activity::count(Counter::FrameEnvironments);
     Ok(env)
 }
 
-/// `value`, or the environment it stands for when it is a slot frame's pending one: what a
-/// binding gets for a value that may be pending (a method's `.GenericCallEnv`).
-pub unsafe fn resolved_value(value: Sexp) -> R<Sexp> {
-    if value.kind() == SexpType::Environment {
-        resolved_env(value)
-    } else {
-        Ok(value)
-    }
-}
-
-/// The environment of an unforced `promise`, made first when it is a slot frame's pending one
-/// or the frame an argument reference names. Anything that reads a promise's environment other
-/// than to force it reads it here.
+/// The environment of an unforced `promise`: for an argument reference, that of the frame it
+/// names. Anything that reads a promise's environment other than to force it reads it here.
 pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::ARGUMENT_REFERENCE)
         && promise.car() == unbound()
@@ -1148,16 +1356,7 @@ pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
             Reify::Site("promise environment"),
         );
     }
-    resolved_env(promise.tag())
-}
-
-/// `env`, made first when it is a slot frame's pending environment, which a promise's
-/// environment may be (see [`promise_env`]).
-pub unsafe fn resolved_env(env: Sexp) -> R<Sexp> {
-    if !env.has_gp(gp::PENDING_FRAME) {
-        return Ok(env);
-    }
-    frame_env(pending_owner(env), Reify::Site("resolved environment"))
+    Ok(promise.tag())
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
@@ -2145,7 +2344,7 @@ unsafe fn written_in_typed_code(promise: Sexp) -> bool {
         return false;
     }
     let env = promise.tag();
-    if env.has_gp(gp::PENDING_FRAME) {
+    if env.has_gp(gp::SLOT_FRAME) {
         return false;
     }
     interp()
@@ -2283,7 +2482,7 @@ pub unsafe fn bind_arguments(
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
-                heap.define(env, symbol, resolved_value(value)?)?;
+                heap.define(env, symbol, value)?;
             }
         }
     }
@@ -2752,20 +2951,28 @@ pub unsafe fn run_inlined(
     pop_frame(function, depth, result)
 }
 
-/// The environment of the frame at `index`, made from its slots first if it is a slot frame
-/// that has none yet. Everything that hands a frame's environment to R code or native code
-/// reads it here.
+/// The environment of the frame at `index`: for a slot frame, the one that stands for it
+/// ([`pending_env`]), which binds a variable only once something reads it by name. Everything
+/// that hands a frame's environment to R code or native code reads it here.
 #[inline]
 pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.env != nil() || frame.slots == crate::NO_SLOTS {
         return Ok(frame.env);
     }
-    reify(index, cause)
+    if activity::enabled() {
+        let asker = activity::label(match cause {
+            Reify::Builtin(op) => builtin_def(op)?.name,
+            Reify::Site(name) => name,
+        });
+        interp().frames[index].reified_by = asker;
+    }
+    pending_env(index)
 }
 
 /// What asked for a slot frame's environment, which the profile summary reports as the reason
-/// a package call's frame was reified.
+/// a package call's frame came to read its variables by name, when a lookup through the
+/// environment follows.
 #[derive(Clone, Copy)]
 pub enum Reify {
     /// The builtin `op`, through [`crate::builtins::Call::env`].
@@ -2794,12 +3001,15 @@ pub const OBSERVING_REASONS: [&str; 17] = [
     "mget",
     "native code",
     "as.environment",
-    "environment outliving the frame",
+    PROMISE_OR_ENVIRONMENT_OUTLIVES,
     ".External2",
 ];
 
-/// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
-/// has a `...` formal.
+const PROMISE_OR_ENVIRONMENT_OUTLIVES: &str = "promise or environment outliving the frame";
+const CLOSURE_OUTLIVES: &str = "closure outliving the frame";
+
+/// The `...` slot of the frame at `index`, when it is a slot frame that keeps every variable in
+/// its slot and has a `...` formal.
 pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
     let frame = interp().frames.get(index)?;
     if frame.env != nil() || frame.slots == crate::NO_SLOTS {
@@ -2820,7 +3030,7 @@ pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
 }
 
 /// What the slot of the formal `symbol` holds in the frame at `index`, and whether the formal is
-/// missing, when it is a slot frame without an environment that has such a formal.
+/// missing, when it is a slot frame that keeps every variable in its slot and has such a formal.
 pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
     let frame = interp().frames.get(index)?;
     if frame.env != nil() || frame.slots == crate::NO_SLOTS {
@@ -2841,8 +3051,8 @@ pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
 }
 
 /// [`slot_formal`] for several formals in one walk of the formals, so `symbols` must be listed
-/// in the order the closure declares them. `None` when the frame is no slot frame without an
-/// environment, or when a symbol is not a formal at its place in that order.
+/// in the order the closure declares them. `None` when the frame is no slot frame that keeps
+/// every variable in its slot, or when a symbol is not a formal at its place in that order.
 pub unsafe fn slot_formals<const N: usize>(
     index: usize,
     symbols: [Sexp; N],
@@ -2889,25 +3099,6 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     frame_env(frame.caller as usize, cause)
 }
 
-/// The environment the frame at `index` was called from, as `parent.frame` hands it out: a
-/// slot frame that has none gives its pending environment instead of reifying, and reifies
-/// only once code reads its bindings ([`resolve_pending_read`]) or keeps the environment past
-/// the frame's return ([`finish_frame`]).
-pub unsafe fn frame_sys_parent_pending(index: usize) -> R<Sexp> {
-    let frame = &interp().frames[index];
-    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
-        return Ok(frame.sys_parent);
-    }
-    let owner = frame.caller as usize;
-    let target = &interp().frames[owner];
-    if target.env != nil() || target.slots == crate::NO_SLOTS {
-        return Ok(target.env);
-    }
-    let env = pending_env(owner)?;
-    interp().frames[owner].pending_shared = true;
-    Ok(env)
-}
-
 /// The environment of the slot frame whose header register is `header`, which must be live.
 pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
     let frames = &interp().frames;
@@ -2920,171 +3111,14 @@ pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
     frame_env(index, cause)
 }
 
-/// The environment that stands for the slot frame whose header register is `header` while it
-/// has none: the pending one its closures hold, or `nil` when it made none.
+/// The environment that stands for the slot frame whose header register is `header`, or `nil`
+/// when nothing has asked for it yet.
 pub unsafe fn pending_env_of(header: usize) -> Sexp {
     let frames = &interp().frames;
     frames
         .iter()
         .rposition(|frame| frame.slots as usize == header)
         .map_or(nil(), |index| frames[index].pending)
-}
-
-/// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
-/// first and with their missing flags, exactly as [`bind_arguments`] and the assignments since
-/// would have bound them. The environment is the frame's from then on, so the slots give up
-/// their references and nothing reads them again.
-#[cold]
-#[inline(never)]
-unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
-    if activity::enabled() {
-        let name = match cause {
-            Reify::Builtin(op) => builtin_def(op)?.name,
-            Reify::Site(name) => name,
-        };
-        let reason = activity::label(name);
-        activity::count_reification(reason);
-        interp().frames[index].reified_by = reason;
-    }
-    materialize_references(index)?;
-    let frame = &interp().frames[index];
-    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
-    // generic path would have bound a promise of the variable, forced by the builtin call, and
-    // `substitute` reads the variable from it. Constants bind as themselves either way.
-    if frame.inlined
-        && let Some((shape, sources)) = direct_sources(frame.function, frame.call)?
-    {
-        let header = frame.slots as usize;
-        let call = frame.call;
-        for (slot, &source) in sources.iter().take(shape.formals as usize).enumerate() {
-            if source < 0 {
-                continue;
-            }
-            let mut cell = call.cdr();
-            for _ in 0..source {
-                cell = cell.cdr();
-            }
-            let expression = cell.car();
-            if expression.kind() != SexpType::Symbol {
-                continue;
-            }
-            let register = bytecode::register_address(header + 1 + slot);
-            let promise = forced_promise(expression, *register)?;
-            promise.increment_refcount();
-            (*register).decrement_refcount();
-            *register = promise;
-        }
-    }
-    let frame = &interp().frames[index];
-    let (function, header, missing) = (frame.function, frame.slots as usize, frame.missing);
-    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
-    let count = values::length(names);
-    let formals = function.car();
-    let pending = frame.pending;
-    let env = if pending == nil() {
-        frame_environment(function, formals)?
-    } else {
-        pending.set_gp_bits(gp::PENDING_FRAME, false);
-        pending
-    };
-    let registers = bytecode::register_address(header);
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        let index = bindings.len();
-        bindings.push(Formal {
-            symbol: formal.tag(),
-            value: *registers.add(1 + index),
-            missing: missing & (1 << index) != 0,
-        });
-        formal = formal.cdr();
-    }
-    let heap = crate::heap();
-    heap.define_formals_uncollected(env, &bindings)?;
-    heap.mark_frame_formals(env);
-    if pending == nil() {
-        let locals: SmallVec<[Formal; 12]> = (bindings.len()..count)
-            .filter_map(|slot| {
-                let value = *registers.add(1 + slot);
-                (value != unbound()).then(|| Formal {
-                    symbol: names.element(slot),
-                    value,
-                    missing: false,
-                })
-            })
-            .collect();
-        heap.define_locals_uncollected(env, &locals)?;
-    } else {
-        for slot in bindings.len()..count {
-            let value = *registers.add(1 + slot);
-            if value != unbound() {
-                heap.define(env, names.element(slot), value)?;
-            }
-        }
-    }
-    let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
-    for &(symbol, value) in &method_vars {
-        if heap.frame_cell(env, symbol).is_none() {
-            heap.define(env, symbol, resolved_value(value)?)?;
-        }
-    }
-    let nil = nil();
-    for slot in 0..count {
-        (*registers.add(1 + slot)).decrement_refcount();
-        *registers.add(1 + slot) = nil;
-    }
-    env.set_gp_bits(gp::COMPILED_FRAME, true);
-    *registers = env;
-    let state = interp();
-    state.frames[index].env = env;
-    if !state.pending_closures.is_empty() {
-        state
-            .pending_closures
-            .retain(|&(owner, _)| owner as usize != index);
-    }
-    activity::count(Counter::FramesReified);
-    if syntax::testing::invariants_enabled() {
-        check_reified(index, env, &bindings, &method_vars);
-    }
-    Ok(env)
-}
-
-/// The cross-check behind `syntax::testing::enable_invariants()`: the environment made from a
-/// slot frame binds each formal as the heap-frame path would have, to the same value with the
-/// same missing flag, and binds nothing but its body's locals and, for a method, its dispatch
-/// variables.
-unsafe fn check_reified(
-    index: usize,
-    env: Sexp,
-    bindings: &[Formal],
-    method_vars: &[(Sexp, Sexp)],
-) {
-    let heap = crate::heap();
-    for binding in bindings {
-        let Some(cell) = heap.frame_cell(env, binding.symbol) else {
-            panic!(
-                "frame {index}: a reified slot frame lost formal {:?}",
-                values::symbol_name(binding.symbol)
-            );
-        };
-        assert!(
-            cell.cdr() == binding.value && cell.has_gp(gp::BINDING_MISSING) == binding.missing,
-            "frame {index}: a reified slot frame binds formal {:?} differently",
-            values::symbol_name(binding.symbol)
-        );
-    }
-    let function = interp().frames[index].function;
-    let locals = bytecode::local_symbols(bytecode::source_of_body(function.cdr()), function.car());
-    let Some(locals) = locals else {
-        panic!("frame {index}: a slot frame whose body has no known local symbols");
-    };
-    for symbol in crate::envir::env_symbols(env, true, false) {
-        assert!(
-            locals.contains(&symbol) || method_vars.iter().any(|&(name, _)| name == symbol),
-            "frame {index}: a reified slot frame binds {:?}, which its body cannot bind",
-            values::symbol_name(symbol)
-        );
-    }
 }
 
 /// A fresh, rooted function frame for a call of `function`, after one collection check that
@@ -3550,109 +3584,121 @@ unsafe fn finish_frame(
             result,
         )
     };
-    // Promises over the slots that may still be forced need the environment once the slots are
-    // gone, and so does anything that kept the pending environment itself.
-    let frame = &state.frames[depth - 1];
-    if frame.env == nil() && frame.pending != nil() {
-        let (closures, dying) = if frame.unforced > 0 {
-            pending_closures_dying(depth - 1, &result)
-        } else {
-            (0, 0)
-        };
-        let frame = &interp().frames[depth - 1];
-        if closures > dying {
-            reify(depth - 1, Reify::Site("closure outliving the frame"))?;
-        } else if frame.unforced > unforced_defaults(frame) + closures {
-            reify(depth - 1, Reify::Site("promise outliving the frame"))?;
-        } else if pending_env_kept(depth - 1, &result) {
-            reify(depth - 1, Reify::Site("environment outliving the frame"))?;
-        } else if closures > 0 {
-            interp()
-                .pending_closures
-                .retain(|&(owner, _)| owner as usize != depth - 1);
+    let env = state.frames[depth - 1].pending;
+    if env == nil() {
+        return result;
+    }
+    if env.has_gp(gp::SLOT_FRAME) {
+        match outliving_cause(depth - 1, &result) {
+            Some(cause) => {
+                // The variables move while nothing else can run, as in a lookup's move.
+                crate::heap().inhibit_collection();
+                let lifted = lift_frame(depth - 1, Some(cause));
+                crate::heap().allow_collection();
+                lifted?;
+            }
+            None => {
+                let state = interp();
+                if !state.pending_closures.is_empty() {
+                    state
+                        .pending_closures
+                        .retain(|&(owner, _)| owner as usize != depth - 1);
+                }
+                // The environment dies here, so the frame has none left for the pop to release.
+                state.frames[depth - 1].env = nil();
+                if let Ok(value) = result {
+                    crate::heap().discard_frame(env, value);
+                }
+            }
         }
     }
+    // The body has returned, so no register of compiled code holds a value of the frame.
+    env.set_gp_bits(gp::COMPILED_FRAME, false);
     result
 }
 
-/// Whether something other than what dies with the slot frame at `index` holds its pending
-/// environment as the frame returns `result`: the counted references to it must all come from
-/// the frame's dying closures and the unforced default promises in its slots, the environment
-/// must not be the value returned, and `R_PreserveObject` must not hold it. An error
-/// return keeps it, since the unwind may carry it.
-unsafe fn pending_env_kept(index: usize, result: &R<Sexp>) -> bool {
+/// What keeps the environment of the slot frame at `index` alive past the frame as it returns
+/// `result`, or `None` when everything that names the environment dies with the frame, so the
+/// variables still in slots never need a cell.
+///
+/// The environment's counted references decide. Every promise and closure over it counts one,
+/// so do a binding, a list element or an enclosure that holds it, and a forced promise has
+/// given its count back. The references that die with the frame are known: an unforced promise
+/// that only a slot or a cell of the frame holds (a default argument nobody read), and a
+/// closure the frame made that only its slots and cells hold. Any count beyond those is a
+/// holder that outlives the frame. Three holders are not counted and are checked by hand: the
+/// value returned, `R_PreserveObject`, and a global calling handler. An error return keeps the
+/// environment, since the unwind may carry it or anything made over it.
+unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<&'static str> {
     let Ok(value) = *result else {
-        return true;
+        return Some(PROMISE_OR_ENVIRONMENT_OUTLIVES);
     };
     let state = interp();
     let frame = &state.frames[index];
-    let pending = frame.pending;
-    if value == pending || crate::heap().is_preserved(pending) {
-        return true;
+    let env = frame.pending;
+    let heap = crate::heap();
+    if value == env || heap.is_preserved(env) {
+        return Some(PROMISE_OR_ENVIRONMENT_OUTLIVES);
     }
-    let closures = state
-        .pending_closures
-        .iter()
-        .filter(|&&(owner, closure)| owner as usize == index && closure.tag() == pending)
-        .count() as u32;
-    u32::from(pending.refcount()) > unforced_defaults(frame) + closures
-}
-
-/// How many closures the slot frame at `index` made over its pending environment, and how many
-/// of them die with it as it returns `result`. One dies when nothing counts a reference to it
-/// but the frame's slots, it
-/// is not the value returned, and no root the counts do not see holds it (`R_PreserveObject`
-/// or a global calling handler). A closure whose environment was replaced no longer needs the
-/// frame either. An error return keeps every closure, since the unwind may carry one.
-unsafe fn pending_closures_dying(index: usize, result: &R<Sexp>) -> (u32, u32) {
-    let state = interp();
-    if state.pending_closures.is_empty() {
-        return (0, 0);
-    }
-    let closures = state
-        .pending_closures
-        .iter()
-        .filter(|&&(owner, _)| owner as usize == index)
-        .count() as u32;
-    let Ok(value) = *result else {
-        return (closures, 0);
-    };
-    let frame = &state.frames[index];
-    let (pending, header) = (frame.pending, frame.slots as usize);
     let names = frame
         .function
         .cdr()
         .cdr()
         .element(bytecode::SLOTS)
         .element(1);
-    let count = values::length(names);
-    let heap = crate::heap();
+    let slots = std::slice::from_raw_parts(
+        bytecode::register_address(frame.slots as usize + 1),
+        values::length(names),
+    );
+    // Only an environment that took a variable has cells to look in.
+    let cells = || {
+        env.has_gp(gp::PARTIAL_FRAME)
+            .then(|| heap.own_cells(env).map(|cell| cell.cdr()))
+            .into_iter()
+            .flatten()
+    };
     let mut dying = 0;
-    for &(owner, closure) in &state.pending_closures {
-        if owner as usize != index {
+    // Closures defined while the frame ran on its slots, then those defined by name since.
+    let in_slots = state
+        .pending_closures
+        .iter()
+        .filter(|&&(owner, _)| owner as usize == index)
+        .map(|&(_, closure)| closure);
+    let by_name = state
+        .frame_closures
+        .get(frame.closures as usize..)
+        .unwrap_or(&[])
+        .iter()
+        .copied();
+    for closure in in_slots.chain(by_name) {
+        // A closure whose environment was replaced no longer names the frame's.
+        if closure.tag() != env {
             continue;
         }
-        if closure.tag() != pending {
-            dying += 1;
-            continue;
-        }
-        if closure == value || heap.is_preserved(closure) {
-            continue;
-        }
-        let held = (0..count)
-            .filter(|&slot| *bytecode::register_address(header + 1 + slot) == closure)
-            .count();
-        if closure.refcount() as usize == held
-            && !crate::conditions::handlers_hold(&state.global_handlers, closure)
+        let held = slots.iter().filter(|&&slot| slot == closure).count()
+            + cells().filter(|&bound| bound == closure).count();
+        if closure == value
+            || closure.refcount() as usize != held
+            || heap.is_preserved(closure)
+            || crate::conditions::handlers_hold(&state.global_handlers, closure)
         {
-            dying += 1;
+            return Some(CLOSURE_OUTLIVES);
         }
+        dying += 1;
     }
-    (closures, dying)
+    let dies = |bound: Sexp| {
+        bound.kind() == SexpType::Promise
+            && bound.car() == unbound()
+            && bound.tag() == env
+            && bound.refcount() == 1
+    };
+    dying += slots.iter().filter(|&&slot| dies(slot)).count();
+    dying += cells().filter(|&bound| dies(bound)).count();
+    (env.refcount() as usize > dying).then_some(PROMISE_OR_ENVIRONMENT_OUTLIVES)
 }
 
-/// A slot frame that never made its environment gives up its slots' references, and the
-/// register file drops the window, on every way out.
+/// A slot frame gives up the references of the variables still in its slots, and the register
+/// file drops the window, on every way out.
 struct SlotWindow(u32);
 
 impl Drop for SlotWindow {
@@ -3662,17 +3708,16 @@ impl Drop for SlotWindow {
     }
 }
 
-/// Releases the registers of the slot frame at `header`, and its slots' references when it
-/// never made its environment.
+/// Releases the registers of the slot frame at `header` and the references of the variables
+/// still in its slots. A slot whose variable moved into a cell reads as unbound and gives up
+/// nothing.
 unsafe fn release_window(header: u32) {
     if header == crate::NO_SLOTS {
         return;
     }
     let header = header as usize;
     let registers = &mut interp().bytecode.registers;
-    if *registers.get_unchecked(header) == nil()
-        && let Some(slots) = registers.get_mut(header + 1..)
-    {
+    if let Some(slots) = registers.get_mut(header + 1..) {
         crate::heap().release_slots(slots);
     }
     registers.truncate(header);
@@ -3718,10 +3763,8 @@ unsafe fn push_frame(
         missing,
         caller,
         pending: nil(),
-        unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
-        pending_shared: false,
         handle_mark,
         previous_owner,
     });
@@ -3782,10 +3825,10 @@ unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
 }
 
 /// Counts a call to a closure of a package namespace, and whether it skipped the generic call
-/// protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that never
-/// made its environment, and no argument was a promise. A call that did not is counted under
-/// the reason: what reified its frame, a frame that had an environment from the start, or the
-/// kind of its first promise argument's code.
+/// protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that kept
+/// every variable in its slot, and no argument was a promise. A call that did not is counted
+/// under the reason: what made the frame read its variables by name, a frame that had an
+/// environment from the start, or the kind of its first promise argument's code.
 #[cold]
 pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, args: &[Arg]) {
     let enclosure = function.tag();
@@ -3795,7 +3838,7 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
     activity::count(Counter::PackageCalls);
     let reason = match frame {
         Some(frame) if frame.slots == crate::NO_SLOTS => Some("frame with an environment"),
-        Some(frame) if frame.env != nil() => {
+        Some(frame) if frame.pending != nil() && !frame.pending.has_gp(gp::PENDING_FRAME) => {
             let reason = activity::label_name(frame.reified_by);
             if reason
                 .as_deref()
@@ -3848,29 +3891,6 @@ pub(crate) unsafe fn default_promises(
         );
     }
     Ok(())
-}
-
-/// How many of the frame's unforced promises are its own defaults that nothing but their slot
-/// holds. They die with the slots, so they need no environment once the frame returns.
-unsafe fn unforced_defaults(frame: &Frame) -> u32 {
-    let mut count = 0;
-    let mut formal = frame.function.car();
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist && frame.missing >> index != 0 {
-        if frame.missing & (1 << index) != 0 {
-            let value = *bytecode::register_address(frame.slots as usize + 1 + index);
-            if value.kind() == SexpType::Promise
-                && value.car() == unbound()
-                && value.tag() == frame.pending
-                && value.refcount() == 1
-            {
-                count += 1;
-            }
-        }
-        formal = formal.cdr();
-        index += 1;
-    }
-    count
 }
 
 /// The stack a closure body may use before the interpreter moves to a fresh segment.
@@ -4020,17 +4040,15 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     // environment; only an expression that did not compile needs one.
     let (function, header) = (frame.function, frame.slots);
     // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
-    // the frame's pending environment, which reifies only if the code reads a binding.
+    // the frame's environment, which takes only the variables that code reads.
     let env = if frame.env != nil()
         || expressions
             .iter()
             .all(|expression| expression.kind() == SexpType::Bytecode)
     {
         frame.env
-    } else if frame.slots == crate::NO_SLOTS {
-        frame_env(depth - 1, Reify::Site("on.exit"))?
     } else {
-        pending_env(depth - 1)?
+        frame_env(depth - 1, Reify::Site("on.exit"))?
     };
     let visible = interp().visible;
     let mark = crate::heap().handle_mark();
@@ -5086,7 +5104,7 @@ unsafe fn reachable_loop(env: Sexp) -> R<()> {
         context.env == env && (context.depth == depth || !skips_loop_context(context.body, true))
     });
     let in_closure_body = state.frames.iter().enumerate().any(|(index, frame)| {
-        frame.env == env
+        frame.owns(env)
             && frame.function.kind() == SexpType::Closure
             && (index + 1 == depth || has_loop_context(bytecode::source_body(frame.function)))
     });
@@ -5850,10 +5868,8 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         missing: 0,
         caller: crate::NO_SLOTS,
         pending: nil(),
-        unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
-        pending_shared: false,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
     });
@@ -5899,7 +5915,7 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
         caller_call,
         function,
         call.args,
-        frame_sys_parent_pending(caller)?,
+        frame_sys_parent(caller, Reify::Site("parent.frame"))?,
     )
 }
 
@@ -6454,7 +6470,7 @@ pub unsafe fn reuse_permitted(env: Sexp, value: Sexp) -> bool {
     let innermost = interp().frames.last();
     // `eval()` pushes a frame on the env it evaluates in whose function is the builtin.
     innermost.is_some_and(|frame| {
-        frame.env == env
+        frame.owns(env)
             && frame.function.kind() == SexpType::Closure
             && bytecode::is_compiled(frame.function)
     }) || !bytecode::registers_hold(value)

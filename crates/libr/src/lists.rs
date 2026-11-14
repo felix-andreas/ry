@@ -569,13 +569,6 @@ unsafe fn set_promise_source(
 ) {
     enter(|| {
         checked_kind(object, SexpType::Promise, name)?;
-        // A promise over a slot frame's pending environment would have to be counted as that
-        // frame's unforced promise, so it gets the frame's real environment.
-        let value = if value.kind() == SexpType::Environment {
-            interp::eval::resolved_env(value)?
-        } else {
-            value
-        };
         let heap = &mut runtime().heap;
         setter(heap, object, value);
         let nil = heap.known().nil;

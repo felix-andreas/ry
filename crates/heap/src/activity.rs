@@ -123,7 +123,10 @@ pub enum Counter {
     JitDeoptimizations,
     JitEntries,
     LookupMisses,
+    FrameEnvironments,
     FramesReified,
+    VariablesBoxed,
+    FramesLifted,
     PackageCalls,
     PackageCallsDirect,
     PackageCallsObserved,
@@ -132,7 +135,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 23] = [
+    pub const ALL: [Counter; 26] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -150,7 +153,10 @@ impl Counter {
         Counter::JitDeoptimizations,
         Counter::JitEntries,
         Counter::LookupMisses,
+        Counter::FrameEnvironments,
         Counter::FramesReified,
+        Counter::VariablesBoxed,
+        Counter::FramesLifted,
         Counter::PackageCalls,
         Counter::PackageCallsDirect,
         Counter::PackageCallsObserved,
@@ -177,13 +183,20 @@ impl Counter {
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
-            Counter::FramesReified => "slot frames turned into environments",
+            Counter::FrameEnvironments => "slot frames that made an environment to stand for them",
+            Counter::FramesReified => {
+                "slot frames that switched to reading their variables by name"
+            }
+            Counter::VariablesBoxed => "variables moved from a slot into a binding cell",
+            Counter::FramesLifted => {
+                "slot frames whose environment took every variable, to be listed or to outlive them"
+            }
             Counter::PackageCalls => "calls to closures of package namespaces",
             Counter::PackageCallsDirect => {
                 "package calls that ran in slots, with no argument promise and no environment"
             }
             Counter::PackageCallsObserved => {
-                "package calls whose frame was reified because code observed its environment"
+                "package calls that read variables by name because code observed the environment"
             }
             Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
             Counter::DoCallsInlined => "do.call calls run without its body",
@@ -320,6 +333,14 @@ impl Drop for Scope {
 pub fn count(counter: Counter) {
     if enabled() {
         bump(&COUNTERS[counter as usize]);
+    }
+}
+
+/// [`count`] for `events` events at once.
+pub fn count_by(counter: Counter, events: u64) {
+    if enabled() {
+        let slot = &COUNTERS[counter as usize];
+        slot.store(slot.load(Ordering::Relaxed) + events, Ordering::Relaxed);
     }
 }
 
@@ -477,7 +498,6 @@ pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>, bodies: &mut V
         bodies.push(FRAME_BODIES[index].load(Ordering::Relaxed));
     }
 }
-
 
 /// Exact allocation counts by object kind, and the call paths of a sample of them, while a
 /// profile summary is collected with `RY_ALLOC_SITES` set to the sampling period.

@@ -1255,10 +1255,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             }
             match pending_enclosure(value, &prefixes) {
                 Some(enclosure) => (value, enclosure),
-                None => {
-                    let env = eval::resolved_value(value)?;
-                    (env, env)
-                }
+                None => (value, value),
             }
         }
     };
@@ -1351,7 +1348,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             }
             if let Some(arg) = args.iter_mut().find(|arg| arg.value == *value) {
                 arg.value = eval::make_promise(symbol, method_env)?;
-                if method_env.has_gp(gp::PENDING_FRAME) {
+                if method_env.has_gp(gp::SLOT_FRAME) {
                     arg.value.increment_refcount();
                     made.0.push(arg.value);
                 }
@@ -1429,44 +1426,16 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         _ => apply_next_primitive(method, &args, frame_call, generic_symbol, sys_parent),
     };
     interp().slot_owner = previous_owner;
-    if let Ok(value) = result
-        && interp().frames[position].env == nil()
-    {
-        let dead = made.dead(value);
-        let frame = &mut interp().frames[position];
-        frame.unforced = frame.unforced.saturating_sub(dead);
-    }
     result
 }
 
-/// The promises NextMethod made over the pending environment of a method that runs in slots,
-/// each held by one counted reference of its own for the length of the next method's call.
-/// The method's frame counts them among the promises that may still be forced, and as it
-/// returns it makes its environment for any such promise that outlives it. A promise the next
-/// method neither forced nor kept dies with the call, which only this reference shows: once
-/// the callee's slots let it go, a promise nothing else holds gives up its environment and
-/// looks like a forced one.
+/// The promises NextMethod made over the environment of a method that runs in slots, each held
+/// by one counted reference of its own for the length of the next method's call. Every such
+/// promise counts a reference on the environment until it is forced or released, and the
+/// method's frame keeps its environment past its return while a count it cannot explain
+/// remains. A next method that binds the promise nowhere (a primitive) would leave it
+/// unreleased, so this list releases the ones nothing else holds when the call is over.
 struct MadePromises(SmallVec<[Sexp; 4]>);
-
-impl MadePromises {
-    /// How many of the promises the next method left unforced and nothing but this list holds,
-    /// as it returns `value`: a preserved promise, one a global calling handler holds and the
-    /// value itself count as held, since the counts do not see those roots.
-    unsafe fn dead(&self, value: Sexp) -> u32 {
-        let heap = crate::heap();
-        let handlers = &interp().global_handlers;
-        self.0
-            .iter()
-            .filter(|&&promise| {
-                promise.refcount() == 1
-                    && promise.car() == unbound()
-                    && promise != value
-                    && !heap.is_preserved(promise)
-                    && !crate::conditions::handlers_hold(handlers, promise)
-            })
-            .count() as u32
-    }
-}
 
 impl Drop for MadePromises {
     fn drop(&mut self) {
@@ -1967,10 +1936,8 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         missing: 0,
         caller: crate::NO_SLOTS,
         pending: nil(),
-        unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
-        pending_shared: false,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
     });

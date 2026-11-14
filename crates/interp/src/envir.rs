@@ -375,7 +375,7 @@ unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
             return Ok(global_env());
         };
         if n == 1 {
-            return crate::eval::frame_sys_parent_pending(caller);
+            return crate::eval::frame_sys_parent(caller, crate::eval::Reify::Site("parent.frame"));
         }
         n -= 1;
         index = caller;

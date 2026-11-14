@@ -63,12 +63,12 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
-    thin_vec::ThinVec,
     std::{
         hash::{Hash, Hasher},
         ops::Range,
         rc::Rc,
     },
+    thin_vec::ThinVec,
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -6714,9 +6714,14 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
         return Err(unwind);
     };
     let loops = machine.code.cdr().element(LOOPS);
+    // A jump raised by name names the environment that stands for a frame still in its slots.
+    let env = match machine.env() {
+        env if env == nil() => eval::pending_env_of(machine.header),
+        env => env,
+    };
     let target = match jump {
-        Jump::Break { env: target } if target == machine.env() => loop_target(loops, pc, true),
-        Jump::Next { env: target } if target == machine.env() => loop_target(loops, pc, false),
+        Jump::Break { env: target } if target == env => loop_target(loops, pc, true),
+        Jump::Next { env: target } if target == env => loop_target(loops, pc, false),
         _ => None,
     };
     match target {
@@ -7366,7 +7371,10 @@ unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> 
         }
         let returned = eval::leave(resume.depth as usize, result);
         let interp = &mut *state.interp;
-        interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+        interp
+            .bytecode
+            .loop_states
+            .truncate(resume.loop_mark as usize);
         let machine = &mut *state.machine;
         machine.function = resume.function;
         machine.code = resume.code;
@@ -7712,9 +7720,8 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         || (*row).formals != function.car()
         || (*row).body != body
         || (*row).flags & PLAN_FAST == 0
-        || function.has_gp(
-            gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY,
-        )
+        || function
+            .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
         || function == interp.namespace_loader
         || function == interp.do_call
     {
@@ -7728,8 +7735,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     if depth as u32 >= interp.max_depth
         || end > interp.bytecode.registers.capacity()
         || (loops != 0
-            && interp.bytecode.loop_states.len() + loops
-                > interp.bytecode.loop_states.capacity())
+            && interp.bytecode.loop_states.len() + loops > interp.bytecode.loop_states.capacity())
     {
         return None;
     }
@@ -7762,7 +7768,11 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     let owner = interp.slot_owner as usize;
     let compiled = pool_constant(state, call_index + 1);
     let call = pool_constant(state, call_index);
-    let mut cell = if compiled == nil { call.cdr() } else { compiled };
+    let mut cell = if compiled == nil {
+        call.cdr()
+    } else {
+        compiled
+    };
     for index in 0..count {
         let expression = cell.car();
         let kind = *kinds.add(index);
@@ -7881,10 +7891,8 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         missing,
         caller,
         pending: nil,
-        unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
-        pending_shared: false,
         handle_mark: (*heap).handle_mark() as u32,
         previous_owner: caller,
     };
@@ -8002,7 +8010,10 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     let Some(resume) = interp.bytecode.resumes.pop() else {
         unreachable!("the dispatch loop's resume records are above its base");
     };
-    interp.bytecode.loop_states.truncate(resume.loop_mark as usize);
+    interp
+        .bytecode
+        .loop_states
+        .truncate(resume.loop_mark as usize);
     let machine = &mut *state.machine;
     machine.function = resume.function;
     machine.code = resume.code;
@@ -9292,8 +9303,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
 #[inline(always)]
 unsafe fn in_place(state: &Activation<'_, '_>, function: Sexp) -> bool {
     let loops = &(*state.interp).bytecode.loop_states;
-    state.resume_base != NO_RESUMES
-        && loops.len() + loop_count(function.cdr()) <= loops.capacity()
+    state.resume_base != NO_RESUMES && loops.len() + loop_count(function.cdr()) <= loops.capacity()
 }
 
 /// What a `CallGeneric` instruction does with the value of a call that ran whole: the pc it
@@ -10910,12 +10920,9 @@ unsafe fn slot_promises_into(
     args.clear();
     let owner = (*state.interp).slot_owner as usize;
     let mark = (*state.interp).references_used;
-    let unforced = (&(*state.interp).frames)[owner].unforced;
     let missing = missing_arg();
     // One pass builds the arguments and gives up at the first one that needs the frame's
-    // environment, which is rare, undoing what it made: references go back to the pool, and
-    // the frame's count of unforced promises returns to what it was, since a promise made
-    // over a pending environment counts itself and one made over a reified one does not.
+    // environment, which is rare, undoing what it made: references go back to the pool.
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
@@ -10949,7 +10956,6 @@ unsafe fn slot_promises_into(
             _ => Some(expression),
         };
         let Some(value) = value else {
-            (&mut (*state.interp).frames)[owner].unforced = unforced;
             if (*state.interp).references_used != mark {
                 eval::release_references(mark);
             }
