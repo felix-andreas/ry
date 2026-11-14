@@ -3816,11 +3816,14 @@ unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<&'static str
         }
         dying += 1;
     }
+    // Native code that preserved a promise holds it without a counted reference.
     let dies = |bound: Sexp| {
         bound.kind() == SexpType::Promise
             && bound.car() == unbound()
             && bound.tag() == env
             && bound.refcount() == 1
+            && bound != value
+            && !heap.is_preserved(bound)
     };
     dying += slots.iter().filter(|&&slot| dies(slot)).count();
     dying += cells().filter(|&bound| dies(bound)).count();

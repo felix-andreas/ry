@@ -331,7 +331,9 @@ empty environment and no binding cell.
   die with the frame are known: an unforced promise that only a slot or a cell of the frame holds,
   and a closure only the frame holds. Any count beyond those keeps the environment, and so do the
   three holders that are not counted: the value returned, `R_PreserveObject` and a global calling
-  handler. A kept environment becomes complete (the profile reasons "promise or environment
+  handler. A promise or closure that one of the three holds does not die with the frame either,
+  so native code that preserved a promise it read from the frame can force it after the call
+  returned. A kept environment becomes complete (the profile reasons "promise or environment
   outliving the frame" and "closure outliving the frame"); any other is discarded with the frame
   (`Heap::discard_frame`).
 

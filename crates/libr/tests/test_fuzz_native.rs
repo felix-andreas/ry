@@ -481,3 +481,36 @@ fn fuzz_native_code_reads_closures_over_slot_frames() {
         r.release_to(mark);
     });
 }
+
+/// Native code preserves an unforced promise it read from a variable of a running call's
+/// environment and forces it after the call returned. Nothing counted holds the promise then,
+/// so only `R_PreserveObject` says the environment it evaluates in must outlive the frame.
+#[test]
+fn native_code_forces_a_kept_promise_after_its_slot_frame_returned() {
+    let r = r_with_base();
+    rytest(&r);
+    let source = "kept_promise_case <- function(a) {\n  \
+                  delayedAssign(\"lazy\", a + 1L)\n  \
+                  .Call(\"rytest_keep_promise\", environment(), \"lazy\")\n\
+                  }\n";
+    let parsed = r
+        .eval("parse", &[(Some("text"), r.string(source))])
+        .expect("the case parses");
+    r.eval("eval", &[(None, parsed)]).expect("the case defines");
+    for round in 0..4 {
+        r.stress(round % 2 == 1);
+        let kind = r
+            .eval("kept_promise_case", &[(None, r.integer(round))])
+            .expect("the case runs");
+        assert_eq!(
+            r.integers(kind),
+            vec![5],
+            "round {round}: the variable holds a promise"
+        );
+        let forced = r
+            .call("rytest_force_promise", &[])
+            .expect("the promise forces");
+        assert_eq!(r.integers(forced), vec![round + 1], "round {round}");
+    }
+    r.stress(false);
+}

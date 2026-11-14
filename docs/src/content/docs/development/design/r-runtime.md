@@ -412,7 +412,7 @@ so a few big live vectors do not let as many bytes of small garbage pile up.
 
 `R_PreserveObject` sets a flag bit in the object's header and appends the object to a dense vector
 of preserved objects with their counts, so a frame release asks the header, not a hash table,
-whether an environment is preserved. `R_ReleaseObject` searches the vector from its newest entry,
+whether native code preserved the environment or one of the promises the frame holds. `R_ReleaseObject` searches the vector from its newest entry,
 as GNU R's precious list does.
 
 The write barrier is one load and one compare on the parent's header: a store into a young object,

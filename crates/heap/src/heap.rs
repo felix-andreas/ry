@@ -2658,6 +2658,7 @@ impl Heap {
                         || (closures && value.kind() == SexpType::Closure))
                     && value.tag() == env
                     && value.gc_bits() & gc_bits::HELD == 0
+                    && !self.roots.precious.contains(value)
             })
             .count()
     }
@@ -2677,7 +2678,7 @@ impl Heap {
             }
             let value = cell.cdr();
             match value.kind() {
-                SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
+                SexpType::Promise if self.frame_alone_holds(value) => self.release_promise(value),
                 SexpType::Dots if value.refcount() == 1 && !kept(self, value) => {
                     self.release_dots(value)
                 }
@@ -2739,7 +2740,7 @@ impl Heap {
         for slot in slots {
             let value = *slot;
             match value.kind() {
-                SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
+                SexpType::Promise if self.frame_alone_holds(value) => self.release_promise(value),
                 SexpType::Dots if value.refcount() == 1 => self.release_dots(value),
                 _ => {}
             }
@@ -2760,7 +2761,7 @@ impl Heap {
         let mut cell = dots;
         while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) && cell.refcount() <= 1 {
             let argument = cell.car();
-            if argument.kind() == SexpType::Promise && argument.refcount() == 1 {
+            if argument.kind() == SexpType::Promise && self.frame_alone_holds(argument) {
                 self.release_promise(argument);
             }
             self.release_field(cell, argument);
@@ -2775,7 +2776,10 @@ impl Heap {
     /// that later frees such a promise does not lower the count of the value it was forced to,
     /// so that value would look shared for the rest of its life.
     pub unsafe fn release_argument(&mut self, promise: Sexp) {
-        if promise.kind() == SexpType::Promise && promise.refcount() == 0 {
+        if promise.kind() == SexpType::Promise
+            && promise.refcount() == 0
+            && !self.roots.precious.contains(promise)
+        {
             self.release_promise(promise);
         }
     }
@@ -2824,6 +2828,14 @@ impl Heap {
         self.release_field(env, env.enclosure());
         env.set_enclosure_unbarriered(empty);
         env.set_gp_bits(gp::DETACHED, true);
+    }
+
+    /// Whether the one counted reference to `promise` is all that holds it, so it dies with the
+    /// frame whose binding, slot or `...` list makes that reference. `R_PreserveObject` holds
+    /// without counting, and it is the one root that can keep a frame's promise past the call:
+    /// native code that read the promise from the frame returned before the frame did.
+    unsafe fn frame_alone_holds(&self, promise: Sexp) -> bool {
+        promise.refcount() == 1 && !self.roots.precious.contains(promise)
     }
 
     /// Clears a promise that only a released frame held.
