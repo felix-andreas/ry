@@ -1,0 +1,64 @@
+# A user records where a script calls into package code, then replays the sampled calls in a
+# fresh session without the script: each replay gives the value the script saw.
+
+requires ry-runtime
+
+file workload.R
+| helper <- function(v) mean(v) + 1
+| k <- 3
+| x <- c(1, 4, 9, 16)
+| xs <- list(1:3, 4:6, 7:9)
+| a <- stats::sd(x)
+| b <- vapply(xs, function(v) sum(v) * k, numeric(1))
+| h <- sapply(xs, helper)
+| glue_all <- function(...) paste(..., sep = "-")
+| d <- glue_all("a", "b")
+| bad <- function() stopifnot(all(x < 0))
+| e <- tryCatch(bad(), error = function(e) "caught")
+| set.seed(42)
+| r <- stats::rnorm(5)
+| cat("done\n")
+
+env RY_CAPTURE_PACKAGE R_GlobalEnv
+env RY_CAPTURE_DIR capture
+run ry run workload.R
+expect exit 0
+expect stdout "done"
+expect file capture/summary.tsv "boundary_calls"
+expect file capture/entries.tsv "stats	sd	1	"
+expect file capture/entries.tsv "base	mean	3	"
+
+unset RY_CAPTURE_PACKAGE
+unset RY_CAPTURE_DIR
+file replay.R
+| entries <- read.delim("capture/entries.tsv", stringsAsFactors = FALSE)
+| entry <- function(name) entries[entries$name == name, ]
+| stopifnot(
+|   entry("vapply")$calls == 1, entry("vapply")$samples == 1,
+|   entry("sapply")$user_binding == 1, entry("sapply")$samples == 0,
+|   entry("paste")$dots == 1, entry("tryCatch")$user_binding == 1,
+|   entry("stopifnot")$calls == 1, entry("rnorm")$calls == 1
+| )
+| samples <- read.delim("capture/samples.tsv", stringsAsFactors = FALSE)
+| for (file in samples$file) {
+|   sample <- readRDS(file.path("capture", file))
+|   env <- list2env(sample$variables, parent = globalenv())
+|   for (name in names(sample$imports)) {
+|     assign(name, get(name, envir = asNamespace(sample$imports[[name]])), envir = env)
+|   }
+|   if (!is.null(sample$seed)) assign(".Random.seed", sample$seed, envir = globalenv())
+|   replayed <- tryCatch(list(value = eval(sample$call, env)), error = function(e) "threw")
+|   if (sample$threw) {
+|     stopifnot(identical(replayed, "threw"))
+|   } else {
+|     stopifnot(sample$value_kept, identical(replayed$value, sample$value))
+|   }
+|   cat("replayed", sample$package, sample$name, if (sample$threw) "(threw)", "\n")
+| }
+run ry run replay.R
+expect exit 0
+expect stdout "replayed stats sd"
+expect stdout "replayed base vapply"
+expect stdout "replayed base mean"
+expect stdout "replayed base stopifnot (threw)"
+expect stdout "replayed stats rnorm"

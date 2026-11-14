@@ -2716,7 +2716,7 @@ pub unsafe fn run_inlined(
 ) -> R<Sexp> {
     let _window = SlotWindow(header);
     activity::count(Counter::ClosureCalls);
-    let _frame = crate::profile_summary::enter_closure(call, function);
+    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent)?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -2749,7 +2749,9 @@ pub unsafe fn run_inlined(
     } else {
         result
     };
-    pop_frame(function, depth, result)
+    let result = pop_frame(function, depth, result);
+    hooks.returned(&result);
+    result
 }
 
 /// The environment of the frame at `index`, made from its slots first if it is a slot frame
@@ -3413,7 +3415,7 @@ unsafe fn run_frame_general(
     let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
-    let _frame = crate::profile_summary::enter_closure(call, function);
+    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent)?;
     if slots == crate::NO_SLOTS {
         moves::entering_closure(function, env)?;
     }
@@ -3503,7 +3505,9 @@ unsafe fn run_frame_general(
         Err(unwind) => (None, Err(unwind)),
     };
     let result = finish_frame(call, depth, signature, result);
-    pop_frame(function, depth, result)
+    let result = pop_frame(function, depth, result);
+    hooks.returned(&result);
+    result
 }
 
 /// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the

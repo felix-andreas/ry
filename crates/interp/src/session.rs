@@ -42,6 +42,7 @@ pub struct StartOptions {
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
     crate::profile_summary::start_from_environment();
+    crate::capture::start_from_environment();
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     interp().code_image.build = options.build;
@@ -142,6 +143,7 @@ unsafe fn start_from_image(home: &str) -> R<()> {
     )?;
     remove_library_site()?;
     crate::profile_summary::mark_ready();
+    crate::capture::mark_ready();
     conditions::print_warnings()
 }
 
@@ -242,6 +244,7 @@ unsafe fn start_slowly(
     let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
     crate::profile_summary::mark_ready();
+    crate::capture::mark_ready();
     Ok(warned)
 }
 
@@ -907,6 +910,9 @@ pub unsafe fn finish() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_memory_profiler() {
+        report_toplevel(unwind);
+    }
+    if let Err(unwind) = crate::capture::finish() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::profile_summary::finish() {
