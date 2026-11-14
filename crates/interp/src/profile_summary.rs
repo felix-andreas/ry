@@ -924,7 +924,7 @@ fn report(
     )?;
     let mut sites = activity::allocation_sites();
     if !sites.is_empty() {
-        sites.sort_by(|a, b| b.1.cmp(&a.1));
+        sites.sort_by_key(|site| std::cmp::Reverse(site.1));
         writeln!(out, "\n## Allocation sites (sampled)\n")?;
         writeln!(out, "| kind | samples | call path, innermost first |")?;
         writeln!(out, "| --- | ---: | --- |")?;
