@@ -8,21 +8,21 @@ session = ["abind", "assertthat", "azidentity", "AzureAuth", "AzureKeyVault", "A
 programs = 100
 coverage = 0.9
 samples = 3
-coverage_of_run = { finbench = 0.7657, dsbench = 0.7319, biobench = 0.7285 }
-captured_of_run = { finbench = 0.7157, dsbench = 0.6347, biobench = 0.6406 }
+coverage_of_run = { finbench = 0.7959, dsbench = 0.7706, biobench = 0.7692 }
+captured_of_run = { finbench = 0.7439, dsbench = 0.6693, biobench = 0.6797 }
 
 [[programs]]
 id = "testthat-expect-equal"
 display = "testthat::expect_equal"
 samples = ["samples/testthat-expect-equal-1.rds", "samples/testthat-expect-equal-2.rds", "samples/testthat-expect-equal-3.rds"]
-iterations = [5, 7, 6]
+iterations = [6, 8, 6]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["testthat"]
-gnu_seconds_per_call = 0.00108276
-share = { finbench = 0.119984, dsbench = 0.212891, biobench = 0.160745 }
-weight = { finbench = 0.135851, dsbench = 0.303336, biobench = 0.159443 }
+namespaces = ["fs", "testthat"]
+gnu_seconds_per_call = 0.0010456
+share = { finbench = 0.12328, dsbench = 0.218515, biobench = 0.165697 }
+weight = { finbench = 0.168432, dsbench = 0.418029, biobench = 0.244981 }
 
 [[programs]]
 id = "openxlsx-write-xlsx"
@@ -33,9 +33,9 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["openxlsx"]
-gnu_seconds_per_call = 0.0175124
-share = { finbench = 0.022352, dsbench = 0.037625, biobench = 0.138158 }
-weight = { finbench = 0.094118, dsbench = 0.102302, biobench = 0.198178 }
+gnu_seconds_per_call = 0.0146678
+share = { finbench = 0.023992, dsbench = 0.052949, biobench = 0.154922 }
+weight = { finbench = 0.040631, dsbench = 0.059722, biobench = 0.155369 }
 
 [[programs]]
 id = "foreach-do"
@@ -46,9 +46,9 @@ rng = [true, true, true]
 threw = [false, false, false]
 fresh = [true, true, true]
 namespaces = ["foreach"]
-gnu_seconds_per_call = 0.012494
-share = { finbench = 0.001887, dsbench = 0.003745, biobench = 0.120826 }
-weight = { finbench = 0.002017, dsbench = 0.005615, biobench = 0.111102 }
+gnu_seconds_per_call = 0.0198626
+share = { finbench = 0.002009, dsbench = 0.003859, biobench = 0.123719 }
+weight = { finbench = 0.00249, dsbench = 0.005528, biobench = 0.223282 }
 
 [[programs]]
 id = "yieldcurve-nelson-siegel"
@@ -59,22 +59,22 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["YieldCurve"]
-gnu_seconds_per_call = 0.0318597
-share = { finbench = 0.11955 }
-weight = { finbench = 0.145084 }
+gnu_seconds_per_call = 0.0287893
+share = { finbench = 0.125169 }
+weight = { finbench = 0.124817 }
 
 [[programs]]
 id = "data-table-data-table"
 display = "data.table::[.data.table"
 samples = ["samples/data-table-data-table-1.rds", "samples/data-table-data-table-2.rds", "samples/data-table-data-table-3.rds"]
-iterations = [9, 11, 1]
+iterations = [10, 17, 10]
 rng = [false, false, false]
 threw = [false, false, false]
-fresh = [false, true, false]
-namespaces = ["data.table", "stats"]
-gnu_seconds_per_call = 0.00215732
-share = { finbench = 0.012162, dsbench = 0.052575, biobench = 0.031564 }
-weight = { finbench = 0.062285, dsbench = 0.073823, biobench = 0.336412 }
+fresh = [false, false, false]
+namespaces = ["data.table"]
+gnu_seconds_per_call = 0.000540523
+share = { finbench = 0.012881, dsbench = 0.05281, biobench = 0.034911 }
+weight = { finbench = 0.012658, dsbench = 0.07396, biobench = 0.036647 }
 
 [[programs]]
 id = "zoo-rollapply"
@@ -85,9 +85,9 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["stats", "zoo"]
-gnu_seconds_per_call = 0.0095028
-share = { finbench = 0.080195 }
-weight = { finbench = 0.081045 }
+gnu_seconds_per_call = 0.010432
+share = { finbench = 0.083331 }
+weight = { finbench = 0.09244 }
 
 [[programs]]
 id = "performanceanalytics-table-annualizedreturns"
@@ -98,61 +98,61 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["PerformanceAnalytics"]
-gnu_seconds_per_call = 0.0112567
-share = { finbench = 0.074702 }
-weight = { finbench = 0.083372 }
+gnu_seconds_per_call = 0.0150928
+share = { finbench = 0.079004 }
+weight = { finbench = 0.099025 }
 
 [[programs]]
 id = "testthat-expect-error"
 display = "testthat::expect_error"
 samples = ["samples/testthat-expect-error-1.rds", "samples/testthat-expect-error-2.rds", "samples/testthat-expect-error-3.rds"]
-iterations = [2, 1, 2]
+iterations = [1, 2, 2]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["R6", "assertthat", "rlang", "testthat", "utils"]
-gnu_seconds_per_call = 0.00439094
-share = { finbench = 0.010164, dsbench = 0.022981, biobench = 0.019022 }
-weight = { finbench = 0.018004, dsbench = 0.070723, biobench = 0.031968 }
-
-[[programs]]
-id = "data-table-dcast"
-display = "data.table::dcast"
-samples = ["samples/data-table-dcast-1.rds", "samples/data-table-dcast-2.rds", "samples/data-table-dcast-3.rds"]
-iterations = [2, 2, 2]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["data.table"]
-gnu_seconds_per_call = 0.00303674
-share = { finbench = 0.011305, dsbench = 0.040838 }
-weight = { finbench = 0.013196, dsbench = 0.065609 }
+gnu_seconds_per_call = 0.00398387
+share = { finbench = 0.010119, dsbench = 0.024087, biobench = 0.020373 }
+weight = { finbench = 0.023132, dsbench = 0.064475, biobench = 0.040635 }
 
 [[programs]]
 id = "stats-lm"
 display = "stats::lm"
 samples = ["samples/stats-lm-1.rds", "samples/stats-lm-2.rds", "samples/stats-lm-3.rds"]
-iterations = [22, 18, 22]
+iterations = [18, 13, 9]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["stats"]
-gnu_seconds_per_call = 0.000322647
-share = { dsbench = 0.044608, biobench = 0.006077 }
-weight = { dsbench = 0.047876, biobench = 0.002706 }
+gnu_seconds_per_call = 0.00048789
+share = { dsbench = 0.047421, biobench = 0.006714 }
+weight = { dsbench = 0.005933, biobench = 0.00508 }
 
 [[programs]]
 id = "testthat-expect-true"
 display = "testthat::expect_true"
 samples = ["samples/testthat-expect-true-1.rds", "samples/testthat-expect-true-2.rds", "samples/testthat-expect-true-3.rds"]
-iterations = [15, 22, 20]
+iterations = [20, 21, 12]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["testthat"]
-gnu_seconds_per_call = 0.00034915
-share = { finbench = 0.013403, dsbench = 0.012583, biobench = 0.025003 }
-weight = { finbench = 0.01424, dsbench = 0.02058, biobench = 0.021157 }
+gnu_seconds_per_call = 0.000377711
+share = { finbench = 0.014248, dsbench = 0.012648, biobench = 0.02582 }
+weight = { finbench = 0.015433, dsbench = 0.018525, biobench = 0.043064 }
+
+[[programs]]
+id = "data-table-dcast"
+display = "data.table::dcast"
+samples = ["samples/data-table-dcast-1.rds", "samples/data-table-dcast-2.rds", "samples/data-table-dcast-3.rds"]
+iterations = [4, 3, 2]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["data.table"]
+gnu_seconds_per_call = 0.00206846
+share = { finbench = 0.011226, dsbench = 0.041588 }
+weight = { finbench = 0.0146, dsbench = 0.065138 }
 
 [[programs]]
 id = "ompr-solve-model"
@@ -163,22 +163,9 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["fastmap", "ompr", "ompr.roi"]
-gnu_seconds_per_call = 0.00969797
-share = { finbench = 0.049544 }
-weight = { finbench = 0.053694 }
-
-[[programs]]
-id = "ompr-add-constraint"
-display = "ompr::add_constraint"
-samples = ["samples/ompr-add-constraint-1.rds", "samples/ompr-add-constraint-2.rds", "samples/ompr-add-constraint-3.rds"]
-iterations = [1, 1, 1]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["ompr"]
-gnu_seconds_per_call = 0.0140191
-share = { finbench = 0.048657 }
-weight = { finbench = 0.056713 }
+gnu_seconds_per_call = 0.0121749
+share = { finbench = 0.051439 }
+weight = { finbench = 0.074848 }
 
 [[programs]]
 id = "performanceanalytics-maxdrawdown"
@@ -189,9 +176,22 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["PerformanceAnalytics"]
-gnu_seconds_per_call = 0.0157213
-share = { finbench = 0.047353 }
-weight = { finbench = 0.087823 }
+gnu_seconds_per_call = 0.0111022
+share = { finbench = 0.051128 }
+weight = { finbench = 0.091716 }
+
+[[programs]]
+id = "ompr-add-constraint"
+display = "ompr::add_constraint"
+samples = ["samples/ompr-add-constraint-1.rds", "samples/ompr-add-constraint-2.rds", "samples/ompr-add-constraint-3.rds"]
+iterations = [1, 1, 1]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["ompr"]
+gnu_seconds_per_call = 0.0131145
+share = { finbench = 0.050362 }
+weight = { finbench = 0.074572 }
 
 [[programs]]
 id = "performanceanalytics-sharperatio-annualized"
@@ -202,607 +202,607 @@ rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["PerformanceAnalytics"]
-gnu_seconds_per_call = 0.00661647
-share = { finbench = 0.041084 }
-weight = { finbench = 0.037753 }
+gnu_seconds_per_call = 0.00774018
+share = { finbench = 0.042628 }
+weight = { finbench = 0.048499 }
 
 [[programs]]
 id = "base-vapply"
 display = "base::vapply"
 samples = ["samples/base-vapply-1.rds", "samples/base-vapply-2.rds", "samples/base-vapply-3.rds"]
-iterations = [19, 63, 50]
+iterations = [16, 41, 253]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["uuid"]
-gnu_seconds_per_call = 0.000151286
-share = { finbench = 0.003854, dsbench = 0.017533, biobench = 0.017032 }
-weight = { finbench = 0.000654, dsbench = 0.010537, biobench = 0.012241 }
-
-[[programs]]
-id = "rlang-abort"
-display = "rlang::abort"
-samples = ["samples/rlang-abort-1.rds", "samples/rlang-abort-2.rds", "samples/rlang-abort-3.rds"]
-iterations = [2, 2, 2]
-rng = [false, false, false]
-threw = [true, true, true]
-fresh = [false, false, false]
-namespaces = ["rlang"]
-gnu_seconds_per_call = 0.00326153
-share = { finbench = 0.007801, dsbench = 0.016289, biobench = 0.012974 }
-weight = { finbench = 0.009332, dsbench = 0.022591, biobench = 0.010449 }
+gnu_seconds_per_call = 6.51563e-05
+share = { finbench = 0.003594, dsbench = 0.017128, biobench = 0.01941 }
+weight = { finbench = 0.00066, dsbench = 0.010655, biobench = 0.026897 }
 
 [[programs]]
 id = "jsonlite-tojson"
 display = "jsonlite::toJSON"
 samples = ["samples/jsonlite-tojson-1.rds", "samples/jsonlite-tojson-2.rds", "samples/jsonlite-tojson-3.rds"]
-iterations = [18, 14, 26]
+iterations = [12, 17, 10]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["jsonlite"]
-gnu_seconds_per_call = 0.000351465
-share = { finbench = 0.00457, dsbench = 0.010888, biobench = 0.020529 }
-weight = { finbench = 0.005957, dsbench = 0.025538, biobench = 0.018319 }
+gnu_seconds_per_call = 0.000515271
+share = { finbench = 0.004718, dsbench = 0.011112, biobench = 0.021683 }
+weight = { finbench = 0.007415, dsbench = 0.015077, biobench = 0.035754 }
+
+[[programs]]
+id = "rlang-abort"
+display = "rlang::abort"
+samples = ["samples/rlang-abort-1.rds", "samples/rlang-abort-2.rds", "samples/rlang-abort-3.rds"]
+iterations = [2, 2, 1]
+rng = [false, false, false]
+threw = [true, true, true]
+fresh = [false, false, false]
+namespaces = ["rlang"]
+gnu_seconds_per_call = 0.00375743
+share = { finbench = 0.00808, dsbench = 0.016073, biobench = 0.013153 }
+weight = { finbench = 0.013934, dsbench = 0.028403, biobench = 0.018256 }
 
 [[programs]]
 id = "stats-glm"
 display = "stats::glm"
 samples = ["samples/stats-glm-1.rds", "samples/stats-glm-2.rds", "samples/stats-glm-3.rds"]
-iterations = [5, 7, 5]
+iterations = [4, 5, 4]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["stats"]
-gnu_seconds_per_call = 0.00117717
-share = { dsbench = 0.026175 }
-weight = { dsbench = 0.035263 }
+gnu_seconds_per_call = 0.00157298
+share = { dsbench = 0.029212 }
+weight = { dsbench = 0.036511 }
 
 [[programs]]
 id = "base-data-frame"
 display = "base::data.frame"
 samples = ["samples/base-data-frame-1.rds", "samples/base-data-frame-2.rds", "samples/base-data-frame-3.rds"]
-iterations = [28, 37, 47]
-rng = [true, true, true]
+iterations = [43, 46, 29]
+rng = [true, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["stats"]
-gnu_seconds_per_call = 0.000177181
-share = { finbench = 0.002169, dsbench = 0.012444, biobench = 0.010432 }
-weight = { finbench = 0.001449, dsbench = 0.013461, biobench = 0.005989 }
-
-[[programs]]
-id = "base-stopifnot"
-display = "base::stopifnot"
-samples = ["samples/base-stopifnot-1.rds", "samples/base-stopifnot-2.rds", "samples/base-stopifnot-3.rds"]
-iterations = [517, 2712, 1351]
-rng = [false, false, false]
-threw = [true, false, false]
-fresh = [false, false, false]
-namespaces = ["assertthat", "rlang", "utils"]
-gnu_seconds_per_call = 4.36631e-06
-share = { finbench = 4e-06, dsbench = 0.021355, biobench = 8e-06 }
-weight = { finbench = 5e-06, dsbench = 0.00017, biobench = 7e-06 }
+gnu_seconds_per_call = 0.000169035
+share = { finbench = 0.002326, dsbench = 0.013492, biobench = 0.010898 }
+weight = { finbench = 0.002046, dsbench = 0.009842, biobench = 0.014706 }
 
 [[programs]]
 id = "plumber-pr"
 display = "plumber::pr"
 samples = ["samples/plumber-pr-1.rds"]
-iterations = [8]
+iterations = [11]
 rng = [false]
 threw = [false]
 fresh = [false]
 namespaces = ["plumber"]
-gnu_seconds_per_call = 0.0024825
-share = { finbench = 0.001777, dsbench = 0.015863, biobench = 0.003072 }
-weight = { finbench = 0.001809, dsbench = 0.020616, biobench = 0.002504 }
+gnu_seconds_per_call = 0.00176778
+share = { finbench = 0.001781, dsbench = 0.016959, biobench = 0.003175 }
+weight = { finbench = 0.002271, dsbench = 0.018229, biobench = 0.003422 }
 
 [[programs]]
-id = "testthat-expect-length"
-display = "testthat::expect_length"
-samples = ["samples/testthat-expect-length-1.rds", "samples/testthat-expect-length-2.rds", "samples/testthat-expect-length-3.rds"]
-iterations = [71, 41, 67]
+id = "base-stopifnot"
+display = "base::stopifnot"
+samples = ["samples/base-stopifnot-1.rds", "samples/base-stopifnot-2.rds", "samples/base-stopifnot-3.rds"]
+iterations = [549, 1619, 1553]
 rng = [false, false, false]
-threw = [false, false, false]
+threw = [true, false, false]
 fresh = [false, false, false]
-namespaces = ["testthat"]
-gnu_seconds_per_call = 0.000111801
-share = { finbench = 0.003011, dsbench = 0.004531, biobench = 0.012801 }
-weight = { finbench = 0.00215, dsbench = 0.005051, biobench = 0.005223 }
-
-[[programs]]
-id = "base-replicate"
-display = "base::replicate"
-samples = ["samples/base-replicate-1.rds"]
-iterations = [8]
-rng = [true]
-threw = [false]
-fresh = [false]
-namespaces = []
-gnu_seconds_per_call = 0.00251393
-share = { biobench = 0.019397 }
-weight = { biobench = 0.02339 }
-
-[[programs]]
-id = "base-apply"
-display = "base::apply"
-samples = ["samples/base-apply-1.rds", "samples/base-apply-2.rds", "samples/base-apply-3.rds"]
-iterations = [52, 58, 40]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 0.000133439
-share = { finbench = 0.000998, dsbench = 0.015756, biobench = 0.002323 }
-weight = { finbench = 0.000593, dsbench = 0.002532, biobench = 0.000931 }
+namespaces = ["assertthat", "rlang", "utils"]
+gnu_seconds_per_call = 5.37375e-06
+share = { finbench = 4e-06, dsbench = 0.021715, biobench = 8e-06 }
+weight = { finbench = 9e-06, dsbench = 0.000173, biobench = 1e-05 }
 
 [[programs]]
 id = "base-mean"
 display = "base::mean"
 samples = ["samples/base-mean-1.rds", "samples/base-mean-2.rds", "samples/base-mean-3.rds"]
-iterations = [1343, 1518, 1363]
+iterations = [1355, 1553, 1627]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 4.73479e-06
-share = { finbench = 0.001379, dsbench = 0.017061, biobench = 0.000305 }
-weight = { finbench = 0.001753, dsbench = 0.020234, biobench = 0.000187 }
+gnu_seconds_per_call = 4.40935e-06
+share = { finbench = 0.001677, dsbench = 0.019456, biobench = 0.00031 }
+weight = { finbench = 0.002152, dsbench = 0.020908, biobench = 0.000337 }
 
 [[programs]]
-id = "testthat-expect-gt"
-display = "testthat::expect_gt"
-samples = ["samples/testthat-expect-gt-1.rds", "samples/testthat-expect-gt-2.rds", "samples/testthat-expect-gt-3.rds"]
-iterations = [28, 21, 29]
+id = "testthat-expect-length"
+display = "testthat::expect_length"
+samples = ["samples/testthat-expect-length-1.rds", "samples/testthat-expect-length-2.rds", "samples/testthat-expect-length-3.rds"]
+iterations = [52, 72, 71]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["testthat"]
-gnu_seconds_per_call = 0.000257798
-share = { finbench = 0.004281, dsbench = 0.011358, biobench = 0.006505 }
-weight = { finbench = 0.004949, dsbench = 0.016084, biobench = 0.005131 }
+gnu_seconds_per_call = 0.000102459
+share = { finbench = 0.00308, dsbench = 0.00458, biobench = 0.012729 }
+weight = { finbench = 0.002197, dsbench = 0.005101, biobench = 0.010075 }
 
 [[programs]]
-id = "base-merge"
-display = "base::merge"
-samples = ["samples/base-merge-1.rds", "samples/base-merge-2.rds", "samples/base-merge-3.rds"]
-iterations = [6, 6, 6]
+id = "base-apply"
+display = "base::apply"
+samples = ["samples/base-apply-1.rds", "samples/base-apply-2.rds", "samples/base-apply-3.rds"]
+iterations = [47, 51, 49]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 0.00109883
-share = { dsbench = 0.017604 }
-weight = { dsbench = 0.02832 }
+gnu_seconds_per_call = 0.000136053
+share = { finbench = 0.000861, dsbench = 0.01648, biobench = 0.002726 }
+weight = { finbench = 0.000522, dsbench = 0.002539, biobench = 0.002314 }
 
 [[programs]]
 id = "base-loadnamespace"
 display = "base::loadNamespace"
 samples = ["samples/base-loadnamespace-1.rds", "samples/base-loadnamespace-2.rds", "samples/base-loadnamespace-3.rds"]
-iterations = [136, 124, 130]
+iterations = [117, 90, 126]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 5.14231e-05
-share = { finbench = 0.008726, dsbench = 0.004417, biobench = 0.004803 }
-weight = { finbench = 0.000216, dsbench = 2.3e-05, biobench = 3.4e-05 }
+gnu_seconds_per_call = 6.01051e-05
+share = { finbench = 0.009091, dsbench = 0.005161, biobench = 0.005605 }
+weight = { finbench = 0.000247, dsbench = 2.3e-05, biobench = 6.4e-05 }
+
+[[programs]]
+id = "base-replicate"
+display = "base::replicate"
+samples = ["samples/base-replicate-1.rds"]
+iterations = [7]
+rng = [true]
+threw = [false]
+fresh = [false]
+namespaces = []
+gnu_seconds_per_call = 0.00285619
+share = { biobench = 0.019234 }
+weight = { biobench = 0.014584 }
+
+[[programs]]
+id = "testthat-expect-gt"
+display = "testthat::expect_gt"
+samples = ["samples/testthat-expect-gt-1.rds", "samples/testthat-expect-gt-2.rds", "samples/testthat-expect-gt-3.rds"]
+iterations = [26, 31, 17]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["testthat"]
+gnu_seconds_per_call = 0.000272737
+share = { finbench = 0.004793, dsbench = 0.01178, biobench = 0.006719 }
+weight = { finbench = 0.006597, dsbench = 0.016327, biobench = 0.009581 }
 
 [[programs]]
 id = "readr-write-csv"
 display = "readr::write_csv"
 samples = ["samples/readr-write-csv-1.rds", "samples/readr-write-csv-2.rds", "samples/readr-write-csv-3.rds"]
-iterations = [1, 3, 1]
+iterations = [3, 3, 3]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["readr"]
-gnu_seconds_per_call = 0.00767883
-share = { finbench = 0.003419, dsbench = 0.006185, biobench = 0.005166 }
-weight = { finbench = 0.027222, dsbench = 0.010303, biobench = 0.004463 }
+gnu_seconds_per_call = 0.00205955
+share = { finbench = 0.003422, dsbench = 0.006881, biobench = 0.005587 }
+weight = { finbench = 0.004738, dsbench = 0.00715, biobench = 0.00777 }
 
 [[programs]]
 id = "base-paste0"
 display = "base::paste0"
 samples = ["samples/base-paste0-1.rds", "samples/base-paste0-2.rds", "samples/base-paste0-3.rds"]
-iterations = [16, 5, 5]
+iterations = [18, 5, 6]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["DBI", "assertthat", "rlang", "snakecase", "utils"]
-gnu_seconds_per_call = 0.000782538
-share = { finbench = 0.002458, dsbench = 0.007311, biobench = 0.003955 }
-weight = { finbench = 0.000973, dsbench = 0.00861, biobench = 0.002489 }
+gnu_seconds_per_call = 0.000688279
+share = { finbench = 0.002268, dsbench = 0.00851, biobench = 0.00417 }
+weight = { finbench = 0.001768, dsbench = 0.007973, biobench = 0.004166 }
 
 [[programs]]
-id = "data-table-data-table-2"
-display = "data.table::data.table"
-samples = ["samples/data-table-data-table-2-1.rds", "samples/data-table-data-table-2-2.rds", "samples/data-table-data-table-2-3.rds"]
-iterations = [53, 48, 54]
-rng = [false, false, true]
+id = "base-merge"
+display = "base::merge"
+samples = ["samples/base-merge-1.rds", "samples/base-merge-2.rds", "samples/base-merge-3.rds"]
+iterations = [3, 5, 6]
+rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["data.table"]
-gnu_seconds_per_call = 0.000129127
-share = { finbench = 0.001842, dsbench = 0.00634, biobench = 0.004432 }
-weight = { finbench = 0.000815, dsbench = 0.003916, biobench = 0.000985 }
+namespaces = []
+gnu_seconds_per_call = 0.00134696
+share = { dsbench = 0.014404 }
+weight = { dsbench = 0.022535 }
 
 [[programs]]
 id = "snakecase-to-snake-case"
 display = "snakecase::to_snake_case"
 samples = ["samples/snakecase-to-snake-case-1.rds"]
-iterations = [14]
+iterations = [15]
 rng = [false]
 threw = [false]
 fresh = [false]
 namespaces = ["snakecase", "stringr"]
-gnu_seconds_per_call = 0.00140095
-share = { finbench = 0.002891, dsbench = 0.005419, biobench = 0.004211 }
-weight = { finbench = 0.002625, dsbench = 0.005046, biobench = 0.002394 }
+gnu_seconds_per_call = 0.00136408
+share = { finbench = 0.002944, dsbench = 0.005937, biobench = 0.004377 }
+weight = { finbench = 0.003781, dsbench = 0.007619, biobench = 0.005082 }
 
 [[programs]]
-id = "testthat-expect-match"
-display = "testthat::expect_match"
-samples = ["samples/testthat-expect-match-1.rds", "samples/testthat-expect-match-2.rds", "samples/testthat-expect-match-3.rds"]
-iterations = [46, 44, 31]
+id = "data-table-data-table-2"
+display = "data.table::data.table"
+samples = ["samples/data-table-data-table-2-1.rds", "samples/data-table-data-table-2-2.rds", "samples/data-table-data-table-2-3.rds"]
+iterations = [25, 87, 57]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["assertthat", "digest", "testthat"]
-gnu_seconds_per_call = 0.000165353
-share = { finbench = 0.002192, dsbench = 0.005647, biobench = 0.003553 }
-weight = { finbench = 0.001474, dsbench = 0.00811, biobench = 0.002135 }
+namespaces = ["data.table"]
+gnu_seconds_per_call = 0.000117668
+share = { finbench = 0.001875, dsbench = 0.007149, biobench = 0.004168 }
+weight = { finbench = 0.001448, dsbench = 0.005104, biobench = 0.001951 }
 
 [[programs]]
 id = "testthat-expect-lte"
 display = "testthat::expect_lte"
 samples = ["samples/testthat-expect-lte-1.rds", "samples/testthat-expect-lte-2.rds", "samples/testthat-expect-lte-3.rds"]
-iterations = [31, 36, 36]
+iterations = [20, 32, 33]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["testthat"]
-gnu_seconds_per_call = 0.000193523
-share = { finbench = 0.001034, biobench = 0.010299 }
-weight = { finbench = 0.000784, biobench = 0.006643 }
+gnu_seconds_per_call = 0.00023716
+share = { finbench = 0.001108, biobench = 0.010703 }
+weight = { finbench = 0.001345, biobench = 0.019134 }
 
 [[programs]]
-id = "base-lapply"
-display = "base::lapply"
-samples = ["samples/base-lapply-1.rds", "samples/base-lapply-2.rds", "samples/base-lapply-3.rds"]
-iterations = [30, 34, 27]
+id = "testthat-expect-match"
+display = "testthat::expect_match"
+samples = ["samples/testthat-expect-match-1.rds", "samples/testthat-expect-match-2.rds", "samples/testthat-expect-match-3.rds"]
+iterations = [35, 49, 45]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 0.000220734
-share = { finbench = 0.004628, dsbench = 0.004414, biobench = 0.000998 }
-weight = { finbench = 0.00352, dsbench = 0.003403, biobench = 0.000262 }
+namespaces = ["testthat"]
+gnu_seconds_per_call = 0.000155367
+share = { finbench = 0.00224, dsbench = 0.00586, biobench = 0.003723 }
+weight = { finbench = 0.001313, dsbench = 0.007733, biobench = 0.003222 }
 
 [[programs]]
 id = "rcppsimdjson-fparse"
 display = "RcppSimdJson::fparse"
 samples = ["samples/rcppsimdjson-fparse-1.rds", "samples/rcppsimdjson-fparse-2.rds", "samples/rcppsimdjson-fparse-3.rds"]
-iterations = [808, 630, 484]
+iterations = [482, 341, 335]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["RcppSimdJson"]
-gnu_seconds_per_call = 1.04004e-05
-share = { finbench = 0.000147, dsbench = 0.00022, biobench = 0.009294 }
-weight = { finbench = 2.3e-05, dsbench = 4.7e-05, biobench = 8.9e-05 }
+gnu_seconds_per_call = 1.72624e-05
+share = { finbench = 0.000151, dsbench = 0.000227, biobench = 0.009772 }
+weight = { finbench = 2.7e-05, dsbench = 4.2e-05, biobench = 0.000162 }
 
 [[programs]]
-id = "base-force"
-display = "base::force"
-samples = ["samples/base-force-1.rds"]
-iterations = [13351]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = []
-gnu_seconds_per_call = 1.498e-06
-share = { finbench = 0.001716, dsbench = 0.003866, biobench = 0.003061 }
-weight = { finbench = 1e-06, dsbench = 4e-06, biobench = 2e-06 }
-
-[[programs]]
-id = "stats-nls"
-display = "stats::nls"
-samples = ["samples/stats-nls-1.rds", "samples/stats-nls-2.rds", "samples/stats-nls-3.rds"]
-iterations = [8, 7, 7]
+id = "base-lapply"
+display = "base::lapply"
+samples = ["samples/base-lapply-1.rds", "samples/base-lapply-2.rds", "samples/base-lapply-3.rds"]
+iterations = [33, 32, 32]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["stats"]
-gnu_seconds_per_call = 0.000910218
-share = { biobench = 0.00839 }
-weight = { biobench = 0.004728 }
+namespaces = []
+gnu_seconds_per_call = 0.000206614
+share = { finbench = 0.005031, dsbench = 0.003947, biobench = 0.001083 }
+weight = { finbench = 0.004461, dsbench = 0.003476, biobench = 0.000546 }
 
 [[programs]]
 id = "lubridate-intdiv"
 display = "lubridate::%/%"
 samples = ["samples/lubridate-intdiv-1.rds", "samples/lubridate-intdiv-2.rds", "samples/lubridate-intdiv-3.rds"]
-iterations = [3, 2, 3]
+iterations = [2, 2, 3]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["lubridate"]
-gnu_seconds_per_call = 0.002706
-share = { finbench = 0.002193, dsbench = 0.003344, biobench = 0.002807 }
-weight = { finbench = 0.003353, dsbench = 0.006642, biobench = 0.002543 }
+gnu_seconds_per_call = 0.00299378
+share = { finbench = 0.002111, dsbench = 0.004058, biobench = 0.003063 }
+weight = { finbench = 0.003876, dsbench = 0.005894, biobench = 0.004714 }
+
+[[programs]]
+id = "base-force"
+display = "base::force"
+samples = ["samples/base-force-1.rds"]
+iterations = [14853]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = []
+gnu_seconds_per_call = 1.3465e-06
+share = { finbench = 0.001741, dsbench = 0.003952, biobench = 0.003176 }
+weight = { finbench = 1e-06, dsbench = 3e-06, biobench = 3e-06 }
+
+[[programs]]
+id = "stats-nls"
+display = "stats::nls"
+samples = ["samples/stats-nls-1.rds", "samples/stats-nls-2.rds", "samples/stats-nls-3.rds"]
+iterations = [6, 5, 6]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["stats"]
+gnu_seconds_per_call = 0.00116776
+share = { biobench = 0.008638 }
+weight = { biobench = 0.010949 }
 
 [[programs]]
 id = "cli-format-inline"
 display = "cli::format_inline"
 samples = ["samples/cli-format-inline-1.rds", "samples/cli-format-inline-2.rds", "samples/cli-format-inline-3.rds"]
-iterations = [2, 2, 2]
+iterations = [3, 2, 3]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["cli"]
-gnu_seconds_per_call = 0.00309805
-share = { finbench = 0.002187, dsbench = 0.00333, biobench = 0.002613 }
-weight = { finbench = 0.001584, dsbench = 0.006701, biobench = 0.001025 }
-
-[[programs]]
-id = "stats-power-t-test"
-display = "stats::power.t.test"
-samples = ["samples/stats-power-t-test-1.rds", "samples/stats-power-t-test-2.rds", "samples/stats-power-t-test-3.rds"]
-iterations = [22, 21, 18]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["stats"]
-gnu_seconds_per_call = 0.000325655
-share = { biobench = 0.007678 }
-weight = { biobench = 0.005318 }
+gnu_seconds_per_call = 0.00263043
+share = { finbench = 0.002127, dsbench = 0.003471, biobench = 0.002666 }
+weight = { finbench = 0.00254, dsbench = 0.006045, biobench = 0.004528 }
 
 [[programs]]
 id = "methods-new"
 display = "methods::new"
 samples = ["samples/methods-new-1.rds", "samples/methods-new-2.rds", "samples/methods-new-3.rds"]
-iterations = [165, 186, 94]
+iterations = [174, 196, 237]
 rng = [false, false, false]
 threw = [true, true, true]
 fresh = [false, false, false]
 namespaces = ["methods", "utils"]
-gnu_seconds_per_call = 4.49421e-05
-share = { finbench = 0.001059, dsbench = 0.004828, biobench = 0.001365 }
-weight = { finbench = 0.000157, dsbench = 0.000735, biobench = 2.5e-05 }
+gnu_seconds_per_call = 3.29465e-05
+share = { finbench = 0.001123, dsbench = 0.005183, biobench = 0.001478 }
+weight = { finbench = 0.000165, dsbench = 0.000372, biobench = 7.7e-05 }
+
+[[programs]]
+id = "stats-power-t-test"
+display = "stats::power.t.test"
+samples = ["samples/stats-power-t-test-1.rds", "samples/stats-power-t-test-2.rds", "samples/stats-power-t-test-3.rds"]
+iterations = [15, 24, 21]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["stats"]
+gnu_seconds_per_call = 0.0003379
+share = { biobench = 0.007498 }
+weight = { biobench = 0.011966 }
 
 [[programs]]
 id = "performanceanalytics-return-calculate"
 display = "PerformanceAnalytics::Return.calculate"
 samples = ["samples/performanceanalytics-return-calculate-1.rds", "samples/performanceanalytics-return-calculate-2.rds", "samples/performanceanalytics-return-calculate-3.rds"]
-iterations = [12, 10, 16]
+iterations = [6, 9, 8]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["PerformanceAnalytics"]
-gnu_seconds_per_call = 0.000529428
-share = { finbench = 0.00667 }
-weight = { finbench = 0.004169 }
+gnu_seconds_per_call = 0.000871315
+share = { finbench = 0.006954 }
+weight = { finbench = 0.006542 }
 
 [[programs]]
 id = "fs-dir-create"
 display = "fs::dir_create"
 samples = ["samples/fs-dir-create-1.rds", "samples/fs-dir-create-2.rds", "samples/fs-dir-create-3.rds"]
-iterations = [14, 21, 25]
+iterations = [24, 24, 26]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["fs"]
-gnu_seconds_per_call = 0.000338973
-share = { finbench = 0.001297, dsbench = 0.002535, biobench = 0.002197 }
-weight = { finbench = 0.000503, dsbench = 0.001544, biobench = 0.000469 }
+gnu_seconds_per_call = 0.000272271
+share = { finbench = 0.00123, dsbench = 0.002999, biobench = 0.002298 }
+weight = { finbench = 0.000517, dsbench = 0.000935, biobench = 0.000821 }
 
 [[programs]]
 id = "testthat-expect-gte"
 display = "testthat::expect_gte"
 samples = ["samples/testthat-expect-gte-1.rds", "samples/testthat-expect-gte-2.rds", "samples/testthat-expect-gte-3.rds"]
-iterations = [37, 36, 34]
+iterations = [33, 33, 14]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["testthat"]
-gnu_seconds_per_call = 0.000187112
-share = { finbench = 0.001276, dsbench = 0.001997, biobench = 0.005453 }
-weight = { finbench = 0.001274, dsbench = 0.002501, biobench = 0.003618 }
+gnu_seconds_per_call = 0.000247952
+share = { finbench = 0.001336, dsbench = 0.002141, biobench = 0.006181 }
+weight = { finbench = 0.001734, dsbench = 0.002946, biobench = 0.007851 }
 
 [[programs]]
 id = "base-nrow"
 display = "base::nrow"
 samples = ["samples/base-nrow-1.rds", "samples/base-nrow-2.rds", "samples/base-nrow-3.rds"]
-iterations = [2609, 4837, 2137]
+iterations = [2075, 2330, 1554]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 2.08681e-06
-share = { finbench = 0.005361, dsbench = 0.000178, biobench = 0.000148 }
-weight = { finbench = 0.00214, dsbench = 0.000345, biobench = 2.8e-05 }
+gnu_seconds_per_call = 3.356e-06
+share = { finbench = 0.005807, dsbench = 0.000184, biobench = 0.00015 }
+weight = { finbench = 0.006201, dsbench = 0.000295, biobench = 0.00012 }
 
 [[programs]]
 id = "testthat-expect-false"
 display = "testthat::expect_false"
 samples = ["samples/testthat-expect-false-1.rds", "samples/testthat-expect-false-2.rds", "samples/testthat-expect-false-3.rds"]
-iterations = [20, 20, 14]
+iterations = [7, 14, 18]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["lubridate", "testthat"]
-gnu_seconds_per_call = 0.000367949
-share = { finbench = 0.002706, dsbench = 0.001331, biobench = 0.001184 }
-weight = { finbench = 0.003272, dsbench = 0.002205, biobench = 0.000964 }
+gnu_seconds_per_call = 0.000509675
+share = { finbench = 0.002819, dsbench = 0.001392, biobench = 0.001232 }
+weight = { finbench = 0.005717, dsbench = 0.002298, biobench = 0.001866 }
 
 [[programs]]
 id = "lubridate-days"
 display = "lubridate::days"
 samples = ["samples/lubridate-days-1.rds", "samples/lubridate-days-2.rds", "samples/lubridate-days-3.rds"]
-iterations = [28, 29, 31]
+iterations = [32, 13, 23]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["lubridate"]
-gnu_seconds_per_call = 0.000225389
-share = { finbench = 0.001207, dsbench = 0.002086, biobench = 0.001756 }
-weight = { finbench = 0.000616, dsbench = 0.001756, biobench = 0.000776 }
+gnu_seconds_per_call = 0.00029363
+share = { finbench = 0.001212, dsbench = 0.002073, biobench = 0.001866 }
+weight = { finbench = 0.001126, dsbench = 0.00151, biobench = 0.001596 }
 
 [[programs]]
 id = "base-do-call"
 display = "base::do.call"
 samples = ["samples/base-do-call-1.rds", "samples/base-do-call-2.rds", "samples/base-do-call-3.rds"]
-iterations = [9, 7, 9]
+iterations = [7, 13, 8]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["httr2"]
-gnu_seconds_per_call = 0.000805039
-share = { finbench = 0.001031, dsbench = 0.002015, biobench = 0.001757 }
-weight = { finbench = 0.000674, dsbench = 0.001558, biobench = 0.000967 }
+gnu_seconds_per_call = 0.000723545
+share = { finbench = 0.001084, dsbench = 0.002103, biobench = 0.001894 }
+weight = { finbench = 0.001053, dsbench = 0.001763, biobench = 0.001347 }
 
 [[programs]]
 id = "base-cut"
 display = "base::cut"
 samples = ["samples/base-cut-1.rds", "samples/base-cut-2.rds", "samples/base-cut-3.rds"]
-iterations = [52, 38, 38]
+iterations = [62, 43, 80]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["stats"]
-gnu_seconds_per_call = 0.000157352
-share = { dsbench = 0.004587 }
-weight = { dsbench = 0.00235 }
+gnu_seconds_per_call = 0.000108264
+share = { dsbench = 0.004783 }
+weight = { dsbench = 0.002559 }
 
 [[programs]]
 id = "base-sort"
 display = "base::sort"
 samples = ["samples/base-sort-1.rds", "samples/base-sort-2.rds", "samples/base-sort-3.rds"]
-iterations = [230, 177, 139]
+iterations = [153, 214, 141]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 3.66154e-05
-share = { dsbench = 0.000689, biobench = 0.003542 }
-weight = { dsbench = 0.000653, biobench = 0.001111 }
-
-[[programs]]
-id = "rugarch-ugarchspec"
-display = "rugarch::ugarchspec"
-samples = ["samples/rugarch-ugarchspec-1.rds", "samples/rugarch-ugarchspec-2.rds", "samples/rugarch-ugarchspec-3.rds"]
-iterations = [21, 21, 25]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["rugarch"]
-gnu_seconds_per_call = 0.000300771
-share = { finbench = 0.004009 }
-weight = { finbench = 0.002981 }
+gnu_seconds_per_call = 3.93611e-05
+share = { dsbench = 0.000678, biobench = 0.003703 }
+weight = { dsbench = 0.000655, biobench = 0.002451 }
 
 [[programs]]
 id = "lgr-set-appenders"
 display = "lgr::$set_appenders"
 samples = ["samples/lgr-set-appenders-1.rds", "samples/lgr-set-appenders-2.rds", "samples/lgr-set-appenders-3.rds"]
-iterations = [11, 12, 14]
+iterations = [12, 8, 12]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [true, true, true]
 namespaces = ["lgr"]
-gnu_seconds_per_call = 0.000546973
-share = { finbench = 0.000711, dsbench = 0.001657, biobench = 0.001396 }
-weight = { finbench = 0.000443, dsbench = 0.001586, biobench = 0.000739 }
-
-[[programs]]
-id = "base-t"
-display = "base::t"
-samples = ["samples/base-t-1.rds", "samples/base-t-2.rds", "samples/base-t-3.rds"]
-iterations = [1277, 1935, 1741]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 4.03751e-06
-share = { finbench = 1.7e-05, dsbench = 0.003673 }
-weight = { finbench = 7e-06, dsbench = 0.004341 }
-
-[[programs]]
-id = "base-format"
-display = "base::format"
-samples = ["samples/base-format-1.rds", "samples/base-format-2.rds", "samples/base-format-3.rds"]
-iterations = [143, 168, 124]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 4.58775e-05
-share = { biobench = 0.003583 }
-weight = { biobench = 0.001184 }
-
-[[programs]]
-id = "base-seq"
-display = "base::seq"
-samples = ["samples/base-seq-1.rds", "samples/base-seq-2.rds", "samples/base-seq-3.rds"]
-iterations = [689, 860, 175]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 1.1612e-05
-share = { finbench = 0.001676, biobench = 0.001893 }
-weight = { finbench = 0.000403, biobench = 5.1e-05 }
-
-[[programs]]
-id = "lubridate-minus"
-display = "lubridate::-"
-samples = ["samples/lubridate-minus-1.rds"]
-iterations = [34]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = ["lubridate"]
-gnu_seconds_per_call = 0.000591703
-share = { finbench = 0.000824, dsbench = 0.001457, biobench = 0.001234 }
-weight = { finbench = 0.001507, dsbench = 0.002079, biobench = 0.00162 }
-
-[[programs]]
-id = "base-set-seed"
-display = "base::set.seed"
-samples = ["samples/base-set-seed-1.rds", "samples/base-set-seed-2.rds", "samples/base-set-seed-3.rds"]
-iterations = [1441, 1232, 1278]
-rng = [true, true, true]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 5.06112e-06
-share = { finbench = 0.000338, dsbench = 0.000917, biobench = 0.00182 }
-weight = { finbench = 0.000171, dsbench = 0.000535, biobench = 0.000706 }
+gnu_seconds_per_call = 0.000639716
+share = { finbench = 0.00071, dsbench = 0.001656, biobench = 0.001422 }
+weight = { finbench = 0.000433, dsbench = 0.001536, biobench = 0.00127 }
 
 [[programs]]
 id = "base-data-frame-2"
 display = "base::[.data.frame"
 samples = ["samples/base-data-frame-2-1.rds", "samples/base-data-frame-2-2.rds", "samples/base-data-frame-2-3.rds"]
-iterations = [165, 192, 223]
+iterations = [278, 365, 451]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 3.44537e-05
-share = { dsbench = 0.003042 }
-weight = { dsbench = 0.002611 }
+gnu_seconds_per_call = 1.82838e-05
+share = { dsbench = 0.003788 }
+weight = { dsbench = 0.002588 }
+
+[[programs]]
+id = "lubridate-minus"
+display = "lubridate::-"
+samples = ["samples/lubridate-minus-1.rds"]
+iterations = [30]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = ["lubridate"]
+gnu_seconds_per_call = 0.000663549
+share = { finbench = 0.000823, dsbench = 0.001612, biobench = 0.001283 }
+weight = { finbench = 0.001737, dsbench = 0.003533, biobench = 0.002387 }
+
+[[programs]]
+id = "base-seq"
+display = "base::seq"
+samples = ["samples/base-seq-1.rds", "samples/base-seq-2.rds", "samples/base-seq-3.rds"]
+iterations = [605, 155, 88]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = []
+gnu_seconds_per_call = 2.35896e-05
+share = { finbench = 0.001736, biobench = 0.001964 }
+weight = { finbench = 0.000744, biobench = 0.000104 }
+
+[[programs]]
+id = "rugarch-ugarchspec"
+display = "rugarch::ugarchspec"
+samples = ["samples/rugarch-ugarchspec-1.rds", "samples/rugarch-ugarchspec-2.rds", "samples/rugarch-ugarchspec-3.rds"]
+iterations = [22, 14, 19]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["rugarch"]
+gnu_seconds_per_call = 0.00036177
+share = { finbench = 0.003625 }
+weight = { finbench = 0.003968 }
+
+[[programs]]
+id = "base-format"
+display = "base::format"
+samples = ["samples/base-format-1.rds", "samples/base-format-2.rds", "samples/base-format-3.rds"]
+iterations = [145, 144, 147]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = []
+gnu_seconds_per_call = 4.58616e-05
+share = { biobench = 0.003316 }
+weight = { biobench = 0.001866 }
+
+[[programs]]
+id = "base-t"
+display = "base::t"
+samples = ["samples/base-t-1.rds", "samples/base-t-2.rds", "samples/base-t-3.rds"]
+iterations = [2248, 1803, 1708]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = []
+gnu_seconds_per_call = 3.47337e-06
+share = { finbench = 1.8e-05, dsbench = 0.003307 }
+weight = { finbench = 1.8e-05, dsbench = 0.00284 }
 
 [[programs]]
 id = "testthat-expect-setequal"
 display = "testthat::expect_setequal"
 samples = ["samples/testthat-expect-setequal-1.rds", "samples/testthat-expect-setequal-2.rds", "samples/testthat-expect-setequal-3.rds"]
-iterations = [19, 24, 18]
+iterations = [19, 28, 21]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["testthat"]
-gnu_seconds_per_call = 0.000322702
-share = { dsbench = 0.003015 }
-weight = { dsbench = 0.006298 }
+gnu_seconds_per_call = 0.000295995
+share = { dsbench = 0.003083 }
+weight = { dsbench = 0.005752 }
+
+[[programs]]
+id = "httr2-resp-body-json"
+display = "httr2::resp_body_json"
+samples = ["samples/httr2-resp-body-json-1.rds", "samples/httr2-resp-body-json-2.rds", "samples/httr2-resp-body-json-3.rds"]
+iterations = [28, 26, 23]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [true, true, true]
+namespaces = ["httr2"]
+gnu_seconds_per_call = 0.000257065
+share = { finbench = 0.000615, dsbench = 0.00123, biobench = 0.001112 }
+weight = { finbench = 0.000275, dsbench = 0.000746, biobench = 0.00083 }
 
 [[programs]]
 id = "rmgarch-dccspec"
@@ -813,500 +813,500 @@ rng = [false]
 threw = [false]
 fresh = [false]
 namespaces = ["rmgarch", "rugarch"]
-gnu_seconds_per_call = 0.000652201
-share = { finbench = 0.003131 }
-weight = { finbench = 0.003673 }
-
-[[programs]]
-id = "stats-p-adjust"
-display = "stats::p.adjust"
-samples = ["samples/stats-p-adjust-1.rds", "samples/stats-p-adjust-2.rds", "samples/stats-p-adjust-3.rds"]
-iterations = [162, 170, 418]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["stats"]
-gnu_seconds_per_call = 2.66181e-05
-share = { biobench = 0.002931 }
-weight = { biobench = 0.000672 }
+gnu_seconds_per_call = 0.00064873
+share = { finbench = 0.002981 }
+weight = { finbench = 0.004027 }
 
 [[programs]]
 id = "base-requirenamespace"
 display = "base::requireNamespace"
 samples = ["samples/base-requirenamespace-1.rds", "samples/base-requirenamespace-2.rds", "samples/base-requirenamespace-3.rds"]
-iterations = [41, 37, 56]
+iterations = [53, 59, 58]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 0.000148878
-share = { finbench = 0.000598, dsbench = 0.002047, biobench = 0.000177 }
-weight = { finbench = 0.000369, dsbench = 0.001625, biobench = 9.2e-05 }
-
-[[programs]]
-id = "httr2-resp-body-json"
-display = "httr2::resp_body_json"
-samples = ["samples/httr2-resp-body-json-1.rds", "samples/httr2-resp-body-json-2.rds", "samples/httr2-resp-body-json-3.rds"]
-iterations = [18, 21, 27]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [true, true, true]
-namespaces = ["httr2"]
-gnu_seconds_per_call = 0.000305219
-share = { finbench = 0.000604, dsbench = 0.001167, biobench = 0.001053 }
-weight = { finbench = 0.000258, dsbench = 0.000864, biobench = 0.000415 }
-
-[[programs]]
-id = "fs-path"
-display = "fs::path"
-samples = ["samples/fs-path-1.rds", "samples/fs-path-2.rds", "samples/fs-path-3.rds"]
-iterations = [363, 411, 390]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["fs"]
-gnu_seconds_per_call = 1.71946e-05
-share = { finbench = 0.000544, dsbench = 0.000942, biobench = 0.001288 }
-weight = { finbench = 0.000405, dsbench = 0.001083, biobench = 0.00059 }
+gnu_seconds_per_call = 0.000117534
+share = { finbench = 0.000588, dsbench = 0.002083, biobench = 0.000177 }
+weight = { finbench = 0.000441, dsbench = 0.001687, biobench = 0.00012 }
 
 [[programs]]
 id = "jsonlite-fromjson"
 display = "jsonlite::fromJSON"
 samples = ["samples/jsonlite-fromjson-1.rds", "samples/jsonlite-fromjson-2.rds", "samples/jsonlite-fromjson-3.rds"]
-iterations = [271, 181, 194]
+iterations = [295, 233, 179]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["jsonlite"]
-gnu_seconds_per_call = 3.09193e-05
-share = { finbench = 0.00016, dsbench = 0.002331, biobench = 0.000249 }
-weight = { finbench = 6.3e-05, dsbench = 0.000977, biobench = 9.3e-05 }
-
-[[programs]]
-id = "base-sprintf"
-display = "base::sprintf"
-samples = ["samples/base-sprintf-1.rds", "samples/base-sprintf-2.rds", "samples/base-sprintf-3.rds"]
-iterations = [20, 25, 22]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["DBI"]
-gnu_seconds_per_call = 0.000301254
-share = { finbench = 0.000573, dsbench = 0.001122, biobench = 0.001019 }
-weight = { finbench = 0.000529, dsbench = 0.001053, biobench = 0.000412 }
+gnu_seconds_per_call = 2.83114e-05
+share = { finbench = 0.000154, dsbench = 0.002409, biobench = 0.00026 }
+weight = { finbench = 7.4e-05, dsbench = 0.000851, biobench = 0.000134 }
 
 [[programs]]
 id = "base-table"
 display = "base::table"
 samples = ["samples/base-table-1.rds", "samples/base-table-2.rds", "samples/base-table-3.rds"]
-iterations = [172, 154, 163]
+iterations = [120, 152, 108]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 4.08855e-05
-share = { finbench = 0.000257, dsbench = 0.002681, biobench = 0.000394 }
-weight = { finbench = 0.000144, dsbench = 0.001882, biobench = 0.000147 }
+gnu_seconds_per_call = 5.2541e-05
+share = { finbench = 0.000251, dsbench = 0.002791, biobench = 0.00042 }
+weight = { finbench = 0.000147, dsbench = 0.001737, biobench = 0.000242 }
 
 [[programs]]
 id = "lgr-get-logger"
 display = "lgr::get_logger"
 samples = ["samples/lgr-get-logger-1.rds", "samples/lgr-get-logger-2.rds", "samples/lgr-get-logger-3.rds"]
-iterations = [166, 189, 233]
+iterations = [244, 203, 155]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["lgr"]
-gnu_seconds_per_call = 3.40114e-05
-share = { finbench = 0.00052, dsbench = 0.001074, biobench = 0.001013 }
-weight = { finbench = 2.8e-05, dsbench = 8e-05, biobench = 3.9e-05 }
+gnu_seconds_per_call = 3.32185e-05
+share = { finbench = 0.000681, dsbench = 0.001078, biobench = 0.001029 }
+weight = { finbench = 4.8e-05, dsbench = 7.2e-05, biobench = 6.7e-05 }
 
 [[programs]]
-id = "stringr-str-split"
-display = "stringr::str_split"
-samples = ["samples/stringr-str-split-1.rds", "samples/stringr-str-split-2.rds", "samples/stringr-str-split-3.rds"]
-iterations = [266, 241, 187]
+id = "base-sprintf"
+display = "base::sprintf"
+samples = ["samples/base-sprintf-1.rds", "samples/base-sprintf-2.rds", "samples/base-sprintf-3.rds"]
+iterations = [19, 21, 21]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["stringr"]
-gnu_seconds_per_call = 2.88186e-05
-share = { finbench = 0.000192, dsbench = 0.001822, biobench = 0.000309 }
-weight = { finbench = 4.8e-05, dsbench = 0.00052, biobench = 5.3e-05 }
+namespaces = ["DBI"]
+gnu_seconds_per_call = 0.000329655
+share = { finbench = 0.000632, dsbench = 0.001129, biobench = 0.00099 }
+weight = { finbench = 0.000691, dsbench = 0.001045, biobench = 0.000615 }
+
+[[programs]]
+id = "base-set-seed"
+display = "base::set.seed"
+samples = ["samples/base-set-seed-1.rds", "samples/base-set-seed-2.rds", "samples/base-set-seed-3.rds"]
+iterations = [1543, 1286, 1621]
+rng = [true, true, true]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = []
+gnu_seconds_per_call = 4.49488e-06
+share = { finbench = 0.000345, dsbench = 0.00081, biobench = 0.001443 }
+weight = { finbench = 0.000136, dsbench = 0.000439, biobench = 0.000844 }
+
+[[programs]]
+id = "stats-p-adjust"
+display = "stats::p.adjust"
+samples = ["samples/stats-p-adjust-1.rds", "samples/stats-p-adjust-2.rds", "samples/stats-p-adjust-3.rds"]
+iterations = [119, 428, 112]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["stats"]
+gnu_seconds_per_call = 3.04087e-05
+share = { biobench = 0.002438 }
+weight = { biobench = 0.00146 }
 
 [[programs]]
 id = "base-matrix"
 display = "base::matrix"
 samples = ["samples/base-matrix-1.rds", "samples/base-matrix-2.rds", "samples/base-matrix-3.rds"]
-iterations = [2141, 2256, 2377]
+iterations = [2624, 2179, 2158]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 2.95231e-06
-share = { finbench = 0.001233, dsbench = 0.000184, biobench = 0.000949 }
-weight = { finbench = 0.003833, dsbench = 0.000139, biobench = 0.000506 }
+gnu_seconds_per_call = 2.87324e-06
+share = { finbench = 0.001283, dsbench = 0.000198, biobench = 0.000987 }
+weight = { finbench = 0.003831, dsbench = 0.000114, biobench = 0.000819 }
 
 [[programs]]
 id = "lubridate-interval"
 display = "lubridate::interval"
 samples = ["samples/lubridate-interval-1.rds", "samples/lubridate-interval-2.rds", "samples/lubridate-interval-3.rds"]
-iterations = [20, 22, 16]
+iterations = [20, 27, 20]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["lubridate"]
-gnu_seconds_per_call = 0.000343583
-share = { finbench = 0.000543, dsbench = 0.000953, biobench = 0.000795 }
-weight = { finbench = 0.000363, dsbench = 0.000736, biobench = 0.000399 }
+gnu_seconds_per_call = 0.000300834
+share = { finbench = 0.000553, dsbench = 0.000964, biobench = 0.000861 }
+weight = { finbench = 0.000429, dsbench = 0.000743, biobench = 0.000727 }
+
+[[programs]]
+id = "fs-path"
+display = "fs::path"
+samples = ["samples/fs-path-1.rds", "samples/fs-path-2.rds", "samples/fs-path-3.rds"]
+iterations = [426, 450, 285]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["fs"]
+gnu_seconds_per_call = 1.72213e-05
+share = { finbench = 0.000529, dsbench = 0.000974, biobench = 0.000822 }
+weight = { finbench = 0.000431, dsbench = 0.000438, biobench = 0.000999 }
 
 [[programs]]
 id = "r6-new"
 display = "R6::$new"
 samples = ["samples/r6-new-1.rds", "samples/r6-new-2.rds", "samples/r6-new-3.rds"]
-iterations = [50, 71, 76]
+iterations = [69, 64, 70]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["R6", "assertthat", "rlang", "utils"]
-gnu_seconds_per_call = 0.000101696
-share = { finbench = 0.000298, dsbench = 0.00137, biobench = 0.000561 }
-weight = { finbench = 0.000146, dsbench = 0.000949, biobench = 0.000244 }
+gnu_seconds_per_call = 9.885e-05
+share = { finbench = 0.000295, dsbench = 0.001403, biobench = 0.000581 }
+weight = { finbench = 0.000216, dsbench = 0.000841, biobench = 0.000396 }
 
 [[programs]]
 id = "r6-r6class"
 display = "R6::R6Class"
 samples = ["samples/r6-r6class-1.rds", "samples/r6-r6class-2.rds", "samples/r6-r6class-3.rds"]
-iterations = [102, 87, 132]
+iterations = [99, 115, 116]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["R6", "assertthat", "digest"]
-gnu_seconds_per_call = 6.21654e-05
-share = { finbench = 0.000213, dsbench = 0.002164, biobench = 0.000396 }
-weight = { finbench = 0.000102, dsbench = 0.001296, biobench = 0.000126 }
+gnu_seconds_per_call = 6.05377e-05
+share = { finbench = 0.000202, dsbench = 0.002168, biobench = 0.0004 }
+weight = { finbench = 9.6e-05, dsbench = 0.001096, biobench = 0.000187 }
 
 [[programs]]
 id = "rglpk-rglpk-solve-lp"
 display = "Rglpk::Rglpk_solve_LP"
 samples = ["samples/rglpk-rglpk-solve-lp-1.rds", "samples/rglpk-rglpk-solve-lp-2.rds", "samples/rglpk-rglpk-solve-lp-3.rds"]
-iterations = [17, 21, 25]
+iterations = [20, 22, 24]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["Rglpk"]
-gnu_seconds_per_call = 0.000315556
-share = { finbench = 0.002147 }
-weight = { finbench = 0.001102 }
+gnu_seconds_per_call = 0.00029736
+share = { finbench = 0.002184 }
+weight = { finbench = 0.001419 }
 
 [[programs]]
-id = "httr2-response-json"
-display = "httr2::response_json"
-samples = ["samples/httr2-response-json-1.rds", "samples/httr2-response-json-2.rds", "samples/httr2-response-json-3.rds"]
-iterations = [32, 30, 27]
+id = "stringr-str-split"
+display = "stringr::str_split"
+samples = ["samples/stringr-str-split-1.rds", "samples/stringr-str-split-2.rds", "samples/stringr-str-split-3.rds"]
+iterations = [229, 256, 253]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["httr2"]
-gnu_seconds_per_call = 0.000223443
-share = { finbench = 0.000429, dsbench = 0.000944, biobench = 0.000684 }
-weight = { finbench = 0.000242, dsbench = 0.000803, biobench = 0.00028 }
+namespaces = ["stringr"]
+gnu_seconds_per_call = 2.70856e-05
+share = { finbench = 0.000188, dsbench = 0.001622, biobench = 0.000309 }
+weight = { finbench = 5.3e-05, dsbench = 0.00036, biobench = 8.7e-05 }
 
 [[programs]]
 id = "stats-quantile"
 display = "stats::quantile"
 samples = ["samples/stats-quantile-1.rds", "samples/stats-quantile-2.rds", "samples/stats-quantile-3.rds"]
-iterations = [157, 179, 117]
+iterations = [176, 96, 145]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["stats"]
-gnu_seconds_per_call = 4.40712e-05
-share = { finbench = 0.001068, biobench = 0.000928 }
-weight = { finbench = 0.000672, biobench = 0.000198 }
+gnu_seconds_per_call = 4.79407e-05
+share = { finbench = 0.001102, biobench = 0.000972 }
+weight = { finbench = 0.000653, biobench = 0.000446 }
+
+[[programs]]
+id = "httr2-response-json"
+display = "httr2::response_json"
+samples = ["samples/httr2-response-json-1.rds", "samples/httr2-response-json-2.rds", "samples/httr2-response-json-3.rds"]
+iterations = [19, 28, 18]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["httr2"]
+gnu_seconds_per_call = 0.000306537
+share = { finbench = 0.000426, dsbench = 0.000979, biobench = 0.000653 }
+weight = { finbench = 0.000281, dsbench = 0.000753, biobench = 0.000499 }
 
 [[programs]]
 id = "httr-parse-url"
 display = "httr::parse_url"
 samples = ["samples/httr-parse-url-1.rds"]
-iterations = [128]
+iterations = [88]
 rng = [false]
 threw = [false]
 fresh = [false]
 namespaces = ["httr"]
-gnu_seconds_per_call = 0.000156317
-share = { finbench = 0.000465, dsbench = 0.000776, biobench = 0.000626 }
-weight = { finbench = 0.000349, dsbench = 0.000309, biobench = 0.000101 }
-
-[[programs]]
-id = "base-unlist"
-display = "base::unlist"
-samples = ["samples/base-unlist-1.rds", "samples/base-unlist-2.rds", "samples/base-unlist-3.rds"]
-iterations = [95, 34, 91]
-rng = [true, true, true]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 9.08357e-05
-share = { finbench = 5.8e-05, dsbench = 0.000115, biobench = 0.001571 }
-weight = { finbench = 1.4e-05, dsbench = 3.8e-05, biobench = 0.000969 }
-
-[[programs]]
-id = "base-cbind"
-display = "base::cbind"
-samples = ["samples/base-cbind-1.rds", "samples/base-cbind-2.rds", "samples/base-cbind-3.rds"]
-iterations = [1589, 78, 96]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 1.13393e-05
-share = { finbench = 0.000163, dsbench = 0.001576 }
-weight = { finbench = 6.6e-05, dsbench = 0.001412 }
-
-[[programs]]
-id = "stats-coef"
-display = "stats::coef"
-samples = ["samples/stats-coef-1.rds", "samples/stats-coef-2.rds", "samples/stats-coef-3.rds"]
-iterations = [107, 106, 103]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["stats"]
-gnu_seconds_per_call = 6.3103e-05
-share = { dsbench = 0.000127, biobench = 0.001725 }
-weight = { dsbench = 6.5e-05, biobench = 0.000468 }
-
-[[programs]]
-id = "openxlsx-createworkbook"
-display = "openxlsx::createWorkbook"
-samples = ["samples/openxlsx-createworkbook-1.rds"]
-iterations = [16]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = ["openxlsx"]
-gnu_seconds_per_call = 0.00124817
-share = { finbench = 0.00179 }
-weight = { finbench = 0.002921 }
-
-[[programs]]
-id = "cli-pluralize"
-display = "cli::pluralize"
-samples = ["samples/cli-pluralize-1.rds", "samples/cli-pluralize-2.rds", "samples/cli-pluralize-3.rds"]
-iterations = [39, 33, 55]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["cli"]
-gnu_seconds_per_call = 0.00015698
-share = { finbench = 0.000334, dsbench = 0.000695, biobench = 0.000641 }
-weight = { finbench = 0.000129, dsbench = 0.000329, biobench = 0.000196 }
-
-[[programs]]
-id = "purrr-keep"
-display = "purrr::keep"
-samples = ["samples/purrr-keep-1.rds", "samples/purrr-keep-2.rds", "samples/purrr-keep-3.rds"]
-iterations = [66, 66, 75]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["purrr"]
-gnu_seconds_per_call = 9.68772e-05
-share = { finbench = 0.000371, dsbench = 0.000696, biobench = 0.000587 }
-weight = { finbench = 0.000252, dsbench = 0.000492, biobench = 0.000165 }
-
-[[programs]]
-id = "testthat-expect-lt"
-display = "testthat::expect_lt"
-samples = ["samples/testthat-expect-lt-1.rds", "samples/testthat-expect-lt-2.rds", "samples/testthat-expect-lt-3.rds"]
-iterations = [34, 26, 34]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["testthat"]
-gnu_seconds_per_call = 0.000216023
-share = { finbench = 0.00223, biobench = 0.001564 }
-weight = { finbench = 0.002016, biobench = 0.000939 }
-
-[[programs]]
-id = "tools-totitlecase"
-display = "tools::toTitleCase"
-samples = ["samples/tools-totitlecase-1.rds"]
-iterations = [79]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = ["tools"]
-gnu_seconds_per_call = 0.000251966
-share = { finbench = 0.000391, dsbench = 0.00062, biobench = 0.000502 }
-weight = { finbench = 0.000642, dsbench = 0.001158, biobench = 0.000408 }
-
-[[programs]]
-id = "purrr-map-dbl"
-display = "purrr::map_dbl"
-samples = ["samples/purrr-map-dbl-1.rds", "samples/purrr-map-dbl-2.rds", "samples/purrr-map-dbl-3.rds"]
-iterations = [171, 157, 163]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["purrr"]
-gnu_seconds_per_call = 4.07268e-05
-share = { dsbench = 0.001447 }
-weight = { dsbench = 0.000537 }
-
-[[programs]]
-id = "stats-median"
-display = "stats::median"
-samples = ["samples/stats-median-1.rds", "samples/stats-median-2.rds", "samples/stats-median-3.rds"]
-iterations = [414, 225, 294]
-rng = [false, false, false]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["stats"]
-gnu_seconds_per_call = 2.14373e-05
-share = { dsbench = 0.001415 }
-weight = { dsbench = 0.001113 }
-
-[[programs]]
-id = "base-months"
-display = "base::months"
-samples = ["samples/base-months-1.rds"]
-iterations = [89]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = []
-gnu_seconds_per_call = 0.000224754
-share = { finbench = 0.00033, dsbench = 0.000565, biobench = 0.000483 }
-weight = { finbench = 0.000239, dsbench = 0.000504, biobench = 0.000292 }
-
-[[programs]]
-id = "stats-rnorm"
-display = "stats::rnorm"
-samples = ["samples/stats-rnorm-1.rds", "samples/stats-rnorm-2.rds", "samples/stats-rnorm-3.rds"]
-iterations = [1175, 646, 398]
-rng = [true, true, true]
-threw = [false, false, false]
-fresh = [false, false, false]
-namespaces = ["stats"]
-gnu_seconds_per_call = 9.01217e-06
-share = { finbench = 0.000185, dsbench = 0.000738, biobench = 0.000389 }
-weight = { finbench = 0.000218, dsbench = 0.001241, biobench = 0.000122 }
+gnu_seconds_per_call = 0.000226289
+share = { finbench = 0.000438, dsbench = 0.000833, biobench = 0.000676 }
+weight = { finbench = 0.000285, dsbench = 0.000284, biobench = 0.000207 }
 
 [[programs]]
 id = "brio-write-lines"
 display = "brio::write_lines"
 samples = ["samples/brio-write-lines-1.rds", "samples/brio-write-lines-2.rds", "samples/brio-write-lines-3.rds"]
-iterations = [3, 54, 30]
+iterations = [43, 41, 49]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["brio"]
-gnu_seconds_per_call = 0.000225838
-share = { finbench = 0.000306, dsbench = 0.000407, biobench = 0.000601 }
-weight = { finbench = 0.005109, dsbench = 0.00401, biobench = 0.000811 }
+gnu_seconds_per_call = 0.00014986
+share = { finbench = 0.000313, dsbench = 0.000978, biobench = 0.000616 }
+weight = { finbench = 0.000373, dsbench = 0.000738, biobench = 0.000531 }
 
 [[programs]]
-id = "httr2-req-url-path-append"
-display = "httr2::req_url_path_append"
-samples = ["samples/httr2-req-url-path-append-1.rds"]
-iterations = [198]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = ["httr2"]
-gnu_seconds_per_call = 0.000101211
-share = { finbench = 0.000267, dsbench = 0.000527, biobench = 0.000517 }
-weight = { finbench = 9.3e-05, dsbench = 0.000335, biobench = 0.000177 }
-
-[[programs]]
-id = "data-table-copy"
-display = "data.table::copy"
-samples = ["samples/data-table-copy-1.rds", "samples/data-table-copy-2.rds", "samples/data-table-copy-3.rds"]
-iterations = [310, 323, 219]
+id = "base-cbind"
+display = "base::cbind"
+samples = ["samples/base-cbind-1.rds", "samples/base-cbind-2.rds", "samples/base-cbind-3.rds"]
+iterations = [1795, 2173, 93]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["data.table"]
-gnu_seconds_per_call = 2.34795e-05
-share = { dsbench = 0.001205 }
-weight = { dsbench = 0.000568 }
+namespaces = []
+gnu_seconds_per_call = 4.9172e-06
+share = { finbench = 0.000165, dsbench = 0.001701 }
+weight = { finbench = 5.5e-05, dsbench = 0.001161 }
+
+[[programs]]
+id = "base-unlist"
+display = "base::unlist"
+samples = ["samples/base-unlist-1.rds", "samples/base-unlist-2.rds", "samples/base-unlist-3.rds"]
+iterations = [40, 46, 82]
+rng = [true, true, true]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = []
+gnu_seconds_per_call = 0.0001196
+share = { finbench = 5.6e-05, dsbench = 0.000123, biobench = 0.00165 }
+weight = { finbench = 2e-05, dsbench = 4.2e-05, biobench = 0.001829 }
+
+[[programs]]
+id = "stats-coef"
+display = "stats::coef"
+samples = ["samples/stats-coef-1.rds", "samples/stats-coef-2.rds", "samples/stats-coef-3.rds"]
+iterations = [93, 142, 46]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["stats"]
+gnu_seconds_per_call = 7.08825e-05
+share = { dsbench = 0.000138, biobench = 0.00179 }
+weight = { dsbench = 6.9e-05, biobench = 0.000828 }
+
+[[programs]]
+id = "openxlsx-createworkbook"
+display = "openxlsx::createWorkbook"
+samples = ["samples/openxlsx-createworkbook-1.rds"]
+iterations = [15]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = ["openxlsx"]
+gnu_seconds_per_call = 0.00131066
+share = { finbench = 0.001831 }
+weight = { finbench = 0.002612 }
+
+[[programs]]
+id = "cli-pluralize"
+display = "cli::pluralize"
+samples = ["samples/cli-pluralize-1.rds", "samples/cli-pluralize-2.rds", "samples/cli-pluralize-3.rds"]
+iterations = [45, 33, 39]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["cli"]
+gnu_seconds_per_call = 0.000170277
+share = { finbench = 0.000326, dsbench = 0.000713, biobench = 0.000664 }
+weight = { finbench = 0.000153, dsbench = 0.000357, biobench = 0.000369 }
+
+[[programs]]
+id = "purrr-keep"
+display = "purrr::keep"
+samples = ["samples/purrr-keep-1.rds", "samples/purrr-keep-2.rds", "samples/purrr-keep-3.rds"]
+iterations = [59, 56, 57]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["purrr"]
+gnu_seconds_per_call = 0.00011625
+share = { finbench = 0.000359, dsbench = 0.000747, biobench = 0.000588 }
+weight = { finbench = 0.000297, dsbench = 0.000584, biobench = 0.000362 }
+
+[[programs]]
+id = "tools-totitlecase"
+display = "tools::toTitleCase"
+samples = ["samples/tools-totitlecase-1.rds"]
+iterations = [114]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = ["tools"]
+gnu_seconds_per_call = 0.000175377
+share = { finbench = 0.000369, dsbench = 0.000679, biobench = 0.000641 }
+weight = { finbench = 0.00075, dsbench = 0.001132, biobench = 0.001119 }
+
+[[programs]]
+id = "testthat-expect-lt"
+display = "testthat::expect_lt"
+samples = ["samples/testthat-expect-lt-1.rds", "samples/testthat-expect-lt-2.rds", "samples/testthat-expect-lt-3.rds"]
+iterations = [26, 12, 23]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["testthat"]
+gnu_seconds_per_call = 0.000321824
+share = { finbench = 0.002117, biobench = 0.001661 }
+weight = { finbench = 0.003229, biobench = 0.00248 }
+
+[[programs]]
+id = "stats-median"
+display = "stats::median"
+samples = ["samples/stats-median-1.rds", "samples/stats-median-2.rds", "samples/stats-median-3.rds"]
+iterations = [178, 343, 222]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["stats"]
+gnu_seconds_per_call = 2.68977e-05
+share = { dsbench = 0.001643 }
+weight = { dsbench = 0.001192 }
 
 [[programs]]
 id = "base-as-date"
 display = "base::as.Date"
 samples = ["samples/base-as-date-1.rds", "samples/base-as-date-2.rds"]
-iterations = [364, 407]
+iterations = [212, 329]
 rng = [false, false]
 threw = [false, false]
 fresh = [false, false]
 namespaces = []
-gnu_seconds_per_call = 2.59334e-05
-share = { finbench = 0.000698, dsbench = 0.0003, biobench = 0.000232 }
-weight = { finbench = 0.000279, dsbench = 0.000162, biobench = 6e-05 }
+gnu_seconds_per_call = 3.69518e-05
+share = { finbench = 0.001005, dsbench = 0.000326, biobench = 0.000251 }
+weight = { finbench = 0.000523, dsbench = 0.000129, biobench = 0.000122 }
 
 [[programs]]
-id = "xts-xts"
-display = "xts::xts"
-samples = ["samples/xts-xts-1.rds", "samples/xts-xts-2.rds", "samples/xts-xts-3.rds"]
-iterations = [85, 84, 99]
+id = "purrr-map-dbl"
+display = "purrr::map_dbl"
+samples = ["samples/purrr-map-dbl-1.rds", "samples/purrr-map-dbl-2.rds", "samples/purrr-map-dbl-3.rds"]
+iterations = [216, 192, 114]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = ["xts"]
-gnu_seconds_per_call = 7.48972e-05
-share = { finbench = 0.001226 }
-weight = { finbench = 0.000646 }
+namespaces = ["purrr"]
+gnu_seconds_per_call = 3.82743e-05
+share = { dsbench = 0.00154 }
+weight = { dsbench = 0.000617 }
+
+[[programs]]
+id = "base-months"
+display = "base::months"
+samples = ["samples/base-months-1.rds"]
+iterations = [76]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = []
+gnu_seconds_per_call = 0.000262713
+share = { finbench = 0.000327, dsbench = 0.000583, biobench = 0.000523 }
+weight = { finbench = 0.000386, dsbench = 0.000558, biobench = 0.000546 }
+
+[[programs]]
+id = "httr2-req-url-path-append"
+display = "httr2::req_url_path_append"
+samples = ["samples/httr2-req-url-path-append-1.rds"]
+iterations = [177]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = ["httr2"]
+gnu_seconds_per_call = 0.000113269
+share = { finbench = 0.000262, dsbench = 0.000577, biobench = 0.000533 }
+weight = { finbench = 0.000126, dsbench = 0.000253, biobench = 0.000347 }
 
 [[programs]]
 id = "base-rank"
 display = "base::rank"
 samples = ["samples/base-rank-1.rds", "samples/base-rank-2.rds", "samples/base-rank-3.rds"]
-iterations = [231, 311, 275]
+iterations = [373, 196, 263]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = []
-gnu_seconds_per_call = 2.4454e-05
-share = { dsbench = 0.001107 }
-weight = { dsbench = 0.000205 }
+gnu_seconds_per_call = 2.40358e-05
+share = { dsbench = 0.001205 }
+weight = { dsbench = 0.000383 }
 
 [[programs]]
-id = "lubridate-ceiling-date"
-display = "lubridate::ceiling_date"
-samples = ["samples/lubridate-ceiling-date-1.rds"]
-iterations = [472]
-rng = [false]
-threw = [false]
-fresh = [false]
-namespaces = ["lubridate"]
-gnu_seconds_per_call = 4.23598e-05
-share = { finbench = 0.000257, dsbench = 0.000439, biobench = 0.000366 }
-weight = { finbench = 8.7e-05, dsbench = 0.000234, biobench = 8.7e-05 }
+id = "stats-rnorm"
+display = "stats::rnorm"
+samples = ["samples/stats-rnorm-1.rds", "samples/stats-rnorm-2.rds", "samples/stats-rnorm-3.rds"]
+iterations = [385, 772, 626]
+rng = [true, true, true]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["stats"]
+gnu_seconds_per_call = 1.12178e-05
+share = { finbench = 0.000184, dsbench = 0.000492, biobench = 0.000439 }
+weight = { finbench = 0.000372, dsbench = 0.000821, biobench = 0.000193 }
 
 [[programs]]
-id = "base-conditionmessage"
-display = "base::conditionMessage"
-samples = ["samples/base-conditionmessage-1.rds", "samples/base-conditionmessage-2.rds", "samples/base-conditionmessage-3.rds"]
-iterations = [208, 162, 183]
+id = "stringr-str-count"
+display = "stringr::str_count"
+samples = ["samples/stringr-str-count-1.rds", "samples/stringr-str-count-2.rds", "samples/stringr-str-count-3.rds"]
+iterations = [271, 439, 344]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
-namespaces = []
-gnu_seconds_per_call = 3.61207e-05
-share = { finbench = 0.000144, dsbench = 0.000661, biobench = 0.000243 }
-weight = { finbench = 0.000138, dsbench = 0.000858, biobench = 0.000143 }
+namespaces = ["stringr"]
+gnu_seconds_per_call = 1.89585e-05
+share = { biobench = 0.001081 }
+weight = { biobench = 0.000226 }
 
 [[programs]]
 id = "rlang-error-cnd"
 display = "rlang::error_cnd"
 samples = ["samples/rlang-error-cnd-1.rds", "samples/rlang-error-cnd-2.rds", "samples/rlang-error-cnd-3.rds"]
-iterations = [366, 335, 278]
+iterations = [215, 346, 343]
 rng = [false, false, false]
 threw = [false, false, false]
 fresh = [false, false, false]
 namespaces = ["rlang"]
-gnu_seconds_per_call = 2.04391e-05
-share = { finbench = 0.000216, dsbench = 0.000468, biobench = 0.000354 }
-weight = { finbench = 7.1e-05, dsbench = 0.000264, biobench = 9.2e-05 }
+gnu_seconds_per_call = 2.21237e-05
+share = { finbench = 0.000212, dsbench = 0.000496, biobench = 0.000378 }
+weight = { finbench = 8.2e-05, dsbench = 0.000245, biobench = 0.00016 }
+
+[[programs]]
+id = "lubridate-ceiling-date"
+display = "lubridate::ceiling_date"
+samples = ["samples/lubridate-ceiling-date-1.rds"]
+iterations = [438]
+rng = [false]
+threw = [false]
+fresh = [false]
+namespaces = ["lubridate"]
+gnu_seconds_per_call = 4.57102e-05
+share = { finbench = 0.000255, dsbench = 0.000445, biobench = 0.000387 }
+weight = { finbench = 0.000126, dsbench = 0.00023, biobench = 0.000117 }
+
+[[programs]]
+id = "base-conditionmessage"
+display = "base::conditionMessage"
+samples = ["samples/base-conditionmessage-1.rds", "samples/base-conditionmessage-2.rds", "samples/base-conditionmessage-3.rds"]
+iterations = [165, 133, 180]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = []
+gnu_seconds_per_call = 4.18453e-05
+share = { finbench = 0.000152, dsbench = 0.000682, biobench = 0.00024 }
+weight = { finbench = 0.000205, dsbench = 0.000829, biobench = 0.000258 }
+
+[[programs]]
+id = "lubridate-plus"
+display = "lubridate::+"
+samples = ["samples/lubridate-plus-1.rds", "samples/lubridate-plus-2.rds", "samples/lubridate-plus-3.rds"]
+iterations = [23, 8, 17]
+rng = [false, false, false]
+threw = [false, false, false]
+fresh = [false, false, false]
+namespaces = ["lubridate"]
+gnu_seconds_per_call = 0.000418791
+share = { finbench = 0.000245, dsbench = 0.000435, biobench = 0.000375 }
+weight = { finbench = 0.000562, dsbench = 0.001198, biobench = 0.000827 }
