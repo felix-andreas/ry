@@ -771,18 +771,19 @@ def merge_memory(memories):
 def same_checksum(value, reference):
     """Numeric checksums agree to a relative 1e-10, since a typed program may sum in another order;
     any other checksum must match exactly. A hot program prints one checksum per sample, joined by
-    commas, and a sample's `num:` or `cpl:` checksum (hot/replay.R) ends in such a sum, so it is
-    compared part by part."""
+    commas, so it is compared part by part. A sample's `num:` or `cpl:` checksum (hot/replay.R)
+    names its length and its count of non-finite values, which must match, and ends in the size
+    of the numbers and their sum over that size, which are compared as numbers."""
     values, references = value.split(","), reference.split(",")
     return len(values) == len(references) and all(map(same_checksum_part, values, references))
 
 
 def same_checksum_part(value, reference):
     if value.startswith(("num:", "cpl:")) and reference.startswith(("num:", "cpl:")):
-        head, _, value = value.rpartition(":")
-        expected_head, _, reference = reference.rpartition(":")
-        if head != expected_head:
-            return False
+        fields, expected = value.split(":"), reference.split(":")
+        return (len(fields) == len(expected) == 5 and fields[:3] == expected[:3]
+                and math.isclose(float(fields[3]), float(expected[3]), rel_tol=1e-10)
+                and math.isclose(float(fields[4]), float(expected[4]), abs_tol=1e-10))
     try:
         number, expected = float(value), float(reference)
     except ValueError:
@@ -1338,10 +1339,11 @@ def instructions_of(runner, programs, engine):
 def parse_callgrind_dump(text):
     """The region and instruction count of one callgrind dump, or None for a dump no region
     triggered (the one at program exit). A dump the region call triggers names the region in its
-    `desc: Trigger: Client Request: <name>` line, and its `summary:` (or `totals:`) line starts
-    with the count of the first event, which is instructions unless other events are asked for."""
+    `desc: Trigger: Client Request: <name>` line, and its `totals:` line starts with the count of
+    the first event, which is instructions unless other events are asked for. The `summary:` line
+    is no use: it reads 0, because the region stops instrumentation before it dumps."""
     trigger = re.search(r"^desc: Trigger: Client Request: (.*)$", text, re.M)
-    total = re.search(r"^(?:summary|totals): (\d+)", text, re.M)
+    total = re.search(r"^totals: (\d+)", text, re.M)
     if trigger is None or total is None or not trigger[1].strip():
         return None
     return trigger[1].strip(), int(total[1])

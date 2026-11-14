@@ -23,8 +23,9 @@ bench-hot-capture DIR` runs in order on code bases that tooling/generate.py wrot
 A program's weight in a code base is its share of the code base's GNU R time among the suite's
 programs, which bench.py needs to read the predicted speed-up of a code base as the weighted
 harmonic mean of the programs' speed-ups. The capture measures ry's time, with the recorder on and
-the JIT off, so GNU R's time in a key is estimated from the key's samples: the key's captured time
-times GNU R's seconds over the capture's seconds for the same sampled calls (`gnu_time`). The
+the JIT off, so GNU R's time in a key is estimated from the key's samples: the time the code base
+spent in the key (`package_seconds`) times GNU R's seconds over the capture's seconds for the same
+sampled calls (`gnu_time`). The
 recorder samples a key's calls uniformly, and a sampled call ran under the same conditions as every
 other call of the key, so whatever the capture run adds to the key's time cancels in that ratio.
 Every step is deterministic for the same capture.

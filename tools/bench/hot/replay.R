@@ -133,10 +133,15 @@
     )
   }
 
+  # Numbers are compared to twelve digits of their size, not to the last bit: the engines' math
+  # libraries round differently in the last place, and an iterative solver carries that further
+  # (`power.t.test` finds its root through `uniroot`, and the two roots differ by one part in 1e13).
   fold_number <- function(kind, numbers) {
     finite <- is.finite(numbers)
     weights <- seq_along(numbers) %% 7 + 1
-    sprintf("%s:%d:%d:%.15g", kind, length(numbers), sum(!finite), sum(numbers[finite] * weights[finite]))
+    size <- sum(abs(numbers[finite]) * weights[finite])
+    total <- sum(numbers[finite] * weights[finite])
+    sprintf("%s:%d:%d:%.12g:%.11f", kind, length(numbers), sum(!finite), size, if (size > 0) total / size else 0)
   }
 
   fold_text <- function(text) {

@@ -244,7 +244,7 @@ class HotSuite(unittest.TestCase):
 
     def summarize(self, programs, rounds):
         """The results of `rounds`, each a map from a program to its batch seconds on GNU R and ry."""
-        state = {"rounds": [{name: {engine.key: {"seconds": seconds, "min": seconds, "checksum": "num:1:0:2", "calls": 100}
+        state = {"rounds": [{name: {engine.key: {"seconds": seconds, "min": seconds, "checksum": "num:1:0:2:1.00000000000", "calls": 100}
                                     if seconds else {"seconds": None, "reason": "a call failed: no"}
                                     for engine, seconds in zip(self.table, pair)}
                              for name, pair in round_.items()} for round_ in rounds]}
@@ -272,10 +272,10 @@ class HotSuite(unittest.TestCase):
         self.assertEqual(bench.load_hot_suite(self.directory)["programs"], [program])
 
     def test_reads_a_harness_line(self):
-        self.assertEqual(bench.parse_hot_line("stats-sd num:1:0:1.5,error 0.019000 0.020500 2044"),
-                         ("stats-sd", {"checksum": "num:1:0:1.5,error", "calls": 2044, "seconds": 0.0205, "min": 0.019}))
-        self.assertEqual(bench.parse_hot_line("stats-sd num:1:0:1.5 NA NA 2044"),
-                         ("stats-sd", {"checksum": "num:1:0:1.5", "calls": 2044}))
+        self.assertEqual(bench.parse_hot_line("stats-sd num:1:0:1.5:1.00000000000,error 0.019000 0.020500 2044"),
+                         ("stats-sd", {"checksum": "num:1:0:1.5:1.00000000000,error", "calls": 2044, "seconds": 0.0205, "min": 0.019}))
+        self.assertEqual(bench.parse_hot_line("stats-sd num:1:0:1.5:1.00000000000 NA NA 2044"),
+                         ("stats-sd", {"checksum": "num:1:0:1.5:1.00000000000", "calls": 2044}))
         self.assertEqual(bench.parse_hot_line("zoo-rollmean failed namespace zoo does not load: gone"),
                          ("zoo-rollmean", {"seconds": None, "reason": "namespace zoo does not load: gone"}))
         self.assertIsNone(bench.parse_hot_line("Loading required namespace: data.table"))
@@ -288,12 +288,12 @@ class HotSuite(unittest.TestCase):
                          "sd\tsamples/sd-1.rds,samples/sd-2.rds\t10,20\t1,0\t0,1\tstats,zoo\n")
 
     def test_a_program_the_harness_printed_no_line_for_fails(self):
-        engine = bench.Engine("ry", "ry", [sys.executable, "-c", "print('sd num:1:0:2 0.01 0.02 7')"], dict(os.environ))
+        engine = bench.Engine("ry", "ry", [sys.executable, "-c", "print('sd num:1:0:2:1.00000000000 0.01 0.02 7')"], dict(os.environ))
         (self.directory / "suite.toml").write_text(hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": []}))
         runner = bench.HotRunner(bench.HOT_SUITE, self.args, directory=self.directory)
         self.addCleanup(runner.close)
         measured = runner.run_batch([self.program("sd", {}), self.program("median", {})], engine)
-        self.assertEqual(measured["sd"], {"checksum": "num:1:0:2", "calls": 7, "seconds": 0.02, "min": 0.01})
+        self.assertEqual(measured["sd"], {"checksum": "num:1:0:2:1.00000000000", "calls": 7, "seconds": 0.02, "min": 0.01})
         self.assertEqual(measured["median"], {"seconds": None, "reason": "the harness printed no line for it"})
 
     def test_the_predicted_speedup_is_the_weighted_harmonic_mean(self):
@@ -319,10 +319,11 @@ class HotSuite(unittest.TestCase):
         self.assertEqual(results["predicted"]["ry"]["finbench"]["median"], 2.0)
 
     def test_compares_a_hot_checksum_sample_by_sample(self):
-        self.assertTrue(bench.same_checksum("num:3:0:1.0000000000001,error", "num:3:0:1,error"))
-        self.assertFalse(bench.same_checksum("num:3:0:1.1,error", "num:3:0:1,error"))
-        self.assertFalse(bench.same_checksum("num:3:1:1,error", "num:3:0:1,error"))
-        self.assertFalse(bench.same_checksum("num:3:0:1", "num:3:0:1,error"))
+        self.assertTrue(bench.same_checksum("num:3:0:69.6585893385:0.50000000001,error", "num:3:0:69.6585893384:0.50000000000,error"))
+        self.assertFalse(bench.same_checksum("num:3:0:69.7:0.50000000000,error", "num:3:0:69.6585893384:0.50000000000,error"))
+        self.assertFalse(bench.same_checksum("num:3:0:2:0.50000000000,error", "num:3:0:2:-0.50000000000,error"))
+        self.assertFalse(bench.same_checksum("num:3:1:2:1.00000000000,error", "num:3:0:2:1.00000000000,error"))
+        self.assertFalse(bench.same_checksum("num:3:0:2:1.00000000000", "num:3:0:2:1.00000000000,error"))
         self.assertTrue(bench.same_checksum("chr:2:0:5:99", "chr:2:0:5:99"))
 
     def test_reads_a_region_profile(self):
@@ -340,10 +341,10 @@ class HotSuite(unittest.TestCase):
         self.assertEqual(bench.weighted_breakdown(rows), {"finbench": {"interpreter": round(2 / 3, 4), "gc": round(1 / 3, 4)}})
 
     def test_reads_a_callgrind_dump_its_region_triggered(self):
-        dump = "version: 1\ncmd: ry run\ndesc: Trigger: Client Request: stats-sd\nevents: Ir\nsummary: 123456\n"
+        dump = ("version: 1\ncmd: ry run\ndesc: Trigger: Client Request: stats-sd\nevents: Ir\nsummary: 0\n"
+                "fn=(1) eval\n12 123456\ntotals: 123456\n")
         self.assertEqual(bench.parse_callgrind_dump(dump), ("stats-sd", 123456))
-        self.assertEqual(bench.parse_callgrind_dump(dump.replace("summary", "totals")), ("stats-sd", 123456))
-        self.assertIsNone(bench.parse_callgrind_dump("desc: Trigger: Program termination\nsummary: 99\n"))
+        self.assertIsNone(bench.parse_callgrind_dump("desc: Trigger: Program termination\nsummary: 0\ntotals: 99\n"))
 
     def test_an_instruction_change_is_weighted_by_gnu_r_time(self):
         programs = [self.program("a", {"finbench": 0.5}, gnu_seconds_per_call=1e-5),
