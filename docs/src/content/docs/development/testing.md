@@ -1192,6 +1192,38 @@ Three options build on the counts:
 - `--functions N` adds the N functions of the runtime and of the packages' compiled code that
   hold the most of each code base's weighted instructions. It needs a build with symbols
   (`cargo build --profile profiling`, passed with `--ry PATH --any-build`).
+- `--save-dumps DIR` keeps each program's callgrind dumps as `DIR/<program>.<n>.callgrind`, for
+  a question the function ranking does not answer, such as who calls a function or how often.
+
+#### What one mechanism costs
+
+`just bench-mechanisms` prices the mechanisms the suite's programs are made of. Each of about
+seventy operations is one expression (a closure call with a default argument, a `UseMethod`
+dispatch, a `tryCatch` that catches nothing, `plain$b`) that a compiled loop evaluates. The tool
+runs the loop under callgrind for 20,000 and for 40,000 iterations and reports the difference per
+iteration, less the empty loop's, so start-up and warm-up cancel and the count repeats exactly.
+The tier-1 JIT is off unless `--jit` is given, because package code runs in tier 0 almost all of
+the time.
+
+```sh
+just bench-mechanisms --ry target/release/ry --filter dispatch
+```
+
+```
+| operation | expression | instructions |
+| --- | --- | ---: |
+| dispatch: `UseMethod`, class method | `describe(object)` | 8,290 |
+| dispatch: `UseMethod`, default method | `describe(i)` | 8,933 |
+| dispatch: `UseMethod` then `NextMethod` | `describe(child)` | 15,830 |
+| dispatch: builtin to a method (`length`) | `length(object)` | 5,628 |
+...
+```
+
+The whole table takes about five minutes on four cores, and one filtered group well under a
+minute. `--save FILE` keeps the counts and `--baseline FILE` prints the change against them,
+which is how a change to the call path or to dispatch is checked before the suite is run.
+`--profile NAME` prints the functions that hold one operation's instructions, on a build with
+symbols.
 
 #### How well the suite predicts the code bases
 
