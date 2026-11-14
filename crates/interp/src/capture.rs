@@ -28,15 +28,17 @@
 //! the program's code.
 //!
 //! Recording runs from the end of start-up to the end of the session. The work it does for a
-//! call (serializing, reading a sample back) runs suspended, so the calls that work makes are
-//! not recorded themselves.
+//! call (inspecting, serializing, reading a sample back) runs suspended, so the calls that work
+//! makes are not recorded themselves, and its time is left out of every record and of the total,
+//! so it is charged to nobody. A call the recorder cannot inspect is counted as uncapturable, and
+//! the recorded program goes on as it would unrecorded.
 
 use {
     crate::{
         dispatch, envir,
         eval::{self, Reify},
         interp,
-        unwind::{R, Unwind, error},
+        unwind::{INTERRUPTS_SUSPENDED, R, Unwind, error},
         values::{
             self, base_env, base_namespace, global_env, missing_arg, nil, symbol_name, unbound,
         },
@@ -51,6 +53,7 @@ use {
         cell::{Cell, RefCell},
         path::PathBuf,
         rc::Rc,
+        sync::atomic::Ordering,
         time::{Duration, Instant},
     },
 };
@@ -67,7 +70,8 @@ pub const MAX_BYTES_VARIABLE: &str = "RY_CAPTURE_MAX_BYTES";
 
 const GLOBAL_LABEL: &str = "R_GlobalEnv";
 
-/// A recording in progress, from [`mark_ready`] to [`finish`].
+/// The record a closure call or an evaluation pushed, open until the scope ends it with the
+/// call's outcome or drops.
 pub struct Scope {
     /// One more than the index of the record the call pushed, or 0 when it pushed none.
     record: usize,
@@ -108,15 +112,15 @@ thread_local! {
 }
 
 struct Capture {
-    /// The process that read the configuration. A forked child inherits the state but writes
-    /// nothing.
-    process: u32,
     directory: PathBuf,
     users: Vec<String>,
     sample_slots: usize,
     max_bytes: usize,
     /// When recording started; `None` until [`mark_ready`].
     started: Option<Instant>,
+    /// The time recording has been paused for since it started: the recorder's own work and
+    /// [`without_recording`]. A record's time and the total leave it out.
+    paused: Duration,
     stack: Vec<Record>,
     /// The index of the capturable boundary call whose region the top of the stack is in.
     covering: Option<usize>,
@@ -151,6 +155,9 @@ struct Record {
     layer: Layer,
     role: Role,
     started: Instant,
+    /// [`Capture::paused`] when the record was pushed, so the record's time can leave out the
+    /// pauses while it was open.
+    paused: Duration,
     /// The inclusive time of the records pushed directly above this one.
     nested: Duration,
 }
@@ -161,7 +168,8 @@ enum Role {
     Covered,
     Capturable {
         key: usize,
-        sample: Option<Pending>,
+        /// The call's sample, when the reservoir selected the call.
+        sample: Option<Selected>,
         /// Whether user code ran below the call.
         reentered: bool,
         /// The variables bound to unforced promises at entry, each preserved until the call
@@ -174,10 +182,21 @@ enum Role {
     },
 }
 
-/// A sampled call's inputs, serialized at entry, waiting for its outcome.
-struct Pending {
+/// A call the reservoir selected for the slot `slot`, waiting for its outcome: its inputs
+/// serialized at entry, or why they cannot be stored. Whether the call ends capturable decides
+/// what happens to the slot, so a call that cannot be stored empties it only then.
+struct Selected {
     slot: usize,
-    inputs: Vec<u8>,
+    inputs: Result<Vec<u8>, Unstorable>,
+}
+
+/// Why a selected call's sample cannot be stored.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unstorable {
+    /// Its inputs or the deferred values it forced serialize to more than the size limit.
+    Oversize,
+    /// Serializing or writing it failed, which [`note_failure`] reports.
+    Failed,
 }
 
 /// A variable the call reads whose binding held an unforced promise at entry. If the callee
@@ -220,32 +239,47 @@ enum Reason {
     /// The callee reads its caller's frame (`match.arg`, `match.call`, `sys.function`): a
     /// replay calls it from a different frame.
     CallerFrame,
+    /// The recorder failed to work out what the call reads, such as a symbol name over R's
+    /// length limit.
+    Uninspectable,
 }
 
+/// The statistics of one key: one package entry, named by the namespace that owns the callee
+/// and the name the call used.
 struct KeyStats {
     package: Rc<str>,
     name: Rc<str>,
     calls: u64,
-    seconds: Duration,
+    time: Duration,
     uncapturable_calls: u64,
-    uncapturable_seconds: Duration,
+    uncapturable_time: Duration,
     dots: u64,
     local_closure: u64,
     user_binding: u64,
     caller_frame: u64,
+    uninspectable: u64,
+    /// Capturable calls the reservoir selected whose sample was too large to store, which left
+    /// their slot empty. The calls it did not select are never serialized, so how many of those
+    /// were too large is unknown.
     oversize: u64,
     /// Capturable calls that ran user code below them: a method the user defined, or a closure
     /// reached through a value. Their replay without the user's code may differ.
     reentered: u64,
     /// Capturable calls seen, the reservoir's denominator.
     seen: u64,
-    /// The sample file of each reservoir slot.
+    /// The sample file of each reservoir slot, once one was stored in it. The file number stays
+    /// with the slot when a later call empties it.
     slots: Vec<Option<usize>>,
 }
 
 struct SampleFile {
     key: usize,
-    seconds: f64,
+    /// What the file holds, or `None` when the slot's last selected call could not be stored.
+    stored: Option<StoredSample>,
+}
+
+struct StoredSample {
+    time: Duration,
     threw: bool,
     bytes: usize,
 }
@@ -300,14 +334,28 @@ pub fn start_from_environment() {
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
         .collect();
+    // A forked child (parallel's `mcfork`, or native code that forks) inherits the recording, and
+    // would write over this process's outputs with a copy of them. Stopping it at the fork costs
+    // the parent nothing, where a check of the process id would cost every write a system call.
+    // SAFETY: `stop_in_child` only clears flags and forgets the state, without allocating.
+    #[cfg(unix)]
+    let failure = match unsafe { libc::pthread_atfork(None, None, Some(stop_in_child)) } {
+        0 => None,
+        code => Some(format!(
+            "cannot stop recording in forked children: {}",
+            std::io::Error::from_raw_os_error(code)
+        )),
+    };
+    #[cfg(not(unix))]
+    let failure = None;
     STATE.with_borrow_mut(|state| {
         *state = Some(Capture {
-            process: std::process::id(),
             directory,
             users,
             sample_slots,
             max_bytes,
             started: None,
+            paused: Duration::ZERO,
             stack: Vec::new(),
             covering: None,
             keys: Vec::new(),
@@ -320,7 +368,7 @@ pub fn start_from_environment() {
             covered: Duration::ZERO,
             uncapturable: Duration::ZERO,
             boundary_calls: 0,
-            failure: None,
+            failure,
         });
     });
 }
@@ -334,7 +382,7 @@ pub fn mark_ready() {
         let now = Instant::now();
         state.started = Some(now);
         if let Err(failure) = std::fs::create_dir_all(state.directory.join("samples")) {
-            state.failure = Some(format!(
+            state.failure.get_or_insert(format!(
                 "cannot create '{}': {failure}",
                 state.directory.display()
             ));
@@ -345,6 +393,7 @@ pub fn mark_ready() {
                 layer: Layer::User,
                 role: Role::User,
                 started: now,
+                paused: Duration::ZERO,
                 nested: Duration::ZERO,
             });
         }
@@ -364,9 +413,9 @@ pub unsafe fn enter(
     sys_parent: Sexp,
     method_vars: &[(Sexp, Sexp)],
     env: Sexp,
-) -> R<Scope> {
+) -> Scope {
     if SUSPENDED.get() {
-        return Ok(Scope::none());
+        return Scope::none();
     }
     let (owner, user) = owner(dispatch::top_env(function.tag()));
     enum Step {
@@ -386,8 +435,8 @@ pub unsafe fn enter(
         }
     });
     match step {
-        Step::Nothing => Ok(Scope::none()),
-        Step::User => Ok(push(Layer::User, |state| {
+        Step::Nothing => Scope::none(),
+        Step::User => push(Layer::User, |state| {
             if let Some(covering) = state.covering {
                 if let Some(Record {
                     role: Role::Capturable { reentered, .. },
@@ -400,124 +449,9 @@ pub unsafe fn enter(
             } else {
                 Role::User
             }
-        })),
+        }),
         Step::Boundary => boundary(call, sys_parent, owner, method_vars, env),
     }
-}
-
-unsafe fn boundary(
-    call: Sexp,
-    sys_parent: Sexp,
-    owner: Rc<str>,
-    method_vars: &[(Sexp, Sexp)],
-    env: Sexp,
-) -> R<Scope> {
-    let name = call_name(call);
-    let covered = STATE.with_borrow(|state| state.as_ref().is_some_and(|s| s.covering.is_some()));
-    if covered {
-        return Ok(push(Layer::Package, |_| Role::Covered));
-    }
-    let generic_symbol = values::symbols().dot_generic;
-    let generic = match method_vars
-        .iter()
-        .find(|&&(symbol, _)| symbol == generic_symbol)
-    {
-        Some(&(_, generic)) => Some(generic),
-        None if env != nil() => crate::heap()
-            .frame_cell(env, generic_symbol)
-            .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
-            .map(|cell| cell.cdr()),
-        None => None,
-    }
-    .filter(|generic| generic.kind() == SexpType::String)
-    .and_then(|generic| values::first_string(generic));
-    let free = free_names(call, generic.as_deref())?;
-    let _suspended = Suspend::start();
-    let heap = crate::heap();
-    let mark = heap.handle_mark();
-    let inspected = if free.dots {
-        Inspection::Uncapturable(Reason::Dots)
-    } else if free.caller_frame || (&*owner == "base" && reads_caller_frame(&name, call)) {
-        Inspection::Uncapturable(Reason::CallerFrame)
-    } else {
-        match inspect(&free, sys_parent) {
-            Ok(inspected) => inspected,
-            Err(unwind) => {
-                heap.release_handles(mark);
-                return Err(unwind);
-            }
-        }
-    };
-    let role = match inspected {
-        Inspection::Uncapturable(reason) => {
-            let key = key_of(&owner, &name);
-            Role::Uncapturable { key, reason }
-        }
-        Inspection::Capturable {
-            variables,
-            imports,
-            deferred,
-        } => {
-            let key = key_of(&owner, &name);
-            let slot = STATE.with_borrow_mut(|state| {
-                let state = state.as_mut()?;
-                let slots = state.sample_slots;
-                let stats = state.keys.get_mut(key)?;
-                stats.seen += 1;
-                let seen = stats.seen;
-                if seen as usize <= slots {
-                    return Some(seen as usize - 1);
-                }
-                let draw = next_random(&mut state.random) % seen;
-                (draw < slots as u64).then_some(draw as usize)
-            });
-            let sample = match slot {
-                Some(slot) => {
-                    let inputs = sample_inputs(&owner, &name, free.call, &variables, &imports)
-                        .and_then(|inputs| serialize(inputs));
-                    match inputs {
-                        Ok(bytes) if bytes.len() <= max_bytes() => Some(Pending {
-                            slot,
-                            inputs: bytes,
-                        }),
-                        Ok(_) => {
-                            with_key(key, |stats| stats.oversize += 1);
-                            None
-                        }
-                        Err(unwind) => {
-                            note_failure(&unwind);
-                            None
-                        }
-                    }
-                }
-                None => None,
-            };
-            for deferred in &deferred {
-                heap.preserve(deferred.promise);
-            }
-            Role::Capturable {
-                key,
-                sample,
-                reentered: false,
-                deferred,
-            }
-        }
-    };
-    heap.release_handles(mark);
-    drop(_suspended);
-    let capturable = matches!(role, Role::Capturable { .. });
-    let scope = push(Layer::Package, |state| {
-        state.boundary_calls += 1;
-        role
-    });
-    if capturable {
-        STATE.with_borrow_mut(|state| {
-            if let Some(state) = state.as_mut() {
-                state.covering = Some(scope.record - 1);
-            }
-        });
-    }
-    Ok(scope)
 }
 
 /// Records that R code runs in the environment `env` gives, entered other than by a closure call:
@@ -533,6 +467,182 @@ pub unsafe fn evaluating(env: impl FnOnce() -> Sexp) -> Scope {
         return Scope::none();
     }
     evaluating_recorded(env)
+}
+
+/// Runs `work` unrecorded and leaves its time out of every total, as if the recording had
+/// paused. The host uses it for the R code it runs itself after start-up, such as attaching the
+/// package loader, which is neither the user's code nor a call the user's code made.
+pub fn without_recording<T>(work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = {
+        let _suspended = Suspend::host();
+        work()
+    };
+    pause_since(started);
+    result
+}
+
+/// Stops recording and writes `entries.tsv`, `samples.tsv` and `summary.tsv`.
+pub fn finish() -> R<()> {
+    let Some(mut state) = STATE.with_borrow_mut(Option::take) else {
+        return Ok(());
+    };
+    activity::set_hook(activity::CAPTURE, false);
+    if !crate::profile_summary::sampling() {
+        activity::set_enabled(false);
+    }
+    let Some(started) = state.started else {
+        return Ok(());
+    };
+    let now = Instant::now();
+    // The records still open are the root user record and whatever an exit to top level left.
+    while let Some(record) = state.stack.pop() {
+        release_deferred(&record.role);
+        let inclusive = now
+            .duration_since(record.started)
+            .saturating_sub(state.paused.saturating_sub(record.paused));
+        if let Some(parent) = state.stack.last_mut() {
+            parent.nested += inclusive;
+        }
+        if let Role::User = record.role {
+            state.user += inclusive.saturating_sub(record.nested);
+        }
+    }
+    let total = now.duration_since(started).saturating_sub(state.paused);
+    let written = write_outputs(&state, total);
+    if let Some(failure) = state.failure.take() {
+        return Err(error(format!("boundary capture: {failure}")));
+    }
+    written.map_err(|failure| {
+        error(format!(
+            "cannot write the boundary capture to '{}': {failure}",
+            state.directory.display()
+        ))
+    })
+}
+
+/// Stops recording in a forked child, before it runs any code: it records nothing and writes
+/// nothing, because [`enter`] and [`evaluating`] no longer run and every record left open finds
+/// no state. The state is forgotten, not dropped, because freeing memory in a child forked from a
+/// process with other threads is not safe.
+#[cfg(unix)]
+extern "C" fn stop_in_child() {
+    activity::set_hook(activity::CAPTURE, false);
+    let state = STATE.try_with(|state| {
+        state
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut state| state.take())
+    });
+    if let Ok(Some(state)) = state {
+        std::mem::forget(state);
+    }
+}
+
+unsafe fn boundary(
+    call: Sexp,
+    sys_parent: Sexp,
+    owner: Rc<str>,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> Scope {
+    let covered =
+        STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.covering.is_some()));
+    if covered {
+        return push(Layer::Package, |_| Role::Covered);
+    }
+    let begun = Instant::now();
+    let suspended = Suspend::start();
+    let name = call_name(call);
+    let generic_symbol = values::symbols().dot_generic;
+    let generic = match method_vars
+        .iter()
+        .find(|&&(symbol, _)| symbol == generic_symbol)
+    {
+        Some(&(_, generic)) => Some(generic),
+        None if env != nil() => crate::heap()
+            .frame_cell(env, generic_symbol)
+            .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
+            .map(|cell| cell.cdr()),
+        None => None,
+    }
+    .filter(|generic| generic.kind() == SexpType::String)
+    .and_then(|generic| values::first_string(generic));
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    // A failure to inspect the call is the recorder's, not the program's, so the call is counted
+    // as one the recorder could not capture and the program goes on as it would unrecorded.
+    let inspected = match free_names(call, generic.as_deref()) {
+        Err(_) => Inspection::Uncapturable(Reason::Uninspectable),
+        Ok(free) if free.dots => Inspection::Uncapturable(Reason::Dots),
+        Ok(free) if free.caller_frame || (&*owner == "base" && reads_caller_frame(&name, call)) => {
+            Inspection::Uncapturable(Reason::CallerFrame)
+        }
+        Ok(free) => {
+            inspect(&free, sys_parent).unwrap_or(Inspection::Uncapturable(Reason::Uninspectable))
+        }
+    };
+    let key = key_of(&owner, &name);
+    let role = match inspected {
+        Inspection::Uncapturable(reason) => Role::Uncapturable { key, reason },
+        Inspection::Capturable {
+            call,
+            variables,
+            imports,
+            deferred,
+        } => {
+            let slot = STATE.with_borrow_mut(|state| {
+                let state = state.as_mut()?;
+                let slots = state.sample_slots;
+                let stats = state.keys.get_mut(key)?;
+                stats.seen += 1;
+                let seen = stats.seen;
+                if seen as usize <= slots {
+                    return Some(seen as usize - 1);
+                }
+                let draw = next_random(&mut state.random) % seen;
+                (draw < slots as u64).then_some(draw as usize)
+            });
+            let sample = slot.map(|slot| {
+                let inputs = match sample_inputs(&owner, &name, call, &variables, &imports)
+                    .and_then(|inputs| serialize(inputs))
+                {
+                    Ok(bytes) if bytes.len() <= max_bytes() => Ok(bytes),
+                    Ok(_) => Err(Unstorable::Oversize),
+                    Err(unwind) => {
+                        note_failure(&unwind);
+                        Err(Unstorable::Failed)
+                    }
+                };
+                Selected { slot, inputs }
+            });
+            for deferred in &deferred {
+                heap.preserve(deferred.promise);
+            }
+            Role::Capturable {
+                key,
+                sample,
+                reentered: false,
+                deferred,
+            }
+        }
+    };
+    heap.release_handles(mark);
+    drop(suspended);
+    let capturable = matches!(role, Role::Capturable { .. });
+    let scope = push(Layer::Package, |state| {
+        state.paused += begun.elapsed();
+        state.boundary_calls += 1;
+        role
+    });
+    if capturable {
+        STATE.with_borrow_mut(|state| {
+            if let Some(state) = state.as_mut() {
+                state.covering = Some(scope.record - 1);
+            }
+        });
+    }
+    scope
 }
 
 #[inline(never)]
@@ -571,6 +681,7 @@ fn push(layer: Layer, role: impl FnOnce(&mut Capture) -> Role) -> Scope {
             layer,
             role,
             started: Instant::now(),
+            paused: state.paused,
             nested: Duration::ZERO,
         });
         Scope {
@@ -581,6 +692,7 @@ fn push(layer: Layer, role: impl FnOnce(&mut Capture) -> Role) -> Scope {
 
 /// Pops the record at `index`, and any a non-local exit left above it, and attributes its time.
 unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
+    let stopped = Instant::now();
     let Some((record, inclusive, exclusive)) = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
         if state.stack.len() <= index {
@@ -588,12 +700,21 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
         }
         for abandoned in state.stack.drain(index + 1..) {
             release_deferred(&abandoned.role);
+            // A call that never ended is counted nowhere, so it leaves the reservoir as if it
+            // had never been seen.
+            if let Role::Capturable { key, .. } = abandoned.role
+                && let Some(stats) = state.keys.get_mut(key)
+            {
+                stats.seen = stats.seen.saturating_sub(1);
+            }
         }
         let record = state.stack.pop()?;
         if state.covering.is_some_and(|covering| covering >= index) {
             state.covering = None;
         }
-        let inclusive = record.started.elapsed();
+        let inclusive = stopped
+            .duration_since(record.started)
+            .saturating_sub(state.paused.saturating_sub(record.paused));
         if let Some(parent) = state.stack.last_mut() {
             parent.nested += inclusive;
         }
@@ -621,41 +742,62 @@ unsafe fn leave(index: usize, result: Option<&R<Sexp>>) {
     };
     let heap = crate::heap();
     let mark = heap.handle_mark();
-    let settled = settle_deferred(&deferred);
-    let settled = match settled {
-        Ok(settled) => settled,
+    match settle_deferred(&deferred) {
         Err(reason) => {
             // The call was counted as covering the user code below it, which recorded no time
             // of its own, so the call owns its inclusive time even though it turned out
-            // uncapturable.
+            // uncapturable. It is no capturable call, so it leaves the reservoir as if never
+            // seen, and the slot it was selected for keeps its sample.
             count_uncapturable(key, reason, inclusive);
             with_key(key, |stats| stats.seen = stats.seen.saturating_sub(1));
-            heap.release_handles(mark);
-            return;
         }
-    };
-    with_state(|state| {
-        state.covered += inclusive;
-        if let Some(stats) = state.keys.get_mut(key) {
-            stats.calls += 1;
-            stats.reentered += u64::from(reentered);
-            stats.seconds += inclusive;
-        }
-    });
-    if let Some(sample) = sample {
-        let _suspended = Suspend::start();
-        let value = match result {
-            Some(Ok(value)) => {
-                heap.root(*value);
-                Some(*value)
+        Ok(settled) => {
+            with_state(|state| {
+                state.covered += inclusive;
+                if let Some(stats) = state.keys.get_mut(key) {
+                    stats.calls += 1;
+                    stats.reentered += u64::from(reentered);
+                    stats.time += inclusive;
+                }
+            });
+            if let Some(Selected { slot, inputs }) = sample {
+                let stored = inputs.and_then(|inputs| {
+                    let _suspended = Suspend::start();
+                    let value = match result {
+                        Some(Ok(value)) => {
+                            heap.root(*value);
+                            Some(*value)
+                        }
+                        _ => None,
+                    };
+                    write_sample(key, slot, &inputs, inclusive, value, &settled).unwrap_or_else(
+                        |unwind| {
+                            note_failure(&unwind);
+                            Err(Unstorable::Failed)
+                        },
+                    )
+                });
+                // The call replaces the slot's sample whether or not it can be stored: keeping the
+                // earlier sample would weigh the earlier calls more than the reservoir's uniform
+                // draw does.
+                if let Err(unstorable) = stored {
+                    empty_slot(key, slot, unstorable);
+                }
             }
-            _ => None,
-        };
-        if let Err(unwind) = write_sample(key, sample, inclusive, value, &settled) {
-            note_failure(&unwind);
         }
     }
     heap.release_handles(mark);
+    pause_since(stopped);
+}
+
+/// Leaves the time since `started` out of every record open now and of the total.
+fn pause_since(started: Instant) {
+    let paused = started.elapsed();
+    with_state(|state| {
+        if state.started.is_some() {
+            state.paused += paused;
+        }
+    });
 }
 
 fn with_state(update: impl FnOnce(&mut Capture)) {
@@ -666,22 +808,46 @@ fn with_state(update: impl FnOnce(&mut Capture)) {
     });
 }
 
-/// Counts a call of `key` that cannot be replayed, for `reason`, as owning `seconds`.
-fn count_uncapturable(key: usize, reason: Reason, seconds: Duration) {
+/// Counts a call of `key` that cannot be replayed, for `reason`, as owning `time`.
+fn count_uncapturable(key: usize, reason: Reason, time: Duration) {
     with_state(|state| {
-        state.uncapturable += seconds;
+        state.uncapturable += time;
         let Some(stats) = state.keys.get_mut(key) else {
             return;
         };
         stats.uncapturable_calls += 1;
-        stats.uncapturable_seconds += seconds;
+        stats.uncapturable_time += time;
         match reason {
             Reason::Dots => stats.dots += 1,
             Reason::LocalClosure => stats.local_closure += 1,
             Reason::UserBinding => stats.user_binding += 1,
             Reason::CallerFrame => stats.caller_frame += 1,
+            Reason::Uninspectable => stats.uninspectable += 1,
         }
     });
+}
+
+/// Empties the reservoir slot `slot` of `key`, whose selected call could not be stored, and
+/// deletes the file of the sample it held.
+fn empty_slot(key: usize, slot: usize, unstorable: Unstorable) {
+    let removed = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        let stats = state.keys.get_mut(key)?;
+        if unstorable == Unstorable::Oversize {
+            stats.oversize += 1;
+        }
+        let file = (*stats.slots.get(slot)?)?;
+        state.files.get_mut(file)?.stored.take()?;
+        Some(state.directory.join("samples").join(format!("{file}.rds")))
+    });
+    if let Some(path) = removed
+        && let Err(failure) = std::fs::remove_file(&path)
+    {
+        note_failure(&error(format!(
+            "cannot remove '{}': {failure}",
+            path.display()
+        )));
+    }
 }
 
 /// Ends the preserves a record's deferred promises hold.
@@ -721,41 +887,32 @@ unsafe fn settle_deferred(deferred: &[Deferred]) -> Result<Vec<(Sexp, Sexp, Inpu
     }
 }
 
-/// Runs `work` unrecorded and leaves its time out of every total, as if the recording had
-/// paused. The host uses it for the R code it runs itself after start-up, such as attaching the
-/// package loader, which is neither the user's code nor a call the user's code made.
-pub fn without_recording<T>(work: impl FnOnce() -> T) -> T {
-    let started = Instant::now();
-    let suspended = Suspend::start();
-    let result = work();
-    drop(suspended);
-    let paused = started.elapsed();
-    STATE.with_borrow_mut(|state| {
-        if let Some(state) = state.as_mut()
-            && let Some(recording) = state.started.as_mut()
-        {
-            *recording += paused;
-            for record in &mut state.stack {
-                record.started += paused;
-            }
-        }
-    });
-    result
-}
-
-/// Restores [`SUSPENDED`] and the visibility of the last value when dropped, however the
-/// recorder's own work ends: the R code it runs (reading a sample back finds namespaces through
-/// base R's functions) sets the visibility, and the call being recorded may have returned
-/// invisibly.
+/// Restores [`SUSPENDED`], the suspension of user interrupts and the visibility of the last value
+/// when dropped, however the suspended work ends: the R code it runs (reading a sample back finds
+/// namespaces through base R's functions) sets the visibility, and the call being recorded may
+/// have returned invisibly.
 struct Suspend {
     suspended: bool,
+    /// The suspension of user interrupts before the recorder's own work, when it held them back.
+    interrupts: Option<i32>,
     visible: bool,
 }
 
 impl Suspend {
+    /// Suspends recording for the recorder's own work. A user interrupt is held back until the
+    /// work ends, so it reaches the program at its next check, as it would unrecorded, instead of
+    /// ending the recorder's work and being lost.
     fn start() -> Suspend {
+        let mut suspend = Suspend::host();
+        suspend.interrupts = Some(INTERRUPTS_SUSPENDED.swap(1, Ordering::Relaxed));
+        suspend
+    }
+
+    /// Suspends recording for R code the host runs, which a user interrupt may stop.
+    fn host() -> Suspend {
         Suspend {
             suspended: SUSPENDED.replace(true),
+            interrupts: None,
             visible: interp().visible,
         }
     }
@@ -764,6 +921,9 @@ impl Suspend {
 impl Drop for Suspend {
     fn drop(&mut self) {
         SUSPENDED.set(self.suspended);
+        if let Some(interrupts) = self.interrupts {
+            INTERRUPTS_SUSPENDED.store(interrupts, Ordering::Relaxed);
+        }
         interp().visible = self.visible;
     }
 }
@@ -877,13 +1037,14 @@ fn key_of(owner: &Rc<str>, name: &Rc<str>) -> usize {
             package: owner.clone(),
             name: name.clone(),
             calls: 0,
-            seconds: Duration::ZERO,
+            time: Duration::ZERO,
             uncapturable_calls: 0,
-            uncapturable_seconds: Duration::ZERO,
+            uncapturable_time: Duration::ZERO,
             dots: 0,
             local_closure: 0,
             user_binding: 0,
             caller_frame: 0,
+            uninspectable: 0,
             oversize: 0,
             reentered: 0,
             seen: 0,
@@ -1083,6 +1244,8 @@ fn braced_identifiers(text: &str, names: &mut Vec<String>) {
 enum Inspection {
     Uncapturable(Reason),
     Capturable {
+        /// The call a sample records ([`FreeNames::call`]).
+        call: Sexp,
         variables: Vec<(Sexp, Sexp)>,
         imports: Vec<(Sexp, String)>,
         deferred: Vec<Deferred>,
@@ -1166,11 +1329,7 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
             // constant, and runs none of the program's code, so it is forced now: deferring it
             // would let a call that reads a user function look capturable until it ends, and
             // cover the user code it runs as if it were the call's own.
-            match eval::force_promise(value) {
-                Ok(forced) => value = forced,
-                Err(Unwind::Interrupt) => return Err(Unwind::Interrupt),
-                Err(unwind) => note_failure(&unwind),
-            }
+            value = eval::force_promise(value)?;
         }
         if value.kind() == SexpType::Promise {
             if value.car() == unbound() {
@@ -1196,6 +1355,7 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
         }
     }
     Ok(Inspection::Capturable {
+        call: free.call,
         variables,
         imports,
         deferred,
@@ -1351,19 +1511,20 @@ unsafe fn serialize(object: Sexp) -> R<Vec<u8>> {
     (interp().hooks.serialize)(object)
 }
 
-/// Completes the sample of a call that took `seconds` and returned `value` (`None` when it
-/// ended in an unwind), with the variables whose deferred promises the call forced, and writes
-/// it to its reservoir slot's file. A sample whose inputs outgrow the size limit with those
-/// variables is dropped as oversize.
+/// Completes the sample of a call of `key` selected for `slot`, whose serialized `inputs` it
+/// reads back, that took `time` and returned `value` (`None` when it ended in an unwind), with
+/// the variables whose deferred promises the call forced, and writes it to the slot's file. A
+/// sample whose inputs outgrow the size limit with those variables is not stored.
 unsafe fn write_sample(
     key: usize,
-    sample: Pending,
-    seconds: Duration,
+    slot: usize,
+    inputs: &[u8],
+    time: Duration,
     value: Option<Sexp>,
     settled: &[(Sexp, Sexp, Input)],
-) -> R<()> {
+) -> R<Result<(), Unstorable>> {
     let max = max_bytes();
-    let inputs = crate::serialize::unserialize(&sample.inputs, nil())?;
+    let inputs = crate::serialize::unserialize(inputs, nil())?;
     crate::heap().root(inputs);
     if !settled.is_empty() {
         let variables = values::list_elt(inputs, 3);
@@ -1396,8 +1557,7 @@ unsafe fn write_sample(
         let names = values::string_vector(&import_names)?;
         values::set_attr(imports, values::symbols().names, names)?;
         if serialize(inputs)?.len() > max {
-            with_key(key, |stats| stats.oversize += 1);
-            return Ok(());
+            return Ok(Err(Unstorable::Oversize));
         }
     }
     let kept = match value {
@@ -1423,7 +1583,7 @@ unsafe fn write_sample(
     for index in 0..6 {
         values::set_elt(list, index, values::list_elt(inputs, index));
     }
-    values::set_elt(list, 6, values::scalar_real(seconds.as_secs_f64())?);
+    values::set_elt(list, 6, values::scalar_real(time.as_secs_f64())?);
     values::set_elt(list, 7, values::scalar_bool(value.is_none())?);
     values::set_elt(
         list,
@@ -1440,33 +1600,27 @@ unsafe fn write_sample(
     let (directory, file) = STATE
         .with_borrow_mut(|state| {
             let state = state.as_mut()?;
-            let file = match state.keys.get(key)?.slots.get(sample.slot)? {
-                Some(file) => *file,
+            let file = match *state.keys.get(key)?.slots.get(slot)? {
+                Some(file) => file,
                 None => {
                     let file = state.files.len();
-                    state.files.push(SampleFile {
-                        key,
-                        seconds: 0.0,
-                        threw: false,
-                        bytes: 0,
-                    });
-                    if let Some(slot) = state.keys.get_mut(key)?.slots.get_mut(sample.slot) {
-                        *slot = Some(file);
-                    }
+                    state.files.push(SampleFile { key, stored: None });
+                    *state.keys.get_mut(key)?.slots.get_mut(slot)? = Some(file);
                     file
                 }
             };
-            if let Some(record) = state.files.get_mut(file) {
-                record.seconds = seconds.as_secs_f64();
-                record.threw = value.is_none();
-                record.bytes = bytes.len();
-            }
+            state.files.get_mut(file)?.stored = Some(StoredSample {
+                time,
+                threw: value.is_none(),
+                bytes: bytes.len(),
+            });
             Some((state.directory.clone(), file))
         })
         .ok_or_else(|| error("the sample's key is gone"))?;
     let path = directory.join("samples").join(format!("{file}.rds"));
     std::fs::write(&path, &bytes)
-        .map_err(|failure| error(format!("cannot write '{}': {failure}", path.display())))
+        .map_err(|failure| error(format!("cannot write '{}': {failure}", path.display())))?;
+    Ok(Ok(()))
 }
 
 /// The elements of the character vector `strings`, or none for `NULL`.
@@ -1479,105 +1633,77 @@ unsafe fn string_items(strings: Sexp) -> Vec<String> {
         .collect()
 }
 
-/// Stops recording and writes `entries.tsv`, `samples.tsv` and `summary.tsv`.
-pub fn finish() -> R<()> {
-    let Some(mut state) = STATE.with_borrow_mut(Option::take) else {
-        return Ok(());
-    };
-    activity::set_hook(activity::CAPTURE, false);
-    if !crate::profile_summary::sampling() {
-        activity::set_enabled(false);
-    }
-    let Some(started) = state.started else {
-        return Ok(());
-    };
-    if state.process != std::process::id() {
-        return Ok(());
-    }
-    let now = Instant::now();
-    // The records still open are the root user record and whatever an exit to top level left.
-    while let Some(record) = state.stack.pop() {
-        release_deferred(&record.role);
-        let inclusive = now.duration_since(record.started);
-        if let Some(parent) = state.stack.last_mut() {
-            parent.nested += inclusive;
-        }
-        if let Role::User = record.role {
-            state.user += inclusive.saturating_sub(record.nested);
-        }
-    }
-    let total = now.duration_since(started);
-    let written = write_outputs(&state, total);
-    if let Some(failure) = state.failure.take() {
-        return Err(error(format!("boundary capture: {failure}")));
-    }
-    written.map_err(|failure| {
-        error(format!(
-            "cannot write the boundary capture to '{}': {failure}",
-            state.directory.display()
-        ))
-    })
-}
-
+/// Writes the tables, with every time in integer nanoseconds: a call into a small entry takes a
+/// few microseconds, which seconds printed to a fixed number of decimals would round away.
 fn write_outputs(state: &Capture, total: Duration) -> std::io::Result<()> {
     std::fs::create_dir_all(&state.directory)?;
     let mut keys: Vec<&KeyStats> = state.keys.iter().collect();
     keys.sort_by(|left, right| {
-        let weight = |stats: &KeyStats| stats.seconds + stats.uncapturable_seconds;
+        let weight = |stats: &KeyStats| stats.time + stats.uncapturable_time;
         weight(right)
             .cmp(&weight(left))
             .then_with(|| left.package.cmp(&right.package))
             .then_with(|| left.name.cmp(&right.name))
     });
     let mut entries = String::from(
-        "package\tname\tcalls\tseconds\tsamples\tuncapturable_calls\tuncapturable_seconds\tdots\tlocal_closure\tuser_binding\toversize\treentered\tcaller_frame\n",
+        "package\tname\tcalls\tnanoseconds\tsamples\tuncapturable_calls\tuncapturable_nanoseconds\tdots\tlocal_closure\tuser_binding\tcaller_frame\tuninspectable\toversize\treentered\n",
     );
     for stats in keys {
-        let samples = stats.slots.iter().filter(|slot| slot.is_some()).count();
+        let samples = stats
+            .slots
+            .iter()
+            .flatten()
+            .filter(|&&file| {
+                state
+                    .files
+                    .get(file)
+                    .is_some_and(|file| file.stored.is_some())
+            })
+            .count();
         entries.push_str(&format!(
-            "{}\t{}\t{}\t{:.6}\t{samples}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{samples}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             stats.package,
             stats.name,
             stats.calls,
-            stats.seconds.as_secs_f64(),
+            stats.time.as_nanos(),
             stats.uncapturable_calls,
-            stats.uncapturable_seconds.as_secs_f64(),
+            stats.uncapturable_time.as_nanos(),
             stats.dots,
             stats.local_closure,
             stats.user_binding,
+            stats.caller_frame,
+            stats.uninspectable,
             stats.oversize,
             stats.reentered,
-            stats.caller_frame,
         ));
     }
     std::fs::write(state.directory.join("entries.tsv"), entries)?;
-    let mut samples = String::from("file\tpackage\tname\tseconds\tthrew\tbytes\n");
+    let mut samples = String::from("file\tpackage\tname\tnanoseconds\tthrew\tbytes\n");
     for (file, record) in state.files.iter().enumerate() {
-        let Some(stats) = state.keys.get(record.key) else {
+        let (Some(stats), Some(stored)) = (state.keys.get(record.key), &record.stored) else {
             continue;
         };
         samples.push_str(&format!(
-            "samples/{file}.rds\t{}\t{}\t{:.6}\t{}\t{}\n",
+            "samples/{file}.rds\t{}\t{}\t{}\t{}\t{}\n",
             stats.package,
             stats.name,
-            record.seconds,
-            if record.threw { "TRUE" } else { "FALSE" },
-            record.bytes,
+            stored.time.as_nanos(),
+            if stored.threw { "TRUE" } else { "FALSE" },
+            stored.bytes,
         ));
     }
     std::fs::write(state.directory.join("samples.tsv"), samples)?;
-    let seconds = |duration: Duration| duration.as_secs_f64();
     let outside = total
         .saturating_sub(state.user)
         .saturating_sub(state.covered)
         .saturating_sub(state.uncapturable);
     let summary = format!(
-        "key\tvalue\ntotal_seconds\t{:.6}\nuser_seconds\t{:.6}\ncovered_seconds\t{:.6}\nuncapturable_seconds\t{:.6}\noutside_seconds\t{:.6}\nboundary_calls\t{}\nkeys\t{}\n",
-        seconds(total),
-        seconds(state.user),
-        seconds(state.covered),
-        seconds(state.uncapturable),
-        seconds(outside),
+        "key\tvalue\ntotal_nanoseconds\t{}\nuser_nanoseconds\t{}\ncovered_nanoseconds\t{}\nuncapturable_nanoseconds\t{}\noutside_nanoseconds\t{}\nboundary_calls\t{}\nkeys\t{}\n",
+        total.as_nanos(),
+        state.user.as_nanos(),
+        state.covered.as_nanos(),
+        state.uncapturable.as_nanos(),
+        outside.as_nanos(),
         state.boundary_calls,
         state.keys.len(),
     );

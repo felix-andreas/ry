@@ -411,27 +411,25 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     // A reference only reads a variable of another frame; forcing the promise it reaches records
     // the code that runs.
-    let recorded = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
-        crate::capture::Scope::none()
+    let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        force_reference(promise)
     } else {
-        crate::capture::evaluating(|| {
-            if env.has_gp(gp::PENDING_FRAME) {
+        let pending = env.has_gp(gp::PENDING_FRAME);
+        let _recorded = crate::capture::evaluating(|| {
+            if pending {
                 interp().frames[pending_owner(env)].function.tag()
             } else {
                 env
             }
-        })
+        });
+        if pending {
+            force_slot_promise(promise, env)
+        } else if code.kind() == SexpType::Bytecode {
+            bytecode::run_promise(code, env)
+        } else {
+            eval(promise.cdr(), env)
+        }
     };
-    let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
-        force_reference(promise)
-    } else if env.has_gp(gp::PENDING_FRAME) {
-        force_slot_promise(promise, env)
-    } else if code.kind() == SexpType::Bytecode {
-        bytecode::run_promise(code, env)
-    } else {
-        eval(promise.cdr(), env)
-    };
-    drop(recorded);
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
     heap.release_handles(mark);
@@ -2730,7 +2728,7 @@ pub unsafe fn run_inlined(
 ) -> R<Sexp> {
     let _window = SlotWindow(header);
     activity::count(Counter::ClosureCalls);
-    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil())?;
+    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil());
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -3430,7 +3428,7 @@ unsafe fn run_frame_general(
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
     let mut hooks =
-        crate::profile_summary::enter_closure(call, function, sys_parent, method_vars, env)?;
+        crate::profile_summary::enter_closure(call, function, sys_parent, method_vars, env);
     if slots == crate::NO_SLOTS {
         moves::entering_closure(function, env)?;
     }

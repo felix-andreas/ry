@@ -19,6 +19,7 @@ local({
   })
   set.seed(7)
   numbers <- function(n) round(runif(n, -1, 1), 6)
+  nanoseconds <- function(seconds) round(seconds * 1e9)
   table_parts <- lapply(1:4, function(i) data.table::data.table(id = seq_len(50) + 50L * i, value = numbers(50)))
   rnorm_seed <- {
     set.seed(42)
@@ -105,10 +106,11 @@ local({
                    imports = spec$imports, seed = spec$seed, value = value, value_kept = spec$keep,
                    threw = spec$threw, seconds = seconds), file.path(directory, file))
       rows[[length(rows) + 1L]] <- data.frame(file = file, package = spec$package, name = spec$name,
-                                              seconds = seconds, threw = spec$threw,
+                                              nanoseconds = nanoseconds(seconds), threw = spec$threw,
                                               bytes = file.size(file.path(directory, file)))
     }
-    write.table(do.call(rbind, rows), file.path(directory, "samples.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+    write.table(format(do.call(rbind, rows), scientific = FALSE, trim = TRUE), file.path(directory, "samples.tsv"),
+                sep = "\t", quote = FALSE, row.names = FALSE)
 
     entries <- list()
     for (key in names(calls)) {
@@ -117,21 +119,24 @@ local({
       parts <- strsplit(key, " ", fixed = TRUE)[[1L]]
       sampled <- sum(vapply(rows, function(row) row$package == parts[[1L]] && row$name == parts[[2L]], TRUE))
       entries[[length(entries) + 1L]] <- data.frame(package = parts[[1L]], name = parts[[2L]], calls = count,
-        seconds = count * per_call[[key]], samples = sampled, uncapturable_calls = 0, uncapturable_seconds = 0,
-        dots = 0, local_closure = 0, user_binding = 0, oversize = if (key == "base cumsum") 3 else 0)
+        nanoseconds = nanoseconds(count * per_call[[key]]), samples = sampled, uncapturable_calls = 0,
+        uncapturable_nanoseconds = 0, dots = 0, local_closure = 0, user_binding = 0, caller_frame = 0,
+        uninspectable = 0, oversize = if (key == "base cumsum") 3 else 0, reentered = 0)
     }
-    entries[[length(entries) + 1L]] <- data.frame(package = "purrr", name = "map", calls = 0, seconds = 0, samples = 0,
-      uncapturable_calls = 4000, uncapturable_seconds = 1.5, dots = 3000, local_closure = 1000, user_binding = 0, oversize = 0)
+    entries[[length(entries) + 1L]] <- data.frame(package = "purrr", name = "map", calls = 0, nanoseconds = 0,
+      samples = 0, uncapturable_calls = 4000, uncapturable_nanoseconds = nanoseconds(1.5), dots = 3000,
+      local_closure = 1000, user_binding = 0, caller_frame = 0, uninspectable = 0, oversize = 0, reentered = 0)
     entries <- do.call(rbind, entries)
-    write.table(entries, file.path(directory, "entries.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+    write.table(format(entries, scientific = FALSE, trim = TRUE), file.path(directory, "entries.tsv"), sep = "\t",
+                quote = FALSE, row.names = FALSE)
 
-    covered <- sum(entries$seconds)
-    uncapturable <- sum(entries$uncapturable_seconds)
-    user <- covered * 0.8
-    outside <- covered * 0.3
-    summary <- c(total_seconds = user + covered + uncapturable + outside, user_seconds = user, covered_seconds = covered,
-                 uncapturable_seconds = uncapturable, outside_seconds = outside,
+    covered <- sum(entries$nanoseconds)
+    uncapturable <- sum(entries$uncapturable_nanoseconds)
+    user <- round(covered * 0.8)
+    outside <- round(covered * 0.3)
+    summary <- c(total_nanoseconds = user + covered + uncapturable + outside, user_nanoseconds = user,
+                 covered_nanoseconds = covered, uncapturable_nanoseconds = uncapturable, outside_nanoseconds = outside,
                  boundary_calls = sum(entries$calls) + sum(entries$uncapturable_calls), keys = nrow(entries))
-    writeLines(c("key\tvalue", sprintf("%s\t%.6f", names(summary), summary)), file.path(directory, "summary.tsv"))
+    writeLines(c("key\tvalue", sprintf("%s\t%.0f", names(summary), summary)), file.path(directory, "summary.tsv"))
   }
 })

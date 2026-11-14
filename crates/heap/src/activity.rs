@@ -502,6 +502,7 @@ pub fn push_frame(owner: u32, name: usize, body: usize) -> FrameScope {
 }
 
 /// A scope that publishes nothing, for when no summary is being collected.
+#[inline(always)]
 pub fn no_frame() -> FrameScope {
     FrameScope {
         depth: 0,

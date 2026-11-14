@@ -346,39 +346,54 @@ fn counters() -> [u64; Counter::ALL.len()] {
 /// The label of code whose top level is the global environment: scripts and the console.
 const GLOBAL_LABEL: &str = "R_GlobalEnv";
 
-/// What a closure call holds while it runs with the profiling hooks on: its published frame and
-/// its boundary-call record.
-pub struct ClosureScope {
+/// What a closure call holds while it runs: nothing while the profiling hooks are off, and
+/// otherwise its published frame and its boundary-call record.
+pub struct ClosureScope(Option<HookedScope>);
+
+struct HookedScope {
     _frame: activity::FrameScope,
     capture: crate::capture::Scope,
 }
 
 impl ClosureScope {
     /// Hands the call's result to the boundary-call recorder before the scope drops.
+    #[inline(always)]
     pub unsafe fn returned(&mut self, result: &R<Sexp>) {
-        unsafe { self.capture.returned(result) };
+        if let Some(hooked) = &mut self.0 {
+            unsafe { hooked.capture.returned(result) };
+        }
     }
 }
 
 /// Runs the profiling hooks for a call of the closure `function` through `call` whose caller's
 /// frame is `sys_parent`, with the dispatch variables of a method in `method_vars` or bound in
 /// its frame environment `env` (`NULL` for a slot frame): publishes the frame for the sampler
-/// and records boundary calls, until the scope drops.
+/// and records boundary calls, until the scope drops. Every closure call passes here, so with
+/// the hooks off it costs one test of the hook flags, and the rest is out of line.
+#[inline(always)]
 pub unsafe fn enter_closure(
     call: Sexp,
     function: Sexp,
     sys_parent: Sexp,
     method_vars: &[(Sexp, Sexp)],
     env: Sexp,
-) -> R<ClosureScope> {
+) -> ClosureScope {
     if !activity::enabled() {
-        return Ok(ClosureScope {
-            _frame: activity::no_frame(),
-            capture: crate::capture::Scope::none(),
-        });
+        return ClosureScope(None);
     }
+    unsafe { enter_closure_hooked(call, function, sys_parent, method_vars, env) }
+}
+
+#[inline(never)]
+unsafe fn enter_closure_hooked(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> ClosureScope {
     let capture = if activity::hooks() & activity::CAPTURE != 0 {
-        unsafe { crate::capture::enter(call, function, sys_parent, method_vars, env)? }
+        unsafe { crate::capture::enter(call, function, sys_parent, method_vars, env) }
     } else {
         crate::capture::Scope::none()
     };
@@ -387,10 +402,10 @@ pub unsafe fn enter_closure(
     } else {
         activity::no_frame()
     };
-    Ok(ClosureScope {
+    ClosureScope(Some(HookedScope {
         _frame: frame,
         capture,
-    })
+    }))
 }
 
 unsafe fn publish_frame(call: Sexp, function: Sexp) -> activity::FrameScope {

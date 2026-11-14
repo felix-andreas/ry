@@ -27,6 +27,7 @@ run ry run workload.R
 expect exit 0
 expect stdout "done"
 expect file capture/summary.tsv "boundary_calls"
+expect file capture/summary.tsv "total_nanoseconds"
 expect file capture/entries.tsv "stats	sd	1	"
 expect file capture/entries.tsv "base	mean	3	"
 
