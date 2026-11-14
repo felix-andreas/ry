@@ -467,7 +467,7 @@ def load_suite(suite):
 
 def load_hot_suite(directory):
     """The hot suite's manifest, after checking that every sample it names is there and that each
-    program gives every sample its iterations and its rng and threw flags."""
+    program gives every sample its iterations and its rng, threw and fresh flags."""
     path = directory / "suite.toml"
     if not path.exists():
         sys.exit(f"error: the {HOT_SUITE} suite has not been generated: {path} does not exist. It comes from a "
@@ -478,8 +478,8 @@ def load_hot_suite(directory):
         sys.exit(f"error: {path} does not list the packages a replay loads (`session`)")
     for program in manifest["programs"]:
         count = len(program["samples"])
-        if not count or any(len(program[key]) != count for key in ("iterations", "rng", "threw")):
-            sys.exit(f"error: {path} gives {program['id']} {count} samples but not as many iterations, rng and threw flags")
+        if not count or any(len(program.get(key, ())) != count for key in ("iterations", "rng", "threw", "fresh")):
+            sys.exit(f"error: {path} gives {program['id']} {count} samples but not as many iterations, rng, threw and fresh flags")
         for sample in program["samples"]:
             if not (directory / sample).is_file():
                 sys.exit(f"error: {path} names {sample}, which does not exist")
@@ -775,19 +775,26 @@ def merge_memory(memories):
 def same_checksum(value, reference):
     """Numeric checksums agree to a relative 1e-10, since a typed program may sum in another order;
     any other checksum must match exactly. A hot program prints one checksum per sample, joined by
-    commas, so it is compared part by part. A sample's `num:` or `cpl:` checksum (hot/replay.R)
-    names its length and its count of non-finite values, which must match, and ends in the size
-    of the numbers and their sum over that size, which are compared as numbers."""
+    commas, so it is compared part by part. A sample's checksum (hot/replay.R) is
+    `<kind>:<length>:<hash>:<magnitude>:<balance>`: the kind, the length and the hash of
+    everything exact (types, lengths, non-finite counts, text, attribute names) must match, and the
+    two sums over the numbers at every depth agree to an absolute 1e-10 or a relative 1e-13."""
     values, references = value.split(","), reference.split(",")
     return len(values) == len(references) and all(map(same_checksum_part, values, references))
 
 
+HOT_CHECKSUM_KINDS = {"lgl", "int", "dbl", "cpl", "chr", "raw", "list", "s4"}
+
+
 def same_checksum_part(value, reference):
-    if value.startswith(("num:", "cpl:")) and reference.startswith(("num:", "cpl:")):
-        fields, expected = value.split(":"), reference.split(":")
-        return (len(fields) == len(expected) == 5 and fields[:3] == expected[:3]
-                and math.isclose(float(fields[3]), float(expected[3]), rel_tol=1e-10)
-                and math.isclose(float(fields[4]), float(expected[4]), abs_tol=1e-10))
+    fields, expected = value.split(":"), reference.split(":")
+    if len(fields) == len(expected) == 5 and fields[0] in HOT_CHECKSUM_KINDS:
+        try:
+            return (fields[:3] == expected[:3]
+                    and all(math.isclose(float(a), float(b), rel_tol=1e-13, abs_tol=1e-10)
+                            for a, b in zip(fields[3:], expected[3:])))
+        except ValueError:
+            return value == reference
     try:
         number, expected = float(value), float(reference)
     except ValueError:
@@ -1116,7 +1123,8 @@ class HotRunner:
 
     def __init__(self, suite, args, directory=None):
         self.network = []
-        self.directory = directory or here / suite
+        # The harness runs in a directory of its own, so a relative suite path would not resolve.
+        self.directory = (directory or here / suite).resolve()
         self.work = pathlib.Path(tempfile.mkdtemp(prefix=f"ry-bench-{suite}-"))
         self.script = self.work / "harness.R"
         self.script.write_text((here / HOT_SUITE / "replay.R").read_text() + "\n"
@@ -1150,13 +1158,14 @@ class HotRunner:
 
 def hot_program_table(programs):
     """The program table hot/harness.R reads: a header, then per program its id and
-    comma-separated lists of its sample files, iterations, rng and threw flags and namespaces."""
+    comma-separated lists of its sample files, iterations, rng, threw and fresh flags and namespaces."""
     def flags(program, key):
         return ",".join("1" if flag else "0" for flag in program[key])
-    lines = ["id\tsamples\titerations\trng\tthrew\tnamespaces"]
+    lines = ["id\tsamples\titerations\trng\tthrew\tfresh\tnamespaces"]
     for program in programs:
         lines.append("\t".join([program["id"], ",".join(program["samples"]), ",".join(map(str, program["iterations"])),
-                                flags(program, "rng"), flags(program, "threw"), ",".join(program["namespaces"])]))
+                                flags(program, "rng"), flags(program, "threw"), flags(program, "fresh"),
+                                ",".join(program["namespaces"])]))
     return "\n".join(lines) + "\n"
 
 
@@ -1189,8 +1198,10 @@ def hot_summary(results, programs, table, state, args):
     when it generates the suite. The predicted speed-up of a code base is GNU R's time over ry's
     for the programs run in the proportions the code base runs them: with each program's paired
     speed-up r (GNU R / ry), 1 / sum(w / r), the weighted harmonic mean, over the programs that
-    have a speed-up, whose summed weight `weight` records. Its interval comes from the bootstrap of the geometric mean,
-    which resamples each program's rounds."""
+    have a speed-up, whose summed weight `weight` records. Its interval is a bootstrap of that
+    weighted harmonic mean (`predicted_interval`) that resamples each program's rounds, so it
+    covers round-to-round noise only: not the uncertainty in the weights, nor which programs the
+    suite selected."""
     rows = {row["id"]: row for row in results["programs"]}
     for program in programs:
         row = rows[program["id"]]
@@ -1250,7 +1261,7 @@ def hot_passes(runner, programs, table, args, results):
                 rows[name]["breakdown"] = regions[name]
             elif regions:
                 print(f"warning: no region profile for {name}: {measured[name].get('reason', 'the profile has no such region')}")
-        results["breakdown"] = weighted_breakdown(results["programs"])
+        results["breakdown_weighting"], results["breakdown"] = weighted_breakdown(results["programs"])
     if args.instructions:
         found, functions = instructions_of(runner, programs, ry, functions=args.functions > 0)
         counts = {"ry": found}
@@ -1303,13 +1314,19 @@ def parse_regions(text):
 
 
 def weighted_breakdown(rows):
-    """Per code base, the share of ry's time in each activity: each program's breakdown weighted by
-    its share of the code base's ry time, which is its GNU R weight over its speed-up."""
+    """Per code base, the share of ry's time in each activity, and which time weighs the programs.
+    Each program's breakdown is weighted by its share of the code base's ry time, which is its GNU
+    R weight over its speed-up. Without a speed-up for every program with a breakdown (a run with
+    `--rounds 0` times nothing) it is weighted by the GNU R weight alone, for every program, and
+    the weighting returned says `GNU R time` in place of `ry time`."""
     found = {}
+    profiled = [row for row in rows if row.get("breakdown")]
+    timed = all(row.get("ratio", {}).get("ry", {}).get("median") for row in profiled)
+    weighting = "ry time" if timed else "GNU R time"
     codebases = list(dict.fromkeys(codebase for row in rows for codebase in row.get("weight", {})))
     for codebase in codebases:
-        weighted = [(row["weight"][codebase] / row["ratio"].get("ry", {}).get("median", 1.0), row["breakdown"]["activities"])
-                    for row in rows if row.get("breakdown") and row["weight"].get(codebase, 0) > 0]
+        weighted = [(row["weight"][codebase] / (row["ratio"]["ry"]["median"] if timed else 1.0), row["breakdown"]["activities"])
+                    for row in profiled if row["weight"].get(codebase, 0) > 0]
         total = sum(weight for weight, _ in weighted)
         if not total:
             continue
@@ -1318,13 +1335,14 @@ def weighted_breakdown(rows):
             for key, share in activities.items():
                 shares[key] = shares.get(key, 0.0) + weight / total * share
         found[codebase] = {key: round(share, 4) for key, share in sorted(shares.items(), key=lambda item: -item[1])}
-    return found
+    return weighting, found
 
 
 def instructions_of(runner, programs, engine, functions=False):
     """Each program's instructions in one batch on `engine`, counted by callgrind in the region
-    the harness opens around it, which dumps when the region ends. With `functions`, also each
-    program's instructions per function (`parse_callgrind_functions`); otherwise that is empty."""
+    the harness opens around it, which dumps each time the region ends; a region entered more
+    than once has its dumps summed. With `functions`, also each program's instructions per
+    function (`parse_callgrind_functions`); otherwise that is empty."""
     if shutil.which("valgrind") is None:
         sys.exit("error: --instructions runs ry under callgrind, and valgrind is not on the PATH")
     prefix = runner.work / f"callgrind.{engine.key}"
@@ -1337,9 +1355,11 @@ def instructions_of(runner, programs, engine, functions=False):
     for path in sorted(runner.work.glob(f"{prefix.name}.*")):
         text = path.read_text(errors="replace")
         if found := parse_callgrind_dump(text):
-            dumps[found[0]] = found[1]
+            dumps[found[0]] = dumps.get(found[0], 0) + found[1]
             if functions:
-                by_function[found[0]] = parse_callgrind_functions(text)
+                summed = by_function.setdefault(found[0], {})
+                for key, count in parse_callgrind_functions(text).items():
+                    summed[key] = summed.get(key, 0) + count
     counts = {}
     for program in programs:
         name, result = program["id"], measured[program["id"]]
@@ -1496,7 +1516,8 @@ def print_hot(results):
             print(f"| {row['display']} | {row['breakdown']['samples']} | "
                   + " | ".join(f"{shares[key]:.0%}" if key in shares else "" for key in activities) + " |")
         for codebase, shares in results.get("breakdown", {}).items():
-            print(f"| weighted, {codebase} | | " + " | ".join(f"{shares[key]:.0%}" if key in shares else "" for key in activities) + " |")
+            weighting = results.get("breakdown_weighting", "ry time")
+            print(f"| {codebase}, weighted by {weighting} | | " + " | ".join(f"{shares[key]:.0%}" if key in shares else "" for key in activities) + " |")
     counted = [row for row in results["programs"] if row.get("instructions")]
     if counted:
         keys = list(dict.fromkeys(key for row in counted for key in row["instructions"]))

@@ -12,8 +12,9 @@ bench-hot-capture DIR` runs in order on code bases that tooling/generate.py wrot
             (samples.tsv, samples/<n>.rds), then prints the shares and the top keys. It also
             lists the packages the code base imports (session.txt), which every replay loads.
   validate  replays every sample under GNU R (hot/validate.R), in a session with those packages
-            loaded, and keeps the samples that replay as they ran without side effects, with GNU
-            R's seconds per call and a batch size of about 20 ms (validated.tsv,
+            loaded, and keeps the samples that replay as they ran without side effects outside
+            the session's temporary directory, with GNU R's seconds per call, a batch size of
+            about 20 ms and whether a call changes its own variables (validated.tsv,
             validated/<n>.rds).
   select    picks the keys that cover the most of each code base's time, up to `--programs`, and
             the most typical `--samples` valid samples of each, weighs them, and writes
@@ -177,11 +178,19 @@ def run_validate(args):
     script = pathlib.Path(tempfile.mkdtemp(prefix="ry-hot-validate-")) / "validate.R"
     script.write_text((bench.here / bench.HOT_SUITE / "replay.R").read_text() + "\n"
                       + (bench.here / bench.HOT_SUITE / "validate.R").read_text())
+    # The validator watches every path under its temporary root for files a replay touches
+    # outside the session's temporary directory, so the root is a directory of its own, and R's
+    # user directories (where cachem, memoise and rappdirs write) lie under it too.
+    watched = script.parent / "tmp"
     try:
         env = {key: value for key, value in os.environ.items() if not key.startswith("RY_")}
         env.update(LC_ALL="C.UTF-8", **bench.library_environment(args.rscript, dependency_library()))
+        env.update(TMPDIR=str(watched), R_USER_CACHE_DIR=str(watched / "cache"), R_USER_DATA_DIR=str(watched / "data"),
+                   R_USER_CONFIG_DIR=str(watched / "config"))
         for directory in directories:
             print(f"validating {directory.name} ...", flush=True)
+            shutil.rmtree(watched, ignore_errors=True)
+            watched.mkdir()
             subprocess.run([args.rscript, "--vanilla", str(script)], env=dict(env, RY_HOT_CAPTURE=str(directory.resolve())),
                            check=True)
             rows = read_tsv(directory / "validated.tsv")
@@ -274,7 +283,7 @@ def build_program(key, captures, count):
              for codebase, capture in captures.items() if key in capture["entries"] and capture["summary"]["total_seconds"]}
     return {"package": package, "name": name, "display": f"{package}::{name}", "chosen": samples,
             "iterations": iterations, "rng": [sample["rng"] for sample in samples],
-            "threw": [sample["threw"] for sample in samples],
+            "threw": [sample["threw"] for sample in samples], "fresh": [sample["fresh"] for sample in samples],
             "namespaces": sorted({namespace for sample in samples for namespace in sample["namespaces"]}),
             "gnu_seconds_per_call": gnu, "share": share, "gnu_time": gnu_time(key, captures, candidates)}
 
@@ -375,7 +384,7 @@ def write_suite(directory, programs, captures, selection):
             files.append(name)
         manifest_programs.append({
             "id": program["id"], "display": program["display"], "samples": files,
-            "iterations": program["iterations"], "rng": program["rng"], "threw": program["threw"],
+            "iterations": program["iterations"], "rng": program["rng"], "threw": program["threw"], "fresh": program["fresh"],
             "namespaces": program["namespaces"],
             "gnu_seconds_per_call": float(f"{program['gnu_seconds_per_call']:.6g}"),
             "share": {codebase: round(value, 6) for codebase, value in program["share"].items()},
@@ -505,46 +514,55 @@ def run_track(args):
 
 
 def parse_configuration(text):
-    """`NAME=RY[,VARIABLE=VALUE...]` as the name, the binary and its environment."""
+    """`NAME=RY[,VARIABLE=VALUE...]` as the name, the binary and its environment. The binary is
+    made absolute, because the suite's harness runs in another working directory."""
     name, separator, rest = text.partition("=")
     binary, *pairs = rest.split(",")
     if not separator or not name or name == "gnu_r" or not binary or any("=" not in pair for pair in pairs):
         sys.exit(f"error: a configuration is NAME=RY[,VARIABLE=VALUE...], and `{text}` is not")
-    return name, binary, dict(pair.split("=", 1) for pair in pairs)
+    return name, os.path.abspath(binary), dict(pair.split("=", 1) for pair in pairs)
 
 
 def predicted_ratio(times, baseline, programs, codebase):
-    """ry's time over GNU R's for the suite's programs in the proportions `codebase` runs them:
-    the mean of each program's ratio weighted by its share of the code base's GNU R time, over the
-    programs both engines ran. Also the summed weight of those programs."""
+    """ry's time over GNU R's for `programs` in the proportions `codebase` runs them: the mean of
+    each program's ratio weighted by its share of the code base's GNU R time. Also the summed
+    weight of the programs that carry one. Every program must have a time on both engines."""
     weight = cost = 0.0
     for program in programs:
         share = program["weight"].get(codebase, 0.0)
-        engine, reference = times.get(program["id"]), baseline.get(program["id"])
-        if share and engine and reference:
+        if share:
             weight += share
-            cost += share * engine / reference
+            cost += share * times[program["id"]] / baseline[program["id"]]
     return (cost / weight if weight else None), weight
 
 
 def tracking_rows(measured, programs, configurations, codebase):
     """Per configuration: the predicted and the measured ratio of ry's time to GNU R's for
-    `codebase`, and each one's change against the first configuration as a difference of logs."""
+    `codebase`, and each one's change against the first configuration as a difference of logs.
+
+    The prediction of a configuration and the reference prediction it is compared with are both
+    taken over the programs that the configuration, the first configuration and GNU R all ran,
+    whose summed weight is `weight`: a configuration that lost a program would otherwise be
+    predicted over less of the code base than the reference."""
     runs = measured["codebases"].get(codebase, {})
     gnu_r = (runs.get("gnu_r") or {}).get("seconds")
+    times = {name: measured["hot"].get(name, {}) for name in (*configurations, "gnu_r")}
+    first = configurations[0]
     rows = []
     for name in configurations:
-        predicted, weight = predicted_ratio(measured["hot"].get(name, {}), measured["hot"].get("gnu_r", {}),
-                                            programs, codebase)
+        common = [program for program in programs
+                  if all(times[key].get(program["id"]) for key in (name, first, "gnu_r"))]
+        predicted, weight = predicted_ratio(times[name], times["gnu_r"], common, codebase)
+        reference, _ = predicted_ratio(times[first], times["gnu_r"], common, codebase)
         seconds = (runs.get(name) or {}).get("seconds")
-        rows.append({"name": name, "predicted": predicted, "weight": weight,
+        rows.append({"name": name, "predicted": predicted, "reference": reference, "weight": weight,
                      "measured": seconds / gnu_r if seconds and gnu_r else None,
                      "checksum": (runs.get(name) or {}).get("checksum", "failed")})
-    reference = rows[0]
+    measured_reference = rows[0]["measured"]
     for row in rows:
-        complete = all(found[key] for found in (row, reference) for key in ("predicted", "measured"))
-        row["predicted_change"] = math.log(row["predicted"] / reference["predicted"]) if complete else None
-        row["measured_change"] = math.log(row["measured"] / reference["measured"]) if complete else None
+        complete = all((row["predicted"], row["reference"], row["measured"], measured_reference))
+        row["predicted_change"] = math.log(row["predicted"] / row["reference"]) if complete else None
+        row["measured_change"] = math.log(row["measured"] / measured_reference) if complete else None
     return rows
 
 
@@ -568,9 +586,10 @@ def print_tracking(measured, programs, configurations, codebases):
     pooled = []
     for codebase in codebases:
         rows = tracking_rows(measured, programs, configurations, codebase)
-        print(f"\n{codebase} (time over GNU R's; change against {configurations[0]})")
-        print("| configuration | predicted | measured | predicted change | measured change | tests |")
-        print("| --- | ---: | ---: | ---: | ---: | --- |")
+        print(f"\n{codebase} (time over GNU R's; change against {configurations[0]}; weight: the code base's weight "
+              f"in the programs that configuration, {configurations[0]} and GNU R all ran, which both predictions use)")
+        print("| configuration | predicted | measured | predicted change | measured change | weight | tests |")
+        print("| --- | ---: | ---: | ---: | ---: | ---: | --- |")
         for row in rows:
             def ratio(value):
                 return "n/a" if value is None else f"{value:.3f}"
@@ -578,7 +597,8 @@ def print_tracking(measured, programs, configurations, codebases):
             def change(value):
                 return "n/a" if value is None else f"{math.expm1(value):+.1%}"
             print(f"| {row['name']} | {ratio(row['predicted'])} | {ratio(row['measured'])} | "
-                  f"{change(row['predicted_change'])} | {change(row['measured_change'])} | {row['checksum']} |")
+                  f"{change(row['predicted_change'])} | {change(row['measured_change'])} | {row['weight']:.0%} | "
+                  f"{row['checksum']} |")
         pairs = [(row["predicted_change"], row["measured_change"]) for row in rows[1:]
                  if row["predicted_change"] is not None]
         pooled += pairs
@@ -626,7 +646,7 @@ def read_summary(directory):
 
 NUMBER_FIELDS = {"calls", "seconds", "samples", "uncapturable_calls", "uncapturable_seconds", "dots", "local_closure",
                  "user_binding", "caller_frame", "oversize", "reentered", "gnu_seconds_per_call", "iterations", "bytes"}
-FLAG_FIELDS = {"valid", "rng", "threw"}
+FLAG_FIELDS = {"valid", "rng", "threw", "fresh"}
 
 
 def read_tsv(path):

@@ -239,7 +239,7 @@ class HotSuite(unittest.TestCase):
 
     def program(self, name, weight, **fields):
         return dict({"id": name, "display": name, "samples": [f"samples/{name}-1.rds"], "iterations": [100],
-                     "rng": [False], "threw": [False], "namespaces": [], "gnu_seconds_per_call": 1e-4,
+                     "rng": [False], "threw": [False], "fresh": [False], "namespaces": [], "gnu_seconds_per_call": 1e-4,
                      "share": dict(weight), "weight": dict(weight)}, **fields)
 
     def summarize(self, programs, rounds):
@@ -267,6 +267,12 @@ class HotSuite(unittest.TestCase):
             bench.load_hot_suite(self.directory)
         self.assertIn("gives sd 1 samples but not as many iterations", str(refusal.exception))
         program["iterations"] = [1]
+        del program["fresh"]
+        (self.directory / "suite.toml").write_text(
+            hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
+        with self.assertRaises(SystemExit):
+            bench.load_hot_suite(self.directory)
+        program["fresh"] = [True]
         (self.directory / "suite.toml").write_text(
             hot.render_toml({"id": "hot", "session": ["stats"], "selection": {}, "programs": [program]}))
         self.assertEqual(bench.load_hot_suite(self.directory)["programs"], [program])
@@ -282,10 +288,10 @@ class HotSuite(unittest.TestCase):
 
     def test_the_program_table_lists_each_samples_flags(self):
         program = self.program("sd", {}, samples=["samples/sd-1.rds", "samples/sd-2.rds"], iterations=[10, 20],
-                               rng=[True, False], threw=[False, True], namespaces=["stats", "zoo"])
+                               rng=[True, False], threw=[False, True], fresh=[True, True], namespaces=["stats", "zoo"])
         self.assertEqual(bench.hot_program_table([program]),
-                         "id\tsamples\titerations\trng\tthrew\tnamespaces\n"
-                         "sd\tsamples/sd-1.rds,samples/sd-2.rds\t10,20\t1,0\t0,1\tstats,zoo\n")
+                         "id\tsamples\titerations\trng\tthrew\tfresh\tnamespaces\n"
+                         "sd\tsamples/sd-1.rds,samples/sd-2.rds\t10,20\t1,0\t0,1\t1,1\tstats,zoo\n")
 
     def test_a_program_the_harness_printed_no_line_for_fails(self):
         engine = bench.Engine("ry", "ry", [sys.executable, "-c", "print('sd num:1:0:2:1.00000000000 0.01 0.02 7')"], dict(os.environ))
@@ -319,12 +325,20 @@ class HotSuite(unittest.TestCase):
         self.assertEqual(results["predicted"]["ry"]["finbench"]["median"], 2.0)
 
     def test_compares_a_hot_checksum_sample_by_sample(self):
-        self.assertTrue(bench.same_checksum("num:3:0:69.6585893385:0.50000000001,error", "num:3:0:69.6585893384:0.50000000000,error"))
-        self.assertFalse(bench.same_checksum("num:3:0:69.7:0.50000000000,error", "num:3:0:69.6585893384:0.50000000000,error"))
-        self.assertFalse(bench.same_checksum("num:3:0:2:0.50000000000,error", "num:3:0:2:-0.50000000000,error"))
-        self.assertFalse(bench.same_checksum("num:3:1:2:1.00000000000,error", "num:3:0:2:1.00000000000,error"))
-        self.assertFalse(bench.same_checksum("num:3:0:2:1.00000000000", "num:3:0:2:1.00000000000,error"))
-        self.assertTrue(bench.same_checksum("chr:2:0:5:99", "chr:2:0:5:99"))
+        reference = "dbl:3:41x1234:4.243134612345678e+00:6.000000000000000e-01,error"
+        # The sums of the numbers agree to an absolute 1e-10.
+        self.assertTrue(bench.same_checksum("dbl:3:41x1234:4.243134612395678e+00:6.000000000020000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1234:4.243134622345678e+00:6.000000000000000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1234:4.243134612345678e+00:-6.000000000000000e-01,error", reference))
+        # The kind, the length and the hash of everything exact must match.
+        self.assertFalse(bench.same_checksum("int:3:41x1234:4.243134612345678e+00:6.000000000000000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1235:4.243134612345678e+00:6.000000000000000e-01,error", reference))
+        self.assertFalse(bench.same_checksum("dbl:3:41x1234:4.243134612345678e+00:6.000000000000000e-01", reference))
+        # A large sum over many vectors agrees to a relative 1e-13.
+        self.assertTrue(bench.same_checksum("list:9:7x1:1.000000000000050e+04:0.000000000000000e+00",
+                                            "list:9:7x1:1.000000000000000e+04:0.000000000000000e+00"))
+        self.assertTrue(bench.same_checksum("opaque:closure,null", "opaque:closure,null"))
+        self.assertFalse(bench.same_checksum("opaque:closure", "opaque:environment"))
 
     def test_reads_a_region_profile(self):
         text = "\n".join([
@@ -338,7 +352,11 @@ class HotSuite(unittest.TestCase):
         rows = [{"weight": {"finbench": 0.5}, "ratio": {"ry": {"median": 1.0}}, "breakdown": {"activities": {"gc": 1.0}}},
                 {"weight": {"finbench": 0.5}, "ratio": {"ry": {"median": 0.5}}, "breakdown": {"activities": {"interpreter": 1.0}}}]
         # The second program takes twice the ry time of the first.
-        self.assertEqual(bench.weighted_breakdown(rows), {"finbench": {"interpreter": round(2 / 3, 4), "gc": round(1 / 3, 4)}})
+        self.assertEqual(bench.weighted_breakdown(rows),
+                         ("ry time", {"finbench": {"interpreter": round(2 / 3, 4), "gc": round(1 / 3, 4)}}))
+        # Without a speed-up for every program, the GNU R weight alone weighs them.
+        del rows[1]["ratio"]
+        self.assertEqual(bench.weighted_breakdown(rows), ("GNU R time", {"finbench": {"gc": 0.5, "interpreter": 0.5}}))
 
     def test_reads_a_callgrind_dump_its_region_triggered(self):
         dump = ("version: 1\ncmd: ry run\ndesc: Trigger: Client Request: stats-sd\nevents: Ir\nsummary: 0\n"
@@ -436,17 +454,25 @@ class HotSelection(unittest.TestCase):
                     "codebases": {"finbench": {"gnu_r": {"seconds": 100.0}, "new": {"seconds": 50.0, "checksum": "ok"},
                                                "old": {"seconds": 100.0, "checksum": "ok"},
                                                "broken": {"seconds": None, "reason": "crashed"}}}}
-        new, old, broken = hot.tracking_rows(measured, programs, ["new", "old", "broken"], "finbench")
+        measured["hot"]["partial"] = {"b": 1.0}
+        measured["codebases"]["finbench"]["partial"] = {"seconds": 50.0, "checksum": "ok"}
+        new, old, broken, partial = hot.tracking_rows(measured, programs, ["new", "old", "broken", "partial"], "finbench")
         self.assertEqual((new["predicted"], new["measured"], new["predicted_change"]), (0.625, 0.5, 0.0))
         self.assertEqual((old["predicted"], old["measured"]), (1.25, 1.0))
         self.assertAlmostEqual(old["predicted_change"], math.log(2))
         self.assertAlmostEqual(old["measured_change"], math.log(2))
-        # A program the configuration did not run leaves the prediction to the others' weight.
-        self.assertEqual((broken["predicted"], broken["weight"], broken["measured_change"]), (1.0, 0.75, None))
+        # A program the configuration did not run leaves both its prediction and the reference
+        # prediction it is compared with: here the reference over a alone is 0.5.
+        self.assertEqual((broken["predicted"], broken["reference"], broken["weight"], broken["measured_change"]),
+                         (1.0, 0.5, 0.75, None))
+        self.assertEqual((partial["predicted"], partial["reference"], partial["weight"], partial["predicted_change"]),
+                         (1.0, 1.0, 0.25, 0.0))
 
     def test_a_configuration_names_a_binary_and_its_environment(self):
         self.assertEqual(hot.parse_configuration("nojit=/opt/ry,RY_JIT=off,RY_BASE_R=/base"),
                          ("nojit", "/opt/ry", {"RY_JIT": "off", "RY_BASE_R": "/base"}))
+        # The harness runs in a directory of its own, so a relative binary is made absolute.
+        self.assertEqual(hot.parse_configuration("head=target/ry")[1], os.path.abspath("target/ry"))
         with self.assertRaises(SystemExit):
             hot.parse_configuration("/opt/ry")
 
