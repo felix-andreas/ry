@@ -346,6 +346,25 @@ class HotSuite(unittest.TestCase):
         self.assertEqual(bench.parse_callgrind_dump(dump), ("stats-sd", 123456))
         self.assertIsNone(bench.parse_callgrind_dump("desc: Trigger: Program termination\nsummary: 0\ntotals: 99\n"))
 
+    def test_a_function_holds_its_own_instructions_not_its_callees(self):
+        dump = ("positions: line\nevents: Ir\n\n"
+                "ob=(1) /lib/libR.so\nfn=(1) interp::eval::h0123456789abcdef\n0 100\n"
+                "cob=(2) /lib/stats.so\ncfn=(2) C_cov\ncalls=1 0\n0 700\n+3 20\n\n"
+                "ob=(2)\nfn=(2)\n0 700\n\n"
+                "ob=(1)\nfn=(3) 0x00000000004a2b10\n0 5\nfn=(4) 0x00000000004a2c00'2\n0 6\n"
+                "totals: 831\n")
+        self.assertEqual(bench.parse_callgrind_functions(dump),
+                         {("libR.so", "interp::eval"): 120, ("stats.so", "C_cov"): 700, ("libR.so", "(no symbols)"): 11})
+
+    def test_function_shares_follow_the_programs_weights(self):
+        programs = [self.program("a", {"finbench": 0.75}, gnu_seconds_per_call=1e-5),
+                    self.program("b", {"finbench": 0.25}, gnu_seconds_per_call=1e-5)]
+        counts = {"a": {"calls": 10}, "b": {"calls": 10}}
+        by_function = {"a": {("libR.so", "eval"): 600, ("libR.so", "match_arguments"): 400},
+                       "b": {("libR.so", "eval"): 1000}}
+        self.assertEqual(bench.weighted_functions(programs, counts, by_function, 1),
+                         [{"object": "libR.so", "function": "eval", "share": {"finbench": 0.7}}])
+
     def test_an_instruction_change_is_weighted_by_gnu_r_time(self):
         programs = [self.program("a", {"finbench": 0.5}, gnu_seconds_per_call=1e-5),
                     self.program("b", {"finbench": 0.5}, gnu_seconds_per_call=1e-4)]

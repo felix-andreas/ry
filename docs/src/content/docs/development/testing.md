@@ -1050,7 +1050,7 @@ finbench: 9592 tests, 9592 passing in 143.8 s of test blocks
 
 A call cannot be captured when a replay could not rebuild it: it passes its caller's `...`, an
 argument names a user function or a local closure, the call reads its caller's frame, or its
-arguments serialize to more than the size limit. Its time still counts for its entry. The validator then drops the samples that depend
+arguments serialize to more than the size limit. Its time counts for its entry all the same. The validator then drops the samples that depend
 on the world outside the call (files, a git repository, external pointers, options) or that print.
 `select` reports what the suite loses to both:
 
@@ -1076,7 +1076,7 @@ so what the recorder and the switched-off JIT add to the entry's time cancels in
 - **Random numbers.** A sample that draws random numbers gets its seed restored before each call.
 - **Checksums.** Each engine prints a checksum of every sample's last result, and the run fails
   when ry's differs from GNU R's. Numbers fold to twelve significant digits, so a root that
-  `uniroot` finds one part in 1e13 away still agrees. A sample whose result differs on every call
+  `uniroot` finds one part in 1e13 away agrees. A sample whose result differs on every call
   under GNU R (a temporary file name, a timestamp) is recorded as `varies` and not compared.
 
 #### Where a program's time goes

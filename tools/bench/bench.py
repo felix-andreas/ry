@@ -103,13 +103,15 @@ predicted speed-up: the programs' speed-ups averaged with the weights the suite 
 code base (`hot_summary`). Two passes run on ry alone after the rounds: `--breakdown` reads where the
 runtime spent each program's time from its region profile, and `--instructions` counts each
 program's instructions under callgrind, which `--save-instructions FILE` keeps and
-`--baseline-instructions FILE` (or a `--baseline` build) compares against.
+`--baseline-instructions FILE` (or a `--baseline` build) compares against. `--functions N` adds
+the N functions of the runtime and the packages' compiled code that hold the most of each code
+base's instructions, which needs a build with symbols (`cargo build --profile profiling`).
 
 Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial] [--any-build]
                             [--breakdown] [--instructions] [--save-instructions FILE]
-                            [--baseline-instructions FILE]
+                            [--baseline-instructions FILE] [--functions N]
 """
 import argparse, atexit, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
 import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
@@ -197,6 +199,8 @@ def main():
     parser.add_argument("--instructions", action="store_true",
                         help="hot suite: count each program's instructions on ry under callgrind")
     parser.add_argument("--save-instructions", metavar="FILE", help="hot suite: keep the instruction counts in FILE")
+    parser.add_argument("--functions", metavar="N", type=int, default=0,
+                        help="hot suite: with --instructions, the N functions holding the most of each code base's instructions")
     parser.add_argument("--baseline-instructions", metavar="FILE",
                         help="hot suite: compare the instruction counts with those of an earlier --save-instructions")
     args = parser.parse_args()
@@ -208,8 +212,8 @@ def main():
     for suite in suites:
         if suite not in SUITES:
             sys.exit(f"error: no suite {suite!r}; the suites are {', '.join(SUITES)}")
-    if (args.save_instructions or args.baseline_instructions) and not args.instructions:
-        sys.exit("error: --save-instructions and --baseline-instructions go with --instructions")
+    if (args.save_instructions or args.baseline_instructions or args.functions) and not args.instructions:
+        sys.exit("error: --save-instructions, --baseline-instructions and --functions go with --instructions")
     if (args.breakdown or args.instructions) and suites != [HOT_SUITE]:
         sys.exit(f"error: --breakdown and --instructions measure the {HOT_SUITE} suite alone")
     if args.rounds < 0 or (args.rounds == 0 and not (args.breakdown or args.instructions)):
@@ -1248,10 +1252,13 @@ def hot_passes(runner, programs, table, args, results):
                 print(f"warning: no region profile for {name}: {measured[name].get('reason', 'the profile has no such region')}")
         results["breakdown"] = weighted_breakdown(results["programs"])
     if args.instructions:
-        counts = {"ry": instructions_of(runner, programs, ry)}
+        found, functions = instructions_of(runner, programs, ry, functions=args.functions > 0)
+        counts = {"ry": found}
+        if functions:
+            results["functions"] = weighted_functions(programs, found, functions, args.functions)
         baseline = next((engine for engine in table if engine.key == "baseline"), None)
         if baseline is not None:
-            counts["baseline"] = instructions_of(runner, programs, baseline)
+            counts["baseline"], _ = instructions_of(runner, programs, baseline)
         for key, measured in counts.items():
             for name, found in measured.items():
                 rows[name].setdefault("instructions", {})[key] = found
@@ -1312,9 +1319,10 @@ def weighted_breakdown(rows):
     return found
 
 
-def instructions_of(runner, programs, engine):
+def instructions_of(runner, programs, engine, functions=False):
     """Each program's instructions in one batch on `engine`, counted by callgrind in the region
-    the harness opens around it, which dumps when the region ends."""
+    the harness opens around it, which dumps when the region ends. With `functions`, also each
+    program's instructions per function (`parse_callgrind_functions`); otherwise that is empty."""
     if shutil.which("valgrind") is None:
         sys.exit("error: --instructions runs ry under callgrind, and valgrind is not on the PATH")
     prefix = runner.work / f"callgrind.{engine.key}"
@@ -1323,8 +1331,13 @@ def instructions_of(runner, programs, engine):
     wrapper = ["valgrind", "--tool=callgrind", "--instr-atstart=no", "--smc-check=all-non-file",
                f"--callgrind-out-file={prefix}"]
     measured = runner.run_batch(programs, engine, mode="instructions", wrapper=wrapper, timeout=CODEBASE_TIMEOUT)
-    dumps = dict(found for path in sorted(runner.work.glob(f"{prefix.name}.*"))
-                 if (found := parse_callgrind_dump(path.read_text(errors="replace"))))
+    dumps, by_function = {}, {}
+    for path in sorted(runner.work.glob(f"{prefix.name}.*")):
+        text = path.read_text(errors="replace")
+        if found := parse_callgrind_dump(text):
+            dumps[found[0]] = found[1]
+            if functions:
+                by_function[found[0]] = parse_callgrind_functions(text)
     counts = {}
     for program in programs:
         name, result = program["id"], measured[program["id"]]
@@ -1333,7 +1346,7 @@ def instructions_of(runner, programs, engine):
         else:
             print(f"warning: no instruction count for {name} on {engine.label}: "
                   f"{result.get('reason') or 'callgrind wrote no dump for its region'}")
-    return counts
+    return counts, by_function
 
 
 def parse_callgrind_dump(text):
@@ -1347,6 +1360,80 @@ def parse_callgrind_dump(text):
     if trigger is None or total is None or not trigger[1].strip():
         return None
     return trigger[1].strip(), int(total[1])
+
+
+def parse_callgrind_functions(text):
+    """The instructions each function ran itself in one callgrind dump, as `{(object, function):
+    count}`, with a function callgrind has no symbol for folded into `(no symbols)` of its object.
+
+    A dump names an object or a function in full once, as `(id) name`, and by `(id)` afterwards,
+    and `ob`/`cob` share one id table as `fn`/`cfn` do. A cost line starts with one position per
+    entry of the `positions:` header and then the instruction count. The cost line after a
+    `calls=` line is what the callee ran, which the callee's own lines already hold."""
+    names = {"ob": {}, "fn": {}}
+    current = {"ob": "???", "fn": None}
+    columns = 1
+    costs = {}
+    after_call = False
+    for line in text.splitlines():
+        if not line:
+            continue
+        if line[0].isdigit() or line[0] in "+-*":
+            if after_call:
+                after_call = False
+            elif current["fn"] is not None:
+                key = (current["ob"], current["fn"])
+                costs[key] = costs.get(key, 0) + int(line.split()[columns])
+            continue
+        key, separator, value = line.partition("=")
+        if key == "positions: instr line":
+            columns = 2
+        if not separator:
+            continue
+        if key == "calls":
+            after_call = True
+        elif key in ("ob", "cob", "fn", "cfn"):
+            table = names[key[-2:]]
+            name = value
+            if compressed := re.match(r"\((\d+)\)\s*(.*)$", value):
+                name = table.setdefault(compressed[1], compressed[2]) if compressed[2] else table.get(compressed[1], value)
+            if key in ("ob", "fn"):
+                current[key] = name
+    folded = {}
+    for (shared_object, function), count in costs.items():
+        label = os.path.basename(shared_object) or shared_object
+        # Callgrind numbers the levels of a recursion as `name'2`, `name'3`.
+        function = re.sub(r"'\d+$", "", function)
+        function = "(no symbols)" if re.fullmatch(r"0x[0-9a-fA-F]+", function) else re.sub(r"::h[0-9a-f]{16}$", "", function)
+        folded[label, function] = folded.get((label, function), 0) + count
+    return folded
+
+
+def weighted_functions(programs, counts, by_function, limit):
+    """The `limit` functions that hold the most of the code bases' instructions, with each one's
+    share per code base: a program's instructions in a function are scaled like the program's
+    total in `weighted_instructions`, and a share is over the sum of all functions. A function's
+    rank is its largest share in any code base."""
+    codebases = list(dict.fromkeys(codebase for program in programs for codebase in program.get("weight", {})))
+    totals = {codebase: {} for codebase in codebases}
+    for program in programs:
+        name = program["id"]
+        if name not in counts or name not in by_function:
+            continue
+        scale = 1 / (counts[name]["calls"] * program["gnu_seconds_per_call"])
+        for codebase in codebases:
+            weight = program["weight"].get(codebase, 0)
+            for key, count in by_function[name].items():
+                totals[codebase][key] = totals[codebase].get(key, 0) + weight * scale * count
+    sums = {codebase: sum(found.values()) for codebase, found in totals.items()}
+    shares = {}
+    for codebase, found in totals.items():
+        for key, value in found.items():
+            if sums[codebase]:
+                shares.setdefault(key, {})[codebase] = value / sums[codebase]
+    ranked = sorted(shares.items(), key=lambda item: (-max(item[1].values()), item[0]))[:limit]
+    return [{"object": key[0], "function": key[1], "share": {codebase: round(share, 5) for codebase, share in found.items()}}
+            for key, found in ranked]
 
 
 def weighted_instructions(programs, counts):
@@ -1424,6 +1511,14 @@ def print_hot(results):
         for key, totals in results["instructions"].items():
             for codebase, total in totals.items():
                 print(f"Weighted, {codebase}, {results['engines'][key]}: {total:,} instructions per second of GNU R work")
+    if results.get("functions"):
+        codebases = list(dict.fromkeys(codebase for row in results["functions"] for codebase in row["share"]))
+        print("\nFunctions by their own share of each code base's instructions\n")
+        print("| function | object | " + " | ".join(codebases) + " |")
+        print("| --- | --- |" + " ---: |" * len(codebases))
+        for row in results["functions"]:
+            print(f"| {row['function']} | {row['object']} | "
+                  + " | ".join(f"{row['share'].get(codebase, 0):.2%}" for codebase in codebases) + " |")
     for against, changes in results.get("instruction_changes", {}).items():
         print(f"\nInstructions per call against {against}, by effect on each code base's weighted total\n")
         codebases = list(dict.fromkeys(codebase for change in changes for codebase in change["effect"]))
