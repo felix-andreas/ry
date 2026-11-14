@@ -267,6 +267,7 @@ pub unsafe fn effect_free_lookups(function: Sexp) -> R<Option<Lookups>> {
 
 /// Whether a calling handler is established, which could run R code in the middle of a call
 /// and look at, or assign, what an argument reads before the callee forces it.
+#[inline]
 pub fn calling_handler_established() -> bool {
     crate::conditions::calling_established(&interp().handlers)
 }

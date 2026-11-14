@@ -26,6 +26,7 @@ use {
 pub type HandlerStack = Option<Rc<Handler>>;
 
 /// Whether `stack` holds a calling handler anywhere.
+#[inline]
 pub fn calling_established(stack: &HandlerStack) -> bool {
     stack.as_ref().is_some_and(|handler| handler.calling_below)
 }
