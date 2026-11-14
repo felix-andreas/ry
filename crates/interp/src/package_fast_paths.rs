@@ -137,27 +137,38 @@ unsafe fn do_package_fast_paths(call: &Call<'_>) -> R<Sexp> {
 
 /// compiler's `compile(e, env = .GlobalEnv, options = NULL, srcref = NULL)`: `e` itself. ry
 /// keeps only the source expression of GNU R byte code (`mkCode`), which the code buffer holds as
-/// its first constant, so the R-level compiler would run in full to return `e`. `env` is forced
-/// first, as the R body forces it before `e`.
+/// its first constant, so the R-level compiler would run in full to return `e`. The arguments are
+/// forced in the R body's order (`env`, `options`, `e`, then `srcref`), and it declines when `env` is
+/// not an environment or `options` or `srcref` is set, because then the R body raises an error
+/// or prints the compiler's notes.
 unsafe fn do_compiler_compile(call: &Call<'_>) -> R<Sexp> {
     let frame = ClosureFrame::of(call);
-    argument(frame, install("env")?)?;
+    let env = argument(frame, install("env")?)?;
+    if env.is_none_or(|env| env.kind() != SexpType::Environment) || compiler_options_set(frame)? {
+        return decline();
+    }
     let Some(expression) = argument(frame, install("e")?)? else {
         return decline();
     };
+    if argument(frame, install("srcref")?)?.is_some_and(|srcref| srcref != nil()) {
+        return decline();
+    }
     finish(frame, expression, true)
 }
 
 /// compiler's `cmpfun(f, options = NULL)`: a builtin or special unchanged, and a closure as a new
 /// closure over the same formals, body and environment, compiled through ry's own compiler and
 /// carrying `f`'s attributes, as the R body's `bcClose` call makes it. A body that may call
-/// `browser()` leaves `f` as it is, as `mayCallBrowser` does in the R body. Anything else keeps
-/// the R body, which raises its error.
+/// `browser()` leaves `f` as it is, as `mayCallBrowser` does in the R body. Anything else, and
+/// a call with `options` set, keeps the R body, which raises its error or prints its notes.
 unsafe fn do_compiler_cmpfun(call: &Call<'_>) -> R<Sexp> {
     let frame = ClosureFrame::of(call);
     let Some(function) = argument(frame, install("f")?)? else {
         return decline();
     };
+    if compiler_options_set(frame)? {
+        return decline();
+    }
     match function.kind() {
         SexpType::Builtin | SexpType::Special => finish(frame, function, true),
         SexpType::Closure => {
@@ -172,6 +183,12 @@ unsafe fn do_compiler_cmpfun(call: &Call<'_>) -> R<Sexp> {
         }
         _ => decline(),
     }
+}
+
+/// Whether the compiler call's `options` argument is anything but `NULL`. Options such as
+/// `suppressAll = FALSE` make GNU R's compiler print notes about the code.
+unsafe fn compiler_options_set(frame: ClosureFrame) -> R<bool> {
+    Ok(argument(frame, install("options")?)?.is_some_and(|options| options != nil()))
 }
 
 /// rlang 1.3.0's `trace_back(top = NULL, bottom = NULL)`: the backtrace of the calls that led to

@@ -247,6 +247,8 @@ symbol_table! {
     description = "description",
     interactive = "interactive",
     nh = "nh",
+    try_catch_one = "tryCatchOne",
+    do_try_catch = "doTryCatch",
     r = "r",
     restart_args = "restartArgs",
     inherits = "inherits",

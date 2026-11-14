@@ -3424,6 +3424,7 @@ unsafe fn nth(list: Sexp, position: usize) -> Sexp {
 unsafe fn tagged_list(items: &[(Sexp, Sexp)]) -> R<Sexp> {
     let heap = crate::heap();
     let list = values::alloc(SexpType::List, items.len())?;
+    heap.root(list);
     for (position, &(_, value)) in items.iter().enumerate() {
         heap.set_element(list, position, value);
     }
@@ -3512,9 +3513,9 @@ unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
     }
     let handlers = tagged_list(&forced)?;
     let classes = values::get_attr(handlers, names.names);
-    let parent_env = eval::frame_sys_parent_pending(index)?;
     eval::define(names.handlers, handlers, frame)?;
     eval::define(names.classes, classes, frame)?;
+    let parent_env = eval::frame_sys_parent_pending(index)?;
     eval::define(names.parentenv, parent_env, frame)?;
     if length(classes) != forced.len() {
         // `stop("condition handlers must be specified with a condition class")`
@@ -3557,7 +3558,7 @@ unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
     ) else {
         return decline_eval(one, frame);
     };
-    let try_catch_one = eval::find_fun(install("tryCatchOne")?, frame)?;
+    let try_catch_one = eval::find_fun(names.try_catch_one, frame)?;
     if handlers.kind() != SexpType::List
         || handlers.is_object()
         || length(handlers) != 1
@@ -3568,25 +3569,17 @@ unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
     // `tryCatchOne(expr, names, parentenv, handlers[[1L]])`, applied without evaluating the
     // call: the arguments other than `expr` are values already, so their promises are made
     // forced, and the frame and its call read as in GNU R.
-    let args = [
-        Arg {
-            tag: nil(),
-            value: eval::make_promise(names.expr, frame)?,
-        },
-        Arg {
-            tag: nil(),
-            value: eval::forced_promise(names.names, classes)?,
-        },
-        Arg {
-            tag: nil(),
-            value: eval::forced_promise(names.parentenv, parent_env)?,
-        },
-        Arg {
-            tag: nil(),
-            value: eval::forced_promise(nth(one, 4), handlers.element(0))?,
-        },
-    ];
-    for arg in &args {
+    let mut args = [Arg {
+        tag: nil(),
+        value: eval::make_promise(names.expr, frame)?,
+    }; 4];
+    crate::heap().root(args[0].value);
+    for (arg, (symbol, value)) in args[1..].iter_mut().zip([
+        (names.names, classes),
+        (names.parentenv, parent_env),
+        (nth(one, 4), handlers.element(0)),
+    ]) {
+        arg.value = eval::forced_promise(symbol, value)?;
         crate::heap().root(arg.value);
     }
     let value = eval::apply_closure(one, try_catch_one, &args, frame, None)?;
@@ -3618,7 +3611,7 @@ unsafe fn do_try_catch_one(call: &Call<'_>) -> R<Sexp> {
     // `value <- doTryCatch(return(expr), name, parentenv, handler)`
     let assignment = nth(statements, 1);
     let do_call = nth(assignment, 2);
-    let do_try_catch = eval::find_fun(install("doTryCatch")?, frame)?;
+    let do_try_catch = eval::find_fun(names.do_try_catch, frame)?;
     let mut args: [Arg; 4] = [Arg {
         tag: nil(),
         value: eval::make_promise(nth(do_call, 1), frame)?,
@@ -3659,6 +3652,7 @@ unsafe fn do_do_try_catch(call: &Call<'_>) -> R<Sexp> {
     }
     let [name, handler, parent_env] = values;
     let handlers = values::list_vector(&[handler])?;
+    crate::heap().root(handlers);
     let calling = values::scalar_logical(0)?;
     kernel(
         crate::conditions::do_add_cond_hands,

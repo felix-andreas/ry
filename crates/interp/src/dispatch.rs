@@ -590,8 +590,10 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
 /// The method `name` in `scope`: its base binding for a name only the base frames bind,
 /// otherwise through the name's row for the part from the top environment on.
 unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>> {
-    if scope.attached && !name.has_gp(gp::BOUND_ELSEWHERE) {
-        let found = base_method(name, scope.table)?;
+    if scope.attached
+        && !name.has_gp(gp::BOUND_ELSEWHERE)
+        && let Some(found) = base_method(name, scope.table)?
+    {
         // An active binding makes a new value on every read, so a second read cannot agree.
         let active = |env: Sexp| {
             crate::heap()
@@ -660,22 +662,28 @@ unsafe fn lookup_in_scope(name: Sexp, scope: &mut MethodScope) -> R<Option<Sexp>
 }
 
 /// The method `name` for a name no attached frame outside the base frames binds: a detached
-/// methods table's binding, which marks nothing, else the base binding.
-unsafe fn base_method(name: Sexp, table: Option<Sexp>) -> R<Option<Sexp>> {
+/// methods table's binding, which marks nothing, else the base binding. `None` when both bind a
+/// function, because then the top environment decides: GNU R searches it before the table, so a
+/// dispatch from base finds base's binding first.
+unsafe fn base_method(name: Sexp, table: Option<Sexp>) -> R<Option<Option<Sexp>>> {
     let mut cacheable = true;
-    if let Some(table) = table
-        && table.has_gp(gp::DETACHED)
-        && let Some((_, function)) = method_cell_in_frame(name, table, &mut cacheable)?
-    {
-        return Ok(Some(function));
-    }
-    match crate::heap().frame_cell(values::base_env(), name) {
+    let in_table = match table {
+        Some(table) if table.has_gp(gp::DETACHED) => {
+            method_cell_in_frame(name, table, &mut cacheable)?.map(|(_, function)| function)
+        }
+        _ => None,
+    };
+    let in_base = match crate::heap().frame_cell(values::base_env(), name) {
         Some(cell) => {
             let value = value_of(eval::cell_value(cell)?)?;
-            Ok(values::is_function(value).then_some(value))
+            values::is_function(value).then_some(value)
         }
-        None => Ok(None),
-    }
+        None => None,
+    };
+    Ok(match (in_table, in_base) {
+        (Some(_), Some(_)) => None,
+        (found, None) | (None, found) => Some(found),
+    })
 }
 
 /// The method `name` found by walking the whole scope, without the rows: what
