@@ -119,9 +119,11 @@ struct Capture {
     /// namespaces and the global environment are kept: they live for the whole session, so an
     /// address names one environment.
     owners: FxHashMap<usize, (Rc<str>, bool)>,
-    /// The names each call expression mentions, by the call's address. Every call in the table
-    /// is a global root, so its address is never reused.
-    free_names: FxHashMap<usize, Rc<FreeNames>>,
+    /// The names each recorded call mentions, by the addresses of its head and its argument
+    /// list: a method entered by dispatch gets a fresh call each time, which shares the
+    /// arguments of the call the user wrote. Every recorded call is a global root, so the
+    /// addresses are never reused.
+    free_names: FxHashMap<(usize, usize), Rc<FreeNames>>,
     files: Vec<SampleFile>,
     random: u64,
     user: Duration,
@@ -241,9 +243,16 @@ struct SampleFile {
     bytes: usize,
 }
 
+/// What a boundary call's expression mentions, worked out once per call site.
 struct FreeNames {
+    /// The call a sample records: the call itself, or for a method entered by dispatch, the
+    /// call with the generic's name as its head, so a replay dispatches again.
+    call: Sexp,
     symbols: Vec<Sexp>,
     dots: bool,
+    /// Whether an argument expression calls a function that reads its caller's frame, such as
+    /// `parent.frame()`, which a replay would answer about the replay's environment.
+    caller_frame: bool,
 }
 
 /// Reads the recorder's configuration, if [`PACKAGE_VARIABLE`] is set. Recording starts at
@@ -339,8 +348,16 @@ pub fn mark_ready() {
 
 /// Records the entry of a call of the closure `function` through `call`. `sys_parent` is the
 /// environment the call was made from, or `NULL` when it was made from the slots of the frame
-/// [`crate::Interp::slot_owner`] names.
-pub unsafe fn enter(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<Scope> {
+/// [`crate::Interp::slot_owner`] names. A method entered by dispatch has its dispatch variables
+/// (`.Generic` and the rest) in `method_vars` or bound in its frame environment `env`, which is
+/// `NULL` for a slot frame.
+pub unsafe fn enter(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> R<Scope> {
     if SUSPENDED.get() {
         return Ok(Scope::none());
     }
@@ -386,23 +403,43 @@ pub unsafe fn enter(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<Scope> {
                 Role::User
             }
         })),
-        Step::Boundary => boundary(call, sys_parent, owner),
+        Step::Boundary => boundary(call, sys_parent, owner, method_vars, env),
     }
 }
 
-unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
+unsafe fn boundary(
+    call: Sexp,
+    sys_parent: Sexp,
+    owner: Rc<str>,
+    method_vars: &[(Sexp, Sexp)],
+    env: Sexp,
+) -> R<Scope> {
     let name = call_name(call);
     let covered = STATE.with_borrow(|state| state.as_ref().is_some_and(|s| s.covering.is_some()));
     if covered {
         return Ok(push(Layer::Package, |_| Role::Covered));
     }
-    let free = free_names(call);
+    let generic_symbol = values::symbols().dot_generic;
+    let generic = match method_vars
+        .iter()
+        .find(|&&(symbol, _)| symbol == generic_symbol)
+    {
+        Some(&(_, generic)) => Some(generic),
+        None if env != nil() => crate::heap()
+            .frame_cell(env, generic_symbol)
+            .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
+            .map(|cell| cell.cdr()),
+        None => None,
+    }
+    .filter(|generic| generic.kind() == SexpType::String)
+    .and_then(|generic| values::first_string(generic));
+    let free = free_names(call, generic.as_deref())?;
     let _suspended = Suspend::start();
     let heap = crate::heap();
     let mark = heap.handle_mark();
     let inspected = if free.dots {
         Inspection::Uncapturable(Reason::Dots)
-    } else if reads_caller_frame(&owner, &name, call) {
+    } else if free.caller_frame || (&*owner == "base" && reads_caller_frame(&name, call)) {
         Inspection::Uncapturable(Reason::CallerFrame)
     } else {
         match inspect(&free, sys_parent) {
@@ -438,7 +475,7 @@ unsafe fn boundary(call: Sexp, sys_parent: Sexp, owner: Rc<str>) -> R<Scope> {
             });
             let sample = match slot {
                 Some(slot) => {
-                    let inputs = sample_inputs(&owner, &name, call, &variables, &imports)
+                    let inputs = sample_inputs(&owner, &name, free.call, &variables, &imports)
                         .and_then(|inputs| serialize(inputs));
                     match inputs {
                         Ok(bytes) if bytes.len() <= max_bytes() => Some(Pending {
@@ -751,14 +788,12 @@ unsafe fn call_name(call: Sexp) -> Rc<str> {
     }
 }
 
-/// Base functions whose result depends on the frame that called them, not only on their
-/// arguments. A replay evaluates the recorded call in a fresh environment with no calling
-/// closure, so these would answer about the wrong frame. `match.arg(arg)` with no `choices`
-/// reads the caller's formals the same way; with explicit choices it is an ordinary call.
-unsafe fn reads_caller_frame(owner: &str, name: &str, call: Sexp) -> bool {
-    if owner != "base" {
-        return false;
-    }
+/// Whether `call`, a call of the base function `name`, depends on the frame that called it, not
+/// only on its arguments. A replay evaluates the recorded call in a fresh environment with no
+/// calling closure, so such a call would answer about the wrong frame. `match.arg(arg)` with no
+/// `choices` reads the caller's formals the same way; with explicit choices it is an ordinary
+/// call.
+unsafe fn reads_caller_frame(name: &str, call: Sexp) -> bool {
     match name {
         "match.call" | "sys.call" | "sys.function" | "sys.frame" | "sys.nframe" | "sys.calls"
         | "sys.frames" | "sys.parent" | "sys.parents" | "sys.on.exit" | "parent.frame"
@@ -843,43 +878,85 @@ fn note_failure(unwind: &Unwind) {
     });
 }
 
-/// Every symbol `call` mentions, function positions and the bodies of inline functions
-/// included, once each.
-unsafe fn free_names(call: Sexp) -> Rc<FreeNames> {
-    let address = call.as_ptr() as usize;
+/// Every symbol the call recorded for `call` mentions, function positions and the bodies of
+/// inline functions included, once each, and the identifiers inside the braces of its strings,
+/// which glue-style formatting (`cli::format_inline("{n} found")`) reads from the caller.
+/// `generic` names the generic of a method entered by dispatch.
+unsafe fn free_names(call: Sexp, generic: Option<&str>) -> R<Rc<FreeNames>> {
+    let (head, arguments) = if call.kind() == SexpType::Language {
+        (call.car(), call.cdr())
+    } else {
+        (call, nil())
+    };
+    let head = match generic {
+        Some(generic) => values::install(generic)?,
+        None => head,
+    };
+    let address = (head.as_ptr() as usize, arguments.as_ptr() as usize);
     if let Some(names) = STATE.with_borrow(|state| {
         state
             .as_ref()
             .and_then(|state| state.free_names.get(&address).cloned())
     }) {
-        return names;
+        return Ok(names);
     }
+    let recorded = if call.kind() == SexpType::Language && head != call.car() {
+        values::lcons(head, arguments)?
+    } else {
+        call
+    };
     let mut seen = FxHashSet::default();
     let mut symbols = Vec::new();
-    let mut pending = vec![call];
-    while let Some(object) = pending.pop() {
+    let mut braced = Vec::new();
+    let mut caller_frame = false;
+    // Each object with whether it sits inside a `function` literal, whose calls run only when
+    // the function is called, in a frame of its own.
+    let mut pending = vec![(recorded, false)];
+    while let Some((object, in_function)) = pending.pop() {
         match object.kind() {
             SexpType::Symbol => {
                 if object != missing_arg() && seen.insert(object.as_ptr() as usize) {
                     symbols.push(object);
                 }
             }
-            // The field of `object$field` and `object@field` is a name, not a variable.
-            SexpType::Language
-                if object.car().kind() == SexpType::Symbol
-                    && matches!(&*symbol_name(object.car()), "$" | "@") =>
-            {
-                pending.push(object.cdr().car());
-                pending.push(object.car());
+            SexpType::String => {
+                for index in 0..values::length(object) {
+                    if let Some(text) = values::string_at(object, index) {
+                        braced_identifiers(&text, &mut braced);
+                    }
+                }
+            }
+            SexpType::Language => {
+                let head = object.car();
+                let operator = (head.kind() == SexpType::Symbol).then(|| symbol_name(head));
+                match operator.as_deref() {
+                    // The field of `object$field` and `object@field` is a name, not a variable.
+                    Some("$" | "@") => {
+                        pending.push((object.cdr().car(), in_function));
+                        pending.push((head, in_function));
+                        continue;
+                    }
+                    Some("function") => {
+                        pending.push((object.cdr(), true));
+                        pending.push((head, in_function));
+                        continue;
+                    }
+                    Some(name) if !in_function && object != recorded => {
+                        caller_frame |= reads_caller_frame(name, object);
+                    }
+                    _ => {}
+                }
+                pending.push((object.cdr(), in_function));
+                pending.push((head, in_function));
             }
             // A cell's tag is an argument or formal name, not a variable the call reads.
-            SexpType::Language | SexpType::Pairlist => {
-                pending.push(object.cdr());
-                pending.push(object.car());
+            SexpType::Pairlist => {
+                pending.push((object.cdr(), in_function));
+                pending.push((object.car(), in_function));
             }
             SexpType::Expression => {
                 for index in 0..values::length(object) {
-                    pending.push(values::list_elt(object, index));
+                    pending.push((values::list_elt(object, index), in_function));
                 }
             }
             _ => {}
@@ -892,14 +969,63 @@ unsafe fn free_names(call: Sexp) -> Rc<FreeNames> {
                 !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
             })
     });
-    let names = Rc::new(FreeNames { symbols, dots });
-    crate::heap().add_global_root(call);
+    for name in braced {
+        let symbol = values::install(&name)?;
+        if seen.insert(symbol.as_ptr() as usize) {
+            symbols.push(symbol);
+        }
+    }
+    let names = Rc::new(FreeNames {
+        call: recorded,
+        symbols,
+        dots,
+        caller_frame,
+    });
+    crate::heap().add_global_root(recorded);
     STATE.with_borrow_mut(|state| {
         if let Some(state) = state.as_mut() {
             state.free_names.insert(address, names.clone());
         }
     });
-    names
+    Ok(names)
+}
+
+/// Appends to `names` the identifiers (`[A-Za-z.][A-Za-z0-9._]*`) inside the braces of `text`,
+/// nested braces included.
+fn braced_identifiers(text: &str, names: &mut Vec<String>) {
+    if !text.contains('{') {
+        return;
+    }
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b'A'..=b'Z' | b'a'..=b'z' | b'.' if depth > 0 => {
+                let start = index;
+                while bytes
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || matches!(next, b'.' | b'_'))
+                {
+                    index += 1;
+                }
+                names.push(text[start..=index].to_owned());
+            }
+            b'0'..=b'9' | b'_' if depth > 0 => {
+                // The rest of a number or of a name that does not start an identifier.
+                while bytes
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || matches!(next, b'.' | b'_'))
+                {
+                    index += 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
 }
 
 enum Inspection {
@@ -935,6 +1061,15 @@ unsafe fn inspect(free: &FreeNames, sys_parent: Sexp) -> R<Inspection> {
                 break;
             }
             scope = frame.enclosure();
+        }
+        // `*tmp*` is no binding: a complex assignment keeps the value it stands for aside.
+        if found.is_none() && symbol == values::symbols().tmp {
+            let value = eval::tmp_value(env);
+            if value != unbound() {
+                heap.root(value);
+                variables.push((symbol, value));
+            }
+            continue;
         }
         if found.is_none() && user_top {
             if let Some(cell) = heap.frame_cell(top, symbol) {

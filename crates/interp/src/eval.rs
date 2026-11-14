@@ -222,7 +222,7 @@ pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The `*tmp*` a complex assignment running in `env` or an environment it encloses stands for,
 /// or `R_UnboundValue`.
-unsafe fn tmp_value(env: Sexp) -> Sexp {
+pub(crate) unsafe fn tmp_value(env: Sexp) -> Sexp {
     let empty = values::empty_env();
     for &(assignment_env, value) in interp().tmp_values.iter().rev() {
         let mut scope = env;
@@ -2716,7 +2716,7 @@ pub unsafe fn run_inlined(
 ) -> R<Sexp> {
     let _window = SlotWindow(header);
     activity::count(Counter::ClosureCalls);
-    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent)?;
+    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil())?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -3415,7 +3415,8 @@ unsafe fn run_frame_general(
     let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
-    let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent)?;
+    let mut hooks =
+        crate::profile_summary::enter_closure(call, function, sys_parent, method_vars, env)?;
     if slots == crate::NO_SLOTS {
         moves::entering_closure(function, env)?;
     }
