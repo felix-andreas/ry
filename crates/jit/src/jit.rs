@@ -565,11 +565,23 @@ unsafe fn compile_in<'a>(
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
         if !forced {
-            if !plan.runs_natively() {
-                return Err(Refusal(analysis::NOTHING_NATIVE));
-            }
-            if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions() {
-                return Err(Refusal(analysis::MOSTLY_TIER0));
+            let reason = if !plan.runs_natively() {
+                Some(analysis::NOTHING_NATIVE)
+            } else if trigger != Trigger::HotLoop && plan.native_actions() < plan.tier0_actions()
+            {
+                Some(analysis::MOSTLY_TIER0)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if logging() {
+                    eprintln!(
+                        "jit: {} would leave to tier 0: {}",
+                        describe(machine.code),
+                        tier0_steps(&plan, machine.code)
+                    );
+                }
+                return Err(Refusal(reason));
             }
             if trigger == Trigger::FirstCall && !plan.may_run_long() {
                 return Err(Refusal(analysis::BRIEF));
@@ -614,28 +626,7 @@ unsafe fn compile_in<'a>(
                     && owner(speculation).is_some_and(|env| long_lived(env))
             });
         if logging() {
-            // The instructions left to tier 0 are where compiled code is slow.
-            // A builtin call lists its argument types, which say why it was not an intrinsic.
-            let steps: Vec<String> = plan
-                .insts
-                .iter()
-                .zip(&plan.actions)
-                .enumerate()
-                .filter(|(_, (_, action))| matches!(action, analysis::Action::Step { .. }))
-                .map(|(position, (inst, _))| {
-                    let arguments = match (inst.op, plan.before(position)) {
-                        (Op::CallBuiltin, Some(before)) => {
-                            let first = inst.operand(3);
-                            let types: Vec<String> = (first..first + inst.operand(4))
-                                .map(|register| format!("{:?}", before.registers[register]))
-                                .collect();
-                            format!("({})", types.join(", "))
-                        }
-                        _ => String::new(),
-                    };
-                    format!("{:?}@{}{arguments}", inst.op, inst.pc)
-                })
-                .collect();
+            let steps = tier0_steps(&plan, machine.code);
             eprintln!(
                 "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} frames, {} loops; tier 0 runs: {})",
                 describe(machine.code),
@@ -652,11 +643,7 @@ unsafe fn compile_in<'a>(
                     .count(),
                 frames.len() - 1,
                 plan.loop_headers.len(),
-                if steps.is_empty() {
-                    "nothing".to_string()
-                } else {
-                    steps.join(", ")
-                }
+                steps
             );
         }
         let osr = plan
@@ -739,6 +726,48 @@ unsafe fn compile_in<'a>(
         counters[profile::RECORDING] = 0;
         counters[profile::NEXT] = i32::MIN;
         Ok(&*(pointer.external_address() as *const Compiled))
+    }
+}
+
+/// The instructions a plan leaves to tier 0, which are where compiled code is slow. Each lists
+/// the types of the registers it reads, which say why it has no native form, and a call names
+/// the function its source calls.
+unsafe fn tier0_steps(plan: &analysis::Plan<'_>, code: Sexp) -> String {
+    let steps: Vec<String> = plan
+        .insts
+        .iter()
+        .zip(&plan.actions)
+        .enumerate()
+        .filter(|(_, (_, action))| matches!(action, analysis::Action::Step { .. }))
+        .map(|(position, (inst, _))| {
+            let arguments = match plan.before(position) {
+                Some(before) => {
+                    let types: Vec<String> = analysis::reads(inst)
+                        .iter()
+                        .filter_map(|&register| before.registers.get(register))
+                        .map(|ty| format!("{ty:?}"))
+                        .collect();
+                    format!("({})", types.join(", "))
+                }
+                None => String::new(),
+            };
+            let call = match inst.op {
+                Op::CallBuiltin | Op::CallGeneric | Op::DispatchSubject => Some(inst.operand(2)),
+                Op::Internal => Some(inst.operand(1)),
+                _ => None,
+            };
+            let head = call
+                .map(|constant| unsafe { code.cdr().element(constant).car() })
+                .filter(|head| head.kind() == SexpType::Symbol)
+                .map(|head| format!(" {}", unsafe { values::symbol_name(head) }))
+                .unwrap_or_default();
+            format!("{:?}{head}@{}{arguments}", inst.op, inst.pc)
+        })
+        .collect();
+    if steps.is_empty() {
+        "nothing".to_string()
+    } else {
+        steps.join(", ")
     }
 }
 

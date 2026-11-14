@@ -746,11 +746,21 @@ pub unsafe extern "C" fn jit_fused(activation: *mut Activation, pc: i64) -> i32 
     }
 }
 
-/// Loads the variable `GetVar` at `pc` reads into its slot. Returns the slot's status.
+/// Loads the variable `GetVar` or `Argument` at `pc` reads into its slot. Returns the slot's
+/// status. A missing formal an `Argument` would pass on as the empty argument declines with
+/// [`outcome::LOAD_FAILED`] and no error, which hands the instruction to tier 0.
 pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
+            match scoped(|| bytecode::passes_missing_argument(machine, pc as usize)) {
+                Ok(false) => {}
+                Ok(true) => return outcome::LOAD_FAILED,
+                Err(unwind) => {
+                    park(activation, unwind);
+                    return outcome::LOAD_FAILED;
+                }
+            }
             let epoch = heap().binding_epoch();
             let reads = interp::interp().active_binding_reads;
             let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));

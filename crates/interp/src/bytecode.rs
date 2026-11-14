@@ -1906,6 +1906,11 @@ pub enum Op {
     /// internal's arguments, evaluated in the caller, are in registers `first..first + count`,
     /// and the builtin `internal` runs on them with `call` as the call its errors name.
     Internal,
+    /// `dst symbol cache`: a formal as an argument of a subset primitive (`i` in `x[i]`), which
+    /// passes on a missing argument instead of reporting it. `dst` gets the empty argument when
+    /// the formal is missing, as when the caller passed on its own missing formal, and what
+    /// [`Op::GetVar`] reads otherwise.
+    Argument,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -1920,7 +1925,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 52] = [
+pub const OPS: [Op; 53] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -1973,6 +1978,7 @@ pub const OPS: [Op; 52] = [
     Op::SuperAssign,
     Op::Prologue,
     Op::Internal,
+    Op::Argument,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2034,6 +2040,9 @@ pub mod feedback {
     /// A `GetVar` read an active binding, so every read there must call the binding again.
     /// Compiled code records it, and the bit says nothing about the value's type.
     pub const ACTIVE_BINDING: u32 = 1 << 13;
+    /// An `Argument` read a missing formal, so its value may be the empty argument, which no
+    /// compiled load yields.
+    pub const MISSING: u32 = 1 << 14;
     /// An attribute-free compact integer sequence.
     pub const INTEGER_SEQUENCE: u32 = 1 << 15;
     /// An attribute-free compact double sequence, such as `as.double(1:n)`.
@@ -3182,7 +3191,9 @@ impl Compiler {
             let op =
                 op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
             let symbol_and_cache = match op {
-                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], Some(self.code[pc + 3]))),
+                Op::GetVar | Op::GetFun | Op::Argument => {
+                    Some((self.code[pc + 2], Some(self.code[pc + 3])))
+                }
                 Op::SetVar => Some((self.code[pc + 1], Some(self.code[pc + 3]))),
                 // A loop variable the body never reads still needs a slot, or the first step
                 // would give the frame an environment.
@@ -5359,28 +5370,25 @@ impl Compiler {
         } else {
             None
         };
-        let formal = args[1..]
-            .iter()
-            .any(|(_, value)| self.formals.contains(value));
-        if formal {
-            self.emit(Op::DispatchSubject, &[dst, function, call_constant, base]);
-            let dispatched = self.emit_patchable(Op::Jump, &[0]);
-            self.patch(generic);
-            self.emit(Op::CallGeneric, &[dst, function, call_constant]);
-            self.patch(dispatched);
-            if let Some(read) = read {
-                self.patch(read);
-            }
-            self.release_to(mark);
-            return Ok(());
-        }
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
+            let register = base + index as u32;
             if *value == missing_arg() {
                 let constant = self.constant(missing_arg());
-                self.emit(Op::Constant, &[base + index as u32, constant]);
+                self.emit(Op::Constant, &[register, constant]);
+            } else if self.formals.contains(value)
+                && self
+                    .bound
+                    .as_ref()
+                    .is_none_or(|bound| !bound.names.contains(value))
+            {
+                // A formal may itself be missing, which the primitive takes as an empty
+                // argument (`i` in `g <- function(i) f(x, i); g()`).
+                let constant = self.constant(*value);
+                let cache = self.cache();
+                self.emit(Op::Argument, &[register, constant, cache]);
             } else {
-                self.expression(*value, base + index as u32)?;
+                self.expression(*value, register)?;
             }
         }
         self.emit(
@@ -5751,7 +5759,7 @@ const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 pub const fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
-        Op::GetVar => 3,
+        Op::GetVar | Op::Argument => 3,
         Op::GetFun => 4,
         Op::SetVar => 3,
         Op::BranchUnlessBuiltin => 2,
@@ -5982,7 +5990,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
     use Operand::*;
     Some(match op {
         Op::Constant | Op::Ast => &[Register, Constant],
-        Op::GetVar => &[Register, Symbol, Cache],
+        Op::GetVar | Op::Argument => &[Register, Symbol, Cache],
         Op::SetVar => &[Symbol, Register, Cache],
         Op::GetFun => &[Register, Symbol, Cache, Call],
         Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
@@ -6868,6 +6876,20 @@ pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
+/// Whether the instruction at `pc` is an [`Op::Argument`] whose formal is missing, which the
+/// optimizing tier leaves to tier 0: no compiled load yields the empty argument.
+pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+    let state = activation(machine, true);
+    if op_of(*state.code.add(pc) as u32) != Some(Op::Argument) {
+        return Ok(false);
+    }
+    let missing = argument_missing(&state, pc)?;
+    if missing {
+        state.record_kind(pc, feedback::MISSING);
+    }
+    Ok(missing)
+}
+
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -7562,6 +7584,7 @@ handlers! {
     run_unfused: Unfused, false, op_unfused;
     run_super_assign: SuperAssign, true, op_super_assign;
     run_internal: Internal, true, op_internal;
+    run_argument: Argument, true, op_argument;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -7638,6 +7661,7 @@ macro_rules! fast_paths {
 
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
+    fast_argument: Argument, get_var_fast;
     fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
@@ -8792,6 +8816,31 @@ unsafe fn op_get_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// [`Op::Argument`]: the empty argument for a missing formal, and the variable's value
+/// otherwise. The question is GNU R's `R_isMissing` for an argument of a subset primitive, so a
+/// formal that took its default is not missing.
+unsafe fn op_argument(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if argument_missing(state, instruction.at)? {
+        state.record_kind(instruction.at, feedback::MISSING);
+        (*state.interp).visible = true;
+        instruction.output(0, missing_arg());
+        return Ok(Flow::Next);
+    }
+    op_get_var(state, instruction)
+}
+
+/// Whether the formal the [`Op::Argument`] at `pc` reads is missing.
+unsafe fn argument_missing(state: &Activation<'_, '_>, pc: usize) -> R<bool> {
+    if state.in_slots() {
+        return match state.slot(*state.code.add(pc + 3) as usize) {
+            Some(slot) => eval::value_is_missing(*slot),
+            None => Ok(false),
+        };
+    }
+    let symbol = pool_constant(state, *state.code.add(pc + 2) as usize);
+    eval::argument_is_missing(symbol, *state.header)
 }
 
 #[inline(always)]

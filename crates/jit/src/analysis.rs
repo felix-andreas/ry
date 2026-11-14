@@ -1378,6 +1378,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             }
             Op::Constant
             | Op::GetVar
+            | Op::Argument
             | Op::SetVar
             | Op::GetFun
             | Op::BranchUnlessBuiltin
@@ -1670,7 +1671,7 @@ unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<Sm
         .collect();
     let mut hints: SmallVec<[Ty; 4]> = smallvec![Ty::Bottom; symbols.len()];
     for inst in decode(arena, code).ok()? {
-        if inst.op != Op::GetVar {
+        if !matches!(inst.op, Op::GetVar | Op::Argument) {
             continue;
         }
         let symbol = constants.element(inst.operand(1));
@@ -1868,7 +1869,7 @@ impl<'a> Builder<'a> {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
-                Op::GetVar => Some(inst.operand(1)),
+                Op::GetVar | Op::Argument => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
                 Op::SubAssign | Op::SubAssignMatrix | Op::Replace => Some(inst.operand(1)),
@@ -1902,8 +1903,8 @@ impl<'a> Builder<'a> {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32)
-                & !feedback::ACTIVE_BINDING;
-            if inst.op == Op::GetVar && bits != 0 {
+                & !(feedback::ACTIVE_BINDING | feedback::MISSING);
+            if matches!(inst.op, Op::GetVar | Op::Argument) && bits != 0 {
                 let slot = self.slot_of[&self.constant(inst.operand(1))];
                 self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
             }
@@ -1969,6 +1970,10 @@ impl<'a> Builder<'a> {
         Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
     }
 
+    fn feedback_bits(&self, pc: usize) -> u32 {
+        self.feedback.get(pc).map_or(0, |&bits| bits as u32)
+    }
+
     fn feedback_at(&self, pc: usize) -> Ty {
         from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u32))
     }
@@ -1997,7 +2002,7 @@ impl<'a> Builder<'a> {
         // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
         // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
         // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u32) & !feedback::ACTIVE_BINDING;
+        let bits = self.feedback_bits(pc) & !feedback::ACTIVE_BINDING;
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
@@ -2239,7 +2244,7 @@ impl<'a> Builder<'a> {
         let action = match inst.op {
             // The global frame's variables are its environment's bindings, which an active
             // binding or code the loop calls may read or rebind.
-            Op::GetVar if self.global => self.opaque_step(
+            Op::GetVar | Op::Argument if self.global => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -2266,7 +2271,11 @@ impl<'a> Builder<'a> {
                     ty,
                 }
             }
-            Op::GetVar => {
+            // The formal has been missing here, and no compiled load yields the empty argument.
+            Op::Argument if self.feedback_bits(inst.pc) & feedback::MISSING != 0 => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
+            }
+            Op::GetVar | Op::Argument => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
                 let volatile = bit(&self.volatile, slot);
@@ -5103,6 +5112,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     match inst.op {
         Op::Constant
         | Op::GetVar
+        | Op::Argument
         | Op::GetFun
         | Op::Ast
         | Op::Closure

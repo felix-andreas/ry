@@ -3916,7 +3916,7 @@ impl<'p> Translator<'p> {
         // Only this activation's own `GetVar` may probe: the probe reads the activation's
         // environment and lookup hints, which belong to the outer body, and an inlined callee's
         // loads reach here as other ops.
-        let probed = inst.op == Op::GetVar;
+        let probed = matches!(inst.op, Op::GetVar | Op::Argument);
         if probed {
             let symbol = runtime_constant(self.frame.code, inst.operand(1));
             let lookup = inst.operand(2);
