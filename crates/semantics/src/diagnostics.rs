@@ -15,8 +15,8 @@ use {
         file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
-        inline_annotations_enabled, item_check, item_hir, item_naming, item_spans,
-        item_syntax, item_tree,
+        inline_annotations_enabled, item_check, item_hir, item_naming, item_spans, item_syntax,
+        item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,

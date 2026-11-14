@@ -27,11 +27,15 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
+    smallvec::SmallVec,
     std::{
         cell::RefCell,
         collections::{BTreeMap, BTreeSet},
         num::NonZero,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Condvar, Mutex, MutexGuard,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
     },
     syntax::{
         NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
@@ -137,9 +141,23 @@ pub struct SourceFile {
 /// The file's syntax tree, from the host's [`TreeStore`]. No query memoizes a tree: a query that
 /// reads one records the read of the file's text, and keeps only what it derives.
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
+    parse_stamped(db, file).0
+}
+
+/// The file's tree with the stamp of each child node of its root, in source order.
+fn parse_stamped(db: &dyn Db, file: SourceFile) -> (Parse, Arc<[SyntaxStamp]>) {
     db.trees()
         .parse(file, file.text(db), salsa::plumbing::current_revision(db))
 }
+
+/// Names the syntax of one top-level node. A node keeps its stamp across the edits that leave
+/// its subtree equal, wherever it moves in its file, and no two different subtrees ever share
+/// one. So a query that depends on an item's stamp alone ([`item_stamp`]) is valid for as long
+/// as the item's syntax is, and an edit lowers only the items it changed.
+pub type SyntaxStamp = u64;
+
+/// The stamp of an item that has no node.
+const NO_STAMP: SyntaxStamp = 0;
 
 /// The syntax trees a host holds, one per file at most. Trees live here rather than in query
 /// memos for two reasons. An edit reparses by splicing the file's previous tree, which a memo
@@ -151,19 +169,45 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
 ///
 /// A dropped tree is parsed again on the next read, so capacity changes time and memory only:
 /// a spliced or repeated parse is byte- and error-identical to a fresh one.
+///
+/// Files are spread over shards with a lock each, so workers reading different files rarely
+/// meet, and a parse runs outside every lock. A worker that asks for a file another worker is
+/// parsing waits for that tree instead of parsing a second one.
 pub struct TreeStore {
-    trees: Mutex<StoredTrees>,
+    shards: [Shard; SHARD_COUNT],
     capacity: usize,
+    stored: AtomicUsize,
+    /// Counts reads, so the tree with the smallest reading is the least recently read.
+    clock: AtomicU64,
+    parses: AtomicU64,
+    next_stamp: AtomicU64,
+}
+
+const SHARD_COUNT: usize = 16;
+
+#[derive(Default)]
+struct Shard {
+    trees: Mutex<ShardTrees>,
+    /// Signalled when a parse of one of the shard's files ends.
+    parsed: Condvar,
 }
 
 #[derive(Default)]
-struct StoredTrees {
+struct ShardTrees {
     entries: FxHashMap<SourceFile, StoredTree>,
     /// How many [`TreeHold`]s are open on a file. A held file's tree is never dropped.
     holds: FxHashMap<SourceFile, u32>,
-    /// Counts reads, so the entry with the smallest stamp is the least recently read.
-    clock: u64,
-    parses: u64,
+    /// The files a worker is parsing.
+    parsing: SmallVec<[SourceFile; 2]>,
+}
+
+struct StoredTree {
+    parse: Parse,
+    stamps: Arc<[SyntaxStamp]>,
+    /// The revision at which the tree was last compared with the file's text. A text cannot
+    /// change within a revision, so a read at the same revision skips the comparison.
+    confirmed: salsa::Revision,
+    last_read: u64,
 }
 
 /// Keeps one file's tree in a bounded store until dropped. A worker that derives everything it
@@ -176,7 +220,7 @@ pub struct TreeHold<'a> {
 
 impl Drop for TreeHold<'_> {
     fn drop(&mut self) {
-        let mut trees = self.store.trees.lock().expect("tree store lock");
+        let mut trees = self.store.shard(self.file).lock();
         if let Some(count) = trees.holds.get_mut(&self.file) {
             *count -= 1;
             if *count == 0 {
@@ -186,21 +230,34 @@ impl Drop for TreeHold<'_> {
     }
 }
 
-struct StoredTree {
-    parse: Parse,
-    /// The revision at which the tree was last compared with the file's text. A text cannot
-    /// change within a revision, so a read at the same revision skips the comparison.
-    confirmed: salsa::Revision,
-    last_read: u64,
+/// Marks a file as being parsed until dropped, which a panic in the parser does too, so a
+/// worker waiting for the tree parses it itself instead of waiting forever.
+struct Parsing<'a> {
+    shard: &'a Shard,
+    file: SourceFile,
+}
+
+impl Drop for Parsing<'_> {
+    fn drop(&mut self) {
+        self.shard.lock().parsing.retain(|file| *file != self.file);
+        self.shard.parsed.notify_all();
+    }
+}
+
+impl Shard {
+    fn lock(&self) -> MutexGuard<'_, ShardTrees> {
+        // A worker panics under this lock only between two complete changes, so the trees of a
+        // poisoned shard are coherent.
+        self.trees
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl Default for TreeStore {
     /// A store that keeps every tree.
     fn default() -> TreeStore {
-        TreeStore {
-            trees: Mutex::default(),
-            capacity: usize::MAX,
-        }
+        TreeStore::bounded(usize::MAX)
     }
 }
 
@@ -210,75 +267,167 @@ impl TreeStore {
     /// the reads a pass makes of a file it does not hold without a parse for each.
     pub fn bounded(capacity: usize) -> TreeStore {
         TreeStore {
-            trees: Mutex::default(),
+            shards: Default::default(),
             capacity,
+            stored: AtomicUsize::new(0),
+            clock: AtomicU64::new(0),
+            parses: AtomicU64::new(0),
+            next_stamp: AtomicU64::new(NO_STAMP + 1),
         }
     }
 
     /// Keeps `file`'s tree until the hold is dropped.
     pub fn hold(&self, file: SourceFile) -> TreeHold<'_> {
-        let mut trees = self.trees.lock().expect("tree store lock");
-        *trees.holds.entry(file).or_default() += 1;
+        *self.shard(file).lock().holds.entry(file).or_default() += 1;
         TreeHold { store: self, file }
     }
 
     /// How many trees the store holds.
     pub fn stored(&self) -> usize {
-        self.trees.lock().expect("tree store lock").entries.len()
+        self.stored.load(Ordering::Relaxed)
     }
 
     /// How many texts the store has parsed, which pins that an edit parses one file.
     pub fn parses(&self) -> u64 {
-        self.trees.lock().expect("tree store lock").parses
+        self.parses.load(Ordering::Relaxed)
     }
 
-    fn parse(&self, file: SourceFile, text: &str, revision: salsa::Revision) -> Parse {
-        let previous = {
-            let mut trees = self.trees.lock().expect("tree store lock");
-            trees.clock += 1;
-            let clock = trees.clock;
-            match trees.entries.get_mut(&file) {
-                Some(stored) if stored.confirmed == revision || stored.parse.text() == text => {
-                    stored.confirmed = revision;
-                    stored.last_read = clock;
-                    return stored.parse.clone();
-                }
-                Some(stored) => Some(stored.parse.clone()),
-                None => None,
+    fn shard(&self, file: SourceFile) -> &Shard {
+        &self.shards[file.as_id().index() as usize % SHARD_COUNT]
+    }
+
+    fn parse(
+        &self,
+        file: SourceFile,
+        text: &str,
+        revision: salsa::Revision,
+    ) -> (Parse, Arc<[SyntaxStamp]>) {
+        let shard = self.shard(file);
+        let mut trees = shard.lock();
+        let previous = loop {
+            if let Some(stored) = trees.entries.get_mut(&file)
+                && (stored.confirmed == revision || stored.parse.text() == text)
+            {
+                stored.confirmed = revision;
+                stored.last_read = self.clock.fetch_add(1, Ordering::Relaxed);
+                return (stored.parse.clone(), stored.stamps.clone());
             }
+            if !trees.parsing.contains(&file) {
+                break trees
+                    .entries
+                    .get(&file)
+                    .map(|stored| (stored.parse.clone(), stored.stamps.clone()));
+            }
+            trees = shard
+                .parsed
+                .wait(trees)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         };
-        // Parse unlocked so parallel workers never serialize on the parse itself.
+        trees.parsing.push(file);
+        drop(trees);
+        let parsing = Parsing { shard, file };
         let parse = match &previous {
-            Some(old) => {
+            Some((old, _)) => {
                 let (deleted, inserted) = derived_edit(old.text(), text);
                 syntax::reparse(old, text, deleted, inserted)
             }
             None => syntax::parse(text),
         };
-        let mut trees = self.trees.lock().expect("tree store lock");
-        trees.parses += 1;
-        while trees.entries.len() >= self.capacity && !trees.entries.contains_key(&file) {
-            let oldest = trees
-                .entries
-                .iter()
-                .filter(|(stored_file, _)| !trees.holds.contains_key(stored_file))
-                .min_by_key(|(_, stored)| stored.last_read)
-                .map(|(&file, _)| file);
-            let Some(oldest) = oldest else {
-                break;
-            };
-            trees.entries.remove(&oldest);
+        let stamps = self.stamps(previous.as_ref(), &parse);
+        self.parses.fetch_add(1, Ordering::Relaxed);
+        let stored = StoredTree {
+            parse: parse.clone(),
+            stamps: stamps.clone(),
+            confirmed: revision,
+            last_read: self.clock.fetch_add(1, Ordering::Relaxed),
+        };
+        if shard.lock().entries.insert(file, stored).is_none() {
+            self.stored.fetch_add(1, Ordering::Relaxed);
         }
-        let last_read = trees.clock;
-        trees.entries.insert(
-            file,
-            StoredTree {
-                parse: parse.clone(),
-                confirmed: revision,
-                last_read,
-            },
-        );
-        parse
+        drop(parsing);
+        while self.stored.load(Ordering::Relaxed) > self.capacity
+            && self.drop_least_recently_read(file)
+        {}
+        (parse, stamps)
+    }
+
+    /// One stamp per child node of `parse`'s root. A node at the start or the end of the file
+    /// whose subtree equals its counterpart's in `previous` keeps that stamp, which covers
+    /// every node outside the one region an edit changes. Every other node gets a stamp no
+    /// node has had.
+    fn stamps(
+        &self,
+        previous: Option<&(Parse, Arc<[SyntaxStamp]>)>,
+        parse: &Parse,
+    ) -> Arc<[SyntaxStamp]> {
+        let tree = parse.tree();
+        let nodes: SmallVec<[NodeRef<'_>; 64]> = tree.root().child_nodes().collect();
+        let mut stamps = vec![NO_STAMP; nodes.len()];
+        if let Some((old, old_stamps)) = previous {
+            let old_tree = old.tree();
+            let old_nodes: SmallVec<[NodeRef<'_>; 64]> = old_tree.root().child_nodes().collect();
+            let same = |(old_node, node): &(&NodeRef<'_>, &NodeRef<'_>)| {
+                old_tree.subtree(**old_node) == tree.subtree(**node)
+            };
+            let prefix = old_nodes.iter().zip(&nodes).take_while(same).count();
+            let suffix = old_nodes[prefix..]
+                .iter()
+                .rev()
+                .zip(nodes[prefix..].iter().rev())
+                .take_while(same)
+                .count();
+            stamps[..prefix].copy_from_slice(&old_stamps[..prefix]);
+            stamps[nodes.len() - suffix..].copy_from_slice(&old_stamps[old_nodes.len() - suffix..]);
+        }
+        let fresh = stamps.iter().filter(|&&stamp| stamp == NO_STAMP).count() as u64;
+        let mut next = self.next_stamp.fetch_add(fresh, Ordering::Relaxed);
+        for stamp in stamps.iter_mut().filter(|stamp| **stamp == NO_STAMP) {
+            *stamp = next;
+            next += 1;
+        }
+        stamps.into()
+    }
+
+    /// The subtree of the top-level node of `file` that carries `stamp`, when the store holds
+    /// the tree the stamp was read from. A bounded store may have dropped that tree, and a
+    /// tree parsed in its place has stamps of its own.
+    fn stamped(&self, file: SourceFile, stamp: SyntaxStamp) -> Option<Tree> {
+        let (parse, stamps) = {
+            let mut trees = self.shard(file).lock();
+            let stored = trees.entries.get_mut(&file)?;
+            stored.last_read = self.clock.fetch_add(1, Ordering::Relaxed);
+            (stored.parse.clone(), stored.stamps.clone())
+        };
+        let position = stamps.iter().position(|&held| held == stamp)?;
+        let tree = parse.tree();
+        Some(tree.subtree(tree.root().child_nodes().nth(position)?))
+    }
+
+    /// Drops the tree read longest ago that no worker holds, never `keep`'s. Whether there was
+    /// one to consider.
+    fn drop_least_recently_read(&self, keep: SourceFile) -> bool {
+        let mut oldest: Option<(u64, SourceFile)> = None;
+        for shard in &self.shards {
+            let trees = shard.lock();
+            for (&file, stored) in &trees.entries {
+                if file != keep
+                    && !trees.holds.contains_key(&file)
+                    && oldest.is_none_or(|(read, _)| stored.last_read < read)
+                {
+                    oldest = Some((stored.last_read, file));
+                }
+            }
+        }
+        let Some((_, file)) = oldest else {
+            return false;
+        };
+        let mut trees = self.shard(file).lock();
+        // Another worker may have taken a hold since the scan, and then the next scan passes
+        // the file over.
+        if !trees.holds.contains_key(&file) && trees.entries.remove(&file).is_some() {
+            self.stored.fetch_sub(1, Ordering::Relaxed);
+        }
+        true
     }
 }
 
@@ -346,8 +495,41 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// The item's subtree with offsets counted from its start, so what is derived from it is the
 /// same wherever the item sits in its file. Item innards must be read through this (never
 /// `parse`), and spans derived from it stay item-relative until the rendering edge.
+///
+/// The only dependency it records is the item's [`item_stamp`]. A query that reads an item
+/// through this therefore runs again when that item's syntax changes, and not when another
+/// item of the file does. A bounded store may have dropped the tree the stamp names, and then
+/// the read parses the file again and depends on its text like any other read of the tree.
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())))
+    let stamp = item_stamp(db, item);
+    if stamp == NO_STAMP {
+        return None;
+    }
+    let tree = match db.trees().stamped(*item.file(db), stamp) {
+        Some(tree) => tree,
+        None => item_node(db, item)?.subtree(),
+    };
+    Some(ItemSyntax(Arc::new(tree)))
+}
+
+/// The stamp of the item's syntax, [`NO_STAMP`] for an item without a node. It runs again for
+/// every item of an edited file, and for every item the edit left alone it comes out equal,
+/// so nothing derived from those items' syntax runs again.
+#[salsa::tracked(returns(copy))]
+fn item_stamp<'db>(db: &'db dyn Db, item: Item<'db>) -> SyntaxStamp {
+    let Some(span) = item_span(db, item) else {
+        return NO_STAMP;
+    };
+    let file = *item.file(db);
+    if syntax::testing::invariants_enabled()
+        && let Some(stamped) = db.trees().stamped(file, span.stamp)
+    {
+        assert!(
+            span_node(db, file, span).is_some_and(|node| node.subtree() == stamped),
+            "the stamp of an item names another node's syntax"
+        );
+    }
+    span.stamp
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
@@ -356,16 +538,17 @@ pub struct ItemSpan<'db> {
     pub range: TextRange,
     /// The defined name's range, read with the item's identity from the same walk.
     pub name_range: Option<TextRange>,
+    stamp: SyntaxStamp,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
 #[salsa::tracked(returns(ref))]
 pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> {
-    let parse = parse(db, file);
+    let (parse, stamps) = parse_stamped(db, file);
     let root = parse.syntax_node();
     let mut counts: FxHashMap<(ItemKind, Option<Symbol>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
-    for node in root.children() {
+    for (node, &stamp) in root.children().zip(stamps.iter()) {
         if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
@@ -387,6 +570,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
             item: Item::new(db, file, kind, name, None, disambiguator),
             range: node.text_range(),
             name_range,
+            stamp,
         });
     }
     spans
@@ -594,16 +778,22 @@ pub fn is_ry_syntax(kind: SyntaxKind) -> bool {
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
 /// only; derived per-item values must use `item_syntax` to keep cutting off.
 pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
+    span_node(db, *item.file(db), item_span(db, item)?)
+}
+
+fn item_span<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<&'db ItemSpan<'db>> {
     let file = *item.file(db);
     let index = *item_tree_positions(db, file).get(&item.as_id())?;
-    let range = item_spans(db, file).get(index as usize)?.range;
-    let parse = parse(db, file);
+    item_spans(db, file).get(index as usize)
+}
+
+fn span_node(db: &dyn Db, file: SourceFile, span: &ItemSpan<'_>) -> Option<SyntaxNode> {
     // Descend by range: a linear child walk per item is quadratic in statements.
-    parse
+    parse(db, file)
         .syntax_node()
-        .child_or_token_at_range(range)
+        .child_or_token_at_range(span.range)
         .and_then(|element| element.into_node())
-        .filter(|node| node.text_range() == range)
+        .filter(|node| node.text_range() == span.range)
 }
 
 /// Where each item stands in its file's [`item_tree`], which is also its place in
@@ -3720,7 +3910,14 @@ mod tests {
     use {super::*, salsa::Setter as _};
 
     fn function_item<'db>(db: &'db RootDatabase, file: SourceFile, name: &str) -> Item<'db> {
-        Item::new(db, file, ItemKind::Function, Some(Symbol::new(name)), None, 0)
+        Item::new(
+            db,
+            file,
+            ItemKind::Function,
+            Some(Symbol::new(name)),
+            None,
+            0,
+        )
     }
 
     #[test]

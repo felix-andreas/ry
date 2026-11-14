@@ -10555,7 +10555,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         // A write the body never reached leaves its seed open; it must not generalize.
         let seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
         for seed in seeds {
-            if !seed.written && self.table.unify(self.db, seed.variable, unknown(self.db)).is_err()
+            if !seed.written
+                && self
+                    .table
+                    .unify(self.db, seed.variable, unknown(self.db))
+                    .is_err()
             {
                 panic!("an open superassignment seed always unifies with `Unknown`");
             }

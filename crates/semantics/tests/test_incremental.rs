@@ -540,6 +540,85 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     );
 }
 
+/// An item keeps the stamp of its syntax while that syntax is unchanged, wherever the item
+/// moves in its file. Its stamp is read again after every edit to the file and comes out
+/// equal, so nothing derived from the item's syntax runs again.
+#[test]
+fn an_edit_lowers_only_the_items_whose_syntax_changed() {
+    let mut db = ProbeDatabase::default();
+    let source = |second: &str| {
+        format!(
+            "first <- function() 1L\n{second}\nthird <- function(x) x + 1L\nfourth <- 4L\n\
+             fourth <- 4L\n"
+        )
+    };
+    let files = db.project(&[&source("second <- function() 2L")]);
+    let derived = [
+        "item_stamp",
+        "item_syntax_flags",
+        "item_hir",
+        "item_annotations",
+        "item_naming",
+    ];
+    settle(&db, &files);
+    assert_eq!(db.executions_since(&derived), [5, 5, 5, 5, 5]);
+
+    db.edit(files[0], source("second <- function() 20L"));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [5, 1, 1, 1, 1],
+        "an edit inside one item"
+    );
+
+    db.edit(
+        files[0],
+        format!(
+            "# moved\n\nzeroth <- 0L\n{}",
+            source("second <- function() 20L")
+        ),
+    );
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [6, 1, 1, 1, 1],
+        "a new item above the others, which all move"
+    );
+
+    db.edit(files[0], source("second <- function() 20L"));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [5, 0, 0, 0, 0],
+        "the new item removed again"
+    );
+
+    db.edit(
+        files[0],
+        "first <- function() 1L\nsecond <- function() 20L\nthird <- function(x) x + 1L\n\
+         fourth <- 4L\n",
+    );
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [4, 0, 0, 0, 0],
+        "the second of two equal statements removed"
+    );
+
+    db.edit(
+        files[0],
+        "first <- function() 10L\nsecond <- function() 20L\nthird <- function(x) x + 1L\n\
+         fourth <- 40L\n",
+    );
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [4, 4, 4, 4, 2],
+        "edits at both ends of the file leave one changed region that spans it, so every item \
+         lowers again, and the two in the middle lower to what they were"
+    );
+}
+
 #[test]
 fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     let mut db = ProbeDatabase::default();
@@ -1076,6 +1155,23 @@ fn link_invariants_child() {
             .map(|&source| SourceFile::new(&db, source.to_owned(), kind))
             .collect();
         ProjectFiles::new(&db, files.clone());
+        settle(&db, &files);
+    }
+
+    // Every read of an item's stamp compares the syntax the stamp names with the item's node
+    // in the file as it stands, through edits that move, repeat, add and remove statements.
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&["first <- 1L\nsecond <- function() first\nfirst <- 1L\n"]);
+    settle(&db, &files);
+    for text in [
+        "first <- 1L\nfirst <- 1L\nsecond <- function() first\n",
+        "first <- 1L\nsecond <- function() first\n",
+        "# note\nsecond <- function() first\nfirst <- 1L\nfirst <- 1L\n",
+        "second <- function() first\nsecond <- function() first\n",
+        "",
+        "first <- 1L\n",
+    ] {
+        db.edit(files[0], text);
         settle(&db, &files);
     }
 }

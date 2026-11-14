@@ -134,7 +134,11 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
             continue;
         }
         let mut renderer = TypeRenderer::default();
-        schemes.push((name.as_str().to_owned(), renderer.render_scheme(db, scheme), line_start));
+        schemes.push((
+            name.as_str().to_owned(),
+            renderer.render_scheme(db, scheme),
+            line_start,
+        ));
     }
     schemes
 }

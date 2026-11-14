@@ -291,10 +291,15 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             run_job(&mut seed, &mut worker, job);
         }));
-        if outcome.is_err() {
+        if let Err(payload) = outcome {
             // A read catches its own cancellation, so this is a coherence panic; serving a
-            // corrupted analysis state is worse than dying.
-            tracing::error!("analysis worker panicked; exiting");
+            // corrupted analysis state is worse than dying. A cancellation that escaped its
+            // read never reached the panic hook, so this line is the only place that names it.
+            let reason = match payload.downcast_ref::<salsa::Cancelled>() {
+                Some(cancelled) => format!("an uncaught cancellation ({cancelled:?})"),
+                None => "a panic".to_owned(),
+            };
+            tracing::error!("analysis worker stopped by {reason}; exiting");
             process::exit(1);
         }
     }
@@ -1573,9 +1578,15 @@ impl Worker {
         let sourced_before = self.source_calls(file);
         // The attach union is a function of each file's `library()` calls, and an edit can
         // change only the edited file's, so the walk over every file runs when they changed.
-        // While a union is owed the comparison decides nothing, so the scan is skipped.
-        let attached_before = (!self.attached_union_stale && self.unscanned.is_empty())
-            .then(|| file_attached_namespaces(&self.db, file));
+        // While a union is owed the comparison decides nothing, so the scan is skipped. A
+        // notification queued behind this one has already flipped the cancellation token, so
+        // the read can be cancelled like any other, and then the union counts as moved.
+        let attached_before = if !self.attached_union_stale && self.unscanned.is_empty() {
+            self.cancellable(|worker| file_attached_namespaces(&worker.db, file))
+                .ok()
+        } else {
+            None
+        };
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
