@@ -80,15 +80,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("mkCode", 2, do_mk_code),
     internal("bcClose", 3, |call| unsafe {
-        let closure = eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))?;
-        crate::heap().root(closure);
-        // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
-        // code passes constant arguments as values, which native code such as rlang observes.
-        if worth_compiling(closure.cdr()) {
-            let code = compile(closure.cdr(), closure, true)?;
-            crate::heap().set_cdr(closure, code);
-        }
-        Ok(closure)
+        close_compiled(call.arg(0), call.arg(1), call.arg(2))
     }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
@@ -103,6 +95,19 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("compilePKGS", 1, |_| unsafe { values::scalar_logical(0) }),
 ];
+
+/// A closure over `formals`, `body` and `env` whose body is compiled at once, as `cmpfun`
+/// compiles in GNU R, rather than on the second call: compiled code passes constant arguments
+/// as values, which native code such as rlang observes.
+pub(crate) unsafe fn close_compiled(formals: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
+    let closure = eval::make_closure(formals, body, nil(), env)?;
+    crate::heap().root(closure);
+    if worth_compiling(closure.cdr()) {
+        let code = compile(closure.cdr(), closure, true)?;
+        crate::heap().set_cdr(closure, code);
+    }
+    Ok(closure)
+}
 
 /// The byte-code version GNU R 4.3 writes, which `compiler` stamps into every code buffer.
 const GNU_R_BYTECODE_VERSION: i32 = 12;
@@ -1486,7 +1491,7 @@ unsafe fn handler_binds(name: &str, call: Sexp, enclosure: Sexp) -> bool {
 
 /// GNU R's `mayCallBrowser`: whether `expression` calls `browser`, outside the functions it
 /// defines.
-unsafe fn may_call_browser(expression: Sexp, enclosure: Sexp) -> bool {
+pub(crate) unsafe fn may_call_browser(expression: Sexp, enclosure: Sexp) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
     }

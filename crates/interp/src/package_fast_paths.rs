@@ -11,6 +11,7 @@ use {
     crate::{
         base_fast_paths::{ClosureFrame, argument, decline, finish, install_prologue, kernel},
         builtins::{BuiltinDef, Call, internal},
+        bytecode,
         envir::{self, frame_of, get_option, sys_parent_number, top_env},
         eval, interp,
         unwind::R,
@@ -22,6 +23,8 @@ use {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryPackageFastPaths", 2, do_package_fast_paths).invisible(),
+    internal("ryCompilerCompile", 0, do_compiler_compile).prologue(),
+    internal("ryCompilerCmpfun", 0, do_compiler_cmpfun).prologue(),
     internal("ryTraceBack", 0, do_trace_back).prologue(),
     internal("ryWithrListCombine", 0, do_withr_list_combine).prologue(),
     internal("ryWithrAsEnvvars", 0, do_withr_as_envvars).prologue(),
@@ -41,6 +44,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// suite rather than as a silent slowdown. `RY_PRINT_FAST_PATH_HASHES=1` prints the hashes of the
 /// loaded functions.
 const FAST_PATHS: &[(&str, &str, &str, &str, u64)] = &[
+    ("compiler", "4.6.2", "compile", "ryCompilerCompile", 0x9234db8e3ce67b7b),
+    ("compiler", "4.6.2", "cmpfun", "ryCompilerCmpfun", 0xc3f352a43845fbe7),
     (
         "rlang",
         "1.3.0",
@@ -128,6 +133,45 @@ unsafe fn do_package_fast_paths(call: &Call<'_>) -> R<Sexp> {
         install_prologue(function, name, internal_name, expected, print)?;
     }
     Ok(nil())
+}
+
+/// compiler's `compile(e, env = .GlobalEnv, options = NULL, srcref = NULL)`: `e` itself. ry
+/// keeps only the source expression of GNU R byte code (`mkCode`), which the code buffer holds as
+/// its first constant, so the R-level compiler would run in full to return `e`. `env` is forced
+/// first, as the R body forces it before `e`.
+unsafe fn do_compiler_compile(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    argument(frame, install("env")?)?;
+    let Some(expression) = argument(frame, install("e")?)? else {
+        return decline();
+    };
+    finish(frame, expression, true)
+}
+
+/// compiler's `cmpfun(f, options = NULL)`: a builtin or special unchanged, and a closure as a new
+/// closure over the same formals, body and environment, compiled through ry's own compiler and
+/// carrying `f`'s attributes, as the R body's `bcClose` call makes it. A body that may call
+/// `browser()` leaves `f` as it is, as `mayCallBrowser` does in the R body. Anything else keeps
+/// the R body, which raises its error.
+unsafe fn do_compiler_cmpfun(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(function) = argument(frame, install("f")?)? else {
+        return decline();
+    };
+    match function.kind() {
+        SexpType::Builtin | SexpType::Special => finish(frame, function, true),
+        SexpType::Closure => {
+            let body = bytecode::closure_body(function);
+            let env = function.tag();
+            if bytecode::may_call_browser(body, env) {
+                return finish(frame, function, true);
+            }
+            let compiled = bytecode::close_compiled(function.car(), body, env)?;
+            values::copy_attributes(function, compiled)?;
+            finish(frame, compiled, true)
+        }
+        _ => decline(),
+    }
 }
 
 /// rlang 1.3.0's `trace_back(top = NULL, bottom = NULL)`: the backtrace of the calls that led to
