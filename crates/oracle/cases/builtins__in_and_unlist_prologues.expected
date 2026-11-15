@@ -1,0 +1,206 @@
+[stdout]
+| [1] TRUE
+| [1] FALSE  TRUE FALSE
+| [1] TRUE
+| a b c 
+| 1 2 3 
+| [1] "a"
+| [1] TRUE
+| [1] FALSE  TRUE FALSE
+| [1] TRUE
+| a b c 
+| 1 2 3 
+| [1] "a"
+| [1] TRUE
+| [1] FALSE  TRUE FALSE
+| [1] TRUE
+| a b c 
+| 1 2 3 
+| [1] "a"
+| [1] TRUE
+| logical(0)
+| [1] FALSE FALSE FALSE
+| [1] FALSE  TRUE
+| [1] TRUE
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+| [1] FALSE FALSE  TRUE  TRUE
+| [1] TRUE
+| error: 'match' requires vector arguments 
+| match(x, table, nomatch = 0L)
+| error: 'match' requires vector arguments 
+| match(x, table, nomatch = 0L)
+| mtfrm method
+| [1] FALSE  TRUE FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] "x"     "table"
+|  [1] "local({"                                            
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"  
+|  [3] "eval(expr, p)"                                      
+|  [4] "eval(expr, p)"                                      
+|  [5] "eval(quote({"                                       
+|  [6] "eval(quote({"                                       
+|  [7] "withCallingHandlers(tryCatch({"                     
+|  [8] "tryCatch({"                                         
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"   
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"
+| [11] "doTryCatch(return(expr), name, parentenv, handler)" 
+| [12] "withVisible(eval(expression, globalenv()))"         
+| [13] "eval(expression, globalenv())"                      
+| [14] "eval(expression, globalenv())"                      
+| [15] "show(inside() %in% \"a\")"                          
+| [16] "print(value)"                                       
+| [17] "inside() %in% \"a\""                                
+| [18] "inside()"                                           
+| [1] TRUE
+|  [1] "local({"                                            
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"  
+|  [3] "eval(expr, p)"                                      
+|  [4] "eval(expr, p)"                                      
+|  [5] "eval(quote({"                                       
+|  [6] "eval(quote({"                                       
+|  [7] "withCallingHandlers(tryCatch({"                     
+|  [8] "tryCatch({"                                         
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"   
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"
+| [11] "doTryCatch(return(expr), name, parentenv, handler)" 
+| [12] "withVisible(eval(expression, globalenv()))"         
+| [13] "eval(expression, globalenv())"                      
+| [14] "eval(expression, globalenv())"                      
+| [15] "show(\"a\" %in% inside())"                          
+| [16] "print(value)"                                       
+| [17] "\"a\" %in% inside()"                                
+| [18] "inside()"                                           
+| [1] TRUE
+| error: in x 
+| stop("in x") %in% 1
+| error: in table 
+| 1 %in% stop("in table")
+| as.integer("x") %in% NA
+| [1] TRUE
+| [1] TRUE
+| error: argument "table" is missing, with no default 
+| `%in%`(1)
+| [1] "1" "2" "a"
+|     a   b.c b.d.e 
+|     1     2     3 
+| $a
+| [1] 1
+| 
+| $b.c
+| [1] 2
+| 
+| [1] 1 2 3
+| NULL
+| NULL
+| [1] 1 2 3
+| a 
+| 1 
+|   a   b 
+| "1" "x" 
+| expression(a, 1)
+| [[1]]
+| function (..., na.rm = FALSE)  .Primitive("sum")
+| 
+| [[2]]
+| [1] 1
+| 
+| [1] TRUE
+| b 
+| 1 
+| [1] 1
+| [1] a b a
+| Levels: a b
+| x y 
+| a b 
+| Levels: a b
+| [1] 1 1
+| [1] 19724     1
+| a 
+| 1 
+| [1] "unlist method"
+| [1] 1 2
+|  a1  a2  b1  b2 
+| "1" "2" "x" "y" 
+| [1] 1
+| [1] "recursive" "x"         "use.names"
+| error: 'recursive' is NA 
+| unlist(list(1), recursive = NA)
+| error: 'recursive' must be a length-1 vector 
+| unlist(list(1), recursive = c(TRUE, FALSE))
+| error: 'recursive' must be a length-1 vector 
+| unlist(list(1), recursive = sum)
+| a 
+| 1 
+| [1] 1
+| error: NA in coercion to boolean 
+| unlist(x, recursive, use.names)
+| error: NA in coercion to boolean 
+| unlist(x, recursive, use.names)
+| a 
+| 1 
+| error: 'length = 2' in coercion to 'logical(1)' 
+| unlist(x, recursive, use.names)
+| error: NA in coercion to boolean 
+| unlist(x, recursive, use.names)
+| error: NA in coercion to boolean 
+| unlist(x, recursive, use.names)
+| error: NA in coercion to boolean 
+| unlist(x, recursive, use.names)
+| expression(a, 1)
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| b
+| 
+| [[1]]
+| a
+| 
+| [[2]]
+| [1] 1
+| 
+| expression(a, 1)
+| $a.b
+| [1] 1
+| 
+| [1] 1
+| error: argument "x" is missing, with no default 
+| unlist()
+|  [1] "local({"                                            
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"  
+|  [3] "eval(expr, p)"                                      
+|  [4] "eval(expr, p)"                                      
+|  [5] "eval(quote({"                                       
+|  [6] "eval(quote({"                                       
+|  [7] "withCallingHandlers(tryCatch({"                     
+|  [8] "tryCatch({"                                         
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"   
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"
+| [11] "doTryCatch(return(expr), name, parentenv, handler)" 
+| [12] "withVisible(eval(expression, globalenv()))"         
+| [13] "eval(expression, globalenv())"                      
+| [14] "eval(expression, globalenv())"                      
+| [15] "show(unlist(list(inside())))"                       
+| [16] "print(value)"                                       
+| [17] "unlist(list(inside()))"                             
+| [18] "inside()"                                           
+| [1] "a"
+| error: in x 
+| unlist(stop("in x"))
+| $value
+| [1] 1
+| 
+| $visible
+| [1] TRUE
+| 
+| [1] TRUE
+| [1] "mine"
+| [1] "mine too"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "mine too"

@@ -4960,7 +4960,7 @@ unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let recursive = values::as_logical_scalar(call.arg(1)) == 1;
     unsafe fn check(object: Sexp, recursive: bool) -> Option<bool> {

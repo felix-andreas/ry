@@ -323,7 +323,17 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
         }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
-    if names == nil() && get_attr(object, symbols().names) == nil() {
+    // A pairlist's or a call's names are its tags, which GNU R's `getAttrib` reads as names.
+    let tagged = |mut cell: Sexp| {
+        while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+            if cell.tag() != nil() {
+                return true;
+            }
+            cell = cell.cdr();
+        }
+        false
+    };
+    if names == nil() && get_attr(object, symbols().names) == nil() && !tagged(object) {
         return Ok(object);
     }
     if object.kind() == SexpType::Object {

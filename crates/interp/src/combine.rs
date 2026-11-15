@@ -10,7 +10,7 @@ use {
         unwind::R,
         values::{self, alloc, char_str, length, na_string, nil, symbols},
     },
-    heap::object::{Sexp, SexpType},
+    heap::object::{NA_LOGICAL, Sexp, SexpType},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -129,12 +129,10 @@ unsafe fn direct_c(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
 
 pub(crate) unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) != 0;
-    let use_names = values::as_logical_scalar(call.arg(2)) != 0;
-    if !matches!(
-        object.kind(),
-        SexpType::List | SexpType::Pairlist | SexpType::Expression
-    ) {
+    let recursive = flag(call, call.arg(1))?;
+    let use_names = flag(call, call.arg(2))?;
+    // GNU R flattens only lists and pairlists, so an expression vector comes back as it is.
+    if !matches!(object.kind(), SexpType::List | SexpType::Pairlist) {
         return Ok(object);
     }
     let list = if object.kind() == SexpType::Pairlist {
@@ -146,6 +144,25 @@ pub(crate) unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     };
     let names = values::names(list);
     combine_items(Items::List { list, names }, recursive, use_names)
+}
+
+/// `unlist()`'s `recursive` or `use.names`, read as GNU R's `asLogical2()` reads a flag: one
+/// element, which must not be `NA`.
+unsafe fn flag(call: &Call<'_>, value: Sexp) -> R<bool> {
+    let atomic = value.kind().is_atomic();
+    let count = length(value);
+    if atomic && count > 1 {
+        return Err(call.error(format!("'length = {count}' in coercion to 'logical(1)'")));
+    }
+    let flag = if atomic && count == 1 {
+        values::as_logical_scalar(value)
+    } else {
+        NA_LOGICAL
+    };
+    if flag == NA_LOGICAL {
+        return Err(call.error("NA in coercion to boolean"));
+    }
+    Ok(flag != 0)
 }
 
 /// The arguments being combined, each with the name it carries.
@@ -234,7 +251,7 @@ unsafe fn answer_type(value: Sexp, kind: SexpType, recursive: bool) -> R<SexpTyp
     let value = values::materialize(value)?;
     let own = match value.kind() {
         SexpType::Nil => return Ok(kind),
-        SexpType::List | SexpType::Pairlist if recursive => {
+        SexpType::List | SexpType::Pairlist | SexpType::Expression if recursive => {
             let list = if value.kind() == SexpType::Pairlist {
                 let list = values::pairlist_to_list(value)?;
                 crate::heap().root(list);
